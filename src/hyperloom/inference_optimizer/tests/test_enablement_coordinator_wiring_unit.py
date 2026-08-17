@@ -1194,3 +1194,55 @@ def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_perf(sess
     assert len(rearm_called) == 1
     # apply_fail_reauthor_attempts not touched.
     assert not getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_accumulates_config_only_envs(monkeypatch):
+    """An advanced round that carries only env changes (no patch) is recorded."""
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "patches_applied": [],
+            "extra_envs_applied": {"VLLM_ROCM_USE_AITER": "1"},
+            "extra_server_args_applied": "--kv-cache-dtype fp8",
+            "setup_commands_applied": [],
+            "enablement_launch_log": "some boot log",
+        }
+    )
+    cfg = fake.shared_state.enablement.accepted_config
+    assert cfg.get("extra_envs", {}).get("VLLM_ROCM_USE_AITER") == "1"
+    assert "--kv-cache-dtype fp8" in (cfg.get("extra_server_args") or "")
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch):
+    """Successive advanced rounds accumulate envs without overwriting prior ones."""
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "patches_applied": [],
+            "extra_envs_applied": {"A": "1"},
+            "extra_server_args_applied": "--flag-a",
+            "setup_commands_applied": [],
+        }
+    )
+    fake.shared_state.enablement.inflight_task_id = "spec-2"
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "patches_applied": [],
+            "extra_envs_applied": {"B": "2"},
+            "extra_server_args_applied": "--flag-b",
+            "setup_commands_applied": [],
+        }
+    )
+    cfg = fake.shared_state.enablement.accepted_config
+    assert cfg["extra_envs"].get("A") == "1"
+    assert cfg["extra_envs"].get("B") == "2"
+    assert "--flag-a" in cfg["extra_server_args"]
+    assert "--flag-b" in cfg["extra_server_args"]
