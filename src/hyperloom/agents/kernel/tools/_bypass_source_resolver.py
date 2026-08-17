@@ -401,14 +401,15 @@ def resolve_triton_py(
     and the exact ``@triton.jit`` def line is pinned via :func:`triton_def_line`.
     The AST step is a pure refinement: a resolved file is returned even when the
     def line cannot be pinned. ``method`` is ``"trace_kernel_file_ast"`` (path +
-    pinned line), ``"trace_kernel_file"`` (path only), or ``"unresolved"``.
+    pinned line), ``"trace_kernel_file"`` (path only), ``"non_patchable"``,
+    or ``"unresolved"``.
     """
     path, line, func = _parse_launcher_form(kernel_file)
     if not path:
         return "", None, "unresolved"
     source = editable_trace_source(path, kernel_kind)
     if not source:
-        return "", None, "unresolved"
+        return "", None, "non_patchable"
     ast_line: int | None = None
     if source.lower().endswith(".py") and os.path.isfile(source):
         ast_line = triton_def_line(source, func=func, symbol=symbol)

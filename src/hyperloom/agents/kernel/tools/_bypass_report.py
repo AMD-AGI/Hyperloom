@@ -454,7 +454,7 @@ def build_candidates(
         finder_patchable: bool | None = None
         finder_status = ""
         finder_reason = ""
-        if not source_file and kname:
+        if not source_file and kname and source_method != "non_patchable":
             source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
             if source_file:
                 source_method = method
@@ -563,7 +563,15 @@ def build_candidates(
                 else (
                     ""
                     if source_file
-                    else (f"source: {finder_reason}" if finder_patchable is False else "source file not resolved")
+                    else (
+                        f"source: {finder_reason}"
+                        if finder_patchable is False
+                        else (
+                            "source: non-patchable kernel (trace kernel_file is not editable)"
+                            if source_method == "non_patchable"
+                            else "source file not resolved"
+                        )
+                    )
                 )
             ),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
