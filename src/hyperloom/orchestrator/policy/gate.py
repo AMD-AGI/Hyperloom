@@ -412,6 +412,7 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
         "candidates_path",
         "patch_path",
         "target_file",
+        "target_files",
         "config_path",
         "output_dir",
         "workspace",
@@ -561,6 +562,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_context",
         "kb_stage_outbox",
         "kb_stage_dead_letter",
+        "recipe_finalize_status",
+        "recipe_finalize_attempts",
+        "recipe_finalize_outcome",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
@@ -2210,25 +2214,23 @@ class PolicyGate:
                     f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
                     rule="warm_replay_plan_invalid",
                 )
-            raw_target = entry.get("target_file")
-            if not raw_target:
+            raw_targets = entry.get("target_files") or []
+            if not raw_targets:
                 continue
-            if not isinstance(raw_target, str):
+            if not isinstance(raw_targets, list) or not all(
+                isinstance(target, str) and target.strip()
+                for target in raw_targets
+            ):
                 raise PolicyDenied(
-                    f"replay_warm_recipe warm_kernel_plan[{index}].target_file must be a string",
+                    f"replay_warm_recipe warm_kernel_plan[{index}].target_files "
+                    "must be a flat non-empty string list",
                     rule="warm_replay_plan_invalid",
-                )
-            if not self._path_in_source_allowlist(raw_target):
-                raise PolicyDenied(
-                    f"replay_warm_recipe target_file={raw_target!r} is outside "
-                    "trusted framework source roots",
-                    rule="warm_replay_target_outside_framework_roots",
                 )
 
             raw_patch = entry.get("patch_path")
             if not isinstance(raw_patch, str) or not raw_patch.strip():
                 raise PolicyDenied(
-                    f"replay_warm_recipe target_file={raw_target!r} has no patch_path",
+                    f"replay_warm_recipe target_files={raw_targets!r} has no patch_path",
                     rule="warm_replay_patch_missing",
                 )
             if kb_root is None or not _resolved_within(raw_patch, str(kb_root)):
@@ -2239,15 +2241,6 @@ class PolicyGate:
                 )
 
             declared_targets = self._patch_declared_targets(Path(raw_patch))
-            target_candidates = self._framework_relative_candidates(raw_target)
-            if not declared_targets or declared_targets.isdisjoint(
-                target_candidates
-            ):
-                raise PolicyDenied(
-                    f"replay_warm_recipe target_file={raw_target!r} does not "
-                    f"match patch targets={sorted(declared_targets)!r}",
-                    rule="warm_replay_patch_target_mismatch",
-                )
             try:
                 patch_key = str(Path(raw_patch).resolve())
             except (OSError, RuntimeError) as exc:
@@ -2264,14 +2257,30 @@ class PolicyGate:
                     f"replay_warm_recipe patch_path={raw_patch!r} changed during validation",
                     rule="warm_replay_patch_target_mismatch",
                 )
-            covered_targets.update(target_candidates)
-            try:
-                admitted.add(str(Path(raw_target).resolve()))
-            except (OSError, RuntimeError) as exc:
-                raise PolicyDenied(
-                    f"replay_warm_recipe target_file={raw_target!r} cannot be resolved",
-                    rule="warm_replay_target_outside_framework_roots",
-                ) from exc
+            for raw_target in raw_targets:
+                if not self._path_in_source_allowlist(raw_target):
+                    raise PolicyDenied(
+                        f"replay_warm_recipe target_file={raw_target!r} is outside "
+                        "trusted framework source roots",
+                        rule="warm_replay_target_outside_framework_roots",
+                    )
+                target_candidates = self._framework_relative_candidates(raw_target)
+                if not declared_targets or declared_targets.isdisjoint(
+                    target_candidates
+                ):
+                    raise PolicyDenied(
+                        f"replay_warm_recipe target_file={raw_target!r} does not "
+                        f"match patch targets={sorted(declared_targets)!r}",
+                        rule="warm_replay_patch_target_mismatch",
+                    )
+                covered_targets.update(target_candidates)
+                try:
+                    admitted.add(str(Path(raw_target).resolve()))
+                except (OSError, RuntimeError) as exc:
+                    raise PolicyDenied(
+                        f"replay_warm_recipe target_file={raw_target!r} cannot be resolved",
+                        rule="warm_replay_target_outside_framework_roots",
+                    ) from exc
         for patch_key, (declared_targets, covered_targets) in patch_coverage.items():
             uncovered = declared_targets - covered_targets
             if uncovered:
@@ -2355,7 +2364,7 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
-                if key == "target_file" and trusted_framework_targets:
+                if key in {"target_file", "target_files"} and trusted_framework_targets:
                     try:
                         resolved = str(Path(node).resolve())
                     except (OSError, RuntimeError):

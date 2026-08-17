@@ -52,6 +52,10 @@ class _StubSharedState:
     current_best: dict = field(default_factory=dict)
     tick: int = 0
     phase: str = "PRELUDE"
+    conc: int = 64
+    isl: int = 0
+    osl: int = 0
+    max_model_len: int = 0
 
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
@@ -391,6 +395,47 @@ def _patch_current_sdk_readers(
         "open",
         classmethod(lambda cls: _Replay()),
     )
+
+
+@pytest.mark.asyncio
+async def test_current_recipe_repairs_context_for_target_workload(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_current_sdk_readers(
+        monkeypatch,
+        tmp_path,
+        timeline=[],
+        explore_refs=[],
+        framework_refs=[],
+        explore_config={"extra_server_args": "--context-length 6144"},
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+                "validated_gain_pct": 12.0,
+            },
+        },
+    )
+    coord.shared_state.isl = 8192
+    coord.shared_state.osl = 1024
+    coord.shared_state.max_model_len = 32768
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is not None
+    assert "--context-length 11264" in task.params["extra_server_args"]
+    assert task.params["workload_compatibility"] == {
+        "status": "adjusted",
+        "previous_context_length": 6144,
+        "effective_context_length": 11264,
+        "required_context_length": 9216,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1036,6 +1081,51 @@ def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
         )
         is True
     )
+
+
+def test_multi_file_kernel_targets_share_one_framework_root(
+    tmp_path,
+    monkeypatch,
+):
+    coord = _make_coord(tmp_path)
+    framework_root = tmp_path / "framework"
+    existing = framework_root / "python/sglang/srt/models/qwen3.py"
+    added = framework_root / "python/sglang/srt/models/qwen3_fused_ops.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("original\n", encoding="utf-8")
+    patch = tmp_path / "fusion.patch"
+    patch.write_text(
+        "diff --git a/python/sglang/srt/models/qwen3.py "
+        "b/python/sglang/srt/models/qwen3.py\n"
+        "--- a/python/sglang/srt/models/qwen3.py\n"
+        "+++ b/python/sglang/srt/models/qwen3.py\n"
+        "@@ -1 +1 @@\n"
+        "-original\n"
+        "+patched\n"
+        "diff --git a/python/sglang/srt/models/qwen3_fused_ops.py "
+        "b/python/sglang/srt/models/qwen3_fused_ops.py\n"
+        "--- /dev/null\n"
+        "+++ b/python/sglang/srt/models/qwen3_fused_ops.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+new\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
+        lambda: (str(framework_root),),
+    )
+
+    targets = coord.phase_prelude._resolve_kernel_target_paths(
+        {
+            "patch_path": str(patch),
+            "target_files": [
+                "python/sglang/srt/models/qwen3.py",
+                "python/sglang/srt/models/qwen3_fused_ops.py",
+            ],
+        }
+    )
+
+    assert targets == [str(existing), str(added)]
 
 
 @pytest.mark.asyncio

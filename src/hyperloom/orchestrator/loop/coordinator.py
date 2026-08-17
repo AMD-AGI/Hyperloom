@@ -1178,6 +1178,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_kernel_optimizations_from_state": "writeback",
         "_collect_attempt_provenance": "writeback",
         "_build_recipe_attrs_from_state": "writeback",
+        "ensure_recipe_finalized": "writeback",
         "finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_promote_to_shared_state": "writeback",
@@ -1426,7 +1427,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
-        if getattr(self.shared_state, "close_sequence_done", False):
+        finalize_status = str(
+            getattr(self.shared_state, "recipe_finalize_status", "") or ""
+        )
+        if (
+            getattr(self.shared_state, "close_sequence_done", False)
+            and finalize_status in {"written", "skipped", "disabled"}
+        ):
             return
         try:
             config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
@@ -1436,7 +1443,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 sid = (self.shared_state.recipe_kb_session_id or "").strip()
                 if not sid:
                     return
-            self.finalize_recipe_and_journal(source="t4_fallback")
+            self.ensure_recipe_finalized(source="t4_fallback")
         except Exception:  # noqa: BLE001 — defensive
             log.exception("recipe KB T4 fact_finalize fallback failed")
         try:
@@ -1748,6 +1755,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 or ("coordinator_exception" if last_tick_exc is not None else "unknown")
             )
             self.shared_state.save(self.session_dir)
+            # Every graceful terminal path gets one idempotent Recipe finalize
+            # attempt, including stop-check exits that never enter PHASE_CLOSE.
+            await self._recipe_kb_t4_hook()
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f cumulative_gain=%.2f%% max_minutes=%.0f",
                 tick_n,

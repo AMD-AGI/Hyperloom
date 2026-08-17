@@ -31,7 +31,6 @@ _ARTIFACT_REF_KEYS: frozenset[str] = frozenset(
         "source_file",
         "source_files",
         "target_file",
-        "target_files",
         "tuned_file",
     }
 )

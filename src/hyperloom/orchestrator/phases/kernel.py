@@ -3448,6 +3448,19 @@ class KernelPhase(PhaseHandler):
         ts = datetime.now(timezone.utc).isoformat()
         envs = dict(extra_envs or integrate_result.get("extra_envs") or fusion_result.get("env_flags") or {})
         extra_args = str(integrate_result.get("extra_server_args") or "")
+        target_files = [
+            str(path)
+            for path in (
+                fusion_result.get("target_files")
+                or fusion_result.get("artifact_files")
+                or fusion_result.get("source_files")
+                or [
+                    fusion_result.get("source_file")
+                    or integrate_result.get("target_file")
+                ]
+            )
+            if str(path or "").strip()
+        ]
         entry = {
             "action": "fusion",
             "source_phase": "KERNEL_AGENT",
@@ -3463,7 +3476,7 @@ class KernelPhase(PhaseHandler):
             "gain_pct": incremental_gain,
             "workspace": integrate_result.get("workspace"),
             "patch_path": patch,
-            "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
+            "target_files": list(dict.fromkeys(target_files)),
             "extra_envs": envs,
             "extra_server_args": extra_args,
             "kernel_speedup": fusion_result.get("kernel_speedup"),
@@ -3487,7 +3500,7 @@ class KernelPhase(PhaseHandler):
             "variant_name": "forge_fusion",
             "workspace": integrate_result.get("workspace"),
             "patch_path": patch,
-            "target_file": entry["target_file"],
+            "target_files": list(entry["target_files"]),
             "extra_envs": envs,
             "extra_server_args": extra_args,
         }

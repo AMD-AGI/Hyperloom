@@ -55,7 +55,7 @@ def _warm_replay_dispatch_params(
         {
             "warm_kernel_plan": [
                 {
-                    "target_file": str(target),
+                    "target_files": [str(target)],
                     "patch_path": str(patch_path),
                 }
             ],
@@ -382,6 +382,43 @@ def test_dispatched_warm_replay_rejects_undeclared_extra_patch_target(
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_dispatched_task("replay_warm_recipe", params)
     assert exc.value.rule == "warm_replay_patch_target_mismatch"
+
+
+def test_dispatched_warm_replay_accepts_declared_multi_file_targets(
+    tmp_path,
+    monkeypatch,
+):
+    gate, session_dir = _gate(tmp_path, monkeypatch)
+    framework_root = tmp_path.parent / f"{tmp_path.name}-framework"
+    params, target, patch_path = _warm_replay_dispatch_params(
+        session_dir,
+        framework_root,
+    )
+    added = framework_root / "vllm/v1/attention/ops/new_fused_ops.py"
+    with patch_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n".join(
+                [
+                    "diff --git a/vllm/v1/attention/ops/new_fused_ops.py "
+                    "b/vllm/v1/attention/ops/new_fused_ops.py",
+                    "--- /dev/null",
+                    "+++ b/vllm/v1/attention/ops/new_fused_ops.py",
+                    "@@ -0,0 +1 @@",
+                    "+new",
+                    "",
+                ]
+            )
+        )
+    params["warm_kernel_plan"][0]["target_files"] = [
+        str(target),
+        str(added),
+    ]
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.policy.gate.resolve_source_file_allowlist",
+        lambda: (str(framework_root),),
+    )
+
+    gate.validate_dispatched_task("replay_warm_recipe", params)
 
 
 def test_dispatched_warm_replay_rejects_framework_symlink_escape(

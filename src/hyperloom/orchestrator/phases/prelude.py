@@ -12,7 +12,7 @@ import logging as _logging
 import math
 import os
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections.abc import Mapping
 from typing import Any
 from . import machine_state as _phase_state
@@ -361,7 +361,7 @@ class PreludePhase(PhaseHandler):
                 if column == "rewrite":
                     source_refs = [str(r) for r in (row.get("source_files") or []) if str(r or "").strip()]
                 elif column == "fusion":
-                    source_refs = [str(row.get("source_file"))] if row.get("source_file") else []
+                    source_refs = []
                 else:  # gemm
                     source_refs = [str(row.get("tuned_file"))] if row.get("tuned_file") else []
                 source_paths: list[str] = []
@@ -370,6 +370,11 @@ class PreludePhase(PhaseHandler):
                     if resolved is not None:
                         source_paths.append(str(resolved))
                 entry: dict[str, Any] = {"column": column, "meta": meta}
+                entry["target_files"] = [
+                    str(path)
+                    for path in (row.get("target_files") or [])
+                    if str(path or "").strip()
+                ]
                 # Preserve the exact Recipe row so CLOSE can carry the validated
                 # kernel content and its refs forward on the same inference page.
                 entry["recipe_row"] = dict(row)
@@ -391,36 +396,42 @@ class PreludePhase(PhaseHandler):
         return plan
 
     @staticmethod
-    def _parse_diff_target(patch_path: str | None) -> str:
-        """Extract the patched file's repo-relative path from a unified diff.
+    def _parse_diff_targets(patch_path: str | None) -> list[str]:
+        """Extract every safe repo-relative target from a unified diff."""
+        raw = str(patch_path or "").strip()
+        if not raw:
+            return []
+        try:
+            text = Path(raw).read_text(errors="replace")
+        except OSError:
+            return []
+        targets: list[str] = []
+        for line in text.splitlines():
+            if not line.startswith("+++ "):
+                continue
+            candidate = line[4:].split("\t", 1)[0].strip()
+            if candidate == "/dev/null":
+                continue
+            if candidate.startswith("b/"):
+                candidate = candidate[2:]
+            parsed = PurePosixPath(candidate)
+            if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
+                return []
+            target = parsed.as_posix()
+            if target not in targets:
+                targets.append(target)
+        return targets
+
+    @classmethod
+    def _parse_diff_target(cls, patch_path: str | None) -> str:
+        """Extract the first patched file's repo-relative path from a unified diff.
 
         Reads the ``+++ b/<path>`` header (falling back to ``diff --git a/x
         b/y``) so a champion patch can be located in this session's source tree
         even when the KB record did not persist an absolute target path.
         """
-        raw = str(patch_path or "").strip()
-        if not raw:
-            return ""
-        try:
-            text = Path(raw).read_text(errors="replace")
-        except OSError:
-            return ""
-        git_target = ""
-        for line in text.splitlines():
-            if line.startswith("+++ "):
-                candidate = line[4:].split("\t", 1)[0].strip()
-                if candidate.startswith("b/"):
-                    candidate = candidate[2:]
-                if candidate and candidate != "/dev/null":
-                    return candidate
-            elif line.startswith("diff --git ") and not git_target:
-                parts = line.split()
-                if len(parts) >= 4:
-                    candidate = parts[3]
-                    if candidate.startswith("b/"):
-                        candidate = candidate[2:]
-                    git_target = candidate
-        return git_target
+        targets = cls._parse_diff_targets(patch_path)
+        return targets[0] if targets else ""
 
     def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
         """Locate the champion patch's target file in this session's source tree.
@@ -462,6 +473,38 @@ class PreludePhase(PhaseHandler):
                 if candidate.is_file():
                     return str(candidate)
         return ""
+
+    def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
+        """Resolve every declared target of one kernel patch under one source root."""
+        declared = self._parse_diff_targets(entry.get("patch_path"))
+        if not declared:
+            return []
+        metadata = [
+            str(path).replace("\\", "/").lstrip("/")
+            for path in (
+                entry.get("target_files")
+                or (entry.get("meta") or {}).get("target_files")
+                or (entry.get("recipe_row") or {}).get("target_files")
+                or []
+            )
+            if str(path or "").strip()
+        ]
+        if metadata and set(metadata) != set(declared):
+            return []
+        try:
+            from ..framework.paths import resolve_patch_target_roots
+
+            roots = resolve_patch_target_roots()
+        except Exception:  # noqa: BLE001
+            roots = ()
+        for root in roots:
+            base = Path(root)
+            if not base.is_dir():
+                continue
+            candidates = [base / PurePosixPath(target) for target in declared]
+            if any(candidate.is_file() for candidate in candidates):
+                return [str(candidate) for candidate in candidates]
+        return []
 
     @staticmethod
     def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
@@ -768,8 +811,10 @@ class PreludePhase(PhaseHandler):
             if entry.get("column") == "gemm":
                 if not envs:
                     continue
-            elif not self._resolve_kernel_target_path(entry):
-                continue
+            else:
+                targets = self._resolve_kernel_target_paths(entry)
+                if not any(targets):
+                    continue
             configs.append(
                 (
                     f"kernel[{index}]",
@@ -855,7 +900,7 @@ class PreludePhase(PhaseHandler):
         applied: list[dict[str, Any]] = []
         kernel_snapshots: list[dict[str, Any]] = []
         prepared_envs: dict[int, dict[str, str]] = {}
-        prepared_targets: dict[int, str] = {}
+        prepared_targets: dict[int, list[str]] = {}
         kernel_configs: list[tuple[str, Mapping[str, Any]]] = []
         for index, entry in enumerate(plan):
             envs = self._warm_kernel_extra_envs(entry)
@@ -863,10 +908,10 @@ class PreludePhase(PhaseHandler):
                 if not envs:
                     continue
             else:
-                target = self._resolve_kernel_target_path(entry)
-                if not target:
+                targets = self._resolve_kernel_target_paths(entry)
+                if not targets:
                     continue
-                prepared_targets[index] = target
+                prepared_targets[index] = targets
             prepared_envs[index] = envs
             kernel_configs.append(
                 (
@@ -918,18 +963,20 @@ class PreludePhase(PhaseHandler):
                     continue
                 entry["decision"] = "PENDING"
                 continue
-            target = prepared_targets.get(index, "")
-            if not target:
+            targets = prepared_targets.get(index, [])
+            if not targets:
                 entry["decision"] = "DEFERRED"
                 deferred += 1
                 continue
-            entry["target_file"] = target
+            target = targets[0]
+            entry["target_files"] = list(targets)
             try:
-                snapshot = self._snapshot_warm_kernel_target(
-                    target,
-                    len(kernel_snapshots),
-                )
-                kernel_snapshots.append(snapshot)
+                for target_path in targets:
+                    snapshot = self._snapshot_warm_kernel_target(
+                        target_path,
+                        len(kernel_snapshots),
+                    )
+                    kernel_snapshots.append(snapshot)
                 state.warm_replay_pending = {
                     **dict(state.warm_replay_pending or {}),
                     "status": "preparing_kernel",
@@ -940,7 +987,7 @@ class PreludePhase(PhaseHandler):
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "warm-kernel KB: pre-mutation snapshot persist failed for %s",
-                    target,
+                    targets,
                     exc_info=True,
                 )
                 entry["decision"] = "ERROR"
@@ -1260,6 +1307,62 @@ class PreludePhase(PhaseHandler):
                 }
                 state.save(self.session_dir)
                 return None
+            try:
+                from ..actions.executors._grid_server_args import (
+                    reconcile_warm_replay_context_length,
+                )
+
+                repaired_args, workload_compatibility = (
+                    reconcile_warm_replay_context_length(
+                        sdk_replay.get("extra_server_args"),
+                        getattr(state, "framework", ""),
+                        int(getattr(state, "isl", 0) or 0),
+                        int(getattr(state, "osl", 0) or 0),
+                        getattr(state, "max_model_len", None),
+                    )
+                )
+                if repaired_args != str(
+                    sdk_replay.get("extra_server_args") or ""
+                ):
+                    sdk_replay["extra_server_args"] = repaired_args
+                    combined_args, combined_envs = (
+                        _merge_named_current_recipe_configs(
+                            [
+                                (
+                                    "config",
+                                    {
+                                        "extra_server_args": repaired_args,
+                                        "extra_envs": dict(
+                                            sdk_replay.get("extra_envs") or {}
+                                        ),
+                                    },
+                                ),
+                                (
+                                    "kernel",
+                                    sdk_replay.get("kernel_config") or {},
+                                ),
+                            ]
+                        )
+                    )
+                    sdk_replay["combined_extra_server_args"] = combined_args
+                    sdk_replay["combined_extra_envs"] = combined_envs
+                sdk_replay["workload_compatibility"] = workload_compatibility
+            except Exception as exc:  # noqa: BLE001 — incompatible config skips
+                state.warm_replay_attempted = True
+                state.warm_replay_outcome = {
+                    "status": "skipped",
+                    "reason": (
+                        "workload_config_incompatible:"
+                        f"{type(exc).__name__}:{exc}"
+                    )[:500],
+                    "target_workload_shape": {
+                        "conc": int(getattr(state, "conc", 0) or 0),
+                        "isl": int(getattr(state, "isl", 0) or 0),
+                        "osl": int(getattr(state, "osl", 0) or 0),
+                    },
+                }
+                state.save(self.session_dir)
+                return None
         try:
             kernel = (
                 await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
@@ -1575,6 +1678,10 @@ class PreludePhase(PhaseHandler):
             ),
             "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
         }
+        if current_remote:
+            params["workload_compatibility"] = dict(
+                sdk_replay.get("workload_compatibility") or {}
+            )
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="replay_warm_recipe",

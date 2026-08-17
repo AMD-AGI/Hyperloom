@@ -38,6 +38,11 @@ class _StubPrelude:
         """Stubbed gate: these tests exercise the replay itself."""
         return self.gate_reason
 
+    def _resolve_kernel_target_paths(self, entry: dict) -> list[str]:
+        """Keep legacy single-target fixtures focused on preparation behavior."""
+        target = self._resolve_kernel_target_path(entry)
+        return [target] if target else []
+
     def __init__(self, session_dir: Path, reader: object | None = None) -> None:
         self.session_dir = session_dir
         self.shared_state = SimpleNamespace(

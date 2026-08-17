@@ -67,9 +67,25 @@ def _state(tmp_path: Path) -> SimpleNamespace:
     tuned = tmp_path / "tuned.csv"
     tuned.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
     fusion = tmp_path / "fusion.patch"
-    fusion.write_text("fusion", encoding="utf-8")
+    fusion.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// optimized\n",
+        encoding="utf-8",
+    )
     rewrite = tmp_path / "rewrite.cu"
-    rewrite.write_text("// optimized", encoding="utf-8")
+    rewrite.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// rewrite optimized\n",
+        encoding="utf-8",
+    )
     source = tmp_path / "source.cu"
     source.write_text("// source", encoding="utf-8")
     return SimpleNamespace(
@@ -195,6 +211,65 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
+
+
+def test_fusion_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    patch = Path(state.last_fusion["patch"])
+    source = Path(state.last_fusion["source_file"])
+    added = tmp_path / "source_fused_ops.cu"
+    added.write_text("// new fused ops\n", encoding="utf-8")
+    patch.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// optimized\n"
+        "diff --git a/source_fused_ops.cu b/source_fused_ops.cu\n"
+        "--- /dev/null\n"
+        "+++ b/source_fused_ops.cu\n"
+        "@@ -0,0 +1 @@\n"
+        "+// new fused ops\n",
+        encoding="utf-8",
+    )
+    state.optimization_stack[3]["target_files"] = [str(source), str(added)]
+    state.last_fusion["artifact_files"] = [str(source), str(added)]
+
+    bundle = build_remote_knowledge(state, tmp_path / "files-multi-fusion")
+
+    fusion = bundle.knowledge["value"]["kernel"]["fusion"]["items"][0]
+    assert fusion["target_files"] == ["source.cu", "source_fused_ops.cu"]
+    assert fusion["patch"].startswith("kernel/fusion/patches/")
+    assert "source_file" not in fusion
+    assert "source_files" not in fusion
+    artifact_paths = {artifact.path for artifact in bundle.artifacts}
+    assert not any(path.startswith("kernel/fusion/artifacts/source") for path in artifact_paths)
+
+
+def test_rewrite_writer_preserves_all_patch_targets(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    patch = Path(state.optimization_stack[4]["patch_path"])
+    patch.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// optimized\n"
+        "diff --git a/source_helpers.cu b/source_helpers.cu\n"
+        "--- /dev/null\n"
+        "+++ b/source_helpers.cu\n"
+        "@@ -0,0 +1 @@\n"
+        "+// helper\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_remote_knowledge(state, tmp_path / "files-multi-rewrite")
+
+    rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
+    assert rewrite["target_files"] == ["source.cu", "source_helpers.cu"]
+    assert rewrite["patch"].startswith("kernel/rewrite/patches/")
 
 
 def test_remote_recipe_projects_workload_shape_for_donor_gating(

@@ -1461,6 +1461,9 @@ class KBProvenance(TypedDict, total=False):
         warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
         warm_replay_attempted (bool): Whether a warm replay was attempted.
         warm_history_injected (bool): Whether warm history was injected.
+        recipe_finalize (dict[str, Any]): Terminal Recipe publication outcome.
+        recipe_finalize_status (str): Persisted publication lifecycle state.
+        recipe_finalize_attempts (int): Number of idempotent finalize attempts.
         stack_fingerprint (dict[str, str]): Fingerprint of the optimization stack.
         queue (KBQueueStats): Depth stats for the KB write queues.
         audit_tail_count (int): Number of audit-tail entries.
@@ -1483,6 +1486,9 @@ class KBProvenance(TypedDict, total=False):
     warm_replay: WarmReplayOutcome
     warm_replay_attempted: bool
     warm_history_injected: bool
+    recipe_finalize: dict[str, Any]
+    recipe_finalize_status: str
+    recipe_finalize_attempts: int
     stack_fingerprint: dict[str, str]
     queue: KBQueueStats
     audit_tail_count: int

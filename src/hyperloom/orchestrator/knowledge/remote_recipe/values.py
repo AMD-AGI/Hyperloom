@@ -12,7 +12,7 @@ import math
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Collection, Mapping
 
 from .models import (
@@ -70,6 +70,39 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _patch_declared_targets(path: Any) -> tuple[str, ...]:
+    """Return every safe target declared by a unified diff."""
+    patch = Path(str(path or ""))
+    try:
+        text = patch.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RemoteRecipeValidationError(
+            f"cannot read accepted patch targets: {patch}"
+        ) from exc
+    targets: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("+++ "):
+            continue
+        raw = line[4:].split("\t", 1)[0].strip()
+        if raw == "/dev/null":
+            continue
+        if raw.startswith("b/"):
+            raw = raw[2:]
+        parsed = PurePosixPath(raw)
+        if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
+            raise RemoteRecipeValidationError(
+                f"accepted patch declares unsafe target: {raw!r}"
+            )
+        target = parsed.as_posix()
+        if target not in targets:
+            targets.append(target)
+    if not targets:
+        raise RemoteRecipeValidationError(
+            f"accepted patch declares no target files: {patch}"
+        )
+    return tuple(targets)
 
 
 def _positive_int(value: Any) -> int | None:
@@ -518,29 +551,49 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     if not stack_rows or str(integrated.get("decision") or "").upper() != "KEEP":
         return {"items": []}
     patch_source = stack_rows[-1].get("patch_path") or result.get("patch")
-    target_source = stack_rows[-1].get("target_file") or result.get("source_file")
-    if not str(patch_source or "").strip() or not str(target_source or "").strip():
+    if not str(patch_source or "").strip():
         raise RemoteRecipeValidationError(
-            "accepted kernel/fusion is missing its patch or target file"
+            "accepted kernel/fusion is missing its patch"
         )
     patch_ref = files.add(patch_source, category="kernel/fusion", kind="patches")
-    target_ref = files.add(target_source, category="kernel/fusion", kind="artifacts")
-    if not patch_ref or not target_ref:
+    if not patch_ref:
         raise RemoteRecipeValidationError(
-            "accepted kernel/fusion patch or target cannot be materialized: "
-            f"patch={patch_source!r} target={target_source!r}"
+            f"accepted kernel/fusion patch cannot be materialized: {patch_source!r}"
         )
+    declared_targets = _patch_declared_targets(patch_source)
+    integrated_for_publish = dict(integrated)
+    for key in (
+        "target_file",
+        "target_files",
+        "source_file",
+        "source_files",
+        "artifact_files",
+    ):
+        integrated_for_publish.pop(key, None)
+    e2e_record = _externalize_record(
+        integrated_for_publish,
+        files,
+        "kernel/fusion",
+    )
+    e2e_record.pop("target_file", None)
+    e2e_record.pop("target_files", None)
     record = {
         **result,
         **stack_rows[-1],
-        "e2e": _externalize_record(integrated, files, "kernel/fusion"),
+        "e2e": e2e_record,
         "phase": str(stack_rows[-1].get("phase") or "KERNEL_AGENT"),
         "patch": patch_ref,
-        "source_file": target_ref,
+        "target_files": list(declared_targets),
     }
     # Remove duplicate local-path aliases after establishing canonical refs.
-    record.pop("patch_path", None)
-    record.pop("target_file", None)
+    for key in (
+        "patch_path",
+        "target_file",
+        "source_file",
+        "source_files",
+        "artifact_files",
+    ):
+        record.pop(key, None)
     return {"items": [record]}
 
 
@@ -630,6 +683,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 f"integration_id={integration_id!r} patch={patch_source!r} "
                 f"source={source_source!r}"
             )
+        declared_targets = _patch_declared_targets(patch_source)
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
@@ -662,6 +716,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 "experience_document": experience,
                 "patch": patch,
                 "source_files": [source] if source else [],
+                "target_files": list(declared_targets),
             }
         )
     return {"items": rows}
