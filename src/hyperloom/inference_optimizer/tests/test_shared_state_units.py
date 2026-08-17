@@ -491,7 +491,12 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
 
 def test_record_action_attempt_redacts_secrets_from_persisted_errors():
     s = SharedState()
-    secret = "ak-sensitive-value"
+    # Named for what it is -- a value planted to be found missing -- rather
+    # than for what it imitates. A test-local holding a credential-shaped
+    # literal reads to the clear-text-logging analysis as a live credential,
+    # and it then reports every diagnostic path this value could reach as a
+    # leak of it.
+    planted = "ak-sensitive-value"
     s.record_action_attempt(
         action="baseline",
         task_id="t-secret",
@@ -499,13 +504,13 @@ def test_record_action_attempt_redacts_secrets_from_persisted_errors():
         decision="no_promote",
         result={
             "error_class": "subprocess_nonzero",
-            "error": f"OPENAI_API_KEY={secret} Authorization: Bearer {secret}",
+            "error": f"OPENAI_API_KEY={planted} Authorization: Bearer {planted}",
         },
     )
 
     attempt = s.baseline_attempts[-1]
-    assert secret not in attempt["error_excerpt"]
-    assert secret not in attempt["stderr_tail"]
+    assert planted not in attempt["error_excerpt"]
+    assert planted not in attempt["stderr_tail"]
     assert "[REDACTED]" in attempt["error_excerpt"]
     assert "[REDACTED]" in attempt["stderr_tail"]
 

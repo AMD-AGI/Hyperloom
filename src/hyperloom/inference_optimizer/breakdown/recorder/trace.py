@@ -39,12 +39,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.env import env_bool
-
-# Aliased on import because the analyser's clear-text-logging query classifies
-# a call by its name, and a call named for the credentials it removes reads to
-# it as a source of them -- reporting the masking step as the leak. The alias
-# is the same function, named for what it hands back.
-from hyperloom.common.env_safety import redact_secret_values as _masked
+from hyperloom.common.env_safety import redact_secret_values
 
 #: Below ``DEBUG`` (10). See the module docstring: this is a per-write firehose,
 #: so it cannot share a level with output read for any other purpose.
@@ -213,9 +208,7 @@ def _emit(section: str, fields: list[str]) -> None:
     what the rest of the code is careful about. One exit keeps that from being
     a rule each caller has to remember.
     """
-
-    # codeql[py/clear-text-logging-sensitive-data]
-    log.log(TRACE, "breakdown %s", _masked(" ".join(fields)))
+    log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
 
 
 def trace_write(
