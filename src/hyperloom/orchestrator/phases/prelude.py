@@ -23,24 +23,24 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
-def _warm_kernel_keep_threshold_pct(default: float = 1.0) -> float:
-    """Gain a replayed champion set must clear, from the environment.
+def _warm_kernel_keep_threshold_pct(state: Any = None) -> float:
+    """Gain a replayed champion set must clear.
 
-    Parsed in one place with a fallback: a typo in the override used to turn
-    every champion into an ERROR instead of just being ignored.
+    Reads ``HYPERLOOM_WARM_KERNEL_KEEP_PCT`` as an override; falls back to the
+    shared decaying curve so the bar tracks the session's macro-cycle.
     """
+    from ..phases.machine_state import resolve_keep_threshold
+
     raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        log.warning(
-            "warm-kernel KB: HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r is not a number; using %.2f",
-            raw,
-            default,
-        )
-        return default
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            log.warning(
+                "warm-kernel KB: HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r is not a number; using curve value",
+                raw,
+            )
+    return resolve_keep_threshold(state) if state is not None else 1.0
 
 
 class PreludePhase(PhaseHandler):
@@ -525,7 +525,7 @@ class PreludePhase(PhaseHandler):
             "source": "warm_kernel_kb",
             "extra_envs": dict(extra_envs or {}),
             "base_tput": base_tput,
-            "keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
+            "keep_threshold_pct": _warm_kernel_keep_threshold_pct(self.shared_state),
         }
         if extra_server_args:
             payload["extra_server_args"] = extra_server_args

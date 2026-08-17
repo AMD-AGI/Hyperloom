@@ -40,7 +40,7 @@ patch *files*; this action produces *outcomes*.
 | `specialist_task_id` | string   | yes      | Task id of the specialist whose worktree carries the patches. |
 | `patches`            | list[str]| no       | Explicit patch path list (relative to specialist workspace or absolute under `SESSION_DIR`). Defaults to `specialist_done.patches_written`. |
 | `config_changes`     | object   | no       | `env_var -> value` map layered onto the server-launch env before restart. Reverted with the patches on gate failure. |
-| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput, default 1.0. |
+| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput; defaults to the session's decaying per-cycle bar (read from `SharedState`). |
 | `accuracy_baseline`  | float    | no       | Baseline accuracy score (0-1). Backfilled from `SharedState.baseline_accuracy` when omitted; `<= 0` skips the gate. |
 
 ## EMIT format
@@ -75,7 +75,7 @@ delegate{
    the shared `_accuracy_gate.parse_eval_results(...)` +
    `_accuracy_gate.accuracy_passed(...)` helpers.
 8. Decide:
-   - KEEP — bench tput ≥ baseline * (1 + keep_threshold_pct/100) AND
+   - KEEP — bench tput ≥ grading anchor * (1 + keep_threshold_pct/100) AND
      accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to
      `SharedState.optimization_stack`, update `current_best`, restamp
      `cumulative_gain_validated`.

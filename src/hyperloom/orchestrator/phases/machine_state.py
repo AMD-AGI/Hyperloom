@@ -433,6 +433,19 @@ KEEP_THRESHOLD_SPAN_PCT: float = 0.9
 MULTI_NODE_KEEP_THRESHOLD_FACTOR: float = 2.0
 
 
+def resolve_keep_threshold(state: Any) -> float:
+    """Current-cycle KEEP threshold read from SharedState.
+
+    Single call-site for every dispatch path that needs to inject
+    ``keep_threshold_pct``.  Reads ``macro_cycle`` and the multi-node flag
+    from ``state`` so callers don't have to.
+    """
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    return decaying_keep_threshold_pct(cycle, multi_node=is_multi_node())
+
+
 def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -> float:
     """KEEP / convergence gain threshold for cycle N = ``macro_cycle`` + 1.
 
@@ -2921,6 +2934,7 @@ __all__ = [
     "DEFAULT_CYCLE_MIN_GAIN_PCT",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
+    "resolve_keep_threshold",
     "should_reloop_to_explore",
     "allowed_actions_for",
     "apply_escalate_budget_bump",

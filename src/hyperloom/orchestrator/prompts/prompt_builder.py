@@ -431,7 +431,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "specialist_task_id=<completed specialist task_id>, "
             "patches?=[<patch paths from specialist_done>], "
             "config_changes?={ENV_VAR: value}, "
-            "keep_threshold_pct?=1.0, "
+            "keep_threshold_pct?=<session-cycle default>, "
             "accuracy_baseline?=<float>}}"
         )
     return f"propose_action{{action_name='{meta.name}', predicted_gain_pct=<your estimate>}}"
@@ -455,7 +455,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
+            "keep_threshold_pct?: <session-cycle default>, stack_stable_threshold_pct?: <keep/2>}}`. "
             "Variants run serially; each KEEP triggers an inlined stack "
             "rebench. Variant identity is content-based (args+envs+"
             "remove_args+unset_envs+args_mode); only exact duplicates within "

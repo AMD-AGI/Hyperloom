@@ -2178,9 +2178,6 @@ def _session_deadline_skip_result(variant: GridVariant) -> VariantResult:
     )
 
 
-SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
-MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
-
 
 def _existing_log_path(path: Path) -> str | None:
     """Return ``path`` as a string when it exists, else ``None``.
@@ -2309,9 +2306,7 @@ def _write_variant_abort_marker_impl(
 __all__ = [
     "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
-    "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "SGLANG_WATCHDOG_TIMEOUT_ENV",
-    "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_multi_node_invalid_variants",
     "apply_aiter_moe_pin_filter",

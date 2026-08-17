@@ -1097,17 +1097,9 @@ class ExplorePhase(PhaseHandler):
             if _cgv != 0:
                 params["cumulative_gain_validated"] = _cgv
         if "keep_threshold_pct" not in params:
-            try:
-                from ..phases.machine_state import decaying_keep_threshold_pct
-                from ..actions.executors._multi_node_env import is_multi_node
+            from ..phases.machine_state import resolve_keep_threshold
 
-                _kth = decaying_keep_threshold_pct(
-                    int(getattr(state, "macro_cycle", 0) or 0),
-                    multi_node=is_multi_node(),
-                )
-                params["keep_threshold_pct"] = _kth
-            except Exception:  # noqa: BLE001
-                pass
+            params["keep_threshold_pct"] = resolve_keep_threshold(state)
         if "applied_stack" not in params:
             _stack = list(getattr(state, "optimization_stack", None) or [])
             if _stack:
