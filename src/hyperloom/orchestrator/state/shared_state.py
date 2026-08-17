@@ -25,8 +25,7 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain_validated
-                        float — % over baseline at the last stack rebench
+    cumulative_gain_validated float — % over baseline at the last full-stack rebench
     stop_reason         str   — set when graceful stop fires
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent

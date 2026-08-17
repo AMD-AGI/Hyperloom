@@ -6,8 +6,8 @@
 Reads SharedState + the bus event log and writes
 ``$SESSION_DIR/reports/final.json`` (machine-readable, dashboard shape) and
 ``final.md`` (human-readable). The returned dict surfaces both paths.
-``final.json`` carries the run identity, stop reason, baseline/best, per-round
-and validated cumulative gain, completeness annotations, event counts and
+``final.json`` carries the run identity, stop reason, baseline/best, the
+validated cumulative gain, completeness annotations, event counts and
 highlights, plus optional blocks (failure summary, roofline comparison,
 external baseline, concurrency-sweep and kernel-optimization pointers) when the
 corresponding data exists; ``final.md`` renders the same content as sections.
@@ -542,8 +542,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
             f"(action=`{cb.get('action', '?')}`)"
         )
-    # Always printed, including the never-validated case, so the absence of a
-    # full-stack measurement is visible rather than implied.
+    # Printed even when never validated, so a missing rebench is stated, not implied.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0

@@ -73,25 +73,24 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if is_provisional:
-        facts.append("Cumulative gain is PENDING same-harness revalidation, so no validated number is available.")
+        facts.append("Cumulative gain is PENDING same-harness revalidation; no validated number exists yet.")
         warnings.append(
-            "Reported gain is PROVISIONAL and cross-harness "
-            f"(provenance={gain_provenance or 'unknown'}): the numerator was "
-            "measured by the delegated optimizer's harness and the denominator "
-            "is the orchestrator baseline. A same-harness full-stack rebench is "
-            "pending; the validated gain will replace this number once it lands."
+            "The recorded gain basis is PROVISIONAL and cross-harness "
+            f"(provenance={gain_provenance or 'unknown'}): measured by the "
+            "delegated optimizer's harness against the orchestrator baseline, so "
+            "no gain is reported here. A same-harness full-stack rebench is "
+            "pending and will supply the validated number."
         )
-    else:
-        if gain_v is not None and not headline_unvalidated:
-            facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
-            decisions.append(
-                Decision(
-                    kind="kept" if (gain_v or 0) > 0 else "attempted",
-                    subject="final",
-                    metric_pct=float(gain_v),
-                    rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
-                )
+    elif gain_v is not None and not headline_unvalidated:
+        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
+        decisions.append(
+            Decision(
+                kind="kept" if (gain_v or 0) > 0 else "attempted",
+                subject="final",
+                metric_pct=float(gain_v),
+                rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
             )
+        )
     if geak_pending and geak_pending.get("status") == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"

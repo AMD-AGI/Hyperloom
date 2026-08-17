@@ -349,9 +349,9 @@ def _print_final_summary(
     """Print the end-of-run summary block to stdout.
 
     Reports the stop reason, session id, model, baseline throughput, the
-    per-round (informational) cumulative gain, the validated cumulative gain
-    (with a staleness warning when the optimization stack grew after the last
-    validation), the current best config, pruned families, and crash count.
+    validated cumulative gain (with a staleness warning when the optimization
+    stack grew after the last validation), the current best config, pruned
+    families, and crash count.
     On ``baseline_failed`` it also surfaces the real terminal root cause from
     ``reports/final.json``.
 

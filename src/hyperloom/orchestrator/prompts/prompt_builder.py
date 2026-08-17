@@ -99,9 +99,8 @@ def _section_mission() -> list[str]:
         "",
         'An optimization is only "real" once it has been validated as part of the',
         "full optimization_stack. ``explore`` inlines a per-KEEP stack rebench, so",
-        "the validated cumulative gain advances automatically — sums of per-round",
-        "gains still do NOT compose linearly, so drive the loop until ``explore``",
-        "has produced at least one KEEP that survived the stack rebench.",
+        "cumulative_gain_validated advances automatically — drive the loop until",
+        "``explore`` has produced at least one KEEP that survived the rebench.",
     ]
 
 

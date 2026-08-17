@@ -40,8 +40,7 @@ _STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "fr
 # The only status meaning the change was adopted into current_best.
 _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
-# Set by the promote path when the anchor gate refused a KEEP the executor had
-# already granted: the measurement stands, but nothing was adopted.
+# Stamped on the result when the anchor gate refused an executor-granted KEEP.
 PROMOTION_REFUSED_KEY: str = "promotion_refused"
 
 # Statuses meaning a real change was tested/applied then rolled back or rejected
@@ -379,10 +378,11 @@ def derive_journal_outcome(
         One of :data:`OUTCOME_KEEP` / :data:`OUTCOME_REVERT` /
         :data:`OUTCOME_NO_PROMOTE`.
     """
+    result = result_dict or {}
     if (task_kind or "").lower() in _STATUS_DRIVEN_JOURNAL_KINDS:
-        status = str((result_dict or {}).get("status") or "").strip().lower()
+        status = str(result.get("status") or "").strip().lower()
         if status in _JOURNAL_KEEP_STATUSES:
-            if (result_dict or {}).get(PROMOTION_REFUSED_KEY):
+            if result.get(PROMOTION_REFUSED_KEY):
                 return OUTCOME_NO_PROMOTE
             return OUTCOME_KEEP
         if status in _JOURNAL_REVERT_STATUSES:

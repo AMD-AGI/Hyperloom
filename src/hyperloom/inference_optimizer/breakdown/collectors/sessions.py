@@ -542,10 +542,9 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     """Project SharedState's crash / interruption / resume signals.
 
-    Folds crash / steward-continuation / degraded-mode / pending-revalidation
-    signals into the ``session.recovery`` block so a resumed run is not read as
-    a clean monotonic one. Pure / best-effort: unparseable fields are skipped,
-    never raised.
+    Folds crash / degraded-mode / pending-revalidation signals into the
+    ``session.recovery`` block so a resumed run is not read as a clean monotonic
+    one. Pure / best-effort: unparseable fields are skipped, never raised.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
@@ -1033,9 +1032,9 @@ def collect_final(
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
-        dict[str, Any]: The final section (throughput, validated/per-round
-        cumulative gain, stack-length bookkeeping, action path, ttft / e2el,
-        invocation, and closing-phase markers).
+        dict[str, Any]: The final section (throughput, validated cumulative
+        gain, stack-length bookkeeping, action path, ttft / e2el, invocation,
+        and closing-phase markers).
     """
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []

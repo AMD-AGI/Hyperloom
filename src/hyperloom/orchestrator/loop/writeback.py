@@ -2185,9 +2185,9 @@ class WritebackCollaborator:
     ) -> bool:
         """Lift a winner only when it improves the current throughput anchor.
 
-        The writer of ``optimization_stack`` and every config-KEEP write to
-        ``current_best`` (the baseline anchor is the one other writer), and the
-        only place a winner is merged onto the previous config instead of
+        The only writer of ``optimization_stack``, and the only config-KEEP
+        writer of ``current_best`` (the baseline anchor is the other one). Also
+        the only place a winner is merged onto the previous config instead of
         replacing it, so ``unset_envs`` and cumulative args stay correct across
         the whole stack. The stack append is skipped when the winner is already
         applied, keyed by ``(action, variant_name)`` or by ``fingerprint``, so a
@@ -2909,9 +2909,6 @@ class WritebackCollaborator:
             audit_extras["framework_rewrite_evidence"] = evidence_path
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
             changed = True
-        # A profile run measures with the torch profiler attached, so its
-        # throughput is not comparable with the un-profiled measurements that
-        # establish current_best; it is recorded in the audit row only.
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
         if profile_status == "succeeded":
             anchor_tput = self._current_tput_from_validated_gain()
@@ -3026,9 +3023,9 @@ class WritebackCollaborator:
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
-        # The executor already did per-variant KEEP/REVERT + rebench, so winners
-        # arrive graded; Coordinator is single-writer for explore_search.accepted +
-        # current_best + optimization_stack, and the lift still holds a winner that
+        # Winners arrive already graded by the executor (per-variant KEEP/REVERT +
+        # rebench); Coordinator is single-writer for explore_search.accepted +
+        # current_best + optimization_stack. The lift still refuses a winner that
         # no longer beats the live anchor.
         # 1. Apply the executor's ledger increment.
         update = result.get("explore_search_update")
@@ -3646,12 +3643,9 @@ class WritebackCollaborator:
         lifted = False
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
             if not cand_id:
-                # The name used to be prefixed, which made an empty key look
-                # non-empty to the stack's guard and stacked a nameless entry.
-                # The bare key is falsy, so the append is skipped — current_best
-                # is set regardless, further down. The win
-                # therefore counts without leaving a step anything can reconcile,
-                # dedupe or replay, which is worth saying out loud.
+                # A falsy key skips the stack append but still lifts current_best,
+                # so the win counts without leaving a step anything can reconcile,
+                # dedupe or replay.
                 log.warning(
                     "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
                     "empty, and task params had none either). current_best still advances, but "

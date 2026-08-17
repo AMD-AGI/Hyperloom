@@ -887,7 +887,7 @@ def _snapshot_session(rec, st: Any) -> None:
 
 
 def _snapshot_final(rec, st: Any) -> None:
-    """Snapshot the ``final`` singleton (current best + cumulative gains) from ``st``.
+    """Snapshot the ``final`` singleton (current best + validated gain) from ``st``.
 
     A no-op when there is neither a current best nor an optimization stack.
 
