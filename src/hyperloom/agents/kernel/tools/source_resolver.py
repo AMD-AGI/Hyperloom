@@ -50,11 +50,11 @@ log = logging.getLogger(__name__)
 
 try:  # package import (TraceLens route / tests)
     from . import kernel_source_index, source_env
-    from ._bypass_source_resolver import is_editable_source, _demangle_kernel_name
+    from ._bypass_source_resolver import is_editable_source
 except ImportError:  # flat top-level import (bypass route puts tools/ on sys.path)
     import kernel_source_index  # type: ignore[no-redef]
     import source_env  # type: ignore[no-redef]
-    from _bypass_source_resolver import is_editable_source, _demangle_kernel_name  # type: ignore[no-redef]
+    from _bypass_source_resolver import is_editable_source  # type: ignore[no-redef]
 
 __all__ = [
     "ResolveResult",
@@ -196,12 +196,23 @@ def _demangle_itanium(mangled: str) -> str:
 
 
 def _base_from_demangled(name: str) -> str:
-    """Extract the base kernel identifier from a demangled/plain symbol."""
-    # Keep only the head before params/templates, drop namespaces, then take the
-    # last token (drops any leading return type/qualifiers: "void ns::foo" -> "foo").
-    head = re.split(r"[(<]", name.strip(), maxsplit=1)[0].split("::")[-1]
-    tokens = head.split()
-    return tokens[-1] if tokens else ""
+    """Extract the base kernel identifier from a demangled/plain symbol.
+
+    Strips ``void`` return type, ``(anonymous namespace)::`` qualifiers,
+    template args ``<...>``, function args ``(...)``, and namespace prefixes.
+    """
+    n = (name or "").strip()
+    if not n:
+        return ""
+    if n.startswith("void "):
+        n = n[len("void "):].strip()
+    n = n.replace("(anonymous namespace)::", "")
+    n = re.sub(r"<.*$", "", n)
+    n = re.sub(r"\(.*$", "", n)
+    n = n.strip()
+    if "::" in n:
+        n = n.rsplit("::", 1)[-1]
+    return n
 
 
 def _base_from_mangled(mangled: str) -> str:
@@ -241,10 +252,6 @@ def base_symbol(device_kernel_name: str) -> str:
     Handles already-demangled names, plain names, and Itanium-mangled names
     (``_Z...``) via ``c++filt`` with a pure-Python fallback.
 
-    Delegates to :func:`_bypass_source_resolver._demangle_kernel_name` which
-    correctly handles ``(anonymous namespace)::`` qualifiers, ``void`` return
-    type prefixes, and Itanium mangling.
-
     Args:
         device_kernel_name: The raw symbol from the trace or JSON key.
 
@@ -257,9 +264,9 @@ def base_symbol(device_kernel_name: str) -> str:
     if raw.startswith("_Z"):
         demangled = _demangle_itanium(raw)
         if demangled:
-            return _demangle_kernel_name(demangled) or ""
+            return _base_from_demangled(demangled)
         return _base_from_mangled(raw)
-    return _demangle_kernel_name(raw) or ""
+    return _base_from_demangled(raw)
 
 
 # ----------------------------------------------------------------------------
