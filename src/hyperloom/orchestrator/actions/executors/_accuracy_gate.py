@@ -33,9 +33,13 @@ ACCURACY_THRESHOLD = 0.05  # allowed deviation
 # enablement KEEP path. At 0.0 the gate degenerates to ``accuracy > 0``, which
 # admits a model that is answering essentially nothing: a real run KEPT a
 # candidate scoring gsm8k=0.00076 (0.08% of a 0.906 baseline) as "correct".
-# 0.05 is a floor of last resort -- it rejects the collapsed-output regime
-# without judging genuine quality.
-DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.05
+#
+# 0.5 separates a working baseline from a broken one with a wide margin on both
+# sides. Across historical runs every healthy baseline scored >= 0.63 while the
+# two genuinely broken ones scored 0.196 (MiniMax-M3-MXFP4, a miscompiled MoE
+# kernel) and 0.000 (GLM-5.2-MXFP4). The previous 0.05 rejected only the fully
+# collapsed regime and admitted the 0.196 case as a usable baseline.
+DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
 
 # Enablement admission, selected by the ``--enablement`` CLI flag. ``launch``
 # covers the boot-failure self-heal lane, ``eval`` the accuracy-failure lane.
