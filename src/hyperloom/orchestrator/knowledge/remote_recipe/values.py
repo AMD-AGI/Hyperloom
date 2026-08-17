@@ -925,11 +925,42 @@ def _unique_rows(rows: list[Any]) -> list[Any]:
 
 
 def _adopt_prior_kernel(
+    state: Any,
     sections: Any,
     value: dict[str, Any],
     files: "_Files",
 ) -> None:
-    """Carry prior kernel knowledge into the next throughput champion."""
+    """Carry prior Kernel rows only after that Kernel replay was reproduced."""
+    replay = _mapping(getattr(state, "warm_replay_outcome", {}))
+    kernel_replay = _mapping(replay.get("kernel"))
+    if (
+        str(replay.get("status") or "") != "reproduced"
+        or str(kernel_replay.get("status") or "") != "kept"
+        or (_positive_int(kernel_replay.get("kept")) or 0) <= 0
+    ):
+        return
+    list_keys = {
+        "gemm": "optimizations",
+        "fusion": "items",
+        "rewrite": "items",
+    }
+    selected_kernel: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for raw in getattr(state, "warm_kernel_kb_plan", []) or []:
+        if (
+            not isinstance(raw, Mapping)
+            or str(raw.get("decision") or "").upper() != "KEEP"
+        ):
+            continue
+        column = str(raw.get("column") or "").lower()
+        list_key = list_keys.get(column)
+        row = raw.get("recipe_row")
+        if list_key is None or not isinstance(row, Mapping):
+            continue
+        selected_kernel.setdefault(column, {list_key: []})[list_key].append(
+            dict(row)
+        )
+    if not selected_kernel:
+        return
     prior = sections.read("kernel")
     if prior is None:
         return
@@ -939,7 +970,7 @@ def _adopt_prior_kernel(
         for source in prior.files
         if source.is_file() and not source.is_symlink()
     }
-    prior_knowledge = sanitize_shared_knowledge(prior.knowledge)
+    prior_knowledge = sanitize_shared_knowledge(selected_kernel)
     referenced = extract_knowledge_artifact_refs(prior_knowledge, prior_paths)
     missing = referenced - prior_paths
     if missing:
@@ -952,11 +983,6 @@ def _adopt_prior_kernel(
         remapped[ref] = files.adopt_with_rename(source, ref)
 
     kernel = _mapping(value.get("kernel"))
-    list_keys = {
-        "gemm": "optimizations",
-        "fusion": "items",
-        "rewrite": "items",
-    }
     prior_kernel = _mapping(_remap_artifact_refs(prior_knowledge, remapped))
     for column, list_key in list_keys.items():
         prior_column = _mapping(prior_kernel.get(column))
@@ -1169,7 +1195,7 @@ def build_remote_knowledge(
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
-        _adopt_prior_kernel(sections, value, files)
+        _adopt_prior_kernel(state, sections, value, files)
     staged_sections = (
         merge_staged_sections(
             value,

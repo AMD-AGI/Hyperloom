@@ -402,14 +402,39 @@ def test_micro_keep_without_integrate_stack_is_not_written(tmp_path: Path) -> No
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
 
-def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
+@pytest.mark.parametrize(
+    ("warm_replay_outcome", "adopted"),
+    [
+        (
+            {
+                "status": "reproduced",
+                "kernel": {"status": "kept", "kept": 1},
+            },
+            True,
+        ),
+        (
+            {
+                "status": "failed",
+                "kernel": {"status": "reverted", "kept": 0},
+            },
+            False,
+        ),
+    ],
+)
+def test_prior_kernel_adoption_requires_successful_kernel_replay(
     tmp_path: Path,
+    warm_replay_outcome: dict,
+    adopted: bool,
 ) -> None:
     prior_root = tmp_path / "prior"
     prior_ref = "kernel/gemm/artifacts/tuned.csv"
     prior_file = prior_root / "files" / prior_ref
     prior_file.parent.mkdir(parents=True)
     prior_file.write_text("prior\n", encoding="utf-8")
+    unreplayed_ref = "kernel/gemm/artifacts/unreplayed.csv"
+    (prior_root / "files" / unreplayed_ref).write_text(
+        "unreplayed\n", encoding="utf-8"
+    )
     (prior_root / "recipe.json").write_text(
         json.dumps(
             {
@@ -417,7 +442,11 @@ def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
                     "kernel": {
                         "gemm": {
                             "optimizations": [
-                                {"id": "prior-gemm", "tuned_file": prior_ref}
+                                {"id": "prior-gemm", "tuned_file": prior_ref},
+                                {
+                                    "id": "unreplayed-gemm",
+                                    "tuned_file": unreplayed_ref,
+                                },
                             ]
                         },
                         "fusion": {"items": []},
@@ -438,6 +467,14 @@ def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
     state.last_fusion = {}
     state.last_fusion_integrate = {}
     state.kernel_opt_task_attempts = {}
+    state.warm_replay_outcome = warm_replay_outcome
+    state.warm_kernel_kb_plan = [
+        {
+            "column": "gemm",
+            "decision": "KEEP",
+            "recipe_row": {"id": "prior-gemm", "tuned_file": prior_ref},
+        }
+    ]
     sections = KnowledgeSections(
         tmp_path / "draft",
         warm_start_dir=prior_root,
@@ -452,8 +489,12 @@ def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
     optimizations = bundle.knowledge["value"]["kernel"]["gemm"][
         "optimizations"
     ]
-    assert optimizations == [{"id": "prior-gemm", "tuned_file": prior_ref}]
-    assert {artifact.path for artifact in bundle.artifacts} == {prior_ref}
+    if adopted:
+        assert optimizations == [{"id": "prior-gemm", "tuned_file": prior_ref}]
+        assert {artifact.path for artifact in bundle.artifacts} == {prior_ref}
+    else:
+        assert optimizations == []
+        assert bundle.artifacts == []
 
 
 def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
@@ -483,6 +524,17 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
         encoding="utf-8",
     )
     state = _state(tmp_path)
+    state.warm_replay_outcome = {
+        "status": "reproduced",
+        "kernel": {"status": "kept", "kept": 1},
+    }
+    state.warm_kernel_kb_plan = [
+        {
+            "column": "gemm",
+            "decision": "KEEP",
+            "recipe_row": {"id": "prior-gemm", "tuned_file": prior_ref},
+        }
+    ]
     sections = KnowledgeSections(
         tmp_path / "draft-conflict",
         warm_start_dir=prior_root,
