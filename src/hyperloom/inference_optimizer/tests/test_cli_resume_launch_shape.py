@@ -78,6 +78,20 @@ def test_robustness_options_explicit_flag_wins_over_persisted():
     assert resolve_robustness_options(args, state) == {"auto_probe_inference_server": True}
 
 
+def test_robustness_options_unrelated_flag_leaves_the_rest_persisted():
+    """One unrelated ``--robustness-*`` flag must not reopen the probe the launch closed.
+
+    Whole-mapping substitution reintroduced this branch's own bug one flag later.
+    """
+    state = SharedState(session_id="s", robustness_options={"auto_probe_inference_server": False})
+    args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=None, robustness_llm_rca=True)
+
+    assert resolve_robustness_options(args, state) == {
+        "auto_probe_inference_server": False,
+        "llm_rca_enabled": True,
+    }
+
+
 def test_robustness_options_empty_state_is_empty():
     """No flags and nothing persisted leaves the runtime on its own defaults."""
     args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=None)

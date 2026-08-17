@@ -1685,8 +1685,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported server_args   : {_resume_server_args}")
         if _resume_extra_env:
             print(f"  re-exported extra_env     : {','.join(sorted(_resume_extra_env))}")
-        # The multi-node executors read multi_node_state.json, but the CLI-level
-        # policy derived from the count (robustness defaults, IR-8) reads args/env.
+        # Restores the CLI-level policy derived from the count (robustness
+        # defaults, IR-8) only. It is too late for the cluster hand-off:
+        # ``nodes_resolved`` was fixed from argv at the top of this function, so
+        # multi_node_state.json / BENCHMARK_BASE_URL / MAGPIE_RUN_PHASE are
+        # already settled by then and a multi-node resume must re-pass --nodes
+        # (SKILL.md, Resume). Moving the whole topology block below the state
+        # load would turn that silent single-node degrade into a hard exit on
+        # any host without the HYPERLOOM_MN_EXT_* hand-off; tracked separately.
         _resume_nodes = max(1, int(getattr(state, "nodes", 1) or 1))
         if _resume_nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
             args.nodes = _resume_nodes

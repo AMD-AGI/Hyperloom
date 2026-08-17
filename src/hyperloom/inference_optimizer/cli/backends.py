@@ -422,10 +422,14 @@ def resolve_robustness_options(args: argparse.Namespace, state: Any) -> dict[str
     """Resolve robustness ``request.options``, preferring this launch's flags.
 
     :func:`_build_robustness_options` reads argv only, so a resume that re-passes
-    no robustness flag takes the mapping persisted at launch instead of dropping
-    to the runtime defaults. Substitution is wholesale, not per-key: the
-    resolution folds in multi-node and scriptable-framework policy that a merge
-    would tear apart.
+    no robustness flag would drop to the runtime defaults. The persisted mapping
+    goes underneath it, per-key: this launch wins on every key it resolves, and
+    the rest survive from launch. Whole-mapping substitution would mean one
+    unrelated flag on a resume (say ``--robustness-llm-rca``) silently reopens
+    the ``/health`` probe an earlier ``--robustness-disable-server-probe``
+    closed. Layering does not tear apart the multi-node / scriptable-framework
+    policy the resolution folds in, because that policy is re-derived from
+    ``args`` on this launch and therefore sits on top.
 
     Args:
         args: Parsed CLI args carrying the robustness flags.
@@ -434,4 +438,5 @@ def resolve_robustness_options(args: argparse.Namespace, state: Any) -> dict[str
     Returns:
         The resolved ``request.options`` overrides.
     """
-    return _build_robustness_options(args) or dict(getattr(state, "robustness_options", None) or {})
+    persisted = dict(getattr(state, "robustness_options", None) or {})
+    return {**persisted, **_build_robustness_options(args)}

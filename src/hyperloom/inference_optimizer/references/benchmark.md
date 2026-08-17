@@ -56,8 +56,9 @@ duplicate. Three consecutive baseline failures with no enablement engaged stop
 the run with `stop_reason='baseline_failed'` and route PRELUDE to CLOSE.
 
 Operator-supplied server flags have a first-class CLI surface:
-`optimize --server-args "<framework serve flags>"`. The CLI exports this as
-`INFERENCE_OPTIMIZER_SERVER_ARGS`, and YAML materialization routes it into the
+`optimize --server-args "<framework serve flags>"`. The CLI persists this in
+`state.json` and exports it as `INFERENCE_OPTIMIZER_SERVER_ARGS` (a `--resume`
+re-exports the persisted value), and YAML materialization routes it into the
 framework-specific Magpie env (`EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, or
 `EXTRA_ATOM_ARGS`) for baseline, profile, explore, and sweep. Explicit
 `--max-model-len` / `$MAX_MODEL_LEN` wins over the auto `ISL+OSL+headroom`

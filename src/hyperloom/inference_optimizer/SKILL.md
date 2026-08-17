@@ -487,7 +487,7 @@ and the operator's stated value is lost:
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
-| Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. |
+| Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume` re-exports the persisted set, so re-pass them only to change the set. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
@@ -1028,15 +1028,34 @@ Reuse the Launch template above with these diffs: drop `--model`, add
 baseline, current best, params-search state, event history, and kernel-agent
 artifacts; the CLI clears stale `stop_reason` and `crash_count` before retrying.
 
-**The launch shape does not need re-passing.** `state.json` is the authority for
-it, so a bare `--resume` keeps `--server-args`, every `--extra-env` pin,
-`--reference-script`, `--nodes`, the robustness flags (including
+**Most of the launch shape does not need re-passing.** `state.json` is the
+authority for it, so a bare `--resume` keeps `--server-args`, every
+`--extra-env` pin, the robustness flags (including
 `--robustness-disable-server-probe`) and the warm-replay gates from the original
 launch — the CLI re-exports the derived env from the persisted state and prints
 each one it restored. Re-pass a flag only to *change* it: an explicit flag on
-the resume still wins and is persisted as the new value for later resumes. This
-is what lets `robustness_monitor.sh` auto-resume a crashed run without knowing
-the original command line.
+the resume wins and is persisted as the new value for later resumes. This is
+what lets `robustness_monitor.sh` auto-resume a crashed run without knowing the
+original command line.
+
+Three exceptions:
+
+- `--server-args` and `--extra-env` are restored as a **set**. Re-passing either
+  replaces the whole thing, so changing one pin means re-passing them all —
+  otherwise there would be no way to remove one. Robustness flags layer per-key
+  instead: an unrelated `--robustness-*` flag on a resume leaves the others at
+  their persisted values.
+- `--reference-script` is fixed at launch. The recipe is parsed once into
+  `state.json` and every executor reads it from there, so re-passing the flag on
+  a resume does nothing; start a fresh session to change the reference.
+- **`--nodes` must be re-passed for a multi-node resume.** The persisted count
+  only feeds the robustness defaults and the IR-8 check. The cluster hand-off
+  (`multi_node_state.json`, `BENCHMARK_BASE_URL`, `MAGPIE_RUN_PHASE=client`,
+  `INFERENCE_OPTIMIZER_GPUS_PER_NODE`, `INFERENCE_OPTIMIZER_MN_BACKEND`) is
+  resolved from argv before the state is loaded, so a bare `--resume` of a
+  `--nodes >= 2` session benchmarks against the wrong endpoint. Re-pass
+  `--nodes` (and `--mn-backend` / `--gpus-per-node` if they were set) with the
+  `HYPERLOOM_MN_EXT_*` hand-off still in the environment.
 
 ## Robustness Monitor for Long Runs
 
