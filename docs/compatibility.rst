@@ -145,9 +145,9 @@ accordingly.
 
    * - Image
      - GPU
-   * - ``rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x``
+   * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x``
      - MI300X / MI325X
-   * - ``rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x``
+   * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x``
      - MI355X
    * - ``rocm/hyperloom:vllm-v0.27.1-rocm7.2.3``
      - MI300X / MI325X / MI355X
@@ -178,8 +178,8 @@ Hyperloom does not install ROCm or torch itself.
      - ROCm build matching the host ROCm
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
-     - v0.5.16 (rocm720)
-     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0. Note: ``SGLANG_REF`` (v0.5.16) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which may resolve to a different patch release.
+     - v0.5.17 (rocm720)
+     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0. Note: ``SGLANG_REF`` (v0.5.17) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which may resolve to a different patch release.
    * - vLLM
      - v0.27.1 (rocm723), isolated venv
      - Installs ``vllm==0.27.1+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
@@ -188,7 +188,7 @@ Bare-metal ROCm patch levels differ per framework, and each one matches its
 ``rocm/hyperloom`` image. The vLLM stack installs the ``rocm723`` variant (ROCm
 7.2.3), matching ``rocm/hyperloom:vllm-v0.27.1-rocm7.2.3``; the SGLang stack
 installs from the ROCm 7.2.0 AMD wheel index, matching the two
-``sglang-v0.5.16-rocm7.2.0`` images. ``docker`` mode is still the preferred
+``sglang-v0.5.17-rocm7.2.0`` images. ``docker`` mode is still the preferred
 route for a pre-validated stack, since the images also pin the surrounding
 torch, Triton, and AITER builds.
 
