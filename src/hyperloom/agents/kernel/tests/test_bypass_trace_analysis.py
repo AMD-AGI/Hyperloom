@@ -677,19 +677,20 @@ _FUSION_EVENTS = [
 ]
 
 
-def test_fusion_artifact_and_result(tmp_path, capsys, monkeypatch):
-    # Two consecutive Elementwise launches -> one fusable cluster, emitted in
-    # both the result summary and the kernel_sequence.json artifact.
+def test_fusion_result_summary(tmp_path, capsys, monkeypatch):
+    """Two consecutive Elementwise launches -> one fusable cluster.
+
+    The counts are inlined in the result dict. The separate
+    ``kernel_sequence.json`` artifact -- the only carrier of the per-cluster
+    breakdown -- is gone, having had no reader.
+    """
     trace = tmp_path / "f.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
     _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
     assert result["fusion"]["launch_count"] == 2
     assert result["fusion"]["fusable_cluster_count"] == 1
-    seq_path = result["artifact_paths"]["kernel_sequence"]
-    assert Path(seq_path).is_file()
-    seq = json.loads(Path(seq_path).read_text())
-    assert seq["fusable_clusters"][0]["launch_count"] == 2
-    assert "Elementwise" in seq["fusable_clusters"][0]["categories"]
+    assert result["fusion"]["fusable_time_us"] > 0.0
+    assert "kernel_sequence" not in result["artifact_paths"]
 
 
 def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):

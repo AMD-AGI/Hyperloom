@@ -187,32 +187,6 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts,
     assert "pass_fds" not in captured["kwargs"]
 
 
-def test_probe_ssh_true_on_marker(monkeypatch, known_hosts):
-    monkeypatch.setattr(
-        ssh_client,
-        "ssh_run",
-        lambda *a, **kw: _FakeCompleted(0, "mn_ssh_ok\n", ""),
-    )
-    assert ssh_client.probe_ssh("h", key_path="/k", known_hosts=known_hosts) is True
-
-
-def test_probe_ssh_false_on_bad_rc(monkeypatch, known_hosts):
-    monkeypatch.setattr(
-        ssh_client,
-        "ssh_run",
-        lambda *a, **kw: _FakeCompleted(255, "", "conn refused"),
-    )
-    assert ssh_client.probe_ssh("h", key_path="/k", known_hosts=known_hosts) is False
-
-
-def test_probe_ssh_false_on_timeout(monkeypatch, known_hosts):
-    def _boom(*a, **kw):
-        raise subprocess.TimeoutExpired(cmd="ssh", timeout=1)
-
-    monkeypatch.setattr(ssh_client, "ssh_run", _boom)
-    assert ssh_client.probe_ssh("h", key_path="/k", known_hosts=known_hosts) is False
-
-
 def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
     priv = tmp_path / "mn_id_ed25519"
     pub = tmp_path / "mn_id_ed25519.pub"

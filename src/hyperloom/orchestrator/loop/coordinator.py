@@ -1135,7 +1135,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_kb_best_config_overrides_for_keep": "proposals",
         "_kb_amend_recipe": "proposals",
         "_inject_explore_runtime_params": "proposals",
-        "_decaying_keep_threshold_pct": "proposals",
         "_materialize_approved_proposal": "proposals",
         "_record_proposal_task_map": "proposals",
         "_registry_lanes_ttl": "dispatcher",

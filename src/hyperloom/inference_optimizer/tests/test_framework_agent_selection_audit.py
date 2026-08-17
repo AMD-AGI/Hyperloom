@@ -687,17 +687,6 @@ async def test_phase_audit_request_optional_fields(monkeypatch, tmp_path) -> Non
 
 
 # --------------------------------------------------------------------------
-# framework_agent_artifacts.write_semantic_audit error path
-# --------------------------------------------------------------------------
-def test_write_semantic_audit_error_returns_none(tmp_path) -> None:
-    # Pass a FILE as the session dir so the runs_dir mkdir fails -> exception path.
-    file_path = tmp_path / "not_a_dir"
-    file_path.write_text("x")
-    out = fpa_mod.write_semantic_audit(file_path, candidate_id="c1", verdict={"semantic_status": "x"})
-    assert out is None
-
-
-# --------------------------------------------------------------------------
 # _dispatch_paused_for_phase_budget
 # --------------------------------------------------------------------------
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:

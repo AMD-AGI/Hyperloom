@@ -3792,23 +3792,6 @@ class WritebackCollaborator:
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []
         self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=kept_flag,
-                provenance="raw_diff",
-                reason=str(result.get("reason") or ""),
-                gain_pct=(float(delta_pct) if isinstance(delta_pct, (int, float)) else None),
-                accuracy_pass=result.get("accuracy_pass"),
-                extra={"workspace": str(result.get("workspace") or "")},
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("FRAMEWORK: executor decision.json write failed", exc_info=True)
         # Update batch max-gain rolling stat (for the plateau judge).
         batches = getattr(self.shared_state, "framework_agent_batches", None) or []
         if isinstance(batches, list) and batches:

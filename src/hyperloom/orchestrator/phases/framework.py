@@ -640,17 +640,6 @@ class FrameworkPhase(PhaseHandler):
             candidate["_audit"] = audit
         except Exception:  # noqa: BLE001 — caching is best-effort
             pass
-        # Persist the verdict next to decision.json.
-        try:
-            from ..framework.artifacts import write_semantic_audit
-
-            write_semantic_audit(
-                self.session_dir,
-                candidate_id=self._framework_candidate_key(candidate),
-                verdict=audit,
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: write_semantic_audit failed", exc_info=True)
         log.info(
             "FRAMEWORK: audit candidate=%s status=%s appl=%s next=%s",
             self._framework_candidate_key(candidate),
@@ -729,26 +718,6 @@ class FrameworkPhase(PhaseHandler):
                 "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             }
         )
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=False,
-                provenance="audit",
-                reason="; ".join(str(r) for r in ((audit or {}).get("risks") or [])) or semantic,
-                extra={
-                    "semantic_status": semantic,
-                    "applicability": (audit or {}).get("applicability"),
-                    "confidence": (audit or {}).get("confidence"),
-                    "evidence": (audit or {}).get("evidence") or [],
-                },
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: audit-skip decision.json write failed", exc_info=True)
         if status == "already_present":
             try:
                 from ..knowledge.kb_writeback import OUTCOME_ALREADY_PRESENT, write_framework_record
@@ -3848,22 +3817,6 @@ class FrameworkPhase(PhaseHandler):
             for k, v in extra.items():
                 row.setdefault(str(k), v)
         progress.append(row)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=str(batch_id or ""),
-                status=str(status or ""),
-                kept=bool(kept),
-                provenance=str(provenance or ""),
-                reason=str(rationale or ""),
-                gain_pct=gain_pct,
-                extra=extra if isinstance(extra, dict) else None,
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: stamp decision.json write failed", exc_info=True)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive

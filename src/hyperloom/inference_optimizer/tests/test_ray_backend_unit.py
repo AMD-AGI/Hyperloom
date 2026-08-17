@@ -815,9 +815,9 @@ def test_gpu_specialist_lease_is_alive_false_before_start():
 
 
 def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
-    """§3.3 non-blocking start: start_async submits without blocking; poll_started
-    returns None while pending (ray.wait empty) and the pid once ready;
-    pending_seconds is > 0 while pending and 0 after the pid is obtained."""
+    """§3.3 non-blocking start: start_async submits without blocking, and
+    poll_started returns None while pending (ray.wait empty) and the pid once
+    ready."""
 
     class _FakeRayWait(_FakeRayP2):
         def __init__(self):
@@ -841,13 +841,11 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
     assert lease._start_ref is not None
     assert lease.poll_started() is None
     assert lease.pid() is None
-    assert lease.pending_seconds() >= 0.0
 
-    # Scheduled: wait reports ready -> pid resolves, pending resets to 0.
+    # Scheduled: wait reports ready -> pid resolves.
     fake.ready = True
     assert lease.poll_started() == 4242
     assert lease.pid() == 4242
-    assert lease.pending_seconds() == 0.0
     lease.close()
 
 

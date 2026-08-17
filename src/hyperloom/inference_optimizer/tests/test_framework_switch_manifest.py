@@ -434,15 +434,6 @@ def test_attribution_of_an_unknown_switch_is_ignored():
     assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0, source="additive") is False
 
 
-def test_levers_can_be_selected_by_state():
-    """The explore seeder needs the dormant and active sets separately."""
-    state = _state()
-    state.record_authored_framework_levers([_entry_parsed("HL_ON")], default_on=True)
-    state.record_authored_framework_levers([_entry_parsed("HL_OFF")], default_on=False)
-    assert [r["switch"] for r in state.framework_levers_by_state(default_on=True)] == ["HL_ON"]
-    assert [r["switch"] for r in state.framework_levers_by_state(default_on=False)] == ["HL_OFF"]
-
-
 def _entry_parsed(switch: str) -> dict[str, Any]:
     """Return a single parsed manifest entry for ``switch``."""
     switches, _ = manifest.parse_manifest([_entry(switch)])

@@ -547,11 +547,15 @@ def _roofline_result(snapshot_id: int = 1) -> dict:
 
 
 def test_shared_state_has_roofline_audit_fields_by_default():
+    """``roofline_attempts`` is the surviving audit trail.
+
+    Its sibling ``last_roofline`` is gone: it had no production reader, and the
+    attempts list is what the audit and the breakdown collectors read.
+    """
     s = SharedState()
-    assert hasattr(s, "last_roofline")
     assert hasattr(s, "roofline_attempts")
-    assert s.last_roofline == {}
     assert s.roofline_attempts == []
+    assert not hasattr(s, "last_roofline")
 
 
 def test_audit_actions_includes_roofline_in_both_modules():
