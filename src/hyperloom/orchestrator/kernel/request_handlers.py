@@ -4000,11 +4000,15 @@ _FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORG
 
 
 def _forge_fusion_available() -> bool:
-    """Check if the forge-fusion CLI is importable or on PATH."""
-    if shutil.which("forge-fusion"):
-        return True
+    """Check that KernelForge's fusion pipeline is importable.
+
+    Probes the subpackage rather than ``kernel_agents``: a KernelForge predating
+    the fusion absorption would satisfy the parent import and only fail once the
+    subprocess rejected ``forge-fuse``. PATH is not consulted because the tool is
+    invoked through ``sys.executable -m``.
+    """
     try:
-        return importlib.util.find_spec("forge_fusion") is not None
+        return importlib.util.find_spec("kernel_agents.fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
 
@@ -4208,7 +4212,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "backend": "forge",
             "engine": "forge_fusion",
             "error_class": "forge_fusion_not_found",
-            "error": ("forge-fusion CLI not found. Install via 'pip install -e <KernelForge>/src/forge_fusion'."),
+            "error": ("KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'."),
             "decision": "REVERT",
             "kept": False,
         }

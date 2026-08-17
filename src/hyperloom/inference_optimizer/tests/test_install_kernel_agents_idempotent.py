@@ -165,3 +165,15 @@ def test_static_ensure_kernel_agents_install_and_verify_wired() -> None:
     assert "kernel_agents installed OK" in body
     assert "already importable" in body, "idempotent skip must stay wired"
     assert "die " in body, "post-install import must be verified (die on failure)"
+
+
+def test_static_readiness_probe_covers_the_fusion_package() -> None:
+    """A checkout from before fusion was absorbed imports the CLI fine.
+
+    Probing only the CLI lets such a pod skip the install and pass the check,
+    and the run then dies at forge-fuse with fusion missing.
+    """
+    body = _extract_fn("ensure_kernel_agents")
+    skip_probe, _, verify = body.partition("pip install")
+    assert "kernel_agents.fusion" in skip_probe, "the skip probe must require fusion"
+    assert "kernel_agents.fusion" in verify, "the post-install check must require fusion"
