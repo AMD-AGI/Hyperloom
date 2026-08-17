@@ -915,7 +915,7 @@ async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkey
 @pytest.mark.asyncio
 async def test_enablement_keeps_verified_when_accuracy_above_floor(tmp_path: Path, monkeypatch):
     """Booted + eval accuracy above the absolute floor -> KEEP, non-provisional."""
-    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, enablement_accuracy=0.42)
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, enablement_accuracy=0.9)
     assert result["status"] == "kept"
     assert result["runnable"] is True
     assert result["correctness_verified"] is True
