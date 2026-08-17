@@ -23,11 +23,9 @@ nothing downstream.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
@@ -272,10 +270,3 @@ def path_is_acceptable(path: str, roots: tuple[str, ...]) -> bool:
     """Whether a rewriting tier may write ``path`` as a resolved location."""
     return bool(canonical_source_path(path, roots))
 
-
-def read_document(path: Path | str) -> dict[str, Any] | None:
-    """Load the artifact, or ``None`` when it is absent or unreadable."""
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None

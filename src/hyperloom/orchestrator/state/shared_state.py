@@ -742,8 +742,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
     # merged explore action snapshot (same schema as other ``last_<action>`` mirrors).
     last_explore: dict[str, Any] = field(default_factory=dict)
-    # Composite roofline action audit snapshot plus capped history.
-    last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -909,8 +907,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Recipe KB integration fields — Coordinator-only writers.
     # ``recipe_kb_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
     recipe_kb_session_id: str = ""
-    # Kept (always ``{}``) for resume back-compat.
-    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.

@@ -103,40 +103,6 @@ class _Files:
         self._sources[source_key] = rel
         return rel
 
-    def add_tree(self, source: Any, *, category: str, kind: str) -> list[str]:
-        """Copy a required artifact directory while preserving its relative tree."""
-        raw = str(source or "").strip()
-        if not raw:
-            return []
-        root = Path(raw)
-        if root.is_symlink() or not root.is_dir():
-            raise RemoteRecipeValidationError(
-                f"accepted {category} artifact tree cannot be materialized: {root}"
-            )
-        refs: list[str] = []
-        for src in sorted(root.rglob("*")):
-            if src.is_symlink():
-                raise RemoteRecipeValidationError(
-                    f"accepted {category} artifact tree contains a symlink: {src}"
-                )
-            if not src.is_file():
-                continue
-            if src.stat().st_size > MAX_FILE_BYTES:
-                raise RemoteRecipeValidationError(
-                    f"artifact {src} exceeds the {MAX_FILE_BYTES}-byte KB Store limit"
-                )
-            relative = src.relative_to(root).as_posix()
-            rel = f"{category}/{kind}/{relative}"
-            destination = self.root / rel
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, destination)
-            self.artifacts.append(
-                Artifact(path=rel, source=destination, kind=kind, meta={"origin": category})
-            )
-            self.refs.add(rel)
-            refs.append(rel)
-        return refs
-
     def validate_adoption(self, source: Path, rel: str) -> None:
         """Fail before merge when a staged file cannot safely own ``rel``."""
         if source.is_symlink():

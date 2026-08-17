@@ -613,17 +613,6 @@ class GpuSpecialistLease:
         self._start_ref = None
         return self._pid
 
-    def pending_seconds(self) -> float:
-        """Seconds the actor has been PENDING (submitted, not yet scheduled).
-
-        Zero before :meth:`start_async` and after the pid is obtained. Used by
-        the caller to enforce a pending-time deadline separate from the running
-        wall budget (§3.3 / invariant §6.4).
-        """
-        if self._pending_started_monotonic is None or self._pid is not None:
-            return 0.0
-        return max(0.0, time.monotonic() - self._pending_started_monotonic)
-
     def pid(self) -> int | None:
         """Return the launched pid, or ``None`` before it has been resolved.
 

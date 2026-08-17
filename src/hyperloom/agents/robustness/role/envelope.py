@@ -116,7 +116,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "schema_version",
         # Recipe KB integration.
         "recipe_kb_session_id",
-        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",

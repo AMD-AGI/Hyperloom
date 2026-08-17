@@ -271,7 +271,6 @@ def test_core_state_fields_contains_v08_new_additions():
         "phase_history",
         "phase_budget_pct",
         "recipe_kb_session_id",
-        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",

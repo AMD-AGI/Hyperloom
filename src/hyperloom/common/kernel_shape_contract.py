@@ -11,7 +11,3 @@ DISPATCHABLE_SHAPE_PROVENANCE = frozenset({"torch_trace", "capture_backfill", "t
 # Alias used by the kernel-opt predispatch validator.
 ALLOWED_SHAPE_PROVENANCE = DISPATCHABLE_SHAPE_PROVENANCE
 
-
-def is_dispatchable_shape_provenance(provenance: str) -> bool:
-    """Return whether ``provenance`` carries dispatch-grade operand dims."""
-    return provenance in DISPATCHABLE_SHAPE_PROVENANCE
