@@ -24,6 +24,84 @@ from ._common import (
 )
 
 
+def _journey_paths(result: dict[str, Any]) -> list[Path]:
+    """Every ``kernel_journey.json`` belonging to a GEAK session, pointer first.
+
+    ``result.json`` is the *last* e2e cycle's return, so ``kernel_journey_path``
+    (or ``eval_dir``) names that cycle alone. A run that accepts kernels in cycle
+    0 and then opens a cycle 1 that accepts none leaves the pointer aimed at an
+    empty journey. Enumerate the sibling cycles so attribution survives.
+
+    Args:
+        result (dict[str, Any]): The normalized ``result.json``.
+
+    Returns:
+        list[Path]: Existing journey files. The pointer cycle is first so it wins
+            on any de-duplication; siblings follow in cycle order.
+    """
+    kj_path = str(result.get("kernel_journey_path") or "")
+    if not kj_path:
+        eval_dir = str(result.get("eval_dir") or "")
+        if not eval_dir:
+            return []
+        kj_path = str(Path(eval_dir) / "kernel_journey.json")
+
+    pointer = Path(kj_path)
+    paths: list[Path] = [pointer] if pointer.is_file() else []
+    try:
+        siblings = sorted(pointer.parent.parent.glob("*/kernel_journey.json"), key=lambda p: p.parent.name)
+    except OSError:
+        siblings = []
+    paths.extend(p for p in siblings if p.is_file() and p != pointer)
+    return paths
+
+
+def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the twin rows GEAK writes for one accepted kernel.
+
+    When the profiler resolves a dispatched candidate to a library symbol, the
+    journey records the acceptance twice: once under the candidate id, carrying
+    the measurement (``gpu_pct``), and once under the resolved symbol with
+    ``gpu_pct: null``. Both rows repeat the same ``e2e_gain_pct``, so counting
+    them separately doubles the kernel.
+
+    Rows are grouped by gain (rounded — the twin is sometimes the rounded copy).
+    A group holding both a measured and an unmeasured row is one kernel: the
+    measured row survives and the unmeasured ids move to its ``aliases``. Groups
+    that are all-measured or all-unmeasured are distinct kernels and are left
+    alone, so a run that genuinely accepts two kernels of equal gain keeps both.
+
+    Args:
+        accepted (list[dict[str, Any]]): Accepted-kernel descriptors, in order.
+
+    Returns:
+        list[dict[str, Any]]: The descriptors with alias twins folded in.
+    """
+    groups: dict[Any, list[dict[str, Any]]] = {}
+    for row in accepted:
+        gain = row.get("e2e_gain_pct")
+        key = round(gain, 3) if isinstance(gain, (int, float)) else ("_", id(row))
+        groups.setdefault(key, []).append(row)
+
+    collapsed: list[dict[str, Any]] = []
+    dropped: set[int] = set()
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        measured = [r for r in group if r.get("gpu_pct") is not None]
+        unmeasured = [r for r in group if r.get("gpu_pct") is None]
+        if not measured or not unmeasured:
+            continue
+        primary = measured[0]
+        primary["aliases"] = sorted({str(r.get("kernel_id") or "") for r in unmeasured if r.get("kernel_id")})
+        dropped.update(id(r) for r in unmeasured)
+
+    for row in accepted:
+        if id(row) not in dropped:
+            collapsed.append(row)
+    return collapsed
+
+
 def _geak_accepted_kernels_from_journey(
     result: dict[str, Any],
     warnings: list[str],
@@ -44,33 +122,7 @@ def _geak_accepted_kernels_from_journey(
         list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when the
             journey is absent, unreadable, or holds no integrated kernel.
     """
-    kj_path = str(result.get("kernel_journey_path") or "")
-    if not kj_path:
-        eval_dir = str(result.get("eval_dir") or "")
-        if eval_dir:
-            kj_path = str(Path(eval_dir) / "kernel_journey.json")
-    if not kj_path:
-        return []
-
-    # ``kernel_journey_path`` names the *last* e2e cycle only. A run that keeps a
-    # kernel in cycle 0 and then opens an empty cycle 1 would otherwise back-fill
-    # nothing. Read every sibling cycle, newest pointer first, and de-duplicate on
-    # ``kernel_id``. Safe because no kernel is KEEP in one cycle and rejected in a
-    # later one; the cycles partition the kernel set.
-    journey_paths: list[Path] = []
-    pointer = Path(kj_path)
-    if pointer.is_file():
-        journey_paths.append(pointer)
-    try:
-        siblings = sorted(
-            pointer.parent.parent.glob("e2e_cycle*/kernel_journey.json"),
-            key=lambda p: p.parent.name,
-        )
-    except OSError:
-        siblings = []
-    for sib in siblings:
-        if sib.is_file() and sib not in journey_paths:
-            journey_paths.append(sib)
+    journey_paths = _journey_paths(result)
     if not journey_paths:
         return []
 
@@ -127,7 +179,7 @@ def _geak_accepted_kernels_from_journey(
                 "source": "kernel_journey_backfill",
             }
         )
-    return accepted
+    return _collapse_journey_aliases(accepted)
 
 
 def _geak_reconstruct_from_disk(
