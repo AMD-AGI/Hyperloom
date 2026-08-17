@@ -9,8 +9,74 @@ from __future__ import annotations
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
     data_provenance as dp,
     kernel_lifecycle as kl,
+    optimizations as opt,
     sweep as sw,
 )
+
+
+# ---- optimizations --------------------------------------------------------
+def test_a_missing_read_model_is_not_rendered_as_an_empty_one():
+    """Silence here is what let a records-less session read as no-gain."""
+    out = opt.render(
+        {
+            "optimizations": {
+                "available": False,
+                "unavailable_reason": "no operations were recorded for this session",
+                "entries": [],
+                "validation": {"method": "unavailable"},
+            }
+        }
+    )
+
+    assert out.skipped is False
+    assert any("no operations were recorded" in fact for fact in out.key_facts)
+    assert any("absent, not empty" in warning for warning in out.warnings)
+
+
+def test_the_table_says_what_it_does_not_add_up_to():
+    out = opt.render(
+        {
+            "optimizations": {
+                "entries": [{"validated": True, "gain_pct": 9.0}],
+                "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 9.0}},
+                "validation": {
+                    "validated_total_gain_pct": 10.0,
+                    "attributed_total_gain_pct": 9.0,
+                    "unattributed_gain_pct": 1.0,
+                    "unmeasured_keep_count": 1,
+                    "projected_keep_count": 2,
+                    "stale_evidence_count": 3,
+                },
+            }
+        }
+    )
+
+    joined = " ".join(out.warnings)
+    assert "belongs to no adopted step" in joined
+    assert "1 adopted step(s) recorded neither" in joined
+    assert "2 adopted step(s) recorded no finishing throughput" in joined
+    assert "3 adoption(s) cite measurements" in joined
+
+
+def test_a_clean_ledger_carries_no_reconciliation_notes():
+    out = opt.render(
+        {
+            "optimizations": {
+                "entries": [{"validated": True, "gain_pct": 10.0}],
+                "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 10.0}},
+                "validation": {
+                    "validated_total_gain_pct": 10.0,
+                    "attributed_total_gain_pct": 10.0,
+                    "unattributed_gain_pct": 0.0,
+                    "unmeasured_keep_count": 0,
+                    "projected_keep_count": 0,
+                    "stale_evidence_count": 0,
+                },
+            }
+        }
+    )
+
+    assert out.warnings == []
 
 
 # ---- data_provenance ------------------------------------------------------

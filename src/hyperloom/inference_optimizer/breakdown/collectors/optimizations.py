@@ -992,6 +992,33 @@ def collect_recorded_optimizations(
         for attempt in attempts
         if attempt.get("adopted") and attempt.get("attribution_eligible") is False
     ]
+    # An adopted step that contributes nothing to the total is a hole in the
+    # accounting, not a zero. Counting it keeps the sum honest about what it
+    # could not see.
+    unmeasured = [
+        str(entry["adopted_attempt_id"])
+        for entry in entries
+        if entry.get("gain_method") == "missing"
+    ]
+    if unmeasured:
+        warnings.append(
+            f"optimizations: {len(unmeasured)} adopted step(s) recorded neither "
+            "a throughput nor a gain, so they contribute nothing to the "
+            f"session total: {sorted(unmeasured)[:5]}"
+        )
+    stale_evidence = [
+        str(attempt["attempt_id"])
+        for attempt in attempts
+        if attempt.get("measurement_source") == "adoption_pinned_stale"
+    ]
+    if stale_evidence:
+        # The frozen numbers still stand; what no longer stands is the trail
+        # back to the readings they came from.
+        warnings.append(
+            f"optimizations: {len(stale_evidence)} adoption(s) cite measurements "
+            "that were later written over, so their evidence cannot be "
+            f"re-checked: {sorted(stale_evidence)[:5]}"
+        )
     return {
         "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
         "source_of_truth": "recorder",
@@ -1014,6 +1041,16 @@ def collect_recorded_optimizations(
             "attempt_count": len(attempts),
             "keep_count": len(entries),
             "non_attributable_keep_count": len(non_attributable),
+            # Adopted, counted, but with nothing measured behind them.
+            "unmeasured_keep_count": len(unmeasured),
+            # Adopted steps whose finishing throughput was reconstructed from
+            # the executor's own percentage rather than read from a
+            # measurement.
+            "projected_keep_count": sum(
+                1 for entry in entries if entry.get("gain_method") == "local_gain_projected"
+            ),
+            # Adopted steps whose evidence trail no longer resolves.
+            "stale_evidence_count": len(stale_evidence),
             "notes": [
                 "Projected from author-time recorder streams "
                 "(operations/adoptions/measurements/artifacts)."

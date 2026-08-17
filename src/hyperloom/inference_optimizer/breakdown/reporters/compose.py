@@ -44,7 +44,10 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
 # Final report layout ``(group_title, [section_id, ...])``. ``telemetry`` is dropped.
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload", ["session", "workload"]),
-    ("Performance Results", ["baseline", "final", "roofline", "optimizations"]),
+    (
+        "Performance Results",
+        ["baseline", "final", "roofline", "optimizations", "attribution"],
+    ),
     ("Capability Search", ["capability_summary", "param_search", "decision_journal", "sweep"]),
     (
         "Kernel Optimization",
