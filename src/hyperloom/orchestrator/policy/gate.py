@@ -1264,9 +1264,10 @@ class PolicyGate:
                 rule="payload",
                 hint=(
                     "single-proposal review: emit {target_proposal_msg_id, "
-                    "verdict, reasoning}. Explore batch review: emit "
-                    "{target_proposal_msg_id, verdict_map: {variant_name: "
-                    "{verdict, rationale?}}}"
+                    "verdict, reasoning, failure_reason_code?}. Explore batch "
+                    "review: emit {target_proposal_msg_id, verdict_map: "
+                    "{variant_name: {verdict, rationale?, "
+                    "failure_reason_code?}}}"
                 ),
             )
         if has_single:

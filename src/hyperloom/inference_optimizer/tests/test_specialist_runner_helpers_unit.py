@@ -220,6 +220,59 @@ def test_write_specialist_done_partial(tmp_path):
     assert "ts" in payload
 
 
+def _finalize(r, tmp_path, payload):
+    """Drive ``_finalize`` far enough to inspect the artifact it writes."""
+    prep = sr._PreparedRun(
+        domain=SimpleNamespace(key="serving_specialist"),
+        gap="gap-1",
+        workspace=tmp_path,
+    )
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    result = r._finalize(
+        ctx=ctx,
+        prep=prep,
+        specialist_done_payload=payload,
+        turns_used=1,
+        tool_violations=[],
+        backend_error="",
+        extra_notes=[],
+        patches_written=[],
+    )
+    return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
+
+
+def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
+    """The Critic is told to reject a proposal_set carrying self-reported gain
+    fields, which costs the round every idea in it. Dropping them makes that
+    verdict unreachable; the audit note still records what was there."""
+    result, written = _finalize(
+        _runner(),
+        tmp_path,
+        {
+            "proposal_set": [{"name": "v1", "reason": "why", "expected_gain": 8.0, "score": 2}],
+            "summary": "s",
+        },
+    )
+
+    proposal = written["proposal_set"][0]
+    assert "expected_gain" not in proposal
+    assert "score" not in proposal
+    assert proposal["name"] == "v1" and proposal["reason"] == "why"
+    joined = "\n".join(result.notes)
+    assert "patch_safety_forbidden_fields" in joined
+    assert "expected_gain" in joined and "score" in joined
+
+
+def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
+    _, written = _finalize(
+        _runner(),
+        tmp_path,
+        {"proposal_set": [{"name": "v1"}], "confidence": 0.6},
+    )
+
+    assert written["confidence"] == 0.6
+
+
 def test_write_specialist_done_partial_noop_none_workspace():
     _runner()._write_specialist_done_partial(None, {"a": 1})  # must not raise
 

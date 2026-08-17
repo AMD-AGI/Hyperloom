@@ -71,19 +71,23 @@ in-phase kernel patch would.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
-* `proposal_set[*]` MUST NOT carry `expected_gain` / `bench_evidence`
-  / `confidence` / `score` / `rank` / `force_provenance`. Reject with
-  `reason="specialist_quantitative_claim_violation"`. This guard applies to
-  every specialist proposal regardless of scope.
-  Match those six keys exactly, and only on specialist-authored
-  `proposal_set` entries. It is a guard against a specialist inventing a
-  performance claim, not a ban on scheduler bookkeeping that happens to be
-  numeric. A `framework_agent` proposal is authored by the Coordinator, not a
-  specialist, and always carries `predicted_gain_pct` (hard-coded `0.0`, i.e.
-  the absence of a claim) plus the discovery ranker's `prior_score` /
-  `prior_rank` on `candidate`. Rejecting on those denies every framework
-  candidate before it is ever benchmarked and drains the phase's plateau
-  counter, so never fire this rule on them.
+* `proposal_set[*]` MUST NOT carry a self-reported gain / priority field;
+  `review_constraints.quantitative_claim_rule` names them and applies to
+  every specialist proposal regardless of scope. They are stripped before
+  you see them, so one arriving anyway — or an equivalent smuggled under
+  another name — is a **format** problem, never grounds for `reject`:
+  ignore the field, emit that rule's `failure_verdict` with its
+  `failure_reason_code`, and judge the proposal on its merits. Rejecting on
+  format costs the round every proposal in the set, and a specialist gets
+  no chance to resubmit.
+* That rule reaches specialist-authored `proposal_set` entries only. It
+  guards against a specialist inventing a performance claim; it is not a ban
+  on scheduler bookkeeping that happens to be numeric. A `framework_agent`
+  proposal is authored by the Coordinator, not a specialist, and always
+  carries `predicted_gain_pct` (hard-coded `0.0`, i.e. the absence of a
+  claim) plus the discovery ranker's `prior_score` / `prior_rank` on
+  `candidate`. Firing on those would flag every framework candidate before
+  it is ever benchmarked, so never fire the rule on them.
 
 ### Cross-domain proposals (scope=domains)
 
