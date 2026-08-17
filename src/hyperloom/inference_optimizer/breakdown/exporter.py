@@ -351,6 +351,12 @@ def build(
     telemetry = _pick(
         "telemetry", _safe_collect("telemetry", lambda: collectors.collect_telemetry(sd, state, warnings), warnings)
     )
+    collective = _safe_collect(
+        "collective",
+        lambda: collectors.collect_collective(state),
+        warnings,
+        default={},
+    )
     # Canonical optimization read model. This is the single downstream entry
     # point for adopted warm-replay, Explore, Framework Agent, and Kernel Agent
     # changes.
@@ -548,6 +554,9 @@ def build(
         "action_timeline": phase_timeline,
         "capability_summary": capability_summary,
         "kernel_lifecycle": kernel_lifecycle,
+        # Collective lane audit trail; survives a campaign the E2E gate rejected,
+        # which never reaches ``optimizations``.
+        "collective": collective,
         "param_search": explore_search,
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
@@ -954,6 +963,25 @@ def write_minimal_final_report(
     return target
 
 
+def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
+    """Platform record for the crash-safe path.
+
+    Imported lazily to keep this module's import cost off the normal path, but
+    from ``hyperloom.common`` rather than from the orchestrator's report
+    renderer: this runs when a run has already died, which is the worst moment
+    to pull in the message bus and a SQLite connection layer, and the worst
+    moment to depend on a private symbol in another layer.
+
+    ``platform_fingerprint`` returns a ``status`` dict on every path and does
+    not raise, so there is no second net here. ``multi_node`` is left unset --
+    nothing on this path establishes it, and an unearned ``False`` would read as
+    a fact about the session.
+    """
+    from hyperloom.common.platform_probe import platform_fingerprint
+
+    return platform_fingerprint(gpu_type)
+
+
 def write_minimal_final_json(
     session_dir: Path | str,
     *,
@@ -1029,6 +1057,10 @@ def write_minimal_final_json(
         "crash_count": state.crash_count,
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
+        # A run that died unattended is exactly when the host record is most
+        # useful, since nobody was watching. Kept to the same one-shot, never-
+        # raising contract as the rest of this function.
+        "platform": _crash_safe_platform(state.gpu_type),
     }
 
     fd, tmp = tempfile.mkstemp(

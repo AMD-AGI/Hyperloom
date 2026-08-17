@@ -790,8 +790,27 @@ def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
     return str(cfg["benchmark"]["envs"].get(env_name, ""))
 
 
-def test_reference_base_seeds_lowest_priority(tmp_path):
+def _seed_reference(tmp_path, monkeypatch, *, server_args: str = "", envs: dict | None = None) -> None:
+    """Pin a session whose SharedState carries the reference recipe.
+
+    ``materialize_config_with_envs`` reads the recipe from the session rather than
+    from its arguments, so every caller gets the same base.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    sd = tmp_path / "session"
+    sd.mkdir(parents=True, exist_ok=True)
+    SharedState(
+        session_id="ref-test",
+        reference_server_args=server_args,
+        reference_envs=dict(envs or {}),
+    ).save(sd)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
+
+
+def test_reference_base_seeds_lowest_priority(tmp_path, monkeypatch):
     """Reference flags appear in the framework env at lowest priority."""
+    _seed_reference(tmp_path, monkeypatch, server_args="--block-size 128 --attention-backend TRITON_ATTN")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
@@ -801,15 +820,47 @@ def test_reference_base_seeds_lowest_priority(tmp_path):
         out,
         model_path="/path/models/X",
         gpu_type="mi300x",
-        reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
     )
     args = _fw_args(materialized)
     assert "--block-size 128" in args
     assert "TRITON_ATTN" in args
 
 
-def test_reference_base_extra_args_override_wins(tmp_path):
+def test_reference_base_reaches_a_caller_that_renders_its_own_yaml(tmp_path, monkeypatch):
+    """Every caller gets the recipe, not just the one that used to forward it.
+
+    ``explore`` / ``sweep`` / ``conc_sweep`` / ``integrate_patch`` /
+    ``framework_agent`` / ``rebench`` render their own YAML and pass no recipe;
+    they must still benchmark on the operator's base.
+    """
+    _seed_reference(
+        tmp_path,
+        monkeypatch,
+        server_args="--enable-prefix-caching",
+        envs={"AITER_SITUV2_A8W4": "1", "AITER_BF16_FP8_MOE_BOUND": "0"},
+    )
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/path/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
+        out_name="explore_base.with_envs.yaml",
+    )
+
+    assert "--enable-prefix-caching" in _fw_args(materialized)
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+    assert envs["AITER_SITUV2_A8W4"] == "1"
+    assert envs["AITER_BF16_FP8_MOE_BOUND"] == "0"
+
+
+def test_reference_base_extra_args_override_wins(tmp_path, monkeypatch):
     """A per-task extra_server_args override beats the reference base, deduped once."""
+    _seed_reference(tmp_path, monkeypatch, server_args="--block-size 128 --attention-backend TRITON_ATTN")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
@@ -819,7 +870,6 @@ def test_reference_base_extra_args_override_wins(tmp_path):
         out,
         model_path="/path/models/X",
         gpu_type="mi300x",
-        reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
         extra_server_args="--attention-backend ROCM_FLASH",
     )
     args = _fw_args(materialized)
@@ -832,8 +882,9 @@ def test_reference_base_extra_args_override_wins(tmp_path):
     assert "TRITON_ATTN" not in args
 
 
-def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path):
+def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path, monkeypatch):
     """A single-value flag in both reference and extra args collapses to last-wins."""
+    _seed_reference(tmp_path, monkeypatch, server_args="--gpu-memory-utilization 0.95")
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
@@ -843,7 +894,6 @@ def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path):
         out,
         model_path="/path/models/X",
         gpu_type="mi300x",
-        reference_server_args="--gpu-memory-utilization 0.95",
         extra_server_args="--kv-cache-dtype fp8 --gpu-memory-utilization 0.97",
     )
     args = _fw_args(materialized)
@@ -852,8 +902,9 @@ def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path):
     assert "--kv-cache-dtype fp8" in args
 
 
-def test_reference_envs_do_not_clobber_existing(tmp_path):
+def test_reference_envs_do_not_clobber_existing(tmp_path, monkeypatch):
     """reference_envs use setdefault — never override a YAML/CLI-set env."""
+    _seed_reference(tmp_path, monkeypatch, envs={"VLLM_ROCM_USE_AITER": "0", "VLLM_FP8_PADDING": "1"})
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
@@ -864,7 +915,6 @@ def test_reference_envs_do_not_clobber_existing(tmp_path):
         model_path="/path/models/X",
         gpu_type="mi300x",
         extra_envs={"VLLM_ROCM_USE_AITER": "1"},
-        reference_envs={"VLLM_ROCM_USE_AITER": "0", "VLLM_FP8_PADDING": "1"},
     )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
     # extra_envs (CLI) wins over reference; the new reference key still lands.
@@ -872,28 +922,20 @@ def test_reference_envs_do_not_clobber_existing(tmp_path):
     assert envs["VLLM_FP8_PADDING"] == "1"
 
 
-def test_empty_reference_is_byte_identical(tmp_path):
-    """0-degrade: empty reference args/envs == omitting the kwargs entirely."""
+def test_no_reference_recipe_is_a_no_op(tmp_path, monkeypatch):
+    """A session without a reference recipe renders exactly the plain YAML."""
+    _seed_reference(tmp_path, monkeypatch)
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm", model="/path/models/X")
-    out_a = tmp_path / "a"
-    out_a.mkdir()
-    out_b = tmp_path / "b"
-    out_b.mkdir()
-    m_with = materialize_config_with_envs(
+    out = tmp_path / "out"
+    out.mkdir()
+
+    materialized = materialize_config_with_envs(
         base,
-        out_a,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        reference_server_args="",
-        reference_envs=None,
-        out_name="x.yaml",
-    )
-    m_without = materialize_config_with_envs(
-        base,
-        out_b,
+        out,
         model_path="/path/models/X",
         gpu_type="mi300x",
         out_name="x.yaml",
     )
-    assert yaml.safe_load(m_with.read_text()) == yaml.safe_load(m_without.read_text())
+
+    assert _fw_args(materialized) == ""

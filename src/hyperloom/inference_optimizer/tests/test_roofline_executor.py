@@ -10,12 +10,14 @@ from unittest.mock import patch
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_trace_path,
     _failed,
     make_roofline_executor,
 )
+from hyperloom.orchestrator.trace.task_progress import progress_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -1074,7 +1076,7 @@ def test_extract_skips_blank_mode_entries():
     assert out[0] == "prefilldecode"
 
 
-def _n26_patch_subs(profile_result, ta_results):
+def _n26_patch_subs(profile_result, ta_results, *, on_ta_call=None):
     ta_calls = {"n": 0, "payloads": []}
 
     async def fake_profile(ctx):
@@ -1084,6 +1086,8 @@ def _n26_patch_subs(profile_result, ta_results):
         idx = ta_calls["n"]
         ta_calls["payloads"].append(dict(payload))
         ta_calls["n"] += 1
+        if on_ta_call is not None:
+            on_ta_call()
         if idx >= len(ta_results):
             return ta_results[-1]
         return ta_results[idx]
@@ -1394,6 +1398,69 @@ async def test_431_zero_hot_without_degraded_health_no_warning(tmp_path):
     warnings = state.last_trace_analyze.get("trace_health_warnings") or []
     codes = [w.get("code") for w in warnings if isinstance(w, dict)]
     assert "cuda_graph_attribution_degraded" not in codes
+
+
+def _progress_sink(notes: list[dict]):
+    """Build an ambient progress sink appending every note to ``notes``."""
+
+    async def _sink(**note):
+        notes.append(note)
+
+    return _sink
+
+
+@pytest.mark.asyncio
+async def test_the_n26_retry_reports_before_it_runs(tmp_path):
+    """The retry re-runs TraceLens; unannounced, it is indistinguishable from a hang."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    notes: list[dict] = []
+    at_call: list[list[str]] = []
+    fail = _ta_empty_chunk_failure(requested="mixed", non_empty=["prefilldecode"])
+    p1, p2, _calls = _n26_patch_subs(
+        _profile_ok(),
+        [fail, _ta_ok(report_md=md)],
+        on_ta_call=lambda: at_call.append([n["label"] for n in notes]),
+    )
+
+    executor = RooflineExecutor(shared_state=_state())
+    with p1, p2, progress_scope(_progress_sink(notes)):
+        result = await executor(_n26_ctx(tmp_path))
+
+    assert result["status"] == "succeeded"
+    assert at_call == [
+        ["profile", "trace_analyze"],
+        ["profile", "trace_analyze", "trace_analyze_n26_retry"],
+    ]
+    assert all(n["unit"] == "roofline_step" and n["status"] == "started" for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, monkeypatch):
+    """A second profile and a second analysis, silent end to end until now."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    host_bound = _ta_ok(report_md=md)
+    host_bound["trace_health_warnings"] = [
+        {"code": "high_gpu_idle_pct", "severity": "warning"},
+    ]
+    compute_bound = _ta_ok(report_md=md)
+    compute_bound["hot_kernels"] = [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 30.0}]
+    notes: list[dict] = []
+    p1, p2, _calls = _n26_patch_subs(_profile_ok(), [host_bound, compute_bound])
+    monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: True)
+
+    executor = RooflineExecutor(shared_state=_state())
+    with p1, p2, progress_scope(_progress_sink(notes)):
+        result = await executor(_n26_ctx(tmp_path))
+
+    assert result["status"] == "succeeded"
+    assert [n["label"] for n in notes] == [
+        "profile",
+        "trace_analyze",
+        "profile_compute_bound",
+        "trace_analyze_compute_bound",
+    ]
 
 
 @pytest.mark.asyncio

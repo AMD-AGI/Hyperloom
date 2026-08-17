@@ -26,9 +26,9 @@ support, and enterprise gateway header handling.
 ### 1.0.0b1 highlights
 
 - **Remote Recipe KB Store cutover**: remote Recipe reads and CLOSE writes use
-  KB Store with legacy v1 read compatibility, direct best-record selection,
-  verified artifacts, and config/env-only T0 replay. Local Recipe storage and
-  non-Recipe GBrain consumers are unchanged.
+  the KB Store Recipe View with verified artifacts and combined config,
+  ordered Explore/Framework overlay, and Kernel replay. Local Recipe storage
+  and non-Recipe GBrain consumers are unchanged.
 
 - **`--no-eval` session-wide accuracy opt-out**: the accuracy eval can be turned
   off for a whole run as an explicit choice, anchoring the baseline on throughput

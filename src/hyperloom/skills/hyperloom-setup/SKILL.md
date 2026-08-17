@@ -269,6 +269,11 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
+Skipping the framework install leaves the host without one, and `optimize` then
+stops at preflight rather than failing later inside the benchmark. Install it here,
+or point `BENCHMARK_BASE_URL` at a server that already runs elsewhere. As a last
+resort `HYPERLOOM_SKIP_FRAMEWORK_CHECK=1` drops that check.
+
 ### `docker`
 
 Do **not** run `hyperloom.inference_optimizer.setup` on the host.

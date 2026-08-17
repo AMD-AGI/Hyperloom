@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import framework_registry
 from hyperloom.common import llm_config
@@ -29,6 +29,9 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
@@ -416,3 +419,21 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         options["progress_no_levers_min_minutes"] = 60.0
 
     return options
+
+
+def resolve_robustness_options(args: argparse.Namespace, state: SharedState) -> dict[str, Any]:
+    """Layer this launch's robustness flags over the mapping persisted at launch.
+
+    :func:`_build_robustness_options` reads argv only, so a resume re-passing one
+    ``--robustness-*`` flag would otherwise drop the rest to the runtime
+    defaults. Per-key, so an unrelated flag cannot reopen a probe an earlier
+    ``--robustness-disable-server-probe`` closed.
+
+    Args:
+        args: Parsed CLI args carrying the robustness flags.
+        state: The SharedState carrying ``robustness_options`` from launch.
+
+    Returns:
+        The resolved ``request.options`` overrides.
+    """
+    return {**state.robustness_options, **_build_robustness_options(args)}

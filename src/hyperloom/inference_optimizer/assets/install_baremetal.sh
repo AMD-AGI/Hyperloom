@@ -10,9 +10,8 @@
 #
 # Phase 1  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
 # Phase 2  framework       — optional bare-metal SGLang/vLLM install
-# Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
-# Phase 4  credentials     — resolve Anthropic/DeepSeek LLM creds into .env
-# Phase 5  runtime env     — persist bare-metal runtime vars into .env
+# Phase 3  credentials     — resolve Anthropic/DeepSeek LLM creds into .env
+# Phase 4  runtime env     — persist bare-metal runtime vars into .env
 #
 # Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
 # (io pkg, Magpie, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
@@ -27,15 +26,13 @@ ENV_TEMPLATE="${REPO_ROOT}/.env.template"
 DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
-HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0b1}"
-ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
-ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
-
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
 OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
-FRAMEWORKS="sglang,vllm"
+# Phase 1 probes every serving framework Hyperloom can benchmark, not just the
+# two it can install. An atom image ships neither sglang nor vllm, so gating the
+# preflight on those alone made every `--framework atom` host fail setup.
+FRAMEWORKS="${FRAMEWORKS:-sglang,vllm,atom}"
 INSTALL_FRAMEWORK="none"
 # Track whether the operator explicitly picked a framework env (via $FRAMEWORK_ENV
 # or --framework-env). When unset, vLLM defaults to isolated (its wheel pins a
@@ -43,13 +40,13 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang v0.5.16, ROCm 7.2).
-# vLLM installs 0.24.0+rocm723 from the wheels.vllm.ai pip index, matching the
-# v0.24.0 Docker image version. The pip index publishes 0.24.0 only as the
-# rocm723 variant (ROCm 7.2.3), so the ROCm layer is 7.2.3. AITER_REF
+# Framework versions track docs/compatibility.rst (SGLang v0.5.17, ROCm 7.2).
+# vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
+# vllm-v0.27.1-rocm7.2.3 Docker image. The rocm723 variant puts the vLLM ROCm
+# layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-v0.5.16}"
+SGLANG_REF="${SGLANG_REF:-v0.5.17}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
@@ -62,7 +59,7 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.24.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
@@ -85,7 +82,9 @@ runtime env. Stops BEFORE launching.
 Options:
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
   --deps-root PATH       Directory for auto-cloned dependency checkouts
-  --frameworks LIST      Comma list to verify in Phase 1 (default: sglang,vllm)
+  --frameworks LIST      Comma list to verify in Phase 1 (default:
+                         sglang,vllm,atom). Phase 1 passes when at least one
+                         entry imports.
   --install-framework FW Install a missing bare-metal framework layer.
                          Supported: none, sglang, vllm. Default: none.
   --framework-env MODE   Install target for framework packages: shared or
@@ -114,7 +113,7 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
+VLLM_VENV_ROOT.
 EOF
 }
 
@@ -180,18 +179,34 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
-# Print the serving framework (sglang|vllm), or nothing when none is importable.
+# The interpreter that owns a given framework. vLLM lives in its own venv under
+# FRAMEWORK_ENV=isolated; every other engine uses the shared interpreter. Every
+# framework probe goes through here so preflight and framework resolution never
+# disagree about where an engine is installed.
+framework_probe_python() {
+  local fw="$1" default_py="$2"
+  if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    printf '%s' "${VLLM_VENV_ROOT}/bin/python"
+  else
+    printf '%s' "$default_py"
+  fi
+}
+
+# Print the serving framework to record for downstream skills, or nothing when
+# none is importable. Walks $FRAMEWORKS in order — the same list Phase 1 probes
+# — so an engine that passes preflight is always the one written to .env.
 resolve_installed_framework() {
   if [ "$INSTALL_FRAMEWORK" = "sglang" ] || [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     printf '%s' "$INSTALL_FRAMEWORK"; return 0
   fi
-  local py; py="$(resolve_python)" || return 0
-  if _py_has "$py" sglang; then printf 'sglang'; return 0; fi
-  local vllm_py="$py"
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-    vllm_py="${VLLM_VENV_ROOT}/bin/python"
-  fi
-  if _py_has "$vllm_py" vllm; then printf 'vllm'; return 0; fi
+  local py fw probe_py _rif_arr
+  py="$(resolve_python)" || return 0
+  IFS=',' read -r -a _rif_arr <<< "$FRAMEWORKS"
+  for fw in "${_rif_arr[@]}"; do
+    fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
+    probe_py="$(framework_probe_python "$fw" "$py")"
+    if _py_has "$probe_py" "$fw"; then printf '%s' "$fw"; return 0; fi
+  done
   return 0
 }
 
@@ -333,17 +348,21 @@ PY
     log "torch: ${tv} (hip=${thip}) ROCm OK"
     check_torch_rocm_shared_libs "$py" || rc=1
     check_rocm_toolchain_alignment "$thip" || rc=1
-    check_torch_triton_alignment "$py" || rc=1
+    # The torch/triton pin only has to hold when this run is about to build a
+    # framework layer against it. An image that already ships a working engine
+    # (atom, or a prebuilt sglang/vllm) is allowed to carry its own triton.
+    if [ "$INSTALL_FRAMEWORK" = "none" ]; then
+      check_torch_triton_alignment "$py" || true
+    else
+      check_torch_triton_alignment "$py" || rc=1
+    fi
   fi
 
-  local any_fw=0 fw
+  local any_fw=0 sglang_ok=0 fw
   IFS=',' read -r -a _fw_arr <<< "$FRAMEWORKS"
   for fw in "${_fw_arr[@]}"; do
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
-    local probe_py="$py"
-    if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-      probe_py="${VLLM_VENV_ROOT}/bin/python"
-    fi
+    local probe_py; probe_py="$(framework_probe_python "$fw" "$py")"
     if _py_has "$probe_py" "$fw"; then
       if [ "$probe_py" != "$py" ]; then
         log "framework ${fw}: OK (isolated: ${probe_py})"
@@ -351,6 +370,7 @@ PY
         log "framework ${fw}: OK"
       fi
       any_fw=1
+      [ "$fw" = "sglang" ] && sglang_ok=1
     elif [ "$REQUIRE_FRAMEWORKS" -eq 1 ]; then
       warn "framework ${fw}: MISSING (required). ${IMAGE_HINT}"; rc=1
     else
@@ -366,9 +386,14 @@ PY
     fi
   fi
 
-  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel.
-  local m dep_py
-  for m in triton aiter sgl_kernel; do
+  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel,
+  # so only look for it once SGLang is the engine actually in play — an atom or
+  # vLLM host has no use for it and should not be told a dependency is missing.
+  local m dep_py deps="triton aiter"
+  if [ "$sglang_ok" -eq 1 ] || [ "$INSTALL_FRAMEWORK" = "sglang" ]; then
+    deps="$deps sgl_kernel"
+  fi
+  for m in $deps; do
     dep_py="$py"
     if [ "$m" != "sgl_kernel" ] && [ "$FRAMEWORK_ENV" = "isolated" ] \
        && [ -x "${VLLM_VENV_ROOT}/bin/python" ] \
@@ -432,7 +457,7 @@ check_torch_triton_alignment() {
   [ -n "$required" ] || return 0
   current="$(installed_dist_version "$py" triton 2>/dev/null || true)"
   if [ "$current" != "$required" ]; then
-    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing SGLang"
+    warn "triton ${current:-missing} does not match torch requirement ${required}; reinstall the torch-pinned ROCm Triton before installing a framework layer"
     return 1
   fi
 }
@@ -842,196 +867,6 @@ install_requested_framework() {
   esac
 }
 
-rocm_profiler_hotfix_applied() {
-  local target_dir="$1" hip_lib="$2" tracer_lib="$3"
-  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || true)")" = "$hip_lib" ] \
-    && [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || true)")" = "$tracer_lib" ]
-}
-
-rocm_profiler_hotfix_compatible() {
-  local py hip
-  py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
-  hip="$("$py" - <<'PY' 2>/dev/null || true
-try:
-    import torch
-    print(getattr(torch.version, "hip", None) or "")
-except Exception:
-    pass
-PY
-)"
-  case "$hip" in
-    7.2*) log "torch.version.hip=${hip}; ROCm profiler hotfix is eligible" ;;
-    "") warn "torch ROCm runtime not importable; skipping ROCm profiler hotfix" ; return 1 ;;
-    *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
-  esac
-
-  # Probe vLLM in the isolated venv when FRAMEWORK_ENV=isolated, mirroring
-  # resolve_installed_framework, so an isolated vLLM install still qualifies.
-  local vllm_py="$py"
-  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
-    vllm_py="${VLLM_VENV_ROOT}/bin/python"
-  fi
-  local found=""
-  _py_has "$py" sglang && found="sglang"
-  _py_has "$vllm_py" vllm && found="${found:+${found} }vllm"
-  [ -n "$found" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
-  log "framework imports: ${found}"
-}
-
-download_rocm_profiler_hotfix_libs() {
-  local tmp_dir archive url
-  tmp_dir="$(mktemp -d)"
-  command -v curl >/dev/null 2>&1 || {
-    rm -rf "$tmp_dir"
-    warn "curl not found; cannot download ROCm profiler hotfix asset"
-    return 1
-  }
-  # Public release asset; no auth needed on an open-source repo.
-  url="https://github.com/${HYPERLOOM_WHEEL_REPO}/releases/download/${HYPERLOOM_WHEEL_TAG}/${ROCM_PROFILER_HOTFIX_ASSET}"
-  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
-  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}" >&2
-  if ! curl -fSL -o "$archive" "$url" >&2; then
-    rm -rf "$tmp_dir"
-    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}"
-    return 1
-  fi
-  if ! tar -xzf "$archive" -C "$tmp_dir"; then
-    rm -rf "$tmp_dir"
-    warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"
-    return 1
-  fi
-  if ! find "$tmp_dir" -maxdepth 1 -type f -name 'libamdhip64.so.7.*' | grep -q . \
-     || ! find "$tmp_dir" -maxdepth 1 -type f -name 'libroctracer64.so.4.*' | grep -q .; then
-    rm -rf "$tmp_dir"
-    warn "${ROCM_PROFILER_HOTFIX_ASSET} does not contain the expected ROCm hotfix libraries"
-    return 1
-  fi
-  printf '%s\n' "$tmp_dir"
-}
-
-backup_rocm_profiler_hotfix_targets() {
-  local target_dir="$1" backup_dir="$2" path real
-  install -d "$backup_dir"
-  for path in \
-    "${target_dir}/libamdhip64.so" \
-    "${target_dir}/libamdhip64.so.7" \
-    "${target_dir}/libroctracer64.so" \
-    "${target_dir}/libroctracer64.so.4"; do
-    [ -e "$path" ] || [ -L "$path" ] || continue
-    cp -a "$path" "$backup_dir"/
-    real="$(readlink -f "$path" 2>/dev/null || true)"
-    if [ -n "$real" ] && [ -e "$real" ]; then
-      cp -a "$real" "$backup_dir"/
-    fi
-  done
-}
-
-install_rocm_profiler_hotfix_libs() {
-  local source_dir="$1" target_dir="$2" hip_lib="$3" tracer_lib="$4"
-  install -m 0644 "${source_dir}/${hip_lib}" "${target_dir}/${hip_lib}" || return 1
-  install -m 0644 "${source_dir}/${tracer_lib}" "${target_dir}/${tracer_lib}" || return 1
-  ln -sfnT "$hip_lib" "${target_dir}/libamdhip64.so.7" || return 1
-  ln -sfnT libamdhip64.so.7 "${target_dir}/libamdhip64.so" || return 1
-  ln -sfnT "$tracer_lib" "${target_dir}/libroctracer64.so.4" || return 1
-  ln -sfnT libroctracer64.so.4 "${target_dir}/libroctracer64.so" || return 1
-}
-
-rollback_rocm_profiler_hotfix_targets() {
-  local backup_dir="$1" target_dir="$2"
-  [ -d "$backup_dir" ] || return 1
-  if compgen -G "${backup_dir}/libamdhip64.so*" >/dev/null; then
-    cp -a "${backup_dir}"/libamdhip64.so* "$target_dir"/ || return 1
-  fi
-  if compgen -G "${backup_dir}/libroctracer64.so*" >/dev/null; then
-    cp -a "${backup_dir}"/libroctracer64.so* "$target_dir"/ || return 1
-  fi
-  return 0
-}
-
-verify_rocm_profiler_hotfix() {
-  local target_dir="$1" hip_lib="$2" tracer_lib="$3" py
-  log "verifying ROCm profiler hotfix links"
-  ls -l "${target_dir}/libamdhip64.so" "${target_dir}/libamdhip64.so.7" \
-        "${target_dir}/libroctracer64.so" "${target_dir}/libroctracer64.so.4" || return 1
-  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so")")" = "$hip_lib" ] \
-    || { warn "libamdhip64.so does not point to ${hip_lib}"; return 1; }
-  [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so")")" = "$tracer_lib" ] \
-    || { warn "libroctracer64.so does not point to ${tracer_lib}"; return 1; }
-
-  py="$(resolve_python)" || return 1
-  "$py" - "$target_dir" <<'PY'
-import ctypes
-import os
-import sys
-
-target_dir = sys.argv[1]
-for name in ("libamdhip64.so", "libroctracer64.so"):
-    path = os.path.join(target_dir, name)
-    print(f"{path} -> {os.path.realpath(path)}")
-    ctypes.CDLL(path)
-    print(f"loaded: {path}")
-
-import torch
-
-hip = getattr(torch.version, "hip", None)
-print(f"torch.version.hip={hip}")
-if not hip:
-    raise SystemExit("torch.version.hip is empty after ROCm profiler hotfix")
-PY
-}
-
-apply_rocm_profiler_hotfix() {
-  local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
-  local extract_dir backup_dir hip_lib tracer_lib
-
-  log "Phase 3: applying ROCm profiler hotfix"
-  log "ROCM_PROFILER_HOTFIX_ASSET=${ROCM_PROFILER_HOTFIX_ASSET}"
-
-  [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
-  rocm_profiler_hotfix_compatible || return 0
-
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    log "check-only: ROCm profiler hotfix release asset will not be downloaded"
-    log "current libamdhip64.so -> $(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || echo missing)"
-    log "current libroctracer64.so -> $(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || echo missing)"
-    return 0
-  fi
-
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
-    log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
-    log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
-    return 0
-  fi
-
-  extract_dir="$(download_rocm_profiler_hotfix_libs)" \
-    || { warn "could not obtain ROCm profiler hotfix libraries; skipping"; return 0; }
-  hip_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libamdhip64.so.*' | sort | tail -n 1)")"
-  tracer_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libroctracer64.so.*' | sort | tail -n 1)")"
-  if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then
-    log "ROCm profiler hotfix already applied (${hip_lib}, ${tracer_lib})"
-    verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib" || warn "existing ROCm profiler hotfix verification reported issues"
-    rm -rf "$extract_dir"
-    return 0
-  fi
-  backup_dir="${target_dir}/.profiler_hotfix_backup_$(date -u +%Y%m%dT%H%M%SZ)"
-  backup_rocm_profiler_hotfix_targets "$target_dir" "$backup_dir"
-  log "backed up current ROCm profiler libraries to ${backup_dir}"
-  if ! install_rocm_profiler_hotfix_libs "$extract_dir" "$target_dir" "$hip_lib" "$tracer_lib" \
-     || ! verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib"; then
-    warn "ROCm profiler hotfix failed; attempting rollback from ${backup_dir}"
-    if rollback_rocm_profiler_hotfix_targets "$backup_dir" "$target_dir"; then
-      warn "rollback succeeded; continuing without ROCm profiler hotfix"
-      rm -rf "$extract_dir"
-      return 0
-    fi
-    rm -rf "$extract_dir"
-    die "ROCm profiler hotfix failed and rollback did not complete"
-  fi
-  rm -rf "$extract_dir"
-  log "ROCm profiler hotfix applied"
-}
-
 read_dotenv_var() {
   local name="$1"
   [ -f "$DOTENV" ] || return 0
@@ -1156,7 +991,7 @@ migrate_legacy_deepseek_env() {
 # Resolve the Anthropic entrypoint (plus the OpenAI side of a dual-protocol
 # gateway). Mirrors runtime credential validation.
 resolve_credentials() {
-  log "Phase 4: credentials"
+  log "Phase 3: credentials"
   local anthropic_key anthropic_token anthropic_url
   local oauth_token dv_oauth_token
   local dv_anthropic_key dv_anthropic_token dv_anthropic_url
@@ -1343,12 +1178,16 @@ resolve_credentials() {
 # VIRTUAL_ENV / VLLM_VENV_ROOT at launch (_derive_runtime_paths).
 write_runtime_dotenv() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would update runtime env: ${DOTENV}"; return 0; fi
-  # FRAMEWORK for downstream demo skills; empty when none is importable.
+  # FRAMEWORK for downstream demo skills; empty when none is importable. A stale
+  # value from an earlier install on a re-imaged host would point the skills at
+  # an engine that is no longer there, so drop it rather than leave it behind.
   local detected_framework; detected_framework="$(resolve_installed_framework)"
   if [ -n "$detected_framework" ]; then
     log "detected serving framework: ${detected_framework}"
+    upsert_dotenv_var FRAMEWORK "$detected_framework"
   else
-    warn "no serving framework detected; leaving FRAMEWORK unset in ${DOTENV}"
+    warn "no serving framework detected; clearing FRAMEWORK in ${DOTENV}"
+    remove_dotenv_var FRAMEWORK
   fi
 
   upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
@@ -1361,11 +1200,8 @@ write_runtime_dotenv() {
   [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && upsert_dotenv_var SGLANG_ROCM_PYPI_VERSION "$SGLANG_ROCM_PYPI_VERSION"
   [ -n "${AITER_REF:-}" ] && upsert_dotenv_var AITER_REF "$AITER_REF"
   [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && upsert_dotenv_var KERNEL_OPT_BACKEND_ORDER "$KERNEL_OPT_BACKEND_ORDER"
-  [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_REPO "$HYPERLOOM_WHEEL_REPO"
-  [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
-  [ -n "${detected_framework}" ] && upsert_dotenv_var FRAMEWORK "$detected_framework"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
@@ -1377,7 +1213,13 @@ write_runtime_dotenv() {
 print_next_steps() {
   local framework_hint
   framework_hint="$INSTALL_FRAMEWORK"
-  [ "$framework_hint" = "none" ] && framework_hint="sglang"
+  if [ "$framework_hint" = "none" ]; then
+    # Nothing was installed, so the prompt must name the engine this host
+    # actually has. Falling back to a hardcoded sglang sent atom-only hosts
+    # down a framework that is not present.
+    framework_hint="$(resolve_installed_framework)"
+    [ -n "$framework_hint" ] || framework_hint="<none detected — install or pick one>"
+  fi
   cat <<EOF
 
 [install-baremetal] install complete.
@@ -1426,7 +1268,16 @@ main() {
   # Precedence: --user-data-path > process env > .env > default. The .env value
   # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
   user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
-  user_data="${user_data:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+  user_data="${user_data:-$(_default_workspace_root)}"
   export USER_DATA_PATH="$user_data"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
@@ -1453,7 +1304,6 @@ main() {
   fi
 
   install_requested_framework
-  apply_rocm_profiler_hotfix
   if [ "$INSTALL_FRAMEWORK" != "none" ] && [ "$SKIP_BASE_CHECK" -eq 0 ]; then
     base_preflight
   fi

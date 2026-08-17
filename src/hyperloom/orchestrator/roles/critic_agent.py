@@ -87,6 +87,7 @@ Reply with EXACTLY ONE JSON object that matches this review schema:
       "risks": [{"severity": "blocker|major|minor", "summary": "..."}],
       "required_evidence": ["<key>", ...],
       "notes": ["..."],
+      "failure_reason_code": "<failure_reason_code of the review_constraints rule this verdict rests on, else \"\">",
       "persist_to_kb": false,
       "topic": "<slug>"
     }
@@ -115,6 +116,12 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 - If `review_constraints.known_actions` is non-empty, any
   `alternative_action` MUST be drawn from it; otherwise omit
   `alternative_action`.
+- When a verdict rests on a rule from `review_constraints`, copy that
+  rule's `failure_reason_code` verbatim into the verdict's own
+  `failure_reason_code`; leave it `""` when the verdict rests on your
+  own judgement. Some of those rules declare `advise` as their
+  `failure_verdict`, and naming the rule is how the Coordinator tells
+  a verdict resting on one apart from a substantive refusal.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -304,6 +311,38 @@ def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None
         judge_bundle["review_constraints"] = rc
     rc["cross_domain"] = True
     rc["cross_domain_rules"] = cross_domain_rule_descriptors()
+
+
+def _maybe_inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) -> None:
+    """Set ``review_constraints.quantitative_claim_rule`` from the enforced list.
+
+    Delivering the rule as data keeps the Critic's field list identical to the
+    one the runner strips, instead of a hand-copied prose list that drifts. It
+    is sent only when the bundle holds a proposal the rule is about, on the same
+    principle as the cross-domain rules above: a Critic handed a rule that
+    cannot apply to anything under review can still cite it, and a citation is
+    what the verdict path reads.
+
+    Args:
+        judge_bundle: The judge bundle to enrich in place; unchanged when no
+            proposal is one of the kinds the rule governs.
+    """
+    from ..specialists.patch_safety import (
+        advisory_rules_govern,
+        quantitative_claim_rule_descriptor,
+    )
+
+    proposals = judge_bundle.get("proposals") or []
+    if not isinstance(proposals, list):
+        return
+    governed = any(advisory_rules_govern(str(p.get("action_name") or "")) for p in proposals if isinstance(p, dict))
+    if not governed:
+        return
+    rc = judge_bundle.setdefault("review_constraints", {})
+    if not isinstance(rc, dict):
+        rc = {}
+        judge_bundle["review_constraints"] = rc
+    rc["quantitative_claim_rule"] = quantitative_claim_rule_descriptor()
 
 
 @dataclass
@@ -600,6 +639,7 @@ class CriticAgentBackend:
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
         _maybe_inject_cross_domain_constraints(judge_bundle)
+        _maybe_inject_quantitative_claim_constraint(judge_bundle)
 
         # Codex reasoning; short-circuit when there are no proposals.
         proposals = judge_bundle.get("proposals") or []

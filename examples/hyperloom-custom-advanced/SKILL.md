@@ -37,9 +37,9 @@ In docker mode:
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0`
-- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
-- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
+- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`
+- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x`
+- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -238,7 +238,12 @@ the host:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
+# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
+# value the caller exported. Wider than install.sh, which guards a fixed list.
+_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
 set -a; . "${REPO_ROOT}/.env"; set +a
+eval "$_dotenv_prev"
+unset _dotenv_prev
 export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true

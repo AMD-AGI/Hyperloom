@@ -136,9 +136,18 @@ load_dotenv_no_clobber
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
 # or empty, which is exactly the case the :- default below would absorb.
 _user_data_was_set="${USER_DATA_PATH:+1}"
-USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+# Container images ship a writable /workspace; a bare-metal host off root has
+# neither it nor permission to create it, so the mkdir below would abort.
+_default_workspace_root() {
+  # The nearest existing ancestor decides: -w is false for a path that does not
+  # exist yet, which would divert root off a /workspace it can still create.
+  _ws_probe=/workspace
+  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
+  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
+}
+USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
 if [ -z "${_user_data_was_set}" ]; then
-  echo "[install WARN] USER_DATA_PATH not set; defaulting to /workspace/hyperloom. Set USER_DATA_PATH to persist artifacts under your data root." >&2
+  echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
@@ -815,16 +824,17 @@ ensure_forge_gemm_tune() {
 
 # --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
 # forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
-# Unlike forge_gemm_tune / forge_fusion — which have standalone sub-pyprojects and
-# get pip-installed by the carrier from their sub-package dirs — `kernel_agents`
-# is only packaged by the KernelForge *root* pyproject and was never installed
-# here. So forge-loop relied entirely on $FORGE_PATH being present and prepended to
-# the child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
+# Unlike forge_gemm_tune — which has a standalone sub-pyproject and gets
+# pip-installed by the carrier from its sub-package dir — `kernel_agents` is only
+# packaged by the KernelForge *root* pyproject and was never installed here. So
+# forge-loop relied entirely on $FORGE_PATH being present and prepended to the
+# child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
 # unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
 # `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
 # attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
-# import succeed regardless of FORGE_PATH (root install also covers the two
-# sub-packages, so the carrier's later import checks short-circuit).
+# import succeed regardless of FORGE_PATH, and it is now the ONLY way to get the
+# fusion pipeline: `kernel-agents forge-fuse` lives in the root package since
+# forge_fusion was absorbed into it.
 _kernel_forge_root() {
   # KernelForge repo root that actually contains kernel_agents. Keyed on
   # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
@@ -853,7 +863,10 @@ ensure_kernel_agents() {
   # The provider SDK is part of the readiness check, not just the CLI import: a
   # pod that already has kernel_agents but no openai_codex would skip the install
   # and leave the OpenAI-only side with a codex provider it cannot construct.
-  if "$PYTHON" -c "import kernel_agents.cli, openai_codex" >/dev/null 2>&1; then
+  # kernel_agents.fusion for the same reason: a checkout from before fusion was
+  # absorbed imports the CLI fine and then fails at forge-fuse.
+  if "$PYTHON" -c "import kernel_agents.cli, kernel_agents.fusion, openai_codex" \
+      >/dev/null 2>&1; then
     log "kernel_agents already importable; skipping install (codex SDK present)"
     return 0
   fi
@@ -870,11 +883,11 @@ ensure_kernel_agents() {
   # KernelForge checkout used by concurrent sessions. A non-editable install
   # builds in a temp dir and never writes egg-info/build artifacts back into the
   # checkout, so parallel runs can't race on it — this mirrors the carrier's
-  # own forge_fusion/forge_gemm_tune install (see _incontainer.sh: "Non-editable
-  # installs build in a temp dir and never write to the read-only shared
-  # checkout"). Installing the root also provides forge_gemm_tune + forge_fusion,
-  # so the carrier's later `import forge_fusion` guard short-circuits (verified:
-  # it logs "forge kernel backend ready" with no reinstall).
+  # own forge_gemm_tune install (see _incontainer.sh: "Non-editable installs
+  # build in a temp dir and never write to the read-only shared checkout").
+  # Installing the root also provides forge_gemm_tune and the fusion pipeline.
+  # A carrier that still installs from <KernelForge>/src/forge_fusion will fail:
+  # that directory and its sub-pyproject were removed when fusion was absorbed.
   #
   # Both provider extras: the forge fellow runs on the claude CLI when an
   # Anthropic side is configured and on the codex SDK when the deployment is
@@ -882,7 +895,7 @@ ensure_kernel_agents() {
   # KernelForge's provider fallback then turns that into a silent claude run that
   # dies at its first turn on "Not logged in".
   "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
-  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, openai_codex" \
+  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, kernel_agents.fusion, openai_codex" \
     && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
     || die "kernel_agents / codex SDK import failed after install from ${root}"
 }

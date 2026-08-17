@@ -21,15 +21,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ...gpu_types import _AMD_GPU_TYPES, _GFX_TO_RUNNER
+from ...gpu_types import _AMD_GPU_TYPES, _GFX_TO_RUNNER, _PRODUCT_TAGS
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
 log = logging.getLogger(__name__)
-
-# rocm-smi product-name tags, longest/most-specific first so MI325X is not
-# shadowed by an MI300X substring match.
-_PRODUCT_TAGS = ("MI355X", "MI325X", "MI308X", "MI300X")
 
 # One command that prints the product name, falling back to torch's
 # gcnArchName (gfx942 / gfx950) when rocm-smi is unavailable on PATH.

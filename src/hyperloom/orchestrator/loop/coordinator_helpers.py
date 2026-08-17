@@ -13,13 +13,17 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..actions.executors._grid_server_args import (
-    tokenize_server_args_preserving_json,
+from ..specialists.patch_safety import (
+    ADVISE_VERDICT,
+    advisory_only_reason_codes,
+    advisory_rules_govern,
 )
 
 log = logging.getLogger(__name__)
@@ -441,6 +445,14 @@ def _dedupe_extra_server_args(args_str: str) -> str:
     """
     if not args_str:
         return ""
+    # Imported here, not at module scope: ``actions.executors`` re-enters this
+    # module through ``session_breakdown``, so a top-level import makes any
+    # importer that reaches ``coordinator_helpers`` first (e.g. phases.kernel)
+    # fail on a partially initialised module.
+    from ..actions.executors._grid_server_args import (  # noqa: PLC0415
+        tokenize_server_args_preserving_json,
+    )
+
     parsed = tokenize_server_args_preserving_json(args_str)
     if parsed is None:
         return args_str
@@ -493,6 +505,10 @@ _VERDICT_ADVISORY_LIST_KEYS: tuple[str, ...] = (
     "kb_evidence",
     "packet_evidence",
 )
+# The verdict that ends a proposal's life; its counterpart ``ADVISE_VERDICT``
+# lets the proposal through. See :func:`verdict_held_to_its_rule`.
+_REJECT_VERDICT: str = "reject"
+
 _VERDICT_ADVISORY_TEXT_KEYS: tuple[str, ...] = (
     "advice_text",
     "alternative_action",
@@ -535,6 +551,361 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             out[key] = raw
     return out
+
+
+# The fields a Critic states its grounds in: ``reasoning`` on a single verdict,
+# ``rationale`` on one ``verdict_map`` entry — the per-variant shape PolicyGate
+# documents and every fixture uses. ``notes`` is remediation text and
+# ``risks[*].summary`` describes the risk, so a rule named in either is being
+# discussed rather than invoked; both stay out.
+#
+# Every key an entry fills is read. They are one speaker's grounds for one
+# verdict and nothing ranks them, so trying them in order would let whichever
+# happens to come first decide whether the citation in the other is seen.
+_VERDICT_PROSE_KEYS: tuple[str, ...] = ("reasoning", "rationale")
+
+# What a citation looks like: the code opens the verdict's grounds and a colon
+# introduces the finding, the shape the field verdict used --
+# ``"specialist_quantitative_claim_violation: the proposal payload carries the
+# forbidden predicted_gain_pct field."`` Nothing may precede the code but
+# whitespace or a backtick, and only the opening line of each prose field is
+# read.
+#
+# The two mistakes cost different amounts. Missing a citation costs the round
+# its proposals, which the next round can re-propose; reading one that was not
+# made dispatches a proposal the Critic meant to block. So the scan stays
+# deliberately narrow instead of learning every citation format a model might
+# use -- a list marker, a quote marker or a fence is how one *enumerates* the
+# rules it checked, and "- <code>: clean." must never read as grounds. The
+# reliable path is the explicit ``failure_reason_code`` in the Critic's output
+# schema; this is the fallback.
+_CITATION_OPENER: str = r"[ \t]*`?"
+
+
+def _opening_prose_lines(entry: dict[str, Any]) -> list[str]:
+    """Return the opening line of each prose field ``entry`` states grounds in.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry; the
+            two spell the field differently (:data:`_VERDICT_PROSE_KEYS`), and
+            an entry filling both states grounds in both.
+
+    Returns:
+        The first non-blank line of each field present, in
+        :data:`_VERDICT_PROSE_KEYS` order; empty when the entry states no
+        grounds in prose.
+    """
+    openings: list[str] = []
+    for key in _VERDICT_PROSE_KEYS:
+        for line in str(entry.get(key) or "").splitlines():
+            if line.strip():
+                openings.append(line)
+                break
+    return openings
+
+
+def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
+    """Return the advisory-only rule ``entry`` cites, from the field or its prose.
+
+    ``failure_reason_code`` is the reliable path: the Critic's output schema
+    asks for the code of the rule its verdict rests on. Prose is read only as a
+    fallback, for a verdict that names its rule in its grounds text instead —
+    the shape observed in the field.
+
+    A mention is not a citation: a Critic that clears one rule and refuses on
+    another names both, and reading the cleared one as the grounds would
+    materialise a proposal it meant to block. Only an unambiguous citation
+    counts (see :data:`_CITATION_OPENER`).
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
+
+    Returns:
+        The cited advisory-only reason code, or ``""`` when the entry cites
+        none. A code outside the advisory set yields ``""`` too: only rules
+        that declared ``advise`` can move a verdict.
+    """
+    advisory = advisory_only_reason_codes()
+    explicit = str(entry.get("failure_reason_code") or "").strip()
+    if explicit:
+        return explicit if explicit in advisory else ""
+    # At most one code can open one line, so the sort only fixes the order the
+    # candidates are tried in.
+    for opening in _opening_prose_lines(entry):
+        for code in sorted(advisory):
+            if re.match(rf"{_CITATION_OPENER}{re.escape(code)}`?[ \t]*:", opening):
+                return code
+    return ""
+
+
+# Priority a batch of per-variant verdicts collapses by: one approved variant
+# carries the proposal, otherwise one reject sinks it, and advice outranks a
+# request for more review.
+_VERDICT_COLLAPSE_ORDER: tuple[str, ...] = ("approve", _REJECT_VERDICT, ADVISE_VERDICT, "needs_review")
+
+
+def collapse_verdicts(verdicts: Iterable[str]) -> str:
+    """Collapse per-variant verdicts into the one the proposal is decided on.
+
+    Args:
+        verdicts: The per-variant verdicts of one ``verdict_map``.
+
+    Returns:
+        The highest-priority verdict present, or ``needs_review`` when none of
+        the known verdicts appears.
+    """
+    present = set(verdicts)
+    for candidate in _VERDICT_COLLAPSE_ORDER:
+        if candidate in present:
+            return candidate
+    return "needs_review"
+
+
+def _states_findings(value: Any) -> bool:
+    """Return whether a findings field states anything at all.
+
+    Args:
+        value: A ``risks`` or ``required_evidence`` value: the list the schema
+            documents, or whatever shape a verdict put there instead.
+
+    Returns:
+        True when a list holds at least one non-empty item, or when a value of
+        any other shape is non-empty.
+    """
+    if isinstance(value, (list, tuple)):
+        return any(bool(item) for item in value)
+    return bool(value)
+
+
+def verdict_rests_on_one_ground(entry: dict[str, Any]) -> bool:
+    """Return whether ``entry`` refuses for a single reason.
+
+    A verdict can cite an advisory rule *and* refuse on its own merits in the
+    same breath — "the proposal claims a 12% gain and has no rollback plan".
+    Holding that verdict to the advisory rule would let the second half of the
+    sentence disappear, so the hold is confined to a reject that names one
+    ground and asks for nothing further: at most one risk entry, and no
+    outstanding evidence request.
+
+    The allowance rests on the citation and the risk being one statement by one
+    author, which is what makes the risk the cited rule's. Findings a *batch*
+    states are neither, so they are read where they are stated rather than
+    counted here (:func:`verdict_map_entry_held_to_its_rule`).
+
+    ``risks`` is a list in the schema. A verdict that states it as one sentence
+    instead has stated grounds whose number cannot be read off — "the patch
+    does not apply and there is no rollback plan" is two — so an unlisted
+    value counts as more than one rather than as the single ground the hold is
+    confined to.
+
+    Risk *severity* deliberately plays no part. ``references/risk_rules.md``
+    reserves ``blocker`` for evidence and correctness failures and lists no
+    format item, yet the Critic verdict this hold was built for graded its own
+    format complaint ``blocker`` — so severity separates nothing here, and
+    reading it would only retire the hold on the case that motivated it.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
+
+    Returns:
+        True when the verdict names at most one ground and requests no further
+        evidence.
+    """
+    if _states_findings(entry.get("required_evidence")):
+        return False
+    risks = entry.get("risks")
+    if not isinstance(risks, (list, tuple)):
+        return not _states_findings(risks)
+    return len([risk for risk in risks if risk]) <= 1
+
+
+# The findings a review lists outside its prose: the evidence it still wants
+# and the risks it names. A ``verdict_map`` entry is
+# ``{verdict, rationale?, failure_reason_code?}`` -- the shape PolicyGate
+# documents -- so these have nowhere to live but the payload, where a batch
+# review states them once for every variant it looked at.
+_VERDICT_FINDING_KEYS: tuple[str, ...] = ("required_evidence", "risks")
+
+
+def _batch_states_findings(payload: dict[str, Any]) -> bool:
+    """Return whether a batch review states a finding of its own.
+
+    Args:
+        payload: The ``review_verdict`` payload a ``verdict_map`` arrived in.
+
+    Returns:
+        True when the payload names any risk or asks for any evidence.
+    """
+    if not isinstance(payload, dict):
+        return False
+    return any(_states_findings(payload.get(key)) for key in _VERDICT_FINDING_KEYS)
+
+
+def _inheritable_reason_code(payload: dict[str, Any]) -> str:
+    """Return the payload's declared code, when it cannot soften a variant's reject.
+
+    Any code outside the advisory set is inherited, including one no rule
+    defines. Restricting this to codes a handed rule declares would inherit
+    nothing at all -- every rule in ``review_constraints`` declares ``advise``
+    (:func:`advisory_only_reason_codes`), so the two sets do not intersect --
+    and would let a batch that declared a hard code have its variants
+    downgraded on the advisory rules their rationales cite. An unrecognised
+    string is not the Critic's permission to dispatch; it withholds the
+    downgrade, which is what the batch's own findings do.
+
+    Args:
+        payload: The ``review_verdict`` payload.
+
+    Returns:
+        The declared ``failure_reason_code``, or ``""`` when it names an
+        advisory-only rule.
+    """
+    code = str(payload.get("failure_reason_code") or "").strip()
+    return "" if code in advisory_only_reason_codes() else code
+
+
+def verdict_map_entry_grounds(entry: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the grounds one ``verdict_map`` entry rests on.
+
+    An entry is ``{verdict, rationale?, failure_reason_code?}`` -- the shape
+    PolicyGate documents -- so what it states of its own is nearly all it has.
+    Prose is not inherited, and neither is a ``failure_reason_code`` naming an
+    advisory rule: the batch's citation is a claim about the batch's verdict,
+    and a declared code outranks the entry's own rationale rather than
+    competing with it, so lending one would stop the entry's grounds being read
+    at all. A code that can only withhold the downgrade is inherited
+    (:func:`_inheritable_reason_code`), because the two mistakes cost different
+    amounts (see :data:`_CITATION_OPENER`).
+
+    The findings a batch states are not inherited either. They are read where
+    they are stated, as a hold on every entry in the set
+    (:func:`verdict_map_entry_held_to_its_rule`).
+
+    Args:
+        entry: One ``verdict_map`` entry.
+        payload: The ``review_verdict`` payload that entry arrived in.
+
+    Returns:
+        The entry's own keys, plus a declared reason code that can only hold its
+        reject; ``{}`` when ``entry`` is not a dict.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    grounds = dict(entry)
+    if not isinstance(payload, dict):
+        return grounds
+    if not grounds.get("failure_reason_code"):
+        code = _inheritable_reason_code(payload)
+        if code:
+            grounds["failure_reason_code"] = code
+    return grounds
+
+
+def _stated_verdict(entry: dict[str, Any]) -> str:
+    """Return the verdict ``entry`` states, whatever a hold makes of it.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry.
+
+    Returns:
+        The stated verdict, stripped; ``""`` when the entry states none.
+    """
+    return str(entry.get("verdict") or "").strip()
+
+
+def verdict_held_to_its_rule(entry: dict[str, Any], *, action_name: str) -> tuple[str, str]:
+    """Return the verdict a ``review_verdict`` entry carries, and why it moved.
+
+    Several review rules declare ``advise`` as their failure verdict precisely
+    because rejecting on them costs the round every proposal in the set. That
+    declaration is prose in the Critic prompt, so a model that rejects anyway
+    silently gets its way. This holds the verdict to what the cited rule asked
+    for, which makes the declaration enforceable rather than advisory.
+
+    The hold is narrow by construction: it reaches only the proposal kinds those
+    rules are about (:func:`advisory_rules_govern`), and only a reject whose
+    *only* stated ground is a rule that asked for advice (see
+    :func:`verdict_rests_on_one_ground`). Scoping it by proposal kind is what
+    keeps ``advise`` — which means "dispatch may proceed" — from executing an
+    ``integrate_patch`` the Critic refused, since the propose-time
+    ``PolicyGate`` patch gate does not run a second time on the verdict.
+
+    Args:
+        entry: A ``review_verdict`` payload or one ``verdict_map`` entry, with
+            a ``verdict`` and the rule it cites — in ``failure_reason_code`` or
+            in its own prose (see :func:`cited_advisory_reason_code`).
+        action_name: The reviewed proposal's action name.
+
+    Returns:
+        A ``(verdict, reason_code)`` pair: the verdict to act on, and the cited
+        reason code when it forced a downgrade, else an empty string.
+    """
+    if not isinstance(entry, dict):
+        return "", ""
+    verdict = _stated_verdict(entry)
+    if verdict != _REJECT_VERDICT:
+        return verdict, ""
+    if not advisory_rules_govern(action_name):
+        return verdict, ""
+    if not verdict_rests_on_one_ground(entry):
+        return verdict, ""
+    reason_code = cited_advisory_reason_code(entry)
+    if reason_code:
+        return ADVISE_VERDICT, reason_code
+    return verdict, ""
+
+
+def verdict_map_entry_held_to_its_rule(
+    entry: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    action_name: str,
+) -> tuple[str, str]:
+    """Return the verdict one ``verdict_map`` entry carries, and why it moved.
+
+    :func:`verdict_rests_on_one_ground` allows a verdict one stated risk beside
+    its citation, because on the single path the two are one statement by one
+    author -- "the proposal claims a 12% gain and has no rollback plan" names
+    the rule and the risk in the same breath. A batch states its risks once for
+    the whole set while the citation belongs to the entry, and nothing connects
+    them: counting them together would identify the batch's one ground with the
+    entry's rule, which is attribution in the direction that dispatches. A set
+    refused because no variant in it supplies a rollback plan would run on the
+    strength of a formatting rule its rationales happen to cite.
+
+    So a finding the batch states holds every reject in the set, whatever its
+    count, and only an entry's own grounds can support a downgrade. That is the
+    rule the batch path already had -- what the batch states adds to the grounds
+    a variant is held on, never supplies the grounds it is softened on -- with
+    arithmetic that claimed more than it could tell taken out of it.
+
+    Known limitation: the downgrade now needs a payload that states no findings
+    at all. That is the batch shape the runtime teaches --
+    ``{target_proposal_msg_id, verdict_map: {name: {verdict, rationale?,
+    failure_reason_code?}}}``, the only batch payload spelled out anywhere in
+    ``src`` (PolicyGate's repair hint) and all
+    ``references/intent_envelope.md`` asks for. It is not the reject shape
+    ``references/verdict_schema.md`` documents: that states one risk *and* one
+    required-evidence item, as both reject exemplars in
+    ``critic/tests/expected_outputs.json`` do, so a batch written in the
+    single-verdict style keeps every reject it wrote -- including one resting on
+    nothing but an advisory rule. Recovering that needs attribution the Critic
+    is asked for, i.e. a batch shape in the output schema; guessing it from
+    prose is what this reading gives up.
+
+    Args:
+        entry: One ``verdict_map`` entry.
+        payload: The ``review_verdict`` payload that entry arrived in.
+        action_name: The reviewed proposal's action name.
+
+    Returns:
+        A ``(verdict, reason_code)`` pair, as :func:`verdict_held_to_its_rule`
+        returns it.
+    """
+    grounds = verdict_map_entry_grounds(entry, payload)
+    if _batch_states_findings(payload):
+        return _stated_verdict(grounds), ""
+    return verdict_held_to_its_rule(grounds, action_name=action_name)
 
 
 # Minimum over-baseline gain a same-harness revalidation must show to count as

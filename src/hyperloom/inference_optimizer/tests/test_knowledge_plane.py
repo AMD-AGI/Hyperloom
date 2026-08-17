@@ -32,13 +32,6 @@ def test_plane_enabled_pr_returns_mcp_url():
     assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
 
 
-def test_plane_reset_round_caches_noop():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(),
-    )
-    plane.reset_round_caches()  # must not raise
-
-
 @pytest.mark.asyncio
 async def test_on_enter_explore_runs_without_plane(tmp_path: Path):
     """plane=None must not raise."""

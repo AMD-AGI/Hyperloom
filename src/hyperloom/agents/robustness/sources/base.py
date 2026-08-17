@@ -68,6 +68,11 @@ class SourceData:
     cluster_faults: list[dict[str, Any]] = field(default_factory=list)
     local_gpu: dict[str, Any] = field(default_factory=dict)
     local_processes: list[dict[str, Any]] = field(default_factory=list)
+    # ``False`` when the process probe could not answer (``ps`` missing, timed
+    # out, disabled). An empty ``local_processes`` then means "we do not know
+    # what is running", not "nothing is running", and a consumer must not read
+    # the absence of a process as evidence.
+    local_processes_known: bool = True
     local_disk: dict[str, Any] = field(default_factory=dict)
     local_log_tail: list[str] = field(default_factory=list)
     local_log_errors: list[dict[str, Any]] = field(default_factory=list)
@@ -93,6 +98,12 @@ class SourceData:
     # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
+    # In-flight work: ``{running, by_agent: {agent: {last_progress_unix, task,
+    # oldest_progress_unix, oldest_task}}}``.
+    # A composite task reports a heartbeat per internal unit, so this answers
+    # "is *this agent's* dispatched work still moving" for an agent that is
+    # legitimately quiet while it waits on one.
+    local_task_progress: dict[str, Any] = field(default_factory=dict)
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
 

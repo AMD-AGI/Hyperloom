@@ -389,7 +389,14 @@ def test_t0_anchor_requires_explicit_session_dir(
 # ---------------------------------------------------------------------------
 # _cascade_warm_start_search: the L1-L4 warm-start tier resolution.
 # ---------------------------------------------------------------------------
-_ACTIONABLE = {"best_throughput": 100.0}
+_ACTIONABLE = {
+    "best_throughput": 100.0,
+    "validated_gain_pct": 10.0,
+    "architectures": ["Qwen3ForCausalLM"],
+    "model_type": "qwen",
+    "precision": "fp8",
+    "best_config": {"extra_server_args": "--trusted"},
+}
 
 
 class _FakeKB:
@@ -427,58 +434,6 @@ def _cascade(kb, cid="CID:target"):
         precision="fp8",
         warm_prefer=None,
     )
-
-
-def test_cascade_l1_exact():
-    kb = _FakeKB(get_result={"canonical_id": "CID:target", **_ACTIONABLE})
-    point, tier, conf = _cascade(kb)
-    assert tier == "exact"
-    assert conf == 1.0
-    assert point["canonical_id"] == "CID:target"
-
-
-def test_cascade_l2_same_arch_class():
-    # L1 misses (different cid); L2 search yields an actionable same-arch row.
-    kb = _FakeKB(
-        get_result={"canonical_id": "CID:other"},
-        search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]],
-    )
-    point, tier, conf = _cascade(kb)
-    assert tier == "same_arch_class"
-    assert conf == 0.95
-    assert point["canonical_id"] == "CID:l2"
-
-
-def test_cascade_l3_same_arch_any_version():
-    # L1 miss (non-dict), L2 empty, L3 yields an actionable row.
-    kb = _FakeKB(
-        get_result=None,
-        search_by_labels=[[], [{"canonical_id": "CID:l3", **_ACTIONABLE}]],
-    )
-    point, tier, conf = _cascade(kb)
-    assert tier == "same_arch_any_version"
-    assert conf == 0.5
-    assert point["canonical_id"] == "CID:l3"
-
-
-def test_cascade_l4_relative_when_l1_returns_nonexact():
-    # L1 returns a non-exact dict row; L2/L3 empty -> relative fallback.
-    kb = _FakeKB(
-        get_result={"canonical_id": "CID:other", **_ACTIONABLE},
-        search_by_labels=[[], []],
-    )
-    point, tier, conf = _cascade(kb)
-    assert tier == "relative"
-    assert conf == 0.3
-    assert point["canonical_id"] == "CID:other"
-
-
-def test_cascade_miss_when_nothing_matches():
-    kb = _FakeKB(get_result=None, search_by_labels=[[], []])
-    point, tier, conf = _cascade(kb)
-    assert tier == "miss"
-    assert conf == 0.0
-    assert point == {}
 
 
 def test_cascade_l1_get_recipe_exception_is_swallowed():

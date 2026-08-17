@@ -12,6 +12,7 @@ from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
@@ -274,7 +275,9 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        choices=["mi300x", "mi308x", "mi325x", "mi355x"],
+        # Sorted for a stable --help listing, and derived so a board added to
+        # the identities table is accepted here without a second edit.
+        choices=sorted(AMD_GPU_DISPATCH_IDENTITIES),
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
         "wins when both are present and disagree; a WARN is "
@@ -993,7 +996,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.7,
         help="Minimum ``warm_start_recipe.confidence`` required to "
         "trigger the auto-replay. Default 0.7 means an ``exact`` "
-        "5-tuple hit (conf 1.0) and a server-returned ``relative`` "
+        "seven-tuple hit (conf 1.0) and a server-returned ``relative`` "
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",

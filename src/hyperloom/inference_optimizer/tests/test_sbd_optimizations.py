@@ -8,9 +8,40 @@ import json
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_attribution,
+    collect_optimization_stack,
     collect_recorded_optimizations,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
+
+
+def test_collective_stack_entry_keeps_campaign_evidence():
+    state = {
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "collective",
+                "variant_name": "forge_collective",
+                "engine": "forge_collective",
+                "kernel_id": "k007",
+                "tput": 130.0,
+                "ts": "1970-01-01T00:00:20+00:00",
+                "collective_op": "all_reduce",
+                "world_size": 8,
+                "collective_attempt_id": "attempt-1",
+                "integration_id": "integration-1",
+            },
+        ],
+    }
+
+    entry = collect_optimization_stack(state)[0]
+
+    assert entry["collective_op"] == "all_reduce"
+    assert entry["world_size"] == 8
+    assert entry["collective_attempt_id"] == "attempt-1"
+    assert entry["integration_id"] == "integration-1"
+    assert entry["validated"] is True
+
+
 
 
 def test_phase_breakdown_schema_declares_every_emitted_bucket():

@@ -35,7 +35,7 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     valid_env_key,
 )
-from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_root
+from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
@@ -322,6 +322,19 @@ def _operator_extra_env() -> dict[str, str]:
     if not isinstance(parsed, dict):
         return {}
     return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
+
+
+def resolve_reference_base() -> tuple[str, dict[str, str]]:
+    """Read the ``--reference-script`` server args / envs from SharedState.
+
+    Returns ``("", {})`` when the run has no reference recipe.
+    """
+    from hyperloom.inference_optimizer.session.paths import session_dir
+
+    from ...state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir())
+    return state.reference_server_args.strip(), dict(state.reference_envs)
 
 
 def _apply_custom_runtime_defaults(
@@ -711,8 +724,6 @@ def materialize_config_with_envs(
     gpu_type: str | None = None,
     inferencex_path: str | None = None,
     benchmark_script: str | None = None,
-    reference_server_args: str = "",
-    reference_envs: dict[str, Any] | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
     establish_quality_ref: bool = False,
     drop_moe_runner_backend: bool = False,
@@ -731,9 +742,9 @@ def materialize_config_with_envs(
     ``benchmark.inferencex_path`` for one task (falling back to
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
     into the framework env; ``extra_envs`` overrides any of the above.
-    ``reference_server_args`` / ``reference_envs`` seed a lowest-priority base
-    from a reference recipe (below the YAML base and extra_server_args; empty =
-    no-op, byte-for-byte identical to omitting them).
+    The session's ``--reference-script`` recipe is read from SharedState here
+    rather than passed in, so it seeds a lowest-priority base (below the YAML
+    base and ``extra_server_args``) for every caller.
 
     Args:
         config_path: Path to the source Magpie YAML to render.
@@ -1058,13 +1069,10 @@ def materialize_config_with_envs(
                 ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
             if tracelens_patch_ok:
-                # TraceLens-patched vLLM exposes capture_torch_profiler_dir +
-                # detailed_trace_annotation; unpatched vLLM rejects them.
-                capture_dir = output_dir / "capture_traces"
                 profiler_flags.append(
                     (
-                        "capture_torch_profiler_dir",
-                        f"--profiler-config.capture_torch_profiler_dir {capture_dir}",
+                        "capture_torch_profiler",
+                        "--profiler-config.capture_torch_profiler True",
                     )
                 )
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1135,7 +1143,7 @@ def materialize_config_with_envs(
                             _model,
                         )
             extra_body["shape_discovery"] = _shape_disc
-            extra_body.setdefault("roofline_annotations", True)
+            extra_body.setdefault("detailed_annotations", True)
             # NOTE: this write happens before the per-task ``extra_envs`` merge, so
             # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
             # start_step/num_steps the way ``args_mode="replace"`` used to drop
@@ -1180,7 +1188,7 @@ def materialize_config_with_envs(
     # Seed the framework server-args env + envs from a reference recipe below
     # the YAML base and any per-task extra_server_args (reference flags leftmost,
     # so last-wins lets later merges override them).
-    ref_args = (reference_server_args or "").strip()
+    ref_args, reference_envs = resolve_reference_base()
     if ref_args:
         from ._grid_runner import merge_server_args
 

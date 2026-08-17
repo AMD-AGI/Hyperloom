@@ -43,7 +43,13 @@ def _count_scans(monkeypatch) -> dict[str, int]:
 
     def _scan(server_log_path, offsets):
         calls["scan"] += 1
-        return False, False, False, False
+        return sk._LogScan(
+            saw_ready=False,
+            saw_progress=False,
+            saw_eval_start=False,
+            grew=False,
+            child_spoke=False,
+        )
 
     def _death(path):
         calls["death"] += 1

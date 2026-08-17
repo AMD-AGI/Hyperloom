@@ -11,6 +11,7 @@ forge results on the per-tuner E2E path while GEAK results promote inline.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -228,6 +229,96 @@ class _Bus:
     async def append_and_seq(self, message):
         self.messages.append(message)
         return message
+
+
+def _collective_campaign(
+    tmp_path: Path,
+    integration_id: str = "collective-test",
+    **overrides,
+) -> dict:
+    """Build a persisted Collective KEEP campaign for integration tests."""
+    campaign = {
+        "collective_attempt_id": f"attempt-{integration_id}",
+        "integration_id": integration_id,
+        "integration_status": "pending",
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+        "patch": str(tmp_path / "forge.patch"),
+        "source_file": "/repo/custom_all_reduce.cuh",
+        "kernel_repo": "/repo",
+        "snapshot_dir": str(tmp_path / "collective_snapshot"),
+    }
+    campaign.update(overrides)
+    return campaign
+
+
+def _record_collective_campaign(
+    coord: Coordinator,
+    tmp_path: Path,
+    integration_id: str = "collective-test",
+    **overrides,
+) -> dict:
+    """Persist and return a Collective KEEP campaign."""
+    campaign = _collective_campaign(
+        tmp_path,
+        integration_id,
+        **overrides,
+    )
+    coord.shared_state.record_collective(campaign, tmp_path)
+    return campaign
+
+
+def _collective_recovery_paths(
+    tmp_path: Path,
+    integration_id: str,
+) -> tuple[Path, Path, Path]:
+    """Return the backup manifest and checkpoint paths for an integration."""
+    identity = hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16]
+    patch_root = (
+        tmp_path
+        / "patches"
+        / f"forge_collective_{identity}"
+    )
+    manifest = (
+        patch_root
+        / "backup"
+        / "forge_collective_x"
+        / "manifest.json"
+    )
+    return patch_root / "backup", manifest, patch_root / "apply_checkpoint.json"
+
+
+def _write_collective_recovery(
+    tmp_path: Path,
+    integration_id: str,
+    manifest_status: str,
+    *,
+    checkpoint: bool = True,
+) -> tuple[Path, Path]:
+    """Write a Collective apply manifest and optional checkpoint."""
+    _, manifest, checkpoint_path = _collective_recovery_paths(
+        tmp_path,
+        integration_id,
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"status": manifest_status}),
+        encoding="utf-8",
+    )
+    if checkpoint:
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                }
+            ),
+            encoding="utf-8",
+        )
+    return manifest, checkpoint_path
 
 
 class TestPromoteGemmTuningKeep:
@@ -555,6 +646,1185 @@ class TestPromoteFusionIntegrateKeep:
 
         assert coord.shared_state.last_fusion["decision"] == "REVERT"
         assert coord.shared_state.last_fusion["error_class"] == "RuntimeError"
+
+
+class TestCollectiveIntegratePromotion:
+    """Collective KEEP results must pass through the same E2E adoption gate."""
+
+    @pytest.mark.asyncio
+    async def test_collective_only_preempts_default_geak(
+        self, tmp_path, monkeypatch
+    ):
+        """The directed lane must run before the default GEAK selection."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        calls: list[str] = []
+
+        def _unexpected_geak():
+            """Fail if Collective-only consults the default GEAK backend."""
+            raise AssertionError("GEAK must not preempt Collective-only")
+
+        async def _reprofile():
+            """Record the directed lane's required profile refresh."""
+            calls.append("reprofile")
+
+        async def _collective():
+            """Record the directed Collective dispatch."""
+            calls.append("collective")
+
+        monkeypatch.setenv("HYPERLOOM_COLLECTIVE_ONLY", "1")
+        monkeypatch.setattr(phase, "_kernel_enabled", lambda: True)
+        monkeypatch.setattr(phase, "_geak_enabled", _unexpected_geak)
+        monkeypatch.setattr(phase, "_maybe_reprofile_for_kernel", _reprofile)
+        monkeypatch.setattr(
+            phase,
+            "_maybe_run_collective_before_kernel_opt",
+            _collective,
+        )
+
+        await phase._on_enter_kernel(from_phase="EXPLORE")
+
+        assert calls == ["reprofile", "collective"]
+        assert coord.shared_state.collective_only_mode is True
+
+    def test_promotes_and_deduplicates_collective_keep(self, tmp_path):
+        """An E2E KEEP should become one durable Collective stack entry."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        collective = {
+            "integration_id": "collective-promote",
+            "patch": "/tmp/collective.patch",
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_speedup": 1.2,
+            "collective_op": "all_reduce",
+            "world_size": 8,
+        }
+        integrate = {
+            "status": "ok",
+            "decision": "KEEP",
+            "new_tput": 130.0,
+            "gain_pct": 30.0,
+            "workspace": "/tmp/run",
+            "apply_result": {
+                "status": "ok",
+                "manifest_path": "/tmp/collective-manifest.json",
+            },
+        }
+
+        phase._promote_collective_integrate_keep(collective, integrate)
+        assert coord.shared_state.current_best["engine"] == "forge_collective"
+        coord.shared_state.current_best = {
+            "engine": "later_lane",
+            "tput": 150.0,
+        }
+        coord.shared_state.cumulative_gain = 50.0
+        coord.shared_state.cumulative_gain_validated = 50.0
+        phase._promote_collective_integrate_keep(collective, integrate)
+
+        assert len(coord.shared_state.optimization_stack) == 1
+        entry = coord.shared_state.optimization_stack[0]
+        assert entry["action"] == "collective"
+        assert entry["collective_op"] == "all_reduce"
+        assert entry["world_size"] == 8
+        assert coord.shared_state.current_best["engine"] == "later_lane"
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
+        assert coord.shared_state.gain_per_stack_entry == [30.0]
+
+    @pytest.mark.asyncio
+    async def test_handle_collective_posts_and_integrates_kept_candidate(
+        self, tmp_path, monkeypatch
+    ):
+        """The run verdict must be recorded before its E2E integration starts."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integrated: list[dict] = []
+
+        async def _fake_integrate(result):
+            """Capture the candidate handed to the integration gate."""
+            integrated.append(result)
+
+        monkeypatch.setattr(phase, "_integrate_collective", _fake_integrate)
+        result = {
+            "status": "ok",
+            "decision": "KEEP",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "engine": "forge_collective",
+        }
+
+        await phase._handle_collective_result(result)
+        first_attempt_id = coord.shared_state.last_collective[
+            "collective_attempt_id"
+        ]
+        await phase._handle_collective_result(result)
+
+        assert coord.shared_state.last_collective["status"] == "ok"
+        assert coord.shared_state.last_collective["integration_status"] == "pending"
+        assert integrated[0]["integration_status"] == "pending"
+        assert (
+            coord.shared_state.last_collective[
+                "collective_attempt_id"
+            ]
+            == first_attempt_id
+        )
+        assert len(coord.shared_state.collective_attempts) == 1
+        assert coord.bus.messages[0].payload["kind"] == "run_collective_done"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("finalize_status", ["ok", "partial"])
+    async def test_integrate_collective_builds_payload_and_records_keep(
+        self, tmp_path, monkeypatch, finalize_status
+    ):
+        """Collective integration must use an isolated kernel id and snapshot."""
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            current_best={"extra_envs": {"SGLANG_USE_AITER": "1"}},
+        )
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        calls: list[dict] = []
+        integration_id = "collective-keep"
+        manifest_path = tmp_path / "manifest.json"
+
+        async def _fake_integrate(payload, *, session_dir):
+            """Return a deterministic E2E KEEP for payload inspection."""
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "new_tput": 140.0,
+                "gain_pct": 40.0,
+                "workspace": str(tmp_path / "integrate"),
+                "apply_result": {
+                    "status": "ok",
+                    "manifest_path": str(manifest_path),
+                },
+                "finalize_result": {
+                    "status": "skipped",
+                    "reason": "deferred to caller durability checkpoint",
+                },
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            krh_mod,
+            "materialize_unified_patch_snapshot",
+            lambda **_kwargs: str(tmp_path / "collective_snapshot"),
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_finalize_kernel_patch",
+            lambda _apply: {"status": finalize_status},
+        )
+
+        campaign = {
+            "collective_attempt_id": "collective-attempt-keep",
+            "integration_id": integration_id,
+            "status": "ok",
+            "decision": "KEEP",
+            "engine": "forge_collective",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch": str(tmp_path / "forge.patch"),
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_repo": "/repo",
+            "kernel_speedup": 1.2,
+            "collective_op": "all_reduce",
+            "world_size": 8,
+        }
+        coord.shared_state.record_collective(campaign, tmp_path)
+        await phase._integrate_collective(campaign)
+
+        assert calls[0]["source"] == "forge_collective"
+        assert calls[0]["kernel_id"] == "forge_collective"
+        assert calls[0]["snapshot_dir"] == str(tmp_path / "collective_snapshot")
+        assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1"}
+        assert calls[0]["defer_patch_finalize"] is True
+        assert calls[0]["backup_root"].endswith("/backup")
+        assert calls[0]["apply_checkpoint_path"].endswith(
+            "/apply_checkpoint.json"
+        )
+        assert coord.shared_state.last_collective["integration_decision"] == "KEEP"
+        assert coord.shared_state.last_collective["integration_status"] == "complete"
+        assert coord.shared_state.current_best["action"] == "collective"
+        assert coord.bus.messages[-1].payload["kind"] == "collective_integrate_done"
+
+    @pytest.mark.asyncio
+    async def test_pending_collective_reuses_applied_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        """Resume must benchmark an existing apply without overwriting backups."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "resume-collective"
+        identity = hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16]
+        patch_root = (
+            tmp_path
+            / "patches"
+            / f"forge_collective_{identity}"
+        )
+        manifest = patch_root / "backup" / "forge_collective_x" / "manifest.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps({"status": "applied"}),
+            encoding="utf-8",
+        )
+        checkpoint = patch_root / "apply_checkpoint.json"
+        checkpoint.write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            """Capture the resumed pre-applied payload."""
+            assert session_dir == tmp_path
+            calls.append(payload)
+            return {
+                "status": "ok",
+                "decision": "REVERT",
+                "new_tput": 90.0,
+                "gain_pct": -10.0,
+                "apply_result": payload["preapplied_apply_result"],
+                "revert_result": {"status": "ok"},
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            krh_mod,
+            "materialize_unified_patch_snapshot",
+            lambda **_kwargs: str(tmp_path / "collective_snapshot"),
+        )
+
+        campaign = {
+            "collective_attempt_id": "collective-attempt-resume",
+            "integration_id": integration_id,
+            "integration_status": "pending",
+            "status": "ok",
+            "decision": "KEEP",
+            "engine": "forge_collective",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch": str(tmp_path / "forge.patch"),
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_repo": "/repo",
+        }
+        coord.shared_state.record_collective(campaign, tmp_path)
+        await phase._integrate_collective(campaign)
+
+        assert calls[0]["preapplied_apply_result"]["manifest_path"] == str(
+            manifest
+        )
+        assert not checkpoint.exists()
+
+    @pytest.mark.asyncio
+    async def test_revert_recovery_does_not_repeat_e2e(
+        self, tmp_path, monkeypatch
+    ):
+        """An explicit recovery verdict must revert without remeasurement."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "revert-collective"
+        identity = hashlib.sha256(
+            integration_id.encode("utf-8")
+        ).hexdigest()[:16]
+        patch_root = (
+            tmp_path
+            / "patches"
+            / f"forge_collective_{identity}"
+        )
+        manifest = (
+            patch_root
+            / "backup"
+            / "forge_collective_x"
+            / "manifest.json"
+        )
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps({"status": "applied"}),
+            encoding="utf-8",
+        )
+        checkpoint = patch_root / "apply_checkpoint.json"
+        checkpoint.write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async def _unexpected_integrate(*_args, **_kwargs):
+            """Fail if recovery re-enters the E2E measurement path."""
+            raise AssertionError("integration must not be repeated")
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _unexpected_integrate,
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_revert_kernel_patch",
+            lambda _apply: {"status": "partial"},
+        )
+        campaign = {
+            "collective_attempt_id": "collective-attempt-revert",
+            "integration_id": integration_id,
+            "integration_status": "recovery_required",
+            "integration_recovery_action": "revert",
+            "integration_decision": "REVERT",
+            "status": "ok",
+            "decision": "KEEP",
+            "engine": "forge_collective",
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch": str(tmp_path / "forge.patch"),
+            "source_file": "/repo/custom_all_reduce.cuh",
+            "kernel_repo": "/repo",
+        }
+        coord.shared_state.record_collective(campaign, tmp_path)
+
+        await phase._integrate_collective(campaign)
+
+        assert (
+            coord.shared_state.last_collective["integration_status"]
+            == "complete"
+        )
+        assert (
+            coord.shared_state.last_collective[
+                "integration_decision"
+            ]
+            == "REVERT"
+        )
+        assert not checkpoint.exists()
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_records_handler_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """A Collective handler exception must become a durable lane verdict."""
+        coord = _coord(tmp_path)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        async def _raise(*_args, **_kwargs):
+            """Raise a deterministic Collective handler failure."""
+            raise RuntimeError("collective boom")
+
+        monkeypatch.setattr(krh_mod, "run_collective_handler", _raise)
+
+        await phase._run_forge_collective()
+
+        assert coord.shared_state.last_collective["status"] == "failed"
+        assert coord.shared_state.last_collective["decision"] == "REVERT"
+        assert (
+            coord.shared_state.last_collective["error_class"]
+            == "RuntimeError"
+        )
+        assert coord.bus.messages[-1].payload["kind"] == "run_collective_done"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "result, error_type",
+        [
+            (None, TypeError),
+            (
+                {
+                    "status": "ok",
+                    "decision": "KEEP",
+                    "engine": "forge_collective",
+                    "kept": "yes",
+                    "requires_e2e_validation": True,
+                },
+                ValueError,
+            ),
+            (
+                {
+                    "status": "ok",
+                    "decision": "KEEP",
+                    "engine": "forge_collective",
+                    "kept": True,
+                    "requires_e2e_validation": False,
+                },
+                ValueError,
+            ),
+        ],
+    )
+    async def test_handle_collective_rejects_invalid_handler_contract(
+        self, tmp_path, result, error_type
+    ):
+        """Invalid handler mappings and E2E flags must fail before recording."""
+        coord = _coord(tmp_path)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        with pytest.raises(error_type):
+            await phase._handle_collective_result(result)
+
+        assert coord.shared_state.last_collective == {}
+
+    @pytest.mark.asyncio
+    async def test_handle_collective_tolerates_bus_failure(
+        self, tmp_path
+    ):
+        """A run-result bus failure must not discard the persisted verdict."""
+        coord = _coord(tmp_path)
+        phase = KernelPhase(coord)
+
+        class _FailingBus:
+            async def append_and_seq(self, _message):
+                """Raise a deterministic bus failure."""
+                raise RuntimeError("bus unavailable")
+
+        coord.bus = _FailingBus()
+
+        await phase._handle_collective_result(
+            {
+                "status": "failed",
+                "decision": "REVERT",
+                "engine": "forge_collective",
+            }
+        )
+
+        assert coord.shared_state.last_collective["status"] == "failed"
+        assert coord.shared_state.last_collective["decision"] == "REVERT"
+
+    def test_load_collective_checkpoint_returns_manifest_status(
+        self, tmp_path
+    ):
+        """A trusted checkpoint must return normalized manifest metadata."""
+        backup_root, manifest, checkpoint = _collective_recovery_paths(
+            tmp_path,
+            "checkpoint-ok",
+        )
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps({"status": "applied"}),
+            encoding="utf-8",
+        )
+        checkpoint.write_text(
+            json.dumps({"manifest_path": str(manifest)}),
+            encoding="utf-8",
+        )
+
+        recovered, status = (
+            kernel_phase_mod._collective_recovery.load_apply_checkpoint(
+                checkpoint,
+                backup_root,
+            )
+        )
+
+        assert recovered["manifest_path"] == str(manifest)
+        assert status == "applied"
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "checkpoint_not_mapping",
+            "manifest_missing",
+            "manifest_outside_backup",
+            "manifest_not_mapping",
+        ],
+    )
+    def test_load_collective_checkpoint_rejects_untrusted_state(
+        self, tmp_path, case
+    ):
+        """Malformed or untrusted checkpoint state must be rejected."""
+        backup_root, manifest, checkpoint = _collective_recovery_paths(
+            tmp_path,
+            f"checkpoint-{case}",
+        )
+        checkpoint.parent.mkdir(parents=True)
+        if case == "checkpoint_not_mapping":
+            checkpoint.write_text("[]", encoding="utf-8")
+        elif case == "manifest_missing":
+            checkpoint.write_text(
+                json.dumps({"manifest_path": str(manifest)}),
+                encoding="utf-8",
+            )
+        elif case == "manifest_outside_backup":
+            outside = tmp_path / "outside-manifest.json"
+            outside.write_text("{}", encoding="utf-8")
+            checkpoint.write_text(
+                json.dumps({"manifest_path": str(outside)}),
+                encoding="utf-8",
+            )
+        else:
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("[]", encoding="utf-8")
+            checkpoint.write_text(
+                json.dumps({"manifest_path": str(manifest)}),
+                encoding="utf-8",
+            )
+
+        with pytest.raises(ValueError):
+            kernel_phase_mod._collective_recovery.load_apply_checkpoint(
+                checkpoint,
+                backup_root,
+            )
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_marks_corrupt_checkpoint_for_recovery(
+        self, tmp_path
+    ):
+        """A corrupt apply checkpoint must preserve a NEEDS_REVIEW recovery."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "corrupt-checkpoint"
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            integration_id,
+        )
+        _, _, checkpoint = _collective_recovery_paths(
+            tmp_path,
+            integration_id,
+        )
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_text("{", encoding="utf-8")
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "NEEDS_REVIEW"
+        assert last["integration_status"] == "recovery_required"
+        assert last["integration_recovery_action"] == "revert"
+        assert (
+            last["integration_error_class"]
+            == "collective_apply_checkpoint_invalid"
+        )
+        assert checkpoint.exists()
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_rejects_multiple_manifests(
+        self, tmp_path
+    ):
+        """Multiple recovery manifests must require explicit review."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "multiple-manifests"
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            integration_id,
+        )
+        backup_root, _, _ = _collective_recovery_paths(
+            tmp_path,
+            integration_id,
+        )
+        for name in ("first", "second"):
+            manifest = backup_root / name / "manifest.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                json.dumps({"status": "applied"}),
+                encoding="utf-8",
+            )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "NEEDS_REVIEW"
+        assert last["integration_status"] == "recovery_required"
+        assert (
+            last["integration_error_class"]
+            == "collective_apply_manifest_ambiguous"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "manifest_status, expected_error, expected_reverts",
+        [
+            ("reverted", "collective_apply_already_reverted", 0),
+            ("prepared", "collective_apply_not_resumable", 1),
+            ("failed", "collective_apply_not_resumable", 1),
+            ("reverted_partial", "collective_apply_not_resumable", 1),
+        ],
+    )
+    async def test_integrate_collective_recovers_terminal_and_failed_manifests(
+        self,
+        tmp_path,
+        monkeypatch,
+        manifest_status,
+        expected_error,
+        expected_reverts,
+    ):
+        """Known non-resumable manifests must finish through the revert path."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = f"recover-{manifest_status}"
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            integration_id,
+        )
+        _write_collective_recovery(
+            tmp_path,
+            integration_id,
+            manifest_status,
+        )
+        reverts: list[dict] = []
+
+        def _revert(apply_result):
+            """Capture recovery reverts and report completion."""
+            reverts.append(apply_result)
+            return {"status": "ok"}
+
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_revert_kernel_patch",
+            _revert,
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_status"] == "complete"
+        assert last["integration_error_class"] == expected_error
+        assert len(reverts) == expected_reverts
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_preserves_unknown_manifest_for_review(
+        self, tmp_path, monkeypatch
+    ):
+        """An unknown manifest status must remain recovery-required."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = "unknown-manifest"
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            integration_id,
+        )
+        _write_collective_recovery(
+            tmp_path,
+            integration_id,
+            "unexpected",
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_revert_kernel_patch",
+            lambda _apply: {"status": "ok"},
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "NEEDS_REVIEW"
+        assert last["integration_status"] == "recovery_required"
+        assert last["integration_recovery_action"] == "revert"
+        assert (
+            last["integration_error_class"]
+            == "collective_apply_not_resumable"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "manifest_status, finalize_status",
+        [
+            ("finalized", "ok"),
+            ("finalized_partial", "partial"),
+        ],
+    )
+    async def test_integrate_collective_resumes_finalized_keep(
+        self,
+        tmp_path,
+        monkeypatch,
+        manifest_status,
+        finalize_status,
+    ):
+        """A finalized KEEP must promote without repeating finalization."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        integration_id = f"finalize-{manifest_status}"
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            integration_id,
+            integration_status="recovery_required",
+            integration_recovery_action="finalize",
+            integration_decision="KEEP",
+            integration_result_status="ok",
+            integration_gain_pct=25.0,
+            integration_base_tput=100.0,
+            integration_new_tput=125.0,
+            integration_workspace=str(tmp_path / "integrate"),
+        )
+        _write_collective_recovery(
+            tmp_path,
+            integration_id,
+            manifest_status,
+        )
+
+        def _unexpected_finalize(_apply):
+            """Fail if a finalized manifest is finalized again."""
+            raise AssertionError("finalization must not be repeated")
+
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_finalize_kernel_patch",
+            _unexpected_finalize,
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "KEEP"
+        assert last["integration_status"] == "complete"
+        assert last["integration_finalize_status"] == finalize_status
+        assert coord.shared_state.current_best["tput"] == 125.0
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_reverts_missing_patch(
+        self, tmp_path
+    ):
+        """A KEEP without a patch must become a complete REVERT."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "missing-patch",
+            patch="",
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_status"] == "complete"
+        assert last["integration_error_class"] == "collective_patch_missing"
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_records_snapshot_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Snapshot materialization failures must become durable REVERTs."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "snapshot-failure",
+            snapshot_dir="",
+        )
+
+        def _raise_snapshot(**_kwargs):
+            """Raise a deterministic snapshot failure."""
+            raise RuntimeError("snapshot failed")
+
+        monkeypatch.setattr(
+            krh_mod,
+            "materialize_unified_patch_snapshot",
+            _raise_snapshot,
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_error_class"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("threshold", ["nan", "-1", "invalid"])
+    async def test_integrate_collective_rejects_invalid_keep_threshold(
+        self, tmp_path, monkeypatch, threshold
+    ):
+        """Invalid KEEP thresholds must fail before the E2E handler runs."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            f"threshold-{threshold}",
+        )
+
+        async def _unexpected_integrate(*_args, **_kwargs):
+            """Fail if an invalid threshold reaches integration."""
+            raise AssertionError("integration must not run")
+
+        monkeypatch.setenv("HYPERLOOM_COLLECTIVE_KEEP_PCT", threshold)
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _unexpected_integrate,
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_status"] == "complete"
+        assert last["integration_error_class"] == "ValueError"
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_rejects_non_mapping_handler_result(
+        self, tmp_path, monkeypatch
+    ):
+        """A non-mapping E2E result must become a complete REVERT."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "handler-not-mapping",
+        )
+
+        async def _invalid_result(*_args, **_kwargs):
+            """Return an invalid integration result."""
+            return ["invalid"]
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _invalid_result,
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_status"] == "complete"
+        assert last["integration_error_class"] == "TypeError"
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_marks_invalid_decision_for_review(
+        self, tmp_path, monkeypatch
+    ):
+        """An unknown E2E decision must require explicit recovery review."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "invalid-decision",
+        )
+
+        async def _invalid_decision(*_args, **_kwargs):
+            """Return an unsupported integration decision."""
+            return {"status": "ok", "decision": "MAYBE"}
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _invalid_decision,
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "NEEDS_REVIEW"
+        assert last["integration_status"] == "recovery_required"
+        assert (
+            last["integration_error_class"]
+            == "collective_integration_decision_invalid"
+        )
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_preserves_incomplete_revert(
+        self, tmp_path, monkeypatch
+    ):
+        """An incomplete revert must retain its recovery action."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "incomplete-revert",
+        )
+        manifest = tmp_path / "active-manifest.json"
+
+        async def _revert_result(*_args, **_kwargs):
+            """Return a REVERT whose patch cleanup is incomplete."""
+            return {
+                "status": "ok",
+                "decision": "REVERT",
+                "apply_result": {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                },
+                "revert_result": {"status": "failed"},
+            }
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _revert_result,
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_revert_kernel_patch",
+            lambda _apply: {"status": "failed"},
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_status"] == "recovery_required"
+        assert last["integration_recovery_action"] == "revert"
+        assert last["integration_revert_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_rolls_back_failed_promotion(
+        self, tmp_path, monkeypatch
+    ):
+        """Promotion failure must restore state and revert the applied patch."""
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            current_best={"engine": "existing", "tput": 110.0},
+            cumulative_gain=10.0,
+            cumulative_gain_validated=10.0,
+        )
+        coord.bus = _Bus()
+        coord.shared_state.optimization_stack = [
+            {"action": "existing", "variant_name": "existing"}
+        ]
+        coord.shared_state.gain_per_stack_entry = [10.0]
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "promotion-failure",
+        )
+        manifest = tmp_path / "promotion-manifest.json"
+
+        async def _invalid_keep(*_args, **_kwargs):
+            """Return a KEEP with an invalid promoted throughput."""
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "new_tput": 0.0,
+                "gain_pct": 10.0,
+                "apply_result": {
+                    "status": "ok",
+                    "manifest_path": str(manifest),
+                },
+            }
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _invalid_keep,
+        )
+        monkeypatch.setattr(
+            krh_mod,
+            "_maybe_revert_kernel_patch",
+            lambda _apply: {"status": "ok"},
+        )
+
+        await phase._integrate_collective(campaign)
+
+        last = coord.shared_state.last_collective
+        assert last["integration_decision"] == "REVERT"
+        assert last["integration_status"] == "complete"
+        assert (
+            last["integration_error_class"]
+            == "collective_promotion_invalid"
+        )
+        assert coord.shared_state.current_best["engine"] == "existing"
+        assert len(coord.shared_state.optimization_stack) == 1
+        assert coord.shared_state.gain_per_stack_entry == [10.0]
+
+    @pytest.mark.asyncio
+    async def test_integrate_collective_tolerates_bus_failure(
+        self, tmp_path
+    ):
+        """An integration bus failure must not discard the terminal verdict."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+
+        class _FailingBus:
+            async def append_and_seq(self, _message):
+                """Raise a deterministic bus failure."""
+                raise RuntimeError("bus unavailable")
+
+        coord.bus = _FailingBus()
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "integration-bus-failure",
+            patch="",
+        )
+
+        await phase._integrate_collective(campaign)
+
+        assert (
+            coord.shared_state.last_collective["integration_status"]
+            == "complete"
+        )
+        assert (
+            coord.shared_state.last_collective["integration_decision"]
+            == "REVERT"
+        )
+
+    def test_promote_collective_ignores_non_keep(self, tmp_path):
+        """A non-KEEP integration must not mutate promoted state."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+
+        phase._promote_collective_integrate_keep(
+            {"integration_id": "not-keep", "patch": "/tmp/test.patch"},
+            {"status": "ok", "decision": "REVERT"},
+        )
+
+        assert coord.shared_state.optimization_stack == []
+
+    @pytest.mark.parametrize(
+        "field, value, error",
+        [
+            ("status", "failed", "successful integration"),
+            ("apply_result", {}, "apply manifest"),
+            ("new_tput", True, "numeric E2E measurements"),
+            ("new_tput", 0.0, "new_tput must be positive"),
+            ("gain_pct", 0.0, "gain_pct must be positive"),
+            ("patch", "", "missing patch_path"),
+            ("integration_id", "", "missing integration_id"),
+        ],
+    )
+    def test_promote_collective_rejects_invalid_keep(
+        self, tmp_path, field, value, error
+    ):
+        """Invalid KEEP promotion inputs must fail before state mutation."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        collective = {
+            "integration_id": "promote-guard",
+            "patch": "/tmp/collective.patch",
+        }
+        integrate = {
+            "status": "ok",
+            "decision": "KEEP",
+            "new_tput": 120.0,
+            "gain_pct": 20.0,
+            "apply_result": {
+                "status": "ok",
+                "manifest_path": "/tmp/manifest.json",
+            },
+        }
+        target = collective if field in {"patch", "integration_id"} else integrate
+        target[field] = value
+
+        with pytest.raises(ValueError, match=error):
+            phase._promote_collective_integrate_keep(
+                collective,
+                integrate,
+            )
+
+        assert coord.shared_state.optimization_stack == []
+
+    @pytest.mark.parametrize(
+        "collective, integrate",
+        [
+            ([], {}),
+            ({}, []),
+        ],
+    )
+    def test_promote_collective_requires_mapping_inputs(
+        self, tmp_path, collective, integrate
+    ):
+        """Promotion must reject non-mapping inputs."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+
+        with pytest.raises(TypeError, match="inputs must be mappings"):
+            phase._promote_collective_integrate_keep(
+                collective,
+                integrate,
+            )
+
+    @pytest.mark.asyncio
+    async def test_collective_stage_resumes_pending_integration(
+        self, tmp_path, monkeypatch
+    ):
+        """A pending Collective integration must resume before a new campaign."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        phase = KernelPhase(coord)
+        campaign = _record_collective_campaign(
+            coord,
+            tmp_path,
+            "pending-stage",
+            integration_status="recovery_required",
+            integration_recovery_action="revert",
+        )
+        resumed: list[dict] = []
+
+        async def _resume(result):
+            """Capture the pending integration selected for resume."""
+            resumed.append(result)
+
+        async def _unexpected_run():
+            """Fail if pending recovery launches a new campaign."""
+            raise AssertionError("new campaign must not run")
+
+        monkeypatch.setattr(phase, "_integrate_collective", _resume)
+        monkeypatch.setattr(phase, "_run_forge_collective", _unexpected_run)
+        monkeypatch.setattr(phase, "_collective_only_mode", lambda: False)
+
+        await phase._maybe_run_collective_before_kernel_opt()
+
+        assert resumed == [coord.shared_state.last_collective]
+        assert resumed[0]["integration_id"] == campaign["integration_id"]
+
+    @pytest.mark.asyncio
+    async def test_collective_only_stage_escalates_after_terminal_lane(
+        self, tmp_path, monkeypatch
+    ):
+        """Collective-only mode must hand off after its lane is terminal."""
+        coord = _coord(tmp_path)
+        phase = KernelPhase(coord)
+
+        monkeypatch.setattr(
+            phase,
+            "_collective_required_before_kernel_opt",
+            lambda: False,
+        )
+        monkeypatch.setattr(phase, "_collective_only_mode", lambda: True)
+
+        await phase._maybe_run_collective_before_kernel_opt()
+
+        assert (
+            coord.shared_state.pending_escalate_hint
+            == kernel_phase_mod._phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
+        )
+
+    def test_collective_only_mode_validates_state_and_environment(
+        self, tmp_path, monkeypatch
+    ):
+        """Collective-only gating must accept env truth and reject bad state."""
+        coord = _coord(tmp_path)
+        phase = KernelPhase(coord)
+        monkeypatch.setenv("HYPERLOOM_COLLECTIVE_ONLY", "yes")
+
+        assert phase._collective_only_mode() is True
+
+        coord.shared_state.collective_only_mode = "yes"
+        with pytest.raises(ValueError, match="must be boolean"):
+            phase._collective_only_mode()
 
 
 class TestForgeGemmRuntimeConfigMerge:

@@ -24,6 +24,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable, NamedTuple
+
+from .bypass_analysis import parse_server_log_throughput
 
 log = logging.getLogger(__name__)
 
@@ -260,15 +263,6 @@ _SERVER_READY_MARKERS: tuple[str, ...] = (
     "The server is fired up and ready to roll",
 )
 
-# Generation-progress markers: the periodic decode-throughput lines. Scanned and
-# returned by ``_scan_logs_increment`` but currently unconsumed — the stall gate
-# keys on raw log activity (any new bytes); see
-# :func:`_communicate_with_soft_deadline`.
-_SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
-    "gen throughput (token/s):",  # sglang
-    "Avg generation throughput:",  # vLLM
-)
-
 # Accuracy-eval start markers: their appearance means the benchmark phase of the
 # run is over and the accuracy eval has begun. The soft deadline measures
 # throughput only, so it stops being enforced from this point on — eval duration
@@ -279,8 +273,10 @@ _EVAL_START_MARKERS: tuple[str, ...] = (
     "[magpie_bench_remote_compat] lm_eval cmd:",
 )
 
-# The patcher echoes the eval-start marker to stderr, which Magpie redirects
-# here rather than into ``server.log``; scanned alongside it.
+# The benchmark body's own stderr: Magpie redirects it here rather than into
+# ``server.log`` or the parent's pipe, so it is both where the eval-start marker
+# lands and the one resolved log whose growth is output of the very child this
+# module is waiting on.
 _EVAL_LOG_NAME: str = "benchmark_stderr.log"
 
 # Default grace: how long after the server reports ready it may emit no log
@@ -293,14 +289,24 @@ _DETOK_STALL_GRACE_SEC_DEFAULT: float = 1800.0
 class _StreamCapture:
     """Capture child output while mirroring each line to the parent stream."""
 
-    def __init__(self, proc: subprocess.Popen, *, text: bool) -> None:
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        *,
+        text: bool,
+        on_output: Callable[[], None] | None = None,
+    ) -> None:
         """Set up capture/mirror threads for a child's stdout and stderr.
 
         Args:
             proc: The child process whose pipes should be captured.
             text: Whether the pipes are in text (``str``) or bytes mode.
+            on_output: Called once per observed unit of child output, from the
+                pump thread. Used as liveness evidence by callers that report
+                progress for a long step.
         """
         self._text = text
+        self._on_output = on_output
         self._stdout_chunks: list[str | bytes] = []
         self._stderr_chunks: list[str | bytes] = []
         self._threads: list[threading.Thread] = []
@@ -344,6 +350,15 @@ class _StreamCapture:
             self._join(self._stderr_chunks) if self._stderr_chunks else empty,
         )
 
+    def note_output(self) -> None:
+        """Report one unit of child output to the caller's liveness callback."""
+        if self._on_output is None:
+            return
+        try:
+            self._on_output()
+        except Exception:  # noqa: BLE001 - liveness reporting never breaks capture
+            pass
+
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
         """Concatenate captured chunks using the appropriate empty separator.
 
@@ -370,6 +385,7 @@ class _StreamCapture:
                     break
                 chunks.append(chunk)
                 self._mirror(chunk, mirror)
+                self.note_output()
         finally:
             try:
                 pipe.close()
@@ -548,7 +564,29 @@ def _resolve_scan_logs(server_log_path: str) -> list[str]:
     return out
 
 
-def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> tuple[bool, bool, bool, bool]:
+class _LogScan(NamedTuple):
+    """What one pass over the resolved logs found in the bytes appended since the last.
+
+    Attributes:
+        saw_ready: A server-ready marker appeared.
+        saw_progress: A periodic decode-throughput line reported a non-zero
+            rate, so tokens were being produced during the interval whoever
+            logged them.
+        saw_eval_start: The accuracy eval announced itself.
+        grew: Some resolved log got longer, from any writer at all.
+        child_spoke: The benchmark body's own redirected stderr got longer,
+            which is output of the child being waited on that never reaches its
+            pipe.
+    """
+
+    saw_ready: bool
+    saw_progress: bool
+    saw_eval_start: bool
+    grew: bool
+    child_spoke: bool
+
+
+def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogScan:
     """Scan every resolved log for markers, advancing ``offsets`` in place.
 
     Args:
@@ -556,10 +594,10 @@ def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> tuple
         offsets: Per-path byte offsets already consumed; mutated in place.
 
     Returns:
-        ``(saw_ready, saw_progress, saw_eval_start, grew)`` — the markers seen
-        in the newly appended bytes, and whether any log grew (liveness).
+        _LogScan: The markers seen in the newly appended bytes, plus who — if
+        anyone — did the appending.
     """
-    saw_ready = saw_progress = saw_eval_start = grew = False
+    saw_ready = saw_progress = saw_eval_start = grew = child_spoke = False
     for path in _resolve_scan_logs(server_log_path):
         prev = offsets.get(path, 0)
         new_offset, ready, progress, eval_start = _scan_server_log_increment(path, prev)
@@ -567,8 +605,10 @@ def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> tuple
         saw_ready = saw_ready or ready
         saw_progress = saw_progress or progress
         saw_eval_start = saw_eval_start or eval_start
-        grew = grew or new_offset > prev
-    return saw_ready, saw_progress, saw_eval_start, grew
+        if new_offset > prev:
+            grew = True
+            child_spoke = child_spoke or Path(path).name == _EVAL_LOG_NAME
+    return _LogScan(saw_ready, saw_progress, saw_eval_start, grew, child_spoke)
 
 
 def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, bool, bool]:
@@ -590,8 +630,8 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
 
     Returns:
         ``(new_offset, saw_ready, saw_progress, saw_eval_start)`` — the advanced
-        offset plus whether a ready / progress / eval-start marker appeared in
-        the newly read bytes.
+        offset plus whether the newly read bytes carried a ready marker, a
+        non-zero generation-throughput rate, or the eval-start marker.
     """
     try:
         size = os.path.getsize(path)
@@ -609,7 +649,19 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
     except (OSError, ValueError):
         return from_offset, False, False, False
     saw_ready = any(marker in chunk for marker in _SERVER_READY_MARKERS)
-    saw_progress = any(marker in chunk for marker in _SERVER_PROGRESS_MARKERS)
+    # Progress is the rate on the periodic decode-throughput line, not the
+    # line's presence: some vLLM builds log ``Avg generation throughput: 0.0
+    # tokens/s`` on an idle engine, and an engine goes idle precisely when the
+    # client driving it wedges, so the marker alone lets the server vouch for
+    # the client that stopped asking it for tokens. Reusing the post-mortem
+    # estimator's parse keeps the frameworks the two recognise from drifting
+    # apart. A line whose rate it cannot read counts as no progress: this
+    # evidence only ever suppresses a stall accusation, and one suppressed by
+    # mistake is invisible, where a missing one is visible and answerable from
+    # the child's own redirected stderr. The stall gate is deliberately broader
+    # and keys on raw log activity (any new bytes); see
+    # :func:`_communicate_with_soft_deadline`.
+    saw_progress = bool(parse_server_log_throughput(chunk))
     saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
     return size, saw_ready, saw_progress, saw_eval_start
 
@@ -626,8 +678,15 @@ def run_with_session_kill(
     server_dead_grace_sec: float | None = None,
     detok_stall_grace_sec: float | None = None,
     server_already_ready: bool = False,
+    on_output: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess in its own session and reap descendants on every exit path."""
+    """Run a subprocess in its own session and reap descendants on every exit path.
+
+    Args:
+        on_output: Called from a reader thread each time the child produces
+            output, so a caller can report a long step alive on the child's own
+            activity rather than on a timer.
+    """
     if server_dead_grace_sec is None:
         try:
             server_dead_grace_sec = float(
@@ -660,7 +719,7 @@ def run_with_session_kill(
             cwd=cwd,
             **new_session_kwargs(),
         )
-        capture = _StreamCapture(proc, text=text)
+        capture = _StreamCapture(proc, text=text, on_output=on_output)
         capture.start()
         try:
             stdout, stderr = _communicate_with_soft_deadline(
@@ -887,14 +946,14 @@ def _communicate_with_soft_deadline(
         # Advance the log scan, latching the server-ready, last-activity
         # and eval-start signals.
         if scan_active:
-            saw_ready, _saw_progress, saw_eval_start, grew = _scan_logs_increment(
+            scan = _scan_logs_increment(
                 server_log_path,  # type: ignore[arg-type]
                 scan_offsets,
             )
-            if saw_ready and server_ready_since is None:
+            if scan.saw_ready and server_ready_since is None:
                 server_ready_since = now
                 last_activity_at = now  # start the silence clock at ready
-            if saw_eval_start and not soft_deadline_suspended:
+            if scan.saw_eval_start and not soft_deadline_suspended:
                 soft_deadline_suspended = True
                 log.info(
                     "_subprocess_kill: accuracy eval started; soft_deadline_sec=%.1fs no longer enforced "
@@ -903,8 +962,19 @@ def _communicate_with_soft_deadline(
                 )
             # Any new bytes count as liveness; only total silence trips the
             # stall gate.
-            if grew:
+            if scan.grew:
                 last_activity_at = now
+            # The liveness callback makes a narrower claim than the stall gate —
+            # that this child is working, not that something on the box is — so
+            # it takes narrower evidence: tokens flowing, or the child's own
+            # redirected stderr growing. A ``server.log`` that grew is neither.
+            # The server keeps logging while its benchmark client is wedged, and
+            # both vLLM and sglang write an access line per request, including
+            # the health probe the robustness agent issues on its own tick —
+            # which would let the monitor manufacture the evidence that
+            # suppresses its own stall accusation.
+            if capture is not None and (scan.saw_progress or scan.child_spoke):
+                capture.note_output()
         # Soft deadline. With ``soft_from_ready`` the overtime clock is measured
         # from the server-ready marker and stays dormant until ready; otherwise
         # it is the from-spawn elapsed.

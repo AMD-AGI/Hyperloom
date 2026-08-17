@@ -24,10 +24,21 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
+from hyperloom.orchestrator.loop.coordinator_helpers import (
+    collapse_verdicts,
+    verdict_held_to_its_rule,
+    verdict_map_entry_grounds,
+    verdict_map_entry_held_to_its_rule,
+)
 from hyperloom.orchestrator.policy.gate import (
+    INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     PolicyGate,
     REVIEW_VERDICTS,
+)
+from hyperloom.orchestrator.specialists.patch_safety import (
+    QUANTITATIVE_CLAIM_REASON_CODE,
+    cross_domain_rule_descriptors,
 )
 
 
@@ -177,6 +188,16 @@ def test_policy_gate_rejects_when_neither_present(gate):
             ),
         )
     assert exc.value.rule == "payload"
+
+
+def test_the_per_variant_shape_the_gate_teaches_carries_the_cited_rule(gate):
+    """The gate's hint is where the per-variant entry shape is spelled out for
+    the emitter, so it is where a variant learns it can name the rule its
+    verdict rests on rather than leaving that to prose."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("critic", _critic_intent(target_proposal_msg_id="msg-1"))
+
+    assert "failure_reason_code" in (exc.value.hint or "")
 
 
 def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
@@ -504,6 +525,1175 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     assert "required_evidence" not in line
     assert "risks=" not in line
     assert "advice=" not in line
+
+
+# 3b. A reject on a rule that asked for advice is held to that rule
+@pytest.mark.asyncio
+async def test_reject_on_an_advisory_only_rule_is_held_to_advise(coord):
+    """The quantitative-claim rule declares ``advise``; a reject citing it must not end the proposal."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-held",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-1"}},
+    )
+    coord.state.pending_proposals["msg-held"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-held",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "reasoning": "proposal carried confidence",
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+    # advise materialises, so the round keeps the proposal.
+    assert len(coord._materialise_calls) == 1
+    assert [m for m in coord.bus.messages if m.topic == "review_verdict"][0].payload["verdict"] == "advise"
+
+
+@pytest.mark.asyncio
+async def test_a_held_reject_is_recorded_not_silently_corrected(coord, caplog):
+    """The downgrade leaves both a log line and an observation, so prompt drift stays visible."""
+    import logging
+
+    _seed_explore_proposal(coord, msg_id="msg-audit")
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-audit",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
+        await coord._handle_review_verdict("critic", intent)
+    assert any("held to its rule" in r.getMessage() for r in caplog.records)
+    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    assert "verdict_downgraded_to_rule_verdict" in kinds
+
+
+@pytest.mark.asyncio
+async def test_a_rule_named_only_in_prose_still_holds_the_verdict(coord):
+    """Field shape: the Critic names its rule in ``reasoning``, never in ``failure_reason_code``.
+
+    ``failure_reason_code`` is an input descriptor — nothing on the output side
+    requires it — so a verdict that cites the rule in prose is in contract and
+    must move the same way one carrying the field does.
+    """
+    pending = PendingProposal(
+        proposal_msg_id="msg-prose",
+        from_agent="orchestration",
+        action_name="framework_agent",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "framework_agent", "params": {}},
+    )
+    coord.state.pending_proposals["msg-prose"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-prose",
+            "verdict": "reject",
+            "reasoning": (
+                f"{QUANTITATIVE_CLAIM_REASON_CODE}: the proposal payload carries "
+                "the forbidden predicted_gain_pct field."
+            ),
+            "risks": [
+                {
+                    "severity": "blocker",
+                    "summary": "Specialist proposal payload contains a prohibited quantitative claim field.",
+                }
+            ],
+            "notes": ["Resubmit without predicted_gain_pct or other prohibited quantitative ranking fields."],
+            "packet_evidence": ["payload.predicted_gain_pct"],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    assert "verdict_downgraded_to_rule_verdict" in kinds
+
+
+@pytest.mark.asyncio
+async def test_prose_that_cites_no_rule_leaves_the_reject_alone(coord):
+    """Prose is scanned for a rule citation, not read for sentiment; an ordinary reject stands."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-prose-plain",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-4"}},
+    )
+    coord.state.pending_proposals["msg-prose-plain"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-prose-plain",
+            "verdict": "reject",
+            "reasoning": "the patch rewrites a kernel with no before/after benchmark to stand on.",
+            "notes": ["predicted_gain_pct was not the problem here."],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_reject_code_outranks_an_advisory_one_in_prose(coord):
+    """The field is the Critic's explicit citation; a citation in prose cannot soften a rule it declared ``reject``."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-both",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-5"}},
+    )
+    coord.state.pending_proposals["msg-both"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-both",
+            "verdict": "reject",
+            "failure_reason_code": "specialist_patch_not_grounded",
+            "reasoning": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the payload carries predicted_gain_pct.",
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@dataclass
+class _PatchVerdictSharedState(_BareSharedState):
+    """Adds the patch-verdict mirror the integrate_patch gate reads."""
+
+    patch_verdicts: dict[str, str] = field(default_factory=dict)
+
+    def record_specialist_patch_verdict(self, specialist_task_id: str, verdict: str) -> None:
+        self.patch_verdicts[specialist_task_id] = verdict.strip().lower()
+
+
+@pytest.mark.asyncio
+async def test_a_held_reject_is_not_a_landing_permit(coord):
+    """``advise`` is an integrate_patch permit, so mirroring the held verdict
+    turned "the Critic rejected this patch" into "the Critic waved it through"
+    -- over a formatting rule, and irreversibly."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-permit",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-permit"}},
+    )
+    coord.state.pending_proposals["msg-permit"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-permit",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    assert coord.shared_state.patch_verdicts["t-permit"] == "reject"
+    assert coord.shared_state.patch_verdicts["t-permit"] not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS
+
+
+@pytest.mark.asyncio
+async def test_a_held_variant_mirrors_the_verdict_the_critic_wrote(coord):
+    """The mirror is a landing permit for the specialist's patches, and the
+    per-variant path reaches it the same way the single one does: what the
+    Critic wrote is mirrored, whatever the hold made of it for this round."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-map-permit",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-map"}},
+    )
+    coord.state.pending_proposals["msg-map-permit"] = pending
+    entry = {"verdict": "reject", "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE}
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-permit",
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    assert coord.shared_state.patch_verdicts["t-map"] == "reject"
+
+
+@pytest.mark.asyncio
+async def test_an_unheld_verdict_still_mirrors_itself(coord):
+    """The mirror only diverges from the acted-on verdict when a hold moved it."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-plain-permit",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-plain"}},
+    )
+    coord.state.pending_proposals["msg-plain-permit"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={"target_proposal_msg_id": "msg-plain-permit", "verdict": "advise"},
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert coord.shared_state.patch_verdicts["t-plain"] == "advise"
+
+
+@pytest.mark.asyncio
+async def test_a_reject_that_also_names_a_second_risk_is_not_held(coord):
+    """The hold answers "the whole reject was this one rule"; a verdict that
+    also refuses on its own merits keeps both halves of the sentence."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-mixed",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-mixed"}},
+    )
+    coord.state.pending_proposals["msg-mixed"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-mixed",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "risks": [
+                {"severity": "minor", "summary": "payload carries a self-reported gain."},
+                {"severity": "blocker", "summary": "the patch can only be rolled back by hand."},
+            ],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_reject_still_asking_for_evidence_is_not_held(coord):
+    """An outstanding evidence request is a ground of its own: the Critic is
+    not complaining about a field, it is saying it cannot judge yet."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-eviden",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-evid"}},
+    )
+    coord.state.pending_proposals["msg-eviden"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-eviden",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "required_evidence": ["matched_benchmark"],
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_rule_the_critic_cleared_is_not_the_grounds_for_its_reject(coord):
+    """The prose scan used to fire on any word-bounded mention, so a Critic that
+    checked the advisory rule, found it clean, and refused for a real reason had
+    that reason read as the formatting complaint -- and the proposal ran."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-cleared",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-cleared"}},
+    )
+    coord.state.pending_proposals["msg-cleared"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-cleared",
+            "verdict": "reject",
+            "reasoning": (
+                f"Checked {QUANTITATIVE_CLAIM_REASON_CODE}: clean. Rejecting because the "
+                "patch rewrites a kernel with no before/after benchmark to stand on."
+            ),
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        pytest.param(
+            f"- {QUANTITATIVE_CLAIM_REASON_CODE}: clean.\n- rollback: absent. Rejecting on the rollback.",
+            id="enumerated_checklist",
+        ),
+        pytest.param(
+            f"> {QUANTITATIVE_CLAIM_REASON_CODE}: proposal_set[*] must not carry a self-reported gain field.\n"
+            "The proposal is clean on that rule; it is refused for lack of a rollback.",
+            id="quoted_rule_text",
+        ),
+        pytest.param(
+            f"```\n{QUANTITATIVE_CLAIM_REASON_CODE}: proposal_set[*] must not carry a self-reported gain field.\n"
+            "```\nRefused for lack of a rollback.",
+            id="fenced_rule_text",
+        ),
+        pytest.param(
+            f"Refused for lack of a rollback. For reference:\n{QUANTITATIVE_CLAIM_REASON_CODE}: not at issue here.",
+            id="cited_after_the_grounds",
+        ),
+    ],
+)
+def test_a_rule_a_verdict_enumerates_or_quotes_is_not_the_ground_it_rests_on(reasoning):
+    """A model that walks the rule list, or quotes a rule to say it does not
+    apply, writes the code in exactly the shapes a citation would take. Reading
+    one of those as grounds dispatches a proposal the Critic refused, so the
+    scan only fires on a citation opening the verdict's own prose."""
+    entry = {"verdict": "reject", "reasoning": reasoning}
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
+def test_a_citation_opening_the_verdict_still_holds_it():
+    """The shape the field verdict used stays readable: the code opens the
+    prose and a colon introduces the finding."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": f"`{QUANTITATIVE_CLAIM_REASON_CODE}`: the payload carries predicted_gain_pct.",
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
+def test_a_citation_in_either_field_the_entry_states_its_grounds_in_is_read():
+    """The two prose keys are the same speaker's grounds for the same verdict --
+    ``reasoning`` is how a single verdict spells them and ``rationale`` how a
+    variant does -- and nothing establishes a priority between them. Stopping at
+    the first key that says anything let a one-line pointer decide whether the
+    citation beside it was read at all."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": "See the per-variant notes.",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported gain.",
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
+def test_a_rule_named_in_a_remediation_note_is_not_a_citation():
+    """``notes`` is where a model writes what to do next, including "this is not
+    a <code> problem"; grounds are stated in ``reasoning``."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": "the benchmark is not comparable with the baseline.",
+        "notes": [f"{QUANTITATIVE_CLAIM_REASON_CODE}: nothing to fix on that front."],
+    }
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        pytest.param(
+            f"{QUANTITATIVE_CLAIM_REASON_CODE}_v2: a successor rule, not this one.",
+            id="a_longer_identifier_the_code_only_starts",
+        ),
+        pytest.param(
+            f"{QUANTITATIVE_CLAIM_REASON_CODE}\u00a0: a non-breaking space, not the gap a citation leaves.",
+            id="a_space_that_is_not_the_gap_a_citation_leaves",
+        ),
+    ],
+)
+def test_a_code_the_colon_does_not_follow_is_not_a_citation(reasoning):
+    """Nothing may sit between the code and the colon but a backtick and an
+    ASCII gap, so an identifier the code merely starts is not a citation. The
+    gap stays ASCII on purpose: a line has already been through ``splitlines``,
+    which leaves only exotic unicode spaces for a wider class to add, and
+    stretching the scan to reach them would buy a guess at the cost of reading
+    citations that were never made.
+
+    The other end of the anchor -- that nothing but whitespace or a backtick may
+    precede the code -- is what
+    ``test_a_rule_a_verdict_enumerates_or_quotes_is_not_the_ground_it_rests_on``
+    covers, through the list and quote markers a model actually writes."""
+    entry = {"verdict": "reject", "reasoning": reasoning}
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
+@pytest.mark.parametrize(
+    "risks",
+    [
+        pytest.param("the patch does not apply and there is no rollback plan", id="one_sentence_not_a_list"),
+        pytest.param({"severity": "blocker", "summary": "the patch does not apply"}, id="one_risk_not_in_a_list"),
+    ],
+)
+def test_findings_stated_outside_the_shape_that_counts_them_are_not_one_ground(risks):
+    """The hold is confined to a reject naming at most one risk, which means
+    counting the ``risks`` list. A verdict that states its risks in some other
+    shape has stated grounds the count cannot be read off, and reading them as
+    one would hold the whole reject to whichever rule the prose cites."""
+    entry = {
+        "verdict": "reject",
+        "reasoning": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the payload carries predicted_gain_pct.",
+        "risks": risks,
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == ("reject", "")
+
+
+@pytest.mark.parametrize(
+    "findings",
+    [
+        pytest.param(
+            {"risks": [{"severity": "blocker", "summary": "the payload carries a self-reported gain."}, ""]},
+            id="a_ground_stated_beside_an_empty_slot_is_one_ground",
+        ),
+        pytest.param({"required_evidence": [""]}, id="an_empty_slot_is_not_evidence_the_verdict_still_wants"),
+    ],
+)
+def test_an_empty_findings_slot_states_nothing(findings):
+    """A verdict serialised with its list slots padded out has stated what is
+    in them, not how many there are -- the same reading
+    ``serialize_verdict_advisory`` takes of the field set downstream. Counting
+    an empty slot as a ground would withhold the downgrade from the shape the
+    hold was built for."""
+    entry = {
+        "verdict": "reject",
+        "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        **findings,
+    }
+
+    assert verdict_held_to_its_rule(entry, action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "findings",
+    [
+        pytest.param({"risks": 1}, id="a_count_where_the_risks_go"),
+        pytest.param({"required_evidence": 1}, id="a_count_where_the_evidence_requests_go"),
+    ],
+)
+async def test_a_verdict_whose_findings_cannot_be_counted_still_decides_its_proposal(coord, findings):
+    """A number where the schema puts a list used to raise ``TypeError`` out of
+    the ground count. That reached the router's catch-all, which recorded the
+    exception and dropped the intent, leaving the proposal undecided for the
+    rest of the session. A count is not a citation the hold can act on, so the
+    verdict the Critic wrote is what the proposal is decided on."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-uncountable",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-uncountable"}},
+    )
+    coord.state.pending_proposals["msg-uncountable"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-uncountable",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            **findings,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.decided, pending.verdict) == (True, "reject")
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_held_reject_never_lands_the_patch_it_rejected(coord):
+    """The rules the hold enforces are about specialist proposal payloads, and
+    ``advise`` means "dispatch may proceed": holding an ``integrate_patch``
+    reject would execute the patch the Critic refused, with the propose-time
+    PolicyGate patch gate already behind it."""
+    coord.shared_state = _PatchVerdictSharedState()
+    pending = PendingProposal(
+        proposal_msg_id="msg-patch",
+        from_agent="orchestration",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "integrate_patch", "params": {"specialist_task_id": "t-patch"}},
+    )
+    coord.state.pending_proposals["msg-patch"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-patch",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+    assert coord.shared_state.patch_verdicts["t-patch"] == "reject"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep"])
+async def test_a_reject_of_a_proposal_the_rules_do_not_govern_stands(coord, action_name):
+    """Every advisory rule is about a specialist-authored proposal payload, so a
+    reject of anything else cannot rest on one however the verdict is worded."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-ungoverned",
+        from_agent="orchestration",
+        action_name=action_name,
+        predicted_gain_pct=0.0,
+        payload={"action_name": action_name, "params": {}},
+    )
+    coord.state.pending_proposals["msg-ungoverned"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-ungoverned",
+            "verdict": "reject",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_cross_domain_hint_reject_is_held_too(coord):
+    """Every rule declaring ``advise`` is covered, not just the quantitative-claim one."""
+    reason_code = cross_domain_rule_descriptors()[0]["failure_reason_code"]
+    pending = PendingProposal(
+        proposal_msg_id="msg-xd",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-2"}},
+    )
+    coord.state.pending_proposals["msg-xd"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-xd",
+            "verdict": "reject",
+            "failure_reason_code": reason_code,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload_extra",
+    [
+        pytest.param({}, id="no_reason_code"),
+        # A code no rule declares as advisory — e.g. the safety hard guard,
+        # which critic.md keeps at ``reject``.
+        pytest.param({"failure_reason_code": "specialist_patch_not_grounded"}, id="code_outside_the_advisory_set"),
+    ],
+)
+async def test_a_substantive_reject_still_rejects(coord, payload_extra):
+    """The backstop is scoped to rules that declared ``advise``; every other reject stands."""
+    pending = PendingProposal(
+        proposal_msg_id="msg-real",
+        from_agent="orchestration",
+        action_name="specialist",
+        predicted_gain_pct=0.0,
+        payload={"action_name": "specialist", "params": {"task_id": "t-3"}},
+    )
+    coord.state.pending_proposals["msg-real"] = pending
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-real",
+            "verdict": "reject",
+            **payload_extra,
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_one_variant_held_to_advise_does_not_out_rank_its_siblings(coord):
+    """The hold runs per variant before the collapse, so an advisory-only reject cannot discard the set."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-grid", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-grid",
+            "verdict_map": {
+                "v_a": {"verdict": "advise", "rationale": "worth a look"},
+                "v_b": {
+                    "verdict": "reject",
+                    "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    # Without the per-entry hold, reject out-ranks advise and the set is lost.
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_variant_citing_its_rule_in_the_key_the_entry_carries_is_held(coord):
+    """A ``verdict_map`` entry is ``{verdict, rationale?}`` — the shape PolicyGate
+    documents and every fixture uses. Scanning ``reasoning`` there left the
+    per-variant hold unreachable on the path it was written for."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-rationale", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-rationale",
+            "verdict_map": {
+                "v_a": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+                "v_b": {
+                    "verdict": "reject",
+                    "rationale": (f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported gain."),
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_grid_rejected_only_on_advisory_rules_survives(coord):
+    """A whole map rejected on advisory-only grounds collapses to advise, not reject."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-grid-all", variants=["v_a", "v_b"])
+    entry = {"verdict": "reject", "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE}
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-grid-all",
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_variant_reject_keeps_the_grounds_the_payload_states_for_it(coord):
+    """A ``verdict_map`` entry is ``{verdict, rationale?, failure_reason_code?}``
+    -- it has no slot for ``required_evidence`` or ``risks``, which the schema
+    puts on the payload. Reading the hold's "rests on one ground" guard against
+    the entry alone made it structurally unfireable: a reject stating blockers
+    and asking for evidence was downgraded and its variant dispatched."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-grounds", variants=["v_a"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-grounds",
+            "required_evidence": ["matched benchmark", "rollback plan"],
+            "risks": [
+                {"severity": "blocker", "summary": "the patch does not apply to the base checkout."},
+                {"severity": "blocker", "summary": "there is no rollback plan."},
+                {"severity": "minor", "summary": "the variant carries a self-reported gain."},
+            ],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": (
+                        f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported "
+                        "gain, and the patch it rests on does not apply."
+                    ),
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_reject_code_the_payload_declares_outranks_a_variants_advisory_prose(coord):
+    """Declared-code precedence has to reach the batch path too: a
+    ``failure_reason_code`` naming a rule that asked for a reject is the
+    Critic's own citation, and a variant naming an advisory rule in prose
+    cannot soften it."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-declared", variants=["v_a"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-declared",
+            "failure_reason_code": "specialist_patch_not_grounded",
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported gain.",
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_one_risk_a_batch_states_is_not_the_rule_its_variants_cite(coord):
+    """A single stated risk is allowed beside a citation because on the single
+    path both come from one statement by one author. A batch states its risks
+    for the whole set and the citation belongs to the entry, so counting them
+    as one ground identifies them -- and a set refused for supplying no
+    rollback plan anywhere was dispatched on a formatting rule instead."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-one-blocker", variants=["v_a", "v_b"])
+    entry = {
+        "verdict": "reject",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: this variant carries a self-reported gain field.",
+    }
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-one-blocker",
+            "risks": [{"severity": "blocker", "summary": "no variant in this set supplies a rollback plan."}],
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_variant_resting_only_on_the_cited_rule_still_gives_up_its_reject(coord):
+    """A finding is what holds a variant, not the batch's whole advisory
+    context: remediation notes and evidence pointers say what to do next and
+    where to look, so a variant resting on nothing but its cited rule still
+    gives up its reject."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-only", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-only",
+            "notes": ["Resubmit without predicted_gain_pct."],
+            "packet_evidence": ["proposal_set[0].predicted_gain_pct"],
+            "verdict_map": {
+                "v_a": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+                "v_b": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: the variant carries a self-reported gain.",
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "advise"
+    assert len(coord._materialise_calls) == 1
+    kinds = [call.args[2].get("kind") for call in coord._record_observation.await_args_list]
+    assert "verdict_downgraded_to_rule_verdict" in kinds
+
+
+@pytest.mark.asyncio
+async def test_the_verdicts_own_prose_does_not_supply_a_variants_citation(coord):
+    """Grounds stated once for the whole review are inherited; a citation is
+    not. The payload's prose speaks for the batch, and reading it as one
+    variant's grounds would downgrade a reject whose own rationale refuses on
+    something else entirely."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-prose", variants=["v_a"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-prose",
+            "reasoning": f"{QUANTITATIVE_CLAIM_REASON_CODE}: two of the variants carry a self-reported gain.",
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": "this variant has no rollback plan and its patch does not apply.",
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_batchs_declared_advisory_code_does_not_supply_a_variants_citation(coord):
+    """The batch's citation is not the variant's either. A declared code
+    outranks prose, so inheriting one would not merely compete with the
+    variant's own rationale — it would stop it being read at all, and downgrade
+    a reject that refuses on grounds no advisory rule ever asked advice for."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-field", variants=["v_a"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-field",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": "this variant has no rollback plan and its patch does not apply.",
+                },
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert pending.verdict == "reject"
+    assert coord._materialise_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rejected", "risks"),
+    [
+        pytest.param(
+            "v_a",
+            [
+                {"severity": "blocker", "summary": "no variant in this set gives a rollback plan (v_b included)."},
+                {"severity": "blocker", "summary": "none name the active path the flag touches; v_b is typical."},
+            ],
+            id="prose_naming_a_sibling_as_its_example",
+        ),
+        pytest.param(
+            "v_a",
+            [
+                {"severity": "blocker", "summary": "v_a: no rollback plan."},
+                {"severity": "blocker", "summary": "v_a does not name the active path the flag touches."},
+            ],
+            id="prose_naming_the_rejected_variant",
+        ),
+        pytest.param(
+            "v_a",
+            [
+                {"severity": "blocker", "summary": "the second variant gives no rollback plan; nor do the rest."},
+                {"severity": "blocker", "summary": "none name the active path the flag touches."},
+            ],
+            id="prose_naming_no_key_at_all",
+        ),
+        pytest.param(
+            "naïve",
+            [
+                {"severity": "blocker", "summary": "naïve and v_b: neither gives a rollback plan."},
+                {"severity": "blocker", "summary": "neither names the active path the flag touches."},
+            ],
+            id="prose_naming_a_key_no_json_escape_survives",
+        ),
+    ],
+)
+async def test_a_batch_blocker_binds_every_variant_whatever_name_its_prose_carries(coord, rejected, risks):
+    """A batch states its blockers once, in prose written for the whole set,
+    and nothing asks the Critic to file one under a variant's key. Reading a
+    name in that prose as "about that one, not you" removed grounds the Critic
+    stated and dispatched a set it refused; reading it the other way would let
+    the hold turn on a spelling. Neither is read: the batch's grounds hold
+    every variant that states none of its own."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-example", variants=[rejected, "v_b", "v_c"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-example",
+            "risks": risks,
+            "verdict_map": {
+                rejected: {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "re-run once the patch applies"},
+                "v_c": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_finding_is_not_disowned_by_a_sibling_named_in_a_neighbouring_field(coord):
+    """A finding is a dict of several fields, and only one of them states what
+    the finding *is*. A remediation pointing at how a sibling was fixed, or an
+    evidence request phrased by example, says nothing about who the finding
+    binds."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-fields", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-fields",
+            "required_evidence": ["a rollback plan of the kind v_b supplies"],
+            "risks": [
+                {
+                    "severity": "blocker",
+                    "summary": "the patch does not apply to the base checkout.",
+                    "required_fix": "rebase it the way v_b was rebased.",
+                },
+            ],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "re-run once the patch applies"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_grounds_stated_in_a_shape_the_schema_does_not_use_are_not_read_as_one(coord):
+    """``risks`` is a list in the schema. A verdict that states it as one
+    sentence has stated grounds whose count cannot be read off, and "the patch
+    does not apply and there is no rollback plan" is two of them -- so it
+    cannot be counted as the single ground the hold is confined to."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-scalar", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-scalar",
+            "risks": "the patch does not apply and there is no rollback plan",
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_evidence_the_batch_still_wants_holds_a_variant_resting_on_a_cited_rule(coord):
+    """``required_evidence`` is the stronger of the two inherited findings --
+    one item is a ground where ``risks`` needs two -- and a batch states it in
+    the same place, for variants whose own shape has no slot for it."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-evidence", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-evidence",
+            "required_evidence": ["a matched benchmark for every variant here"],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_variant_that_states_a_finding_of_its_own_still_answers_for_the_batchs(coord):
+    """Filing a risk under a variant's key says that risk is about it; it does
+    not say the blocker the batch filed under no key is about someone else.
+    Letting the entry's own list stand in for the batch's would hand a variant
+    its downgrade back by writing one minor risk next to it."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-both", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-both",
+            "risks": [{"severity": "blocker", "summary": "nothing here has a rollback plan."}],
+            "verdict_map": {
+                "v_a": {
+                    "verdict": "reject",
+                    "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+                    "risks": [{"severity": "minor", "summary": "carries a self-reported gain field."}],
+                },
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_variant_stating_no_grounds_does_not_borrow_the_batchs_advisory_citation(coord):
+    """An entry that states nothing but its verdict has cited no rule. The
+    batch's advisory code is the batch's citation, and lending it to that
+    entry would downgrade a reject on grounds nobody wrote down."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-bare", variants=["v_a", "v_b"])
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-bare",
+            "failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE,
+            "verdict_map": {
+                "v_a": {"verdict": "reject"},
+                "v_b": {"verdict": "needs_review", "rationale": "no prior on this flag"},
+            },
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_code_no_rule_declares_withholds_the_downgrade(coord):
+    """A code the Critic filled in with something no rule defines is not a
+    citation the hold can act on, and it is not permission to dispatch either:
+    it withholds the downgrade, at the cost this reading accepts -- the set
+    keeps the reject it would otherwise have given up."""
+    pending = _seed_explore_proposal(coord, msg_id="msg-map-junk", variants=["v_a", "v_b"])
+    entry = {
+        "verdict": "reject",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+    }
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": "msg-map-junk",
+            "failure_reason_code": "N/A",
+            "verdict_map": {"v_a": dict(entry), "v_b": dict(entry)},
+        },
+    )
+    await coord._handle_review_verdict("critic", intent)
+
+    assert (pending.verdict, len(coord._materialise_calls)) == ("reject", 0)
+
+
+@pytest.mark.parametrize(
+    ("entry", "payload", "expected"),
+    [
+        pytest.param(
+            {"verdict": "reject"},
+            {"risks": [{"severity": "blocker"}], "required_evidence": ["a bench"]},
+            {"verdict": "reject"},
+            id="the_batchs_findings_are_not_moved_onto_the_entry",
+        ),
+        pytest.param(
+            {"verdict": "reject", "failure_reason_code": "variant_code"},
+            {"failure_reason_code": "payload_code"},
+            {"verdict": "reject", "failure_reason_code": "variant_code"},
+            id="the_entrys_own_statement_of_a_ground_wins",
+        ),
+        pytest.param(
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            {"reasoning": "the batch's grounds"},
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            id="prose_is_not_inherited",
+        ),
+        pytest.param(
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            {"failure_reason_code": QUANTITATIVE_CLAIM_REASON_CODE},
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            id="a_code_that_could_soften_the_reject_is_not_inherited_either",
+        ),
+        pytest.param(
+            {"verdict": "reject", "rationale": "the variant's own grounds"},
+            {"failure_reason_code": "specialist_patch_not_grounded"},
+            {
+                "verdict": "reject",
+                "rationale": "the variant's own grounds",
+                "failure_reason_code": "specialist_patch_not_grounded",
+            },
+            id="a_code_that_can_only_hold_the_reject_is_inherited",
+        ),
+        pytest.param(
+            {"verdict": "reject", "risks": [{"summary": "its own"}]},
+            {"risks": [{"summary": "the batch's"}]},
+            {"verdict": "reject", "risks": [{"summary": "its own"}]},
+            id="an_entrys_own_findings_are_left_as_the_entry_stated_them",
+        ),
+        pytest.param("reject", {"failure_reason_code": "payload_code"}, {}, id="a_non_dict_entry_states_nothing"),
+    ],
+)
+def test_an_entry_inherits_only_a_code_that_can_hold_its_reject(entry, payload, expected):
+    """A finding the batch states is read where it is stated, as a hold on the
+    whole set; moving one onto an entry would put it back in the count the
+    ``<= 1`` allowance runs on, which is what identified the batch's ground
+    with the entry's rule."""
+    assert verdict_map_entry_grounds(entry, payload) == expected
+
+
+def test_a_batch_that_states_nothing_readable_leaves_its_entry_on_its_own_grounds():
+    """Both halves of the batch reading -- what an entry inherits and what
+    holds it -- ask a payload what it states, so both have to answer for one
+    that is not a payload at all. It states no findings and no code, which
+    leaves the entry judged on what it wrote itself."""
+    entry = {
+        "verdict": "reject",
+        "rationale": f"{QUANTITATIVE_CLAIM_REASON_CODE}: carries a self-reported gain field.",
+    }
+
+    assert verdict_map_entry_held_to_its_rule(entry, "not a payload", action_name="specialist") == (
+        "advise",
+        QUANTITATIVE_CLAIM_REASON_CODE,
+    )
+
+
+def test_a_map_of_verdicts_none_of_which_decides_asks_for_review():
+    """``redirect`` is a legal verdict with no place in the collapse order, so a
+    map carrying only those decides nothing and must fall back to review."""
+    assert collapse_verdicts(["redirect", ""]) == "needs_review"
+
+
+def test_an_empty_map_asks_for_review():
+    assert collapse_verdicts([]) == "needs_review"
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "expected"),
+    [
+        pytest.param(["approve", "reject", "advise", "needs_review"], "approve", id="one_approve_carries_it"),
+        pytest.param(["reject", "advise", "needs_review"], "reject", id="reject_outranks_advice"),
+        pytest.param(["advise", "needs_review"], "advise", id="advice_outranks_more_review"),
+    ],
+)
+def test_the_collapse_keeps_its_priority_order(verdicts, expected):
+    assert collapse_verdicts(verdicts) == expected
 
 
 # 4. _materialize_approved_proposal — filter semantics (unit)

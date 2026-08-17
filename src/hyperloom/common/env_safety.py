@@ -134,8 +134,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_RUN_MODE",
         "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SKILL_PATH",
-        "HYPERLOOM_WHEEL_REPO",
-        "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_ROOT",
@@ -172,6 +170,10 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
+        # install.sh persists this next to the Anthropic URL and key, so the
+        # reader has to accept it or a header-authenticated gateway loses its
+        # credential on the way back in.
+        "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "FORGE_PATH",
         "GEAK_CLAUDE_BIN",
@@ -197,6 +199,10 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "MAGPIE_PYTHON",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        # install.sh never writes the OpenAI side itself, but the URL and key are
+        # already accepted from an operator-supplied env file; the header that
+        # authenticates the same endpoint is read on the same terms.
+        "OPENAI_CUSTOM_HEADERS",
         "TRACELENS_INTERNAL_ROOT",
         "TRACELENS_ROOT",
         "USER_DATA_PATH",

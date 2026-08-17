@@ -113,14 +113,13 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 ```
 
-The backend runs `install_baremetal.sh` in five phases:
+The backend runs `install_baremetal.sh` in four phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
-4. **Credentials**: resolves LLM gateway credentials into `.env`.
-5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
+3. **Credentials**: resolves LLM gateway credentials into `.env`.
+4. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
 ### Scenario B: Bare metal + Docker
@@ -375,15 +374,15 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0`
-- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
-- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
+- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`
+- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x`
+- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/rocm/hyperloom:vllm-v0.24.0-rocm7.2.0
+export HYPERLOOM_IMAGE=docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
