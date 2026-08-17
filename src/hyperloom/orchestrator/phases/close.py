@@ -524,19 +524,19 @@ class ClosePhase(PhaseHandler):
         )
 
     def _close_step_wait_sec(self, task: Task) -> float:
-        """How long to wait for a close-step task that is already running.
+        """How long CLOSE waits for a close-step task to reach a terminal state.
 
         The bound is the step's own expected runtime, clamped into
         ``[_CLOSE_STEP_WAIT_FLOOR_SEC, _CLOSE_STEP_WAIT_CEILING_SEC]``. This is
         deliberately not the closing reserve: the reserve answers "how much of
         the session do we hold back for CLOSE", which scales with the session
         and is a handful of seconds for a short one, while this answers "how
-        long is it reasonable to wait for work that is already under way",
-        which scales with the work. Bounding a two-minute report by a
-        twelve-second reserve is a wait only on paper.
+        long is it reasonable to wait for the work", which scales with the
+        work. Bounding a two-minute report by a twelve-second reserve is a wait
+        only on paper.
 
         Args:
-            task: The close-step task found in ``running``.
+            task: The close-step task, already running or about to start.
 
         Returns:
             The bound in seconds.
@@ -649,7 +649,40 @@ class ClosePhase(PhaseHandler):
             return state
         if state == _TASK_STATE_RUNNING:
             return await self._await_running_close_task(task, step=step)
-        result = await self.sub.run_task(task)
+        return await self._run_fresh_close_task(task, step=step)
+
+    async def _run_fresh_close_task(self, task: Task, *, step: str) -> str:
+        """Run a queued close-step task, bounded by the same wait as an in-flight one.
+
+        A fresh report used to be awaited with no timeout, so a wedged writer
+        held the process open after the session budget was already gone. The
+        bound is the step's typical cost, not the closing reserve.
+
+        Args:
+            task: The queued (or otherwise runnable) close-step task.
+            step: Close-step label, for logging.
+
+        Returns:
+            The state the task ended in, or ``running`` when the bound elapsed
+            first.
+        """
+        bound_sec = self._close_step_wait_sec(task)
+        log.info(
+            "CLOSE step %s: task_id=%s starting; waiting up to %.0fs for it",
+            step,
+            task.task_id,
+            bound_sec,
+        )
+        try:
+            result = await asyncio.wait_for(self.sub.run_task(task), timeout=bound_sec)
+        except asyncio.TimeoutError:
+            log.warning(
+                "CLOSE step %s: task_id=%s still running after %.0fs; recording the step as failed",
+                step,
+                task.task_id,
+                bound_sec,
+            )
+            return _TASK_STATE_RUNNING
         return result.state
 
     async def _record_close_step(

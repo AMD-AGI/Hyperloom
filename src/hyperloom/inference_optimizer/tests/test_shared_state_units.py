@@ -136,6 +136,67 @@ class TestGridSessionDeadline:
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
 
 
+class TestDeadlineUnix:
+    """The persisted unix deadline is the one remaining-time check."""
+
+    def test_an_unbounded_session_does_not_stamp_a_deadline(self):
+        state = SharedState(session_id="s")
+        assert state.stamp_deadline_unix() == 0.0
+        assert state.deadline_unix == 0.0
+        assert state.remaining_minutes() is None
+
+    def test_the_first_stamp_is_start_plus_the_budget(self):
+        from hyperloom.common.coerce import to_unix
+
+        state = SharedState(session_id="s", max_minutes=60)
+        stamped = state.stamp_deadline_unix()
+        start = to_unix(state.start_ts)
+        assert stamped == pytest.approx(start + 3600.0, abs=1.0)
+        assert state.remaining_minutes() == pytest.approx(60.0, abs=0.1)
+
+    def test_a_second_stamp_does_not_reissue_the_budget(self):
+        state = SharedState(session_id="s", max_minutes=60)
+        first = state.stamp_deadline_unix(now_unix=1_000.0)
+        state.start_ts = "2099-01-01T00:00:00+00:00"
+        assert state.stamp_deadline_unix(now_unix=9_000.0) == first
+        assert state.deadline_unix == first
+
+    def test_remaining_minutes_reads_the_stamp_not_elapsed(self):
+        from datetime import datetime, timezone
+
+        state = SharedState(session_id="s", max_minutes=60)
+        state.deadline_unix = 2_000.0
+        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+
+    def test_a_spent_stamp_reads_as_zero_not_negative(self):
+        from datetime import datetime, timezone
+
+        state = SharedState(session_id="s", max_minutes=60)
+        state.deadline_unix = 100.0
+        now = datetime.fromtimestamp(500.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == 0.0
+
+    def test_teardown_timings_accumulate_and_keep_a_total(self):
+        state = SharedState(session_id="s")
+        state.record_teardown_timing("final_json", 1.25)
+        state.record_teardown_timing("langfuse", 0.5)
+        assert state.teardown_timings_sec["final_json"] == 1.25
+        assert state.teardown_timings_sec["langfuse"] == 0.5
+        assert state.teardown_timings_sec["total"] == pytest.approx(1.75)
+
+    def test_timed_teardown_step_records_the_elapsed_wall(self, monkeypatch):
+        from hyperloom.orchestrator.state import shared_state as ss_mod
+        from hyperloom.orchestrator.state.shared_state import timed_teardown_step
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(ss_mod.time, "monotonic", lambda: clock["t"])
+        state = SharedState(session_id="s")
+        with timed_teardown_step(state, "final_md"):
+            clock["t"] = 2.5
+        assert state.teardown_timings_sec["final_md"] == 2.5
+
+
 class TestProfileWorkloadContext:
     def test_normalizes_state_and_payload_overrides(self):
         state = SharedState(

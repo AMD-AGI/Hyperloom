@@ -131,6 +131,11 @@ def test_session_remaining_seconds() -> None:
         SimpleNamespace(max_minutes=60, start_ts=now_iso),
     )
     assert rem is not None and 0.0 < rem <= 3600.0
+    # A stamped unix deadline wins over start_ts, so a resume cannot reissue.
+    assert ps.session_remaining_seconds(
+        SimpleNamespace(max_minutes=60, start_ts=now_iso, deadline_unix=1_000.0),
+        now_unix=400.0,
+    ) == pytest.approx(600.0)
 
 
 def test_post_prelude_target() -> None:
