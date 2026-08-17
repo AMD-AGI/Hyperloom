@@ -28,10 +28,11 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
+from ...trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 
 log = logging.getLogger(__name__)
@@ -257,6 +258,34 @@ class RooflineExecutor:
         from ...kernel.request_handlers import trace_analyze_handler
         from .profile import profile_executor
 
+        # Every sub-step below goes through this, so a call site added later
+        # cannot silently be the one that reports nothing. Reported on entry,
+        # not on completion: a sub-step that never returns is exactly the case
+        # the heartbeat has to be able to show.
+        async def _reported(
+            label: str,
+            start: Callable[[], Awaitable[Any]],
+            **fields: Any,
+        ) -> Any:
+            """Announce a roofline sub-step, then await it.
+
+            Args:
+                label (str): Sub-step name carried on the progress note.
+                start (Callable[[], Awaitable[Any]]): Zero-argument factory
+                    returning the sub-step awaitable.
+                **fields (Any): Extra note fields, e.g. ``index`` / ``total``.
+
+            Returns:
+                Any: Whatever the sub-step returned, unchanged.
+            """
+            await report_progress(
+                unit="roofline_step",
+                label=label,
+                status="started",
+                **fields,
+            )
+            return await start()
+
         session_dir = self._resolve_session_dir(ctx)
         # Time the composite so the END lifecycle event reports its duration.
         _lc_t0 = time.monotonic()
@@ -310,7 +339,12 @@ class RooflineExecutor:
                 framework=framework,
             )
             try:
-                profile_result = await profile_executor(profile_ctx)
+                profile_result = await _reported(
+                    "profile",
+                    lambda: profile_executor(profile_ctx),
+                    index=attempt,
+                    total=_PROFILE_MAX_ATTEMPTS,
+                )
             except Exception as exc:  # noqa: BLE001
                 last_phase = "profile"
                 last_error = f"profile_executor raised: {exc!r}"
@@ -493,9 +527,9 @@ class RooflineExecutor:
         if roofline_output_name:
             ta_payload["roofline_output_name"] = roofline_output_name
         try:
-            ta_result = await trace_analyze_handler(
-                ta_payload,
-                session_dir=session_dir,
+            ta_result = await _reported(
+                "trace_analyze",
+                lambda: trace_analyze_handler(ta_payload, session_dir=session_dir),
             )
         except Exception as exc:  # noqa: BLE001
             # Clear the cache so the prompt shows no snapshot rather than advice
@@ -550,9 +584,9 @@ class RooflineExecutor:
             if roofline_output_name:
                 ta_payload_retry["roofline_output_name"] = roofline_output_name
             try:
-                ta_result = await trace_analyze_handler(
-                    ta_payload_retry,
-                    session_dir=session_dir,
+                ta_result = await _reported(
+                    "trace_analyze_n26_retry",
+                    lambda: trace_analyze_handler(ta_payload_retry, session_dir=session_dir),
                 )
             except Exception as exc:  # noqa: BLE001
                 self.shared_state.last_trace_analyze = {}
@@ -664,7 +698,10 @@ class RooflineExecutor:
             os.environ[_COMPUTE_BOUND_PROFILE_ENV] = "1"
             try:
                 cb_ctx = self._wrap_profile_ctx(ctx, framework=framework)
-                cb_profile = await profile_executor(cb_ctx)
+                cb_profile = await _reported(
+                    "profile_compute_bound",
+                    lambda: profile_executor(cb_ctx),
+                )
                 cb_trace = _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
                 if cb_trace:
                     cb_payload: dict[str, Any] = {
@@ -675,7 +712,10 @@ class RooflineExecutor:
                         cb_payload["roofline_arm"] = roofline_arm
                     if roofline_output_name:
                         cb_payload["roofline_output_name"] = roofline_output_name
-                    cb_ta = await trace_analyze_handler(cb_payload, session_dir=session_dir)
+                    cb_ta = await _reported(
+                        "trace_analyze_compute_bound",
+                        lambda: trace_analyze_handler(cb_payload, session_dir=session_dir),
+                    )
                     if isinstance(cb_ta, dict) and cb_ta.get("status") == "ok":
                         cb_hot = cb_ta.get("hot_kernels_top15") or cb_ta.get("hot_kernels") or []
                         if cb_hot:

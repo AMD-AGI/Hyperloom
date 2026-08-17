@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import time
 
 import pytest
@@ -17,7 +18,10 @@ from hyperloom.orchestrator.roles._llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
 )
-from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess
+from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
+from hyperloom.orchestrator.trace.task_progress import progress_scope
+
+from .conftest import chatty_child, suppression_window_s
 
 
 def test_apply_llm_stability_env_sets_defaults():
@@ -54,6 +58,89 @@ async def test_run_subprocess_returns_output_normally():
     assert "hello-stdout" in stdout
 
 
+_ECHO_UNBUFFERED = ["python3", "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"]
+
+
+async def test_run_subprocess_unbuffers_its_child(monkeypatch):
+    """A block-buffered child would look dead between flushes."""
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    rc, stdout, _stderr = await _run_subprocess(_ECHO_UNBUFFERED, timeout_sec=30)
+    assert rc == 0
+    assert stdout.strip() == "1"
+
+
+async def test_run_subprocess_leaves_an_operator_chosen_buffering_alone(monkeypatch):
+    """Defaulting is help; overriding an explicit setting is a surprise."""
+    monkeypatch.setenv("PYTHONUNBUFFERED", "0")
+    rc, stdout, _stderr = await _run_subprocess(_ECHO_UNBUFFERED, timeout_sec=30)
+    assert rc == 0
+    assert stdout.strip() == "0"
+
+
+async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
+    """The heartbeat above it reports only when this tally moves."""
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
+
+    counted: list[int] = []
+    real = _subprocess_kill.run_with_session_kill
+
+    def _spy(cmd, **kwargs):
+        calls = 0
+        reported = kwargs.pop("on_output")
+
+        def _count() -> None:
+            nonlocal calls
+            calls += 1
+            reported()
+
+        try:
+            return real(cmd, on_output=_count, **kwargs)
+        finally:
+            counted.append(calls)
+
+    monkeypatch.setattr(_subprocess_kill, "run_with_session_kill", _spy)
+    await _run_subprocess(
+        ["python3", "-c", "print('a')\nprint('b')"],
+        timeout_sec=30,
+    )
+
+    assert counted == [2]
+
+
+async def test_a_kernel_tool_keeps_reporting_while_its_child_works(monkeypatch, progress_cadence):
+    """A trace analysis blocks for the better part of an hour behind one ``await``.
+
+    Bounding the gap between notes is what a dropped liveness callback fails;
+    asserting that a callback was passed is not. The child is faked rather than
+    spawned so the timeline is the simulated one — that a real child's lines
+    reach ``on_output`` is covered by
+    ``test_run_subprocess_counts_the_lines_its_child_emits``.
+    """
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
+
+    def _done(cmd, **_kwargs) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(
+        _subprocess_kill,
+        "run_with_session_kill",
+        chatty_child(progress_cadence, _done, blocks_for_s=600.0, line_every_s=30.0),
+    )
+
+    with progress_scope(progress_cadence.sink()):
+        rc, _stdout, _stderr = await _run_subprocess(["python3", "-c", "pass"], timeout_sec=30)
+
+    assert rc == 0
+    assert progress_cadence.widest_silence() < suppression_window_s()
+
+
+def test_a_tool_is_named_after_the_script_it_runs():
+    """``kernel_tool:tracelens_analysis`` is what an operator has to recognize."""
+    assert _tool_label(["python3", "/opt/tools/tracelens_analysis.py", "--x"]) == "tracelens_analysis"
+    assert _tool_label(["ls", "-l"]) == "ls"
+    assert _tool_label([]) == "subprocess"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process-group kill is POSIX-only")
 async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
     """A timed-out child that spawned a long-lived grandchild must have the
@@ -74,9 +161,7 @@ async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
             timeout_sec=2,
         )
     # A hard timeout surfaces as TimeoutExpired.
-    import subprocess as _sp
-
-    assert isinstance(excinfo.value, _sp.TimeoutExpired)
+    assert isinstance(excinfo.value, subprocess.TimeoutExpired)
 
     assert pidfile.exists(), "grandchild never recorded its pid"
     gc_pid = int(pidfile.read_text().strip())
