@@ -121,6 +121,49 @@ class ServingSpec:
     extra_server_args: str = ""
 
 
+# Context, in tokens, out to which the projection has actually been checked
+# against real vLLM measurements. A controlled sweep -- prefix caching off, three
+# seeds, prompt length from 1k to 65,536 -- scores 6.0% across that range, which
+# covers everything Hyperloom searches. Beyond it the decode step has never been
+# compared to hardware, and the last extrapolation past a measured range hid a
+# 46.3% error until someone ran the sweep.
+VALIDATED_CONTEXT_TOKENS = 65536
+
+# Above this the deployment spans nodes, and no inference measurement behind the
+# projection ever crossed a node boundary.
+SINGLE_NODE_GPUS = 8
+
+
+def extrapolation_notes(spec: "ServingSpec", replica_gpus: int,
+                        calibrated: bool) -> list[str]:
+    """Where this projection is being asked to work outside its evidence.
+
+    Returned on every projection so a search cannot quietly trust a number that
+    was produced by extrapolating along an axis nothing validated. These are not
+    error bars -- the size of the error is not known, which is the point.
+    """
+    notes: list[str] = []
+    context = int(spec.isl or 0) + int(spec.osl or 0)
+    if context > VALIDATED_CONTEXT_TOKENS:
+        notes.append(
+            f"context {context} tokens exceeds the {VALIDATED_CONTEXT_TOKENS} "
+            "this model has been checked against, and the decode step is known "
+            "to be too flat in context; use for ranking, and anchor near the "
+            "target context before believing the absolute latency"
+        )
+    if replica_gpus > SINGLE_NODE_GPUS:
+        notes.append(
+            f"{replica_gpus} GPUs spans nodes; the inter-node collective terms "
+            "are derived, not measured, and nothing has checked them"
+        )
+    if not calibrated:
+        notes.append(
+            "no warmup anchor matched this model, so this is pure simulation "
+            "with no measurement pinning its scale"
+        )
+    return notes
+
+
 @dataclass
 class ProjMetrics:
     """Projected serving metrics, mapped onto benchmark measurement fields."""
@@ -192,6 +235,29 @@ def _parse_server_arg_str(server_args: str, *flags: str) -> str | None:
             if tok.startswith(flag + "="):
                 return tok.split("=", 1)[1]
     return None
+
+
+def _parse_kv_cache_dtype(server_args: str) -> str | None:
+    """KV-cache dtype from a framework's server args, normalised for InferSim.
+
+    vLLM spells it ``--kv-cache-dtype fp8_e4m3`` (or ``fp8``, ``fp8_e5m2``) and
+    sglang ``--kv-cache-dtype fp8_e4m3``; both mean the cache is stored in a
+    single byte per element, which is what the projection needs to know. ``auto``
+    means "follow the weights", which the caller's default already does.
+    """
+    raw = _parse_server_arg_str(server_args, "--kv-cache-dtype", "--kv_cache_dtype")
+    if not raw:
+        return None
+    v = raw.strip().strip("'\"").lower()
+    if v in ("auto", ""):
+        return None
+    if v.startswith("fp8"):
+        return "fp8"
+    if v in ("bf16", "bfloat16"):
+        return "bf16"
+    if v in ("fp16", "float16", "half"):
+        return "fp16"
+    return v
 
 
 def parse_speculative(server_args: str) -> tuple[str | None, int]:
@@ -284,7 +350,23 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
     ) or 1
 
     weight_dtype = _precision_to_weight_dtype(str(bench.get("precision") or "bf16"))
-    kv_dtype = str(os.environ.get(ENV_KV_DTYPE) or "bf16").lower()
+    # KV dtype: explicit bridge env wins, else the server arg the variant sets,
+    # else bf16. Reading the arg matters because an explore grid changes the KV
+    # dtype by passing this flag and nothing else -- and the projection prices KV
+    # dtype perfectly well, so ignoring the flag made a lever the model *can*
+    # see look like one it cannot, and projected an fp8 candidate as bf16.
+    kv_dtype = str(
+        os.environ.get(ENV_KV_DTYPE)
+        or _parse_kv_cache_dtype(extra_args)
+        or "bf16"
+    ).lower()
+
+    conc = max(1, _as_int(_first_env_or(envs, "CONC", 64), 64))
+    # A running batch cannot exceed the scheduler's cap on concurrent sequences,
+    # so a variant that lowers it lowers the batch the decode step actually runs.
+    max_seqs = _parse_server_arg_int(extra_args, "--max-num-seqs", "--max-running-requests")
+    if max_seqs and max_seqs > 0:
+        conc = min(conc, max_seqs)
 
     return ServingSpec(
         framework=framework,
@@ -292,7 +374,7 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
         tp=max(1, tp),
         ep=max(1, ep),
         pp=max(1, pp),
-        conc=max(1, _as_int(_first_env_or(envs, "CONC", 64), 64)),
+        conc=conc,
         isl=max(1, _as_int(_first_env_or(envs, "ISL", 1024), 1024)),
         osl=max(1, _as_int(_first_env_or(envs, "OSL", 1024), 1024)),
         weight_dtype=weight_dtype,
@@ -683,6 +765,11 @@ def _metrics_from_results(
         extras["anchor_needs_warmup"] = anchor.needs_warmup
         extras["anchor_real_weights"] = anchor.real_weights
 
+    replica_gpus = int(getattr(perf, "replica_gpus", 0) or 0)
+    extras["extrapolation"] = extrapolation_notes(
+        spec, replica_gpus, bool(extras.get("benchmark_calibrated", 0.0))
+    )
+
     return ProjMetrics(
         output_throughput=output_tps,
         request_throughput=request_tps,
@@ -695,7 +782,7 @@ def _metrics_from_results(
         memory_per_gpu_gb=mem_gb,
         max_concurrency=max_conc,
         calibrated=bool(extras.get("benchmark_calibrated", 0.0)),
-        replica_gpus=int(getattr(perf, "replica_gpus", 0) or 0),
+        replica_gpus=replica_gpus,
         extras=extras,
     )
 
@@ -739,6 +826,7 @@ def raw_result_from_metrics(spec: ServingSpec, m: ProjMetrics) -> dict[str, Any]
         "infersim_decode_tps_per_gpu": m.decode_tps_per_gpu,
         "infersim_memory_per_gpu_gb": m.memory_per_gpu_gb,
         "infersim_calibrated": m.calibrated,
+        "infersim_extrapolation": list(m.extras.get("extrapolation") or []),
         "infersim_replica_gpus": m.replica_gpus,
         "infersim_tp": spec.tp,
         "infersim_ep": spec.ep,
