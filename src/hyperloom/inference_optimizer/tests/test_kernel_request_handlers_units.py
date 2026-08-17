@@ -1986,6 +1986,10 @@ class TestForgeCollectiveCoverage:
         ).save(tmp_path)
         monkeypatch.setenv("FORGE_COLLECTIVE_AGENT_TIMEOUT", "900")
         monkeypatch.setenv("CLAUDE_MODEL", "claude-test")
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {**_ANTHROPIC_ONLY_ENV, "CLAUDE_MODEL": "claude-test"},
+        )
         monkeypatch.setattr(krh.time, "time_ns", lambda: 123)
         tool_path = tmp_path / "tools" / "forge_collective.py"
         monkeypatch.setattr(
@@ -2043,6 +2047,7 @@ class TestForgeCollectiveCoverage:
         ]
         assert captured["timeout_sec"] == 7200
         assert captured["input"] == {
+            "agent_backend": "claude",
             "agent_timeout_sec": "900",
             "candidate": selected,
             "experience_id": "attempt-123",
@@ -2078,6 +2083,7 @@ class TestForgeCollectiveCoverage:
         monkeypatch,
     ):
         """Convert an invalid wrapper sentinel into a revert result."""
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh.time, "time_ns", lambda: 456)
         monkeypatch.setattr(
             krh,
@@ -2115,6 +2121,7 @@ class TestForgeCollectiveCoverage:
         monkeypatch,
     ):
         """Convert wrapper timeout into a bounded revert result."""
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(
             krh,
             "_kernel_agent_tool_path",
@@ -2143,6 +2150,122 @@ class TestForgeCollectiveCoverage:
         assert "collective-worker" in result["error"]
         assert result["engine"] == "forge_collective"
         assert result["requires_e2e_validation"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_prefers_forge_claude_model(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Collective must honor FORGE_CLAUDE_MODEL like fusion and rewrite."""
+        SharedState(tp=2).save(tmp_path)
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {
+                **_ANTHROPIC_ONLY_ENV,
+                "CLAUDE_MODEL": "claude-orchestration",
+                "FORGE_CLAUDE_MODEL": "claude-forge-only",
+            },
+        )
+        monkeypatch.setattr(krh.time, "time_ns", lambda: 789)
+        monkeypatch.setattr(
+            krh,
+            "_kernel_agent_tool_path",
+            lambda name: tmp_path / "tools" / name,
+        )
+        captured = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured["input"] = json.loads(input_path.read_text(encoding="utf-8"))
+            wrapper_result = {
+                "status": "complete",
+                "engine": "forge_collective",
+                "decision": "REVERT",
+                "kept": False,
+                "requires_e2e_validation": False,
+            }
+            return (
+                0,
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
+                + json.dumps(wrapper_result)
+                + "\nFORGE_COLLECTIVE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_collective(
+            {
+                "candidate": _collective_candidate(kernel_repo=str(tmp_path)),
+                "tp": 2,
+                "timeout": 10000,
+                "max_hours": 1,
+            },
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "complete"
+        assert captured["input"]["agent_backend"] == "claude"
+        assert captured["input"]["llm_model"] == "claude-forge-only"
+
+    @pytest.mark.asyncio
+    async def test_run_forge_collective_openai_only_selects_codex(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """OpenAI-only collective must pin Codex and FORGE_CODEX_MODEL."""
+        SharedState(tp=2).save(tmp_path)
+        _pin_fusion_provider_env(
+            monkeypatch,
+            {
+                **_OPENAI_ONLY_ENV,
+                "CODEX_MODEL": "gpt-orchestration",
+                "FORGE_CODEX_MODEL": "gpt-forge-only",
+            },
+        )
+        monkeypatch.setattr(krh.time, "time_ns", lambda: 790)
+        monkeypatch.setattr(
+            krh,
+            "_kernel_agent_tool_path",
+            lambda name: tmp_path / "tools" / name,
+        )
+        captured = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured["input"] = json.loads(input_path.read_text(encoding="utf-8"))
+            wrapper_result = {
+                "status": "complete",
+                "engine": "forge_collective",
+                "decision": "REVERT",
+                "kept": False,
+                "requires_e2e_validation": False,
+            }
+            return (
+                0,
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
+                + json.dumps(wrapper_result)
+                + "\nFORGE_COLLECTIVE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_collective(
+            {
+                "candidate": _collective_candidate(kernel_repo=str(tmp_path)),
+                "tp": 2,
+                "timeout": 10000,
+                "max_hours": 1,
+            },
+            session_dir=tmp_path,
+        )
+
+        assert result["status"] == "complete"
+        assert captured["input"]["agent_backend"] == "codex"
+        assert captured["input"]["llm_model"] == "gpt-forge-only"
 
 
 def _ensure_torch_module(monkeypatch):

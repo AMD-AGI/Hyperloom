@@ -31,6 +31,9 @@ _PROVIDER_ENV = (
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
     "CODEX_MODEL",
+    "CLAUDE_MODEL",
+    "FORGE_CODEX_MODEL",
+    "FORGE_CLAUDE_MODEL",
 )
 
 
@@ -125,6 +128,17 @@ def test_openai_only_forwards_the_session_codex_model(tmp_path, monkeypatch):
     assert _flag_value(command, "--model") == "gpt-5.5"
 
 
+def test_openai_only_prefers_forge_codex_model_over_codex_model(tmp_path, monkeypatch):
+    """FORGE_CODEX_MODEL is the rewrite counterpart of the fusion/codex override."""
+    _use_openai_only(monkeypatch)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-orchestration")
+    monkeypatch.setenv("FORGE_CODEX_MODEL", "gpt-forge-only")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "gpt-forge-only"
+
+
 def test_openai_only_omits_the_model_flag_without_codex_model(tmp_path, monkeypatch):
     """With no CODEX_MODEL pinned, defer to the codex provider's own default."""
     _use_openai_only(monkeypatch)
@@ -132,6 +146,28 @@ def test_openai_only_omits_the_model_flag_without_codex_model(tmp_path, monkeypa
     command = _capture_forge_loop_argv(tmp_path, monkeypatch)
 
     assert "--model" not in command
+
+
+def test_anthropic_path_forwards_forge_claude_model(tmp_path, monkeypatch):
+    """Claude-side rewrite must honor FORGE_CLAUDE_MODEL over CLAUDE_MODEL."""
+    _use_anthropic_only(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
+    monkeypatch.setenv("FORGE_CLAUDE_MODEL", "claude-forge-only")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "claude-forge-only"
+    assert "--agent-backend" not in command
+
+
+def test_anthropic_path_forwards_claude_model_without_forge_override(tmp_path, monkeypatch):
+    """With no FORGE_CLAUDE_MODEL, rewrite still forwards CLAUDE_MODEL."""
+    _use_anthropic_only(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "claude-orchestration"
 
 
 def test_openai_only_disables_the_silent_claude_fallback(tmp_path, monkeypatch):
