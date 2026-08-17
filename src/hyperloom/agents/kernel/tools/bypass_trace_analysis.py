@@ -849,7 +849,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Kernel-fusion opportunities: launch adjacency -> fusable clusters.
     fusion = _report.build_fusion(analyze)
-    atomic_write_json(kernel_sequence_path, fusion, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Diffusion / scriptable workload-level roofline: aggregate the per-kernel
     # analytical roofline into an end-to-end workload roofline + per-denoise-step
@@ -929,7 +928,6 @@ def main(argv: list[str] | None = None) -> int:
             "kernel_candidates": str(candidates_path),
             "kernel_roofline": str(kernel_roofline_path),
             "tracelens_summary": str(summary_path),
-            "kernel_sequence": str(kernel_sequence_path),
             "kernel_metrics_csv": str(kernel_metrics_csv_path),
             "kernel_summary_csv": str(kernel_summary_csv_path),
             "trace_input_manifest": str(manifest_path),

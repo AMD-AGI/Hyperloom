@@ -27,13 +27,8 @@ logs at debug and returns ``None`` rather than raising into the pump.
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-
-from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
 
 log = logging.getLogger(__name__)
@@ -86,121 +81,6 @@ def candidate_slug(candidate_id: str) -> str:
     return (slug or "candidate")[:96]
 
 
-def write_decision_json(
-    session_dir: Path | str,
-    *,
-    candidate_id: str,
-    batch_id: str = "",
-    status: str,
-    kept: bool = False,
-    reason: str = "",
-    provenance: str = "",
-    gain_pct: float | None = None,
-    accuracy_pass: bool | None = None,
-    extra: dict[str, Any] | None = None,
-) -> str | None:
-    """Write ``runs/framework_agent/<slug>/decision.json`` for one candidate.
-
-    Best-effort: returns the written path, or ``None`` on any failure (never
-    raises — observability must not wedge the pump).
-
-    Args:
-        session_dir: The session root directory.
-        candidate_id: The candidate identifier (used for the slug + payload).
-        batch_id: The discovery batch this candidate belonged to.
-        status: The terminal status (e.g. ``kept`` / ``reverted`` /
-            ``critic_denied`` / ``apply_failed`` / ``already_present``).
-        kept: Whether the candidate was promoted into the stack.
-        reason: Human-readable rationale (critic rationale, failure text, …).
-        provenance: ``raw_diff`` / ``authored`` / ``critic`` / ``audit`` …
-        gain_pct: Measured throughput delta vs baseline, when benched.
-        accuracy_pass: Accuracy-gate verdict, when evaluated.
-        extra: Optional additional fields merged into the payload.
-
-    Returns:
-        The absolute path to the written ``decision.json``, or ``None``.
-    """
-    try:
-        slug = candidate_slug(candidate_id)
-        out_dir = runs_dir(Path(session_dir), "framework_agent", slug)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = {
-            "candidate_id": str(candidate_id),
-            "batch_id": str(batch_id or ""),
-            "status": str(status or ""),
-            "kept": bool(kept),
-            "provenance": str(provenance or ""),
-            "reason": str(reason or ""),
-            "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else None),
-            "accuracy_pass": (bool(accuracy_pass) if isinstance(accuracy_pass, bool) else None),
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        if isinstance(extra, dict):
-            for k, v in extra.items():
-                payload.setdefault(str(k), v)
-        dest = out_dir / "decision.json"
-        dest.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        return str(dest)
-    except Exception:  # noqa: BLE001 — observability is best-effort
-        log.debug("framework_agent_artifacts: write_decision_json failed", exc_info=True)
-        return None
-
-
-def write_semantic_audit(
-    session_dir: Path | str,
-    *,
-    candidate_id: str,
-    verdict: dict[str, Any],
-) -> str | None:
-    """Persist a candidate's semantic-audit verdict next to its decision.json.
-
-    Writes ``semantic_audit.json`` + a readable ``semantic_audit.md`` under
-    ``runs/framework_agent/<slug>/``, alongside ``decision.json``.
-    Best-effort: returns the JSON path, or ``None`` on failure.
-
-    Args:
-        session_dir: The session root directory.
-        candidate_id: The candidate identifier (slug source).
-        verdict: The ``fa phase-audit`` verdict dict.
-
-    Returns:
-        The absolute path to ``semantic_audit.json``, or ``None``.
-    """
-    if not isinstance(verdict, dict) or not verdict:
-        return None
-    try:
-        slug = candidate_slug(candidate_id)
-        out_dir = runs_dir(Path(session_dir), "framework_agent", slug)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        json_path = out_dir / "semantic_audit.json"
-        json_path.write_text(json.dumps(verdict, indent=2, sort_keys=True), encoding="utf-8")
-        lines = [
-            f"# Semantic audit — {candidate_id}",
-            "",
-            f"- semantic_status: {verdict.get('semantic_status')}",
-            f"- applicability: {verdict.get('applicability')}",
-            f"- recommended_next_step: {verdict.get('recommended_next_step')}",
-            f"- confidence: {verdict.get('confidence')}",
-            f"- layer: {verdict.get('layer')}",
-            "",
-            "## Evidence",
-        ]
-        for ev in verdict.get("evidence") or []:
-            if isinstance(ev, dict):
-                lines.append(
-                    f"- {ev.get('local_file') or '(file?)'}"
-                    + (f" [{ev.get('symbol')}]" if ev.get("symbol") else "")
-                    + (f": {ev.get('reason')}" if ev.get("reason") else "")
-                )
-        risks = verdict.get("risks") or []
-        if risks:
-            lines += ["", "## Risks", *[f"- {r}" for r in risks]]
-        (out_dir / "semantic_audit.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return str(json_path)
-    except Exception:  # noqa: BLE001 — observability is best-effort
-        log.debug("framework_agent_artifacts: write_semantic_audit failed", exc_info=True)
-        return None
-
 
 def summarize_candidate_outcomes(
     progress: list[dict[str, Any]] | None,
@@ -252,6 +132,4 @@ __all__ = [
     "candidate_key",
     "candidate_slug",
     "summarize_candidate_outcomes",
-    "write_decision_json",
-    "write_semantic_audit",
 ]
