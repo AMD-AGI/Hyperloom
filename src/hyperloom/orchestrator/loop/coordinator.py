@@ -1615,12 +1615,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         if remaining is not None and remaining <= 0.0:
             log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
             return
-        awaitable = factory()
-        if remaining is None:
-            await awaitable
-            return
         try:
-            await asyncio.wait_for(awaitable, timeout=remaining)
+            # ``timeout=None`` waits until the step finishes (unbounded run).
+            await asyncio.wait_for(factory(), timeout=remaining)
         except asyncio.TimeoutError:
             log.warning(
                 "Coordinator: %s hit the session bound after %.1fs; cancelled so the tick can close",
