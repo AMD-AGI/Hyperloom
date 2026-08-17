@@ -1670,11 +1670,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
         # Operator launch shape: an explicit flag on this resume wins, else the
-        # persisted value, so a bare --resume keeps the original contract.
-        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or str(
-            getattr(state, "operator_server_args", "") or ""
-        ).strip()
-        _resume_extra_env = parse_operator_extra_env(args) or dict(getattr(state, "operator_extra_env", {}) or {})
+        # persisted value.
+        _resume_server_args = str(getattr(args, "server_args", "") or "").strip() or state.operator_server_args
+        _resume_extra_env = parse_operator_extra_env(args) or dict(state.operator_extra_env)
         _export_operator_launch_shape(
             server_args=_resume_server_args,
             extra_env=_resume_extra_env,
@@ -1685,31 +1683,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported server_args   : {_resume_server_args}")
         if _resume_extra_env:
             print(f"  re-exported extra_env     : {','.join(sorted(_resume_extra_env))}")
-        # Restores the CLI-level policy derived from the count (robustness
-        # defaults, IR-8) only. It is too late for the cluster hand-off:
-        # ``nodes_resolved`` was fixed from argv at the top of this function, so
-        # multi_node_state.json / BENCHMARK_BASE_URL / MAGPIE_RUN_PHASE are
-        # already settled by then and a multi-node resume must re-pass --nodes
-        # (SKILL.md, Resume). Moving the whole topology block below the state
-        # load would turn that silent single-node degrade into a hard exit on
-        # any host without the HYPERLOOM_MN_EXT_* hand-off; tracked separately.
-        _resume_nodes = max(1, int(getattr(state, "nodes", 1) or 1))
-        if _resume_nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
-            args.nodes = _resume_nodes
-            os.environ["INFERENCE_OPTIMIZER_NODES"] = str(_resume_nodes)
-            print(f"  re-exported nodes         : {_resume_nodes}")
-        # Warm-replay gates: a non-default numeric is the only "operator set this"
+        # Feeds the robustness defaults and the IR-8 check only. ``nodes_resolved``
+        # was fixed from argv at the top of this function, so the cluster hand-off
+        # is already settled and a multi-node resume must re-pass --nodes.
+        if state.nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
+            args.nodes = state.nodes
+            os.environ["INFERENCE_OPTIMIZER_NODES"] = str(state.nodes)
+            print(f"  re-exported nodes         : {state.nodes}")
+        # Warm-replay gates: a non-default value is the only "operator set this"
         # signal, since the parser gives these flags real defaults rather than None.
-        if bool(getattr(args, "no_warm_replay", False)):
+        if args.no_warm_replay:
             state.warm_replay_enabled = False
         for _wr_attr, _wr_default in (
             ("warm_replay_min_confidence", 0.7),
             ("warm_replay_min_reproduce_pct", 0.8),
         ):
-            try:
-                _wr_value = float(getattr(args, _wr_attr, None))
-            except (TypeError, ValueError):
-                continue
+            _wr_value = getattr(args, _wr_attr)
             if _wr_value != _wr_default:
                 setattr(state, _wr_attr, _wr_value)
         # Honour persisted kernel_enabled on resume; CLI --no-kernel can still override.
@@ -2146,7 +2135,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     robustness_choice = _resolve_robustness_choice(args)
     robustness_agent_root: Path | None = None
     robustness_options = resolve_robustness_options(args, state)
-    state.robustness_options = dict(robustness_options)
+    state.robustness_options = robustness_options
     # Persist before the Coordinator reads SharedState off disk, or the launch
     # shape stays in-memory only and the next resume falls back to defaults.
     state.save(session_dir)
@@ -2218,9 +2207,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # warm_start_recipe.confidence >= min_confidence and the measured gain
         # reproduces at least min_reproduce_pct of the recipe's claim.
         # SharedState is the persistent authority across restarts.
-        warm_replay_enabled=bool(getattr(state, "warm_replay_enabled", True)),
-        warm_replay_min_confidence=float(getattr(state, "warm_replay_min_confidence", 0.7) or 0.7),
-        warm_replay_min_reproduce_pct=float(getattr(state, "warm_replay_min_reproduce_pct", 0.8) or 0.8),
+        warm_replay_enabled=state.warm_replay_enabled,
+        warm_replay_min_confidence=state.warm_replay_min_confidence,
+        warm_replay_min_reproduce_pct=state.warm_replay_min_reproduce_pct,
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))

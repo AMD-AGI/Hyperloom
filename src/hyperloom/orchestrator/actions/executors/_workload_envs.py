@@ -35,7 +35,7 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     valid_env_key,
 )
-from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_root
+from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
@@ -334,10 +334,7 @@ def resolve_reference_base() -> tuple[str, dict[str, str]]:
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir())
-    return (
-        str(getattr(state, "reference_server_args", "") or "").strip(),
-        dict(getattr(state, "reference_envs", None) or {}),
-    )
+    return state.reference_server_args.strip(), dict(state.reference_envs)
 
 
 def _apply_custom_runtime_defaults(

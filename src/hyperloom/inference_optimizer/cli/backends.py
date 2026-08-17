@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import framework_registry
 from hyperloom.common import llm_config
@@ -29,6 +29,9 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
@@ -418,18 +421,13 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     return options
 
 
-def resolve_robustness_options(args: argparse.Namespace, state: Any) -> dict[str, Any]:
-    """Resolve robustness ``request.options``, preferring this launch's flags.
+def resolve_robustness_options(args: argparse.Namespace, state: SharedState) -> dict[str, Any]:
+    """Layer this launch's robustness flags over the mapping persisted at launch.
 
-    :func:`_build_robustness_options` reads argv only, so a resume that re-passes
-    no robustness flag would drop to the runtime defaults. The persisted mapping
-    goes underneath it, per-key: this launch wins on every key it resolves, and
-    the rest survive from launch. Whole-mapping substitution would mean one
-    unrelated flag on a resume (say ``--robustness-llm-rca``) silently reopens
-    the ``/health`` probe an earlier ``--robustness-disable-server-probe``
-    closed. Layering does not tear apart the multi-node / scriptable-framework
-    policy the resolution folds in, because that policy is re-derived from
-    ``args`` on this launch and therefore sits on top.
+    :func:`_build_robustness_options` reads argv only, so a resume re-passing one
+    ``--robustness-*`` flag would otherwise drop the rest to the runtime
+    defaults. Per-key, so an unrelated flag cannot reopen a probe an earlier
+    ``--robustness-disable-server-probe`` closed.
 
     Args:
         args: Parsed CLI args carrying the robustness flags.
@@ -438,5 +436,4 @@ def resolve_robustness_options(args: argparse.Namespace, state: Any) -> dict[str
     Returns:
         The resolved ``request.options`` overrides.
     """
-    persisted = dict(getattr(state, "robustness_options", None) or {})
-    return {**persisted, **_build_robustness_options(args)}
+    return {**state.robustness_options, **_build_robustness_options(args)}

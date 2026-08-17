@@ -559,14 +559,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
-    # ``--nodes``, feeding the CLI-level policy derived from the count: the
-    # robustness defaults and the IR-8 check. NOT the cluster hand-off — that is
-    # resolved from argv before this state is loaded, so a multi-node resume
-    # still has to re-pass ``--nodes`` (see SKILL.md, Resume).
+    # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
+    # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
-    # Resolved robustness-agent ``request.options``. Stored resolved rather than as
-    # the individual flags: the resolution folds in multi-node / scriptable policy.
-    # A resume layers this launch's flags on top, per-key.
+    # Resolved robustness-agent ``request.options``; a resume layers its own flags
+    # on top, per-key. Stored resolved because the resolution folds in
+    # multi-node / scriptable policy that the individual flags do not carry.
     robustness_options: dict[str, Any] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
     warm_replay_enabled: bool = True

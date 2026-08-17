@@ -280,17 +280,15 @@ def _seed_shared_state(
         reference_envs=_ref_envs,
         reference_model=_ref_model,
         reference_source=_ref_source,
-        # Operator launch shape that the process env only carries for the life of
-        # one process. Persisting it here is what makes a resume that does not
-        # re-pass the flag serve the same contract; the CLI re-exports the derived
-        # env from these fields on the resume path.
+        # Operator launch shape; the process env carries it for one process only,
+        # so a resume re-exports it from here rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
-        warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7) or 0.7),
-        warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8) or 0.8),
+        warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
+        warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
         max_minutes=int((args.max_hours or 0) * 60),
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,

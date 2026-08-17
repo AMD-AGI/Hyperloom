@@ -1040,22 +1040,18 @@ original command line.
 
 Three exceptions:
 
-- `--server-args` and `--extra-env` are restored as a **set**. Re-passing either
-  replaces the whole thing, so changing one pin means re-passing them all —
-  otherwise there would be no way to remove one. Robustness flags layer per-key
-  instead: an unrelated `--robustness-*` flag on a resume leaves the others at
-  their persisted values.
-- `--reference-script` is fixed at launch. The recipe is parsed once into
-  `state.json` and every executor reads it from there, so re-passing the flag on
-  a resume does nothing; start a fresh session to change the reference.
-- **`--nodes` must be re-passed for a multi-node resume.** The persisted count
-  only feeds the robustness defaults and the IR-8 check. The cluster hand-off
-  (`multi_node_state.json`, `BENCHMARK_BASE_URL`, `MAGPIE_RUN_PHASE=client`,
-  `INFERENCE_OPTIMIZER_GPUS_PER_NODE`, `INFERENCE_OPTIMIZER_MN_BACKEND`) is
-  resolved from argv before the state is loaded, so a bare `--resume` of a
-  `--nodes >= 2` session benchmarks against the wrong endpoint. Re-pass
-  `--nodes` (and `--mn-backend` / `--gpus-per-node` if they were set) with the
-  `HYPERLOOM_MN_EXT_*` hand-off still in the environment.
+- **`--nodes` must be re-passed for a multi-node resume**, together with
+  `--mn-backend` / `--gpus-per-node` if they were set and the
+  `HYPERLOOM_MN_EXT_*` hand-off. The persisted count only feeds the robustness
+  defaults and the IR-8 check; the cluster hand-off is resolved from argv before
+  `state.json` is read, so a bare `--resume` of a `--nodes >= 2` session
+  benchmarks against the wrong endpoint.
+- `--reference-script` is fixed at launch — the recipe is parsed into
+  `state.json` once, so re-passing it on a resume does nothing. Start a fresh
+  session to change the reference.
+- `--server-args` and `--extra-env` are restored as a **set**: re-passing either
+  replaces the whole thing, so changing one pin means re-passing them all.
+  Robustness flags layer per-key instead.
 
 ## Robustness Monitor for Long Runs
 
