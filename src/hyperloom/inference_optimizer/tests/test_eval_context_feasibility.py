@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the Hyperloom project
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 """The accuracy gate must not spend a KEEP attempt on an eval that cannot run.
 
 Observed on 195 sessions: the parameter search picks ``--max-model-len 2048``
