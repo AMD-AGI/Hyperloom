@@ -1026,7 +1026,7 @@ def _apply_warm_patches(
     *,
     before_mutation: Any = None,
 ) -> list[dict[str, str]] | dict[str, Any]:
-    """Apply warm-replay code patches to the InferenceX checkout.
+    """Apply warm-replay code patches to the Session's active framework root.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch

@@ -466,6 +466,33 @@ async def test_legacy_recipe_skips_undersized_context_for_target_workload(
 
 
 @pytest.mark.asyncio
+async def test_warm_replay_does_not_misclassify_preflight_code_bug(
+    tmp_path,
+    monkeypatch,
+):
+    from hyperloom.orchestrator.actions.executors import _grid_server_args
+
+    def _bug(*_args, **_kwargs):
+        raise AttributeError("preflight implementation bug")
+
+    monkeypatch.setattr(
+        _grid_server_args,
+        "validate_warm_replay_context_length",
+        _bug,
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(),
+    )
+
+    with pytest.raises(AttributeError, match="preflight implementation bug"):
+        await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert coord.tasks.calls == []
+    assert "reason" not in coord.shared_state.warm_replay_outcome
+
+
+@pytest.mark.asyncio
 async def test_current_recipe_patch_skips_without_active_framework_root(
     tmp_path,
     monkeypatch,

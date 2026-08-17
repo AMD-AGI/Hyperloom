@@ -1632,7 +1632,7 @@ class PreludePhase(PhaseHandler):
                 raise RuntimeError(
                     "warm replay context preflight must not mutate config"
                 )
-        except Exception as exc:  # noqa: BLE001 — incompatible config skips
+        except (ValueError, RuntimeError) as exc:
             rollback = (
                 self._revert_warm_kernel_patches(
                     kernel_applied,

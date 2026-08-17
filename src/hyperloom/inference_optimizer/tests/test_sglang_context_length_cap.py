@@ -289,6 +289,20 @@ def test_warm_replay_preserves_compatible_context_length() -> None:
     assert evidence["status"] == "compatible"
 
 
+def test_warm_replay_preserves_compatible_context_whitespace() -> None:
+    original = "  --context-length 12288 --foo bar  "
+
+    out, evidence = validate_warm_replay_context_length(
+        original,
+        "sglang",
+        8192,
+        1024,
+    )
+
+    assert out == original
+    assert evidence["status"] == "compatible"
+
+
 def test_warm_replay_rejects_target_above_max_model_len() -> None:
     with pytest.raises(ValueError, match="exceeds MAX_MODEL_LEN"):
         validate_warm_replay_context_length(

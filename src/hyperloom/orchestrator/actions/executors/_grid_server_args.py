@@ -783,7 +783,7 @@ def validate_warm_replay_context_length(
     current ISL+OSL no longer fits. Compatible or absent pins are preserved
     byte-for-byte; incompatible pins fail the replay preflight.
     """
-    args = str(server_args or "").strip()
+    args = str(server_args or "")
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
         return args, {"status": "not_sglang"}
     required = max(0, int(isl or 0)) + max(0, int(osl or 0))
