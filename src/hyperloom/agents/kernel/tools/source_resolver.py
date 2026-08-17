@@ -267,7 +267,7 @@ def base_symbol(device_kernel_name: str) -> str:
         return ""
     if raw.startswith("_Z"):
         demangled = _demangle_itanium(raw)
-        if demangled:
+        if demangled and demangled != raw:
             return _base_from_demangled(demangled)
         return _base_from_mangled(raw)
     return _base_from_demangled(raw)
