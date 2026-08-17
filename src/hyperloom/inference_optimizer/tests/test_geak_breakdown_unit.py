@@ -728,3 +728,118 @@ def test_collect_geak_backfill_dedupes_repeated_kernel_across_cycles(tmp_path: P
     }
     out = collect_geak(tmp_path, state, [])
     assert out["kernels_optimized"] == 1
+
+
+def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> None:
+    """Journey holding one accepted kernel written twice (candidate + symbol)."""
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": "c0_triton",
+                        "name": "c0_triton",
+                        "gpu_pct": 20.2,
+                        "micro_speedup": 2.2024,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": primary_gain},
+                    },
+                    {
+                        "kernel_id": "dsa_sparse_attn_prefill_main_kernel",
+                        "name": "dsa_sparse_attn_prefill_main_kernel",
+                        "gpu_pct": None,
+                        "micro_speedup": 1.13,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": twin_gain},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_collect_geak_backfill_collapses_alias_twin(tmp_path: Path) -> None:
+    # The journey records one acceptance twice: the candidate id carries the
+    # measurement, the resolved profiler symbol carries gpu_pct=None. One kernel.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=29.994, twin_gain=29.994)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "no_gain", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    kernel = out["accepted_kernels"][0]
+    assert kernel["kernel_id"] == "c0_triton"
+    assert kernel["gpu_pct"] == 20.2
+    assert kernel["aliases"] == ["dsa_sparse_attn_prefill_main_kernel"]
+
+
+def test_collect_geak_backfill_collapses_rounded_alias_twin(tmp_path: Path) -> None:
+    # The twin sometimes carries the rounded gain, so exact equality is too strict.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=10.38337292749906, twin_gain=10.383)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "ok", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels"][0]["aliases"] == ["dsa_sparse_attn_prefill_main_kernel"]
+
+
+def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path: Path) -> None:
+    # Two genuinely distinct kernels that happen to share a gain must both stay:
+    # the collapse needs a measured row AND an unmeasured row to fire.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": f"kernel_{i}",
+                        "gpu_pct": 10.0 + i,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 5.0},
+                    }
+                    for i in range(2)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "ok", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 2
+    assert all("aliases" not in k for k in out["accepted_kernels"])
+
+
+def test_collect_geak_backfill_keeps_unmeasured_kernels_of_distinct_gain(tmp_path: Path) -> None:
+    # Two unmeasured shape-split kernels are not aliases of the measured parent:
+    # their gains differ, so all three survive.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {"kernel_id": "c0_aiter", "gpu_pct": 0.0, "e2e": {"decision": "KEEP", "e2e_gain_pct": 7.53}},
+                    {"kernel_id": "ck#1", "gpu_pct": None, "e2e": {"decision": "KEEP", "e2e_gain_pct": 6.779}},
+                    {"kernel_id": "ck#2", "gpu_pct": None, "e2e": {"decision": "KEEP", "e2e_gain_pct": 0.705}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "no_gain", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 3
