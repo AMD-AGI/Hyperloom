@@ -552,8 +552,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
     # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded at
-    # PRELUDE from the Recipe ``value.kernel`` section, with file paths resolved.
-    # Read back by the combined recipe+kernel promote to record replayed columns.
+    # PRELUDE from the Recipe ``value.kernel``; read back by the combined promote.
     warm_kernel_kb_plan: list = field(default_factory=list)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.

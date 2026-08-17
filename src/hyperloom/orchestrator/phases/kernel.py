@@ -1966,9 +1966,6 @@ class KernelPhase(PhaseHandler):
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
-        # Every backend goes through the same per-candidate E2E validator; the
-        # CK block-scale switch that used to gate forge routing is now injected
-        # by ``_gemm_e2e_candidates`` as a candidate of its own.
         await self._validate_gemm_tuning_e2e(result)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -3002,7 +2999,11 @@ class KernelPhase(PhaseHandler):
         *,
         extra_envs: dict[str, str] | None = None,
     ) -> None:
-        """Promote an E2E-validated Collective KEEP into the optimization stack."""
+        """Promote an E2E-validated Collective KEEP through the current_best lift.
+
+        A no-op when the patch is already stacked, or when the lift refuses a
+        winner that does not beat the live throughput anchor.
+        """
         if not isinstance(collective_result, dict) or not isinstance(
             integrate_result, dict
         ):
@@ -3064,8 +3065,6 @@ class KernelPhase(PhaseHandler):
             raise ValueError("Collective KEEP is missing integration_id")
         if not isinstance(self.shared_state.optimization_stack, list):
             raise ValueError("optimization_stack must be a list")
-        if not isinstance(self.shared_state.gain_per_stack_entry, list):
-            raise ValueError("gain_per_stack_entry must be a list")
         existing = {
             str(item.get("patch_path") or "")
             for item in (self.shared_state.optimization_stack or [])
@@ -3075,9 +3074,6 @@ class KernelPhase(PhaseHandler):
             return
         envs = dict(extra_envs or integrate_result.get("extra_envs") or {})
         extra_args = str(integrate_result.get("extra_server_args") or "")
-        # One writer owns current_best and the stack: the lift merges onto the
-        # previous config (so cumulative args and unset_envs stay correct) and
-        # refuses a winner that does not beat the live anchor.
         lifted = self._lift_to_current_best(
             "collective",
             new_tput,

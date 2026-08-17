@@ -105,11 +105,7 @@ class TestCollectRooflineProgressLatencyCeiling:
 
 
 class TestCollectFinalEmitsLatency:
-    """``collect_final`` is the single producer of the final section.
-
-    The recorder fragment that wrote a second copy of these fields is gone, so
-    the collector is the only thing to assert against.
-    """
+    """``collect_final`` is the single producer of the final section."""
 
     def _state(self, framework: str, current_best: dict) -> dict:
         return {
@@ -121,11 +117,10 @@ class TestCollectFinalEmitsLatency:
         }
 
     def test_scriptable_final_surfaces_the_derived_e2el(self, tmp_path):
-        """The derivation happens once, on save, not a second time here.
+        """``save`` derives the latency; the collector surfaces what it wrote.
 
-        ``SharedState.save`` runs ``_backfill_scriptable_latency`` before it
-        writes ``state.json``, so ``current_best`` already carries the derived
-        latency by the time a collector reads it back.
+        ``_backfill_scriptable_latency`` runs before ``state.json`` is written,
+        so ``current_best`` already carries ``e2el_mean_ms`` when read back.
         """
         from hyperloom.orchestrator.state.shared_state import SharedState
 

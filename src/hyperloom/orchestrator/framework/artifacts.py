@@ -8,24 +8,17 @@ Deterministic, LLM-free observability helpers for the FRAMEWORK_AGENT phase:
 - :func:`candidate_key` is the canonical candidate identity (precedence
   ``candidate_id or pr_url or ref``) used for candidate selection, dedup,
   progress-row keying, and task idempotency across the whole pump.
-- :func:`candidate_slug` is the shared path-slug helper for per-candidate paths.
 - :func:`summarize_candidate_outcomes` classifies a batch's progress rows
   into ``empty_discovery`` / ``tested_no_keep`` / ``tested_with_keep`` so the
   phase-done summary, report, and robustness advisory can tell "discovered
   nothing" apart from "tested candidates but none cleared the gate".
 
-All helpers here are pure. The per-candidate ``decision.json`` /
-``semantic_audit.json`` writers are gone: nothing read them back, and the
-progress-row and journal fact-write paths carry the same information.
+All helpers here are pure.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any
-
-
-log = logging.getLogger(__name__)
 
 
 # Per-candidate terminal statuses that mean the candidate reached the apply/bench
@@ -56,24 +49,6 @@ def candidate_key(row: dict[str, Any] | None) -> str:
     if not isinstance(row, dict):
         return ""
     return str(row.get("candidate_id") or row.get("pr_url") or row.get("ref") or "")
-
-
-def candidate_slug(candidate_id: str) -> str:
-    """Filesystem-safe slug for a candidate id (PR url / ref / synthetic id).
-
-    Args:
-        candidate_id: The candidate identifier (may contain ``/``, ``:`` …).
-
-    Returns:
-        A lowercased slug with non-``[a-z0-9._-]`` runs collapsed to ``-``,
-        capped at 96 chars, defaulting to ``"candidate"`` when empty.
-    """
-    out: list[str] = []
-    for ch in str(candidate_id).lower():
-        out.append(ch if (ch.isalnum() or ch in ".-_") else "-")
-    slug = "".join(out).strip("-")
-    return (slug or "candidate")[:96]
-
 
 
 def summarize_candidate_outcomes(
@@ -124,6 +99,5 @@ def summarize_candidate_outcomes(
 
 __all__ = [
     "candidate_key",
-    "candidate_slug",
     "summarize_candidate_outcomes",
 ]

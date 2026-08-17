@@ -18,7 +18,6 @@ import pytest
 from hyperloom.orchestrator.loop import coordinator as coord_mod
 from hyperloom.orchestrator.framework import client as fa_client_mod
 from hyperloom.orchestrator.framework import paths as fp_mod
-from hyperloom.orchestrator.framework import artifacts as fpa_mod
 from hyperloom.orchestrator.knowledge import kb_writeback as kb_mod
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import framework_agent as fpr_mod

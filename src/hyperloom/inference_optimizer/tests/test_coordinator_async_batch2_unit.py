@@ -338,9 +338,8 @@ async def test_resume_restores_promoted_inferencex_checkout(
     active.mkdir()
     coord._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
-    # setenv, not delenv: monkeypatch records nothing for a delenv of a name
-    # that is already absent, so the value the resume pass exports below would
-    # outlive this test and point every later one at a deleted tmp_path.
+    # setenv, not delenv: delenv of an absent name arms no undo, so the value
+    # the resume pass exports below would leak into every later test.
     monkeypatch.setenv("INFERENCEX_PATH", "")
 
     await coord._resume_consistency_pass()

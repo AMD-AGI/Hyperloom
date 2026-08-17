@@ -113,10 +113,8 @@ def _merge_named_current_recipe_configs(
 def _warm_kernel_keep_threshold_pct(state: Any) -> float:
     """Gain a replayed champion set must clear.
 
-    Defaults to the shared decaying curve so the bar tracks the session's
-    macro-cycle; ``HYPERLOOM_WARM_KERNEL_KEEP_PCT`` overrides it. A malformed
-    or non-finite override is ignored rather than turning every champion into
-    an ERROR.
+    Follows the shared decaying curve so the bar tracks the session's
+    macro-cycle; ``HYPERLOOM_WARM_KERNEL_KEEP_PCT`` overrides it.
 
     Args:
         state: The SharedState the curve reads ``macro_cycle`` from.
@@ -124,29 +122,22 @@ def _warm_kernel_keep_threshold_pct(state: Any) -> float:
     Returns:
         The KEEP threshold percentage for the warm-kernel replay.
     """
-    from .machine_state import resolve_keep_threshold
-
-    default = resolve_keep_threshold(state)
+    default = _phase_state.resolve_keep_threshold(state)
     raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
     if not raw:
         return default
     try:
         value = float(raw)
     except ValueError:
-        log.warning(
-            "warm replay: invalid HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
-            raw,
-            default,
-        )
-        return default
-    if not math.isfinite(value):
-        log.warning(
-            "warm replay: non-finite HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
-            raw,
-            default,
-        )
-        return default
-    return value
+        value = math.nan
+    if math.isfinite(value):
+        return value
+    log.warning(
+        "warm replay: unusable HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
+        raw,
+        default,
+    )
+    return default
 
 
 class PreludePhase(PhaseHandler):

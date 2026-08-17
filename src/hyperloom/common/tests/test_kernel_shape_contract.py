@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The shape-provenance contract.
-
-The dispatch gate tests membership in ``DISPATCHABLE_SHAPE_PROVENANCE``
-directly; the ``is_dispatchable_shape_provenance`` wrapper it used to call is
-gone, so these assert the set the gate actually reads.
-"""
+"""The shape-provenance set the dispatch gate tests membership against."""
 
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE,

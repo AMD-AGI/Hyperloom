@@ -741,7 +741,6 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = run_dir / "trace_input_manifest.json"
     roofline_name = args.roofline_output_name or "kernel_roofline.json"
     kernel_roofline_path = reports_dir / roofline_name
-    kernel_sequence_path = bypass_dir / "kernel_sequence.json"
     kernel_metrics_csv_path = bypass_dir / "kernel_metrics.csv"
     kernel_summary_csv_path = bypass_dir / "kernel_summary.csv"
 
@@ -910,7 +909,6 @@ def main(argv: list[str] | None = None) -> int:
         "trace_report_path": str(analysis_md_path),
         "kernel_roofline_path": str(kernel_roofline_path),
         "tracelens_summary_path": str(summary_path),
-        "kernel_sequence_path": str(kernel_sequence_path),
         "kernel_metrics_csv_path": str(kernel_metrics_csv_path),
         "kernel_summary_csv_path": str(kernel_summary_csv_path),
         "fusion": {

@@ -678,12 +678,7 @@ _FUSION_EVENTS = [
 
 
 def test_fusion_result_summary(tmp_path, capsys, monkeypatch):
-    """Two consecutive Elementwise launches -> one fusable cluster.
-
-    The counts are inlined in the result dict. The separate
-    ``kernel_sequence.json`` artifact -- the only carrier of the per-cluster
-    breakdown -- is gone, having had no reader.
-    """
+    """Two consecutive Elementwise launches -> one fusable cluster."""
     trace = tmp_path / "f.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
     _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
