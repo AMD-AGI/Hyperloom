@@ -57,6 +57,10 @@ def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
     """Group repeated REVERT / no_promote attempts by (kind, change); dead ends first.
 
+    Only outcomes that measured something count: a step recorded as
+    ``OUTCOME_SKIP`` never ran, and clustering it would advise the model to
+    abandon a direction nothing was learned about.
+
     Args:
         entries: The optimization journal entries to cluster.
 

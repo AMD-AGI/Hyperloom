@@ -22,13 +22,10 @@ SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 #: legacy collector fallback.
 SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 
-#: Author-time-only canonical schema. Unlike v2/v3, this version is assembled
-#: exclusively from recorder SDK fragments and never reconstructed from session
-#: business files.
-SCHEMA_VERSION_V4 = "hyperloom.session_breakdown.v4.0"
-
 #: Unified optimization schema. This is a breaking wire-shape cutover: adopted
-#: optimizations are emitted only through ``optimizations``.
+#: optimizations are emitted only through ``optimizations``, and that section
+#: is built exclusively from recorder fragments -- never reconstructed from
+#: session business files.
 SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
 
 #: Current breakdown schema version.
@@ -83,13 +80,23 @@ class SessionMeta(TypedDict, total=False):
         session_id (str): Hyperloom internal id (``manifest.session_id``).
         claw_session_id (str | None): SaFE / Claw session id (env ``CLAW_SESSION_ID``).
         sandbox_user_id (str | None): Sandbox user identifier, if any.
-        created_at_utc (str): ISO UTC timestamp when the session started.
+        created_at_utc (str): ISO UTC timestamp when the session was first
+            created; unchanged by a resume.
+        start_ts (str): ISO UTC timestamp the wall-clock budget is counted
+            from. A resume re-anchors it on the new leg only when the previous
+            one crashed or stopped for a recorded reason; after a clean stop it
+            stays at the original start, because ``--max-hours`` keeps counting
+            from there.
         ended_at_utc (str): ISO UTC timestamp when the session ended.
         stop_reason (str): Why the run stopped (``target_reached`` /
             ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
             ``baseline_failed`` / ...).
         max_minutes (int): Configured time budget in minutes.
-        elapsed_minutes (float): Wall-clock minutes the session ran.
+        elapsed_minutes (float): Wall-clock minutes from ``start_ts`` to the
+            end, or to now while still running, so it stays comparable with
+            ``max_minutes``. When a resume kept ``start_ts`` this spans the
+            gap between the legs as well, which is the span the budget is
+            charged for too.
         host (str): Hostname the session executed on.
         code_revision (str): Source revision of the optimizer.
         pid (int): Process id of the optimizer.
@@ -107,6 +114,7 @@ class SessionMeta(TypedDict, total=False):
     claw_session_id: str | None  # SaFE / Claw session id (env CLAW_SESSION_ID)
     sandbox_user_id: str | None
     created_at_utc: str
+    start_ts: str  # budget anchor; re-anchored only by a resume after a crash or a recorded stop
     ended_at_utc: str
     stop_reason: str  # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int
@@ -376,8 +384,8 @@ class PhaseEvent(TypedDict, total=False):
         kernel_id (str | None): Kernel id for kernel_agent-owned actions, else None.
         status (str): Outcome (``succeeded`` / ``failed``).
         decision (str): Decision label (``promoted`` / ``discarded`` /
-            ``salvaged`` / ``no_promote`` / ``error`` / ``KEEP`` / ``PARTIAL`` /
-            ``REVERT``).
+            ``salvaged`` / ``no_promote`` / ``skipped`` / ``error`` / ``KEEP`` /
+            ``PARTIAL`` / ``REVERT``).
         key_metric (float | None): Headline metric value, or None.
         key_metric_kind (str | None): Type/label of the key metric, or None.
         workspace (str | None): Benchmark workspace path, or None.
@@ -398,7 +406,7 @@ class PhaseEvent(TypedDict, total=False):
     task_id: str
     kernel_id: str | None  # only for kernel_agent-owned actions
     status: str  # succeeded / failed
-    decision: str  # promoted / discarded / salvaged / no_promote / error / KEEP / PARTIAL / REVERT
+    decision: str  # promoted / discarded / salvaged / no_promote / skipped / error / KEEP / PARTIAL / REVERT
     key_metric: float | None
     key_metric_kind: str | None
     workspace: str | None
@@ -1725,34 +1733,46 @@ class OptimizationConfiguration(TypedDict, total=False):
 
 
 class OptimizationEntry(TypedDict, total=False):
-    """One adopted optimization, independent of its internal action name."""
+    """One adopted optimization's contribution to the session's reported gain.
+
+    On the recorder path this is a ledger row over ``Optimizations.attempts``:
+    it carries the chain arithmetic and enough identity to read, and defers
+    everything descriptive to the attempt named by ``adopted_attempt_id``.
+    The remaining fields are emitted only by the legacy state-rebuilt path,
+    which has no attempts to point at.
+    """
 
     id: str
     stack_index: int
+    adopted_attempt_id: str | None
+    adoption_id: str | None
     source: OptimizationSource
     source_method: OptimizationSourceMethod
     optimization_kind: str
     name: str
     backend: KernelOptimizationBackend | None
+    # Gain against the session baseline. This is the only gain figure in the
+    # report that may be summed across rows.
+    gain_pct: float | None
+    gain_method: str
+    # The adopting executor's own measurement, relative to its starting point.
+    local_gain_pct: float | None
+    cumulative_gain_pct: float | None
+    throughput_after: float | None
+    validated: bool
+    ts: str
     execution_mode: KernelExecutionMode | None
     kernel_id: str | None
-    adopted_attempt_id: str | None
     action: str
     variant_name: str
     fingerprint: str
     scope: str
     source_phase: str
-    gain_method: str
     accepted_heads: list[Any]
     extra_server_args_is_invariant: bool | None
     candidate_flags: Any
-    gain_pct: float | None
-    cumulative_gain_pct: float | None
     throughput_before: float | None
-    throughput_after: float | None
-    validated: bool
     task_id: str
-    ts: str
     provenance: str
     configuration: OptimizationConfiguration
     artifacts: list[OptimizationArtifact]
@@ -1793,6 +1813,10 @@ class OptimizationValidation(TypedDict, total=False):
     validated_at_stack_len: int
     validated_total_gain_pct: float | None
     attributed_total_gain_pct: float
+    # Gain the session really moved that no adopted step accounts for, most
+    # often a KEEP that never reached the ledger. Held out of every entry so it
+    # cannot be read as the next step's contribution.
+    unattributed_gain_pct: float
     attribution_gap_pct: float | None
     notes: list[str]
     source_breakdown: dict[str, float]
@@ -1800,12 +1824,93 @@ class OptimizationValidation(TypedDict, total=False):
     domain_attribution: dict[str, Any]
 
 
+class OptimizationAttemptGate(TypedDict, total=False):
+    """One gate the attempt had to clear, as evaluated at author time."""
+
+    kind: str
+    name: str
+    status: str
+    decision: str
+    reason: str
+
+
+class OptimizationAttempt(TypedDict, total=False):
+    """One attempt at making the workload faster, adopted or not.
+
+    This is the per-attempt layer of the optimization report: who proposed it,
+    what it touched, what it measured, whether it was kept, why, and what it
+    left behind. Rejected attempts appear here exactly like adopted ones.
+    """
+
+    attempt_id: str
+    agent: AgentBucket
+    # ``recorded`` when the producer stamped the owner, ``derived`` when it was
+    # reconstructed for a session recorded before that field existed.
+    agent_method: str
+    producer: str
+    kind: str
+    name: str
+    subject: dict[str, str]
+    kernel_id: str | None
+    backend: str
+    phase: str
+    macro_cycle: int | None
+    started_at: str
+    ended_at: str
+    duration_sec: float | None
+    status: str
+    decision: str
+    decision_reason: str
+    keep_threshold_pct: float | None
+    adopted: bool
+    attribution_eligible: bool | None
+    # Measured against this attempt's own starting point, not the session
+    # baseline. Never sum these; use ``OptimizationEntry.gain_pct`` instead.
+    local_gain_pct: float | None
+    throughput_before: float | None
+    throughput_after: float | None
+    adoption_id: str | None
+    gates: list[OptimizationAttemptGate]
+    backend_attempts: list[OptimizationBackendAttempt]
+    # Each row carries ``occurrence``, its position among this operation's
+    # readings of that metric name, oldest first, along with
+    # ``occurrences_of_name`` for how many there are in total. Two readings
+    # that agree are two readings: repeatability is the evidence, so it is
+    # counted rather than inferred from the values.
+    measurements: list[dict[str, Any]]
+    # ``adoption_pinned`` when the adoption named the readings it was decided
+    # on, ``latest_occurrence`` when the newest reading of each metric was used
+    # for want of one, ``adoption_pinned_stale`` when the pinned readings were
+    # overwritten by a later re-measure and no longer match the frozen decision
+    # values. ``measurement_occurrences`` counts every reading the operation
+    # kept, so a re-measured subject is visibly re-measured.
+    measurement_source: str
+    measurement_occurrences: int
+    artifacts: list[dict[str, str]]
+
+
+class OptimizationAgentSummary(TypedDict, total=False):
+    """Per-agent rollup: the top layer of the optimization report."""
+
+    attempts: int
+    keeps: int
+    reverts: int
+    attributable_gain_pct: float
+    non_attributable_keeps: int
+    by_kind: dict[str, dict[str, Any]]
+
+
 class Optimizations(TypedDict, total=False):
     """Canonical downstream optimization API."""
 
     schema_version: int
+    # ``recorder`` when projected from author-time records, ``state`` when
+    # rebuilt from business state for a session that predates the recorder.
+    source_of_truth: str
+    attempts: list[OptimizationAttempt]
     entries: list[OptimizationEntry]
     backend_attempts: list[OptimizationBackendAttempt]
+    summary_by_agent: dict[AgentBucket, OptimizationAgentSummary]
     summary_by_source: dict[OptimizationSource, OptimizationSourceSummary]
     summary_by_kind: dict[str, OptimizationSourceSummary]
     validation: OptimizationValidation
@@ -2445,6 +2550,7 @@ class EnablementBreakdown(TypedDict, total=False):
             the round.
         trigger_evidence_excerpt: Tail of the captured eval-failure evidence.
         kept_patches: Session-relative paths of patches landed by enablement.
+        framework_root: Source tree ``kept_patches`` were applied against.
         kept_stack_action: The stack action behind the KEPT attempt runtime.
         candidate_refs: Bridging candidate refs considered for rotation.
         setup_commands: Setup commands the specialist requested.
@@ -2471,6 +2577,8 @@ class EnablementBreakdown(TypedDict, total=False):
         accepted_config: Server args / envs that bench also launched with, which
             the YAML does not carry; the revalidation replays them on top.
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
+        setting_script: Session-relative path to the generated
+            ``enablement_setting.sh`` artifact, when it was produced.
     """
 
     mode: str
@@ -2489,6 +2597,7 @@ class EnablementBreakdown(TypedDict, total=False):
     launch_log_excerpt: str
     trigger_evidence_excerpt: str
     kept_patches: list[str]
+    framework_root: str
     kept_stack_action: EnablementStackActionSummary
     candidate_refs: list[str]
     setup_commands: list[str]
@@ -2511,6 +2620,7 @@ class EnablementBreakdown(TypedDict, total=False):
     accepted_config_path: str
     accepted_config: dict[str, Any]
     eval_contract_fingerprint: str
+    setting_script: str
 
 
 # ---------------------------------------------------------------------------
@@ -2603,6 +2713,20 @@ class OperationDecision(TypedDict, total=False):
 ExecutorClass = Literal["llm_agent", "llm_tool", "deterministic"]
 IntegrityStatus = Literal["exact", "derived", "partial", "unavailable"]
 
+# Which agent owns a unit of work. Recorded by the producer at author time;
+# ``unattributed`` means the producer genuinely could not name an owner, never
+# that the exporter failed to guess one.
+AgentBucket = Literal[
+    "kernel_agent",
+    "framework_agent",
+    "explore",
+    "warm_replay",
+    "coordinator",
+    "critic",
+    "robustness",
+    "unattributed",
+]
+
 
 class Operation(TypedDict, total=False):
     """Canonical unit of work, incrementally upserted by stable id."""
@@ -2623,6 +2747,9 @@ class Operation(TypedDict, total=False):
     executor_class: ExecutorClass
     purpose: str
     scope: str
+    # Canonical owning agent, stamped by the producer at author time so the
+    # exporter never has to infer ownership from phase timestamps.
+    agent: AgentBucket
     strategy_group: str
     strategy: str
     subject: SubjectRef
@@ -2706,8 +2833,18 @@ class Adoption(TypedDict, total=False):
     adopted_at: str
     validated: bool
     gain_pct: float | None
+    # Frozen at adoption time. Measurement ids are stable per subject, so a
+    # later attempt on the same subject overwrites the referenced measurements;
+    # these two carry the numbers this adoption was actually decided on.
+    throughput_before: float | None
+    throughput_after: float | None
     configuration: dict[str, Any]
     producer: str
+    # Mirrors ``Operation.agent`` so an adoption can be bucketed without a join.
+    agent: AgentBucket
+    # False for pre-baseline enablement work: real, adopted, and deliberately
+    # excluded from reported gain.
+    attribution_eligible: bool
     metadata: dict[str, Any]
 
 
@@ -2730,30 +2867,6 @@ class Integrity(TypedDict, total=False):
     fields: dict[str, IntegrityFieldStatus]
     warnings: list[str]
     conflicts: list[dict[str, Any]]
-
-
-class SessionBreakdownV4(TypedDict, total=False):
-    """Top-level v4 canonical shape plus compatibility projections."""
-
-    schema_version: str
-    exported_at_utc: str
-    exporter_version: str
-    run: dict[str, Any]
-    workload: dict[str, Any]
-    model: dict[str, Any]
-    versions: dict[str, Any]
-    phases: dict[str, Any]
-    subjects: list[SubjectRef]
-    operations: list[Operation]
-    measurements: list[Measurement]
-    adoptions: list[Adoption]
-    optimizations: Optimizations
-    outcome: dict[str, Any]
-    artifacts: list[ArtifactRef]
-    trace: dict[str, Any]
-    integrity: Integrity
-    projections: dict[str, Any]
-    compat: dict[str, Any]
 
 
 class SessionBreakdown(TypedDict, total=False):
@@ -2862,7 +2975,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
-    "SCHEMA_VERSION_V4",
     "SCHEMA_VERSION_V5",
     "Adoption",
     "AdoptedKernel",
@@ -2938,7 +3050,6 @@ __all__ = [
     "RejectedKernel",
     "RobustnessSignal",
     "SessionBreakdown",
-    "SessionBreakdownV4",
     "SessionMeta",
     "SpecialistDomainBreakdown",
     "SpecialistRound",

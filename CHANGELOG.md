@@ -58,6 +58,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The default Magpie benchmark dependency is upgraded from v0.1.0 to v0.2.0.
+  Both the installer and runtime preflight remain pinned to the immutable
+  v0.2.0 release commit for reproducible installs.
+
 - **Remote Recipe knowledge now uses one current KB Store contract.** Remote
   mode reads one identity-addressed inference Recipe containing replay config,
   the ordered patch timeline, and nested kernel columns, then publishes one

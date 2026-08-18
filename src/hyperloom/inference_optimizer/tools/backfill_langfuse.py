@@ -27,7 +27,7 @@ Mapping (trace -> phase span -> agent span -> generation)::
                             fallback). Projected by
                             ``langfuse_mapping.decision_to_scores``:
                               - decision_outcome (CATEGORICAL:
-                                KEEP/REVERT/no_promote)
+                                KEEP/REVERT/no_promote/skipped)
                               - gain_pct / predicted_gain_pct /
                                 proposal_score (NUMERIC) when present
 
@@ -39,7 +39,7 @@ Source files (under the session dir)
                             subset that recorded it; paired by
                             :func:`langfuse_mapping.pair_key`.
 * ``reports/trace/decision_trace.jsonl`` -- per-action
-                            KEEP/REVERT/no_promote + gain_pct.
+                            KEEP/REVERT/no_promote/skipped + gain_pct.
 * ``runtime/recipe_snapshot/.audit.jsonl`` -- recipe-KB read/write audit rows
                             (rendered as the ``agent:recipe_kb`` span subtree).
 * ``manifest.json``                      -- trace-level metadata +
@@ -81,6 +81,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json, read_jsonl
+from hyperloom.orchestrator.state.optimization_journal import (
+    OUTCOME_KEEP,
+    OUTCOME_NO_PROMOTE,
+    OUTCOME_REVERT,
+    OUTCOME_SKIP,
+)
 from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
 from hyperloom.orchestrator.trace.langfuse_emitter import (
     _end_obs,
@@ -235,13 +241,14 @@ def print_plan(plan: dict[str, Any]) -> None:
             with_text = sum(1 for g in gens if g["has_text"])
             print(f"        - {agent}: {len(gens)} gen(s), {with_text} with text, models={models}")
     outcomes = [(d.get("decision") or {}).get("outcome") for d in plan["decisions"]]
-    keep = outcomes.count("KEEP")
-    rev = outcomes.count("REVERT")
-    nop = outcomes.count("no_promote")
+    keep = outcomes.count(OUTCOME_KEEP)
+    rev = outcomes.count(OUTCOME_REVERT)
+    nop = outcomes.count(OUTCOME_NO_PROMOTE)
+    skipped = outcomes.count(OUTCOME_SKIP)
     gainful = sum(1 for d in plan["decisions"] if (d.get("decision") or {}).get("gain_pct") is not None)
     print(
         f"  Scores: {len(plan['decisions'])} decisions "
-        f"(KEEP={keep} REVERT={rev} no_promote={nop}; gain_pct set={gainful})"
+        f"(KEEP={keep} REVERT={rev} no_promote={nop} skipped={skipped}; gain_pct set={gainful})"
     )
     recipe_rows = plan.get("recipe_audit") or []
     recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))

@@ -374,7 +374,7 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
 - `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x`
 - `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x`
 
@@ -382,7 +382,7 @@ Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3
+export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.27.1
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
