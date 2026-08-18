@@ -4857,13 +4857,22 @@ async def run_collective_handler(payload: dict, *, session_dir: Path) -> Handler
 
 
 #: Characters of a tuner's error kept in the audit row. Enough to identify the
-#: failure (an argparse rejection, a memory fault, a kill) without copying the
-#: tuner's whole tail into an append-only trace.
+#: failure (a memory fault, a kill, a missing file) without copying the tuner's
+#: whole tail into an append-only trace.
+#:
+#: This bounds an error that exists; it does not create one. A rejected argument
+#: reaches neither side of it -- the downstream tuner's rejection is a returncode
+#: from ``subprocess.run``, and the wrapper's own is a ``SystemExit``, which its
+#: ``except Exception`` does not catch. Such a run arrives with no ``error`` at
+#: all, and is identified by ``status`` and the absent speedup instead.
 _TRACE_ERROR_CHARS = 400
 
-#: Audit keys emitted even when null. The first three predate the failure fields
-#: and existing readers index on them; the rest are omitted when empty so a
-#: clean run's row stays as compact as it was.
+#: Audit keys emitted even when null, so the entry keeps the shape readers have
+#: always seen. ``kept`` is in here for that reason alone: nothing on the GEMM
+#: path writes it -- it is null in all 364 tuner entries across the 320 traces on
+#: record -- so no reader can be indexing on its value, only on its presence.
+#: Every other key is dropped when empty, which keeps a failure's row about as
+#: small as a clean one's rather than making either smaller than before.
 _TRACE_TUNER_KEEP_NULL = frozenset({"tuner", "best_micro_speedup", "kept"})
 
 
@@ -4885,6 +4894,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
     engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
+    envelope_failed = str(result.get("status") or "").strip().lower() == "failed"
     tuners: list[dict[str, Any]] = []
     tuner_error_class: str | None = None
     for t in result.get("tuners_run") or []:
@@ -4924,8 +4934,13 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
         # The envelope leaves ``error_class`` unset even when every tuner failed;
-        # promote the first tuner's class so a failed run is greppable.
-        "error_class": result.get("error_class") or tuner_error_class,
+        # promote the first tuner's class so a failed run is greppable. Only for a
+        # run that actually failed: a tuner may fail inside a run that succeeds,
+        # and stamping that row would break the invariant readers rely on, that
+        # ``error_class`` means the run did not succeed. It holds in every trace on
+        # record -- 0 of 318 ``ok`` rows carry one, while 119 of them have a tuner
+        # that returned no speedup and would be promoted from here ungated.
+        "error_class": result.get("error_class") or (tuner_error_class if envelope_failed else None),
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:

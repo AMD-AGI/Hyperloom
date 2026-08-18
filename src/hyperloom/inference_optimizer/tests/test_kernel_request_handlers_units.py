@@ -5699,3 +5699,26 @@ def test_gemm_trace_survives_non_mapping_tuner_entries(tmp_path: Path) -> None:
         {"engine": "forge", "status": "ok", "tuners_run": ["junk", None, {"tuner": "a8w8"}]},
     )
     assert [t["tuner"] for t in rows[0]["tuners_run"]] == ["a8w8"]
+
+
+def test_gemm_trace_does_not_stamp_a_successful_run_with_a_tuner_error(tmp_path: Path) -> None:
+    # A run can succeed on one tuner while another fails. Promoting that tuner's
+    # class onto the row would report the whole run as failed by it. Across the
+    # 320 traces on record no ok row carries an error_class, and 119 of them hold
+    # a tuner that returned no speedup -- so this is the common case, not a corner.
+    rows = _gemm_trace_rows(
+        tmp_path,
+        {
+            "engine": "forge",
+            "status": "ok",
+            "error_class": None,
+            "tuners_run": [
+                {"tuner": "a8w8", "status": "failed", "error_class": "subprocess_error", "error": "boom"},
+                {"tuner": "fmoe_ck", "status": "ok", "best_micro_speedup": 1.31},
+            ],
+        },
+    )
+    # The row is clean...
+    assert "error_class" not in rows[0]
+    # ...and the failure is not lost, only kept where it belongs.
+    assert rows[0]["tuners_run"][0]["error_class"] == "subprocess_error"
