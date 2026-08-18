@@ -1771,6 +1771,12 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
+            kept = list(state.enablement.kept_patches or [])
+            for p in res.get("patches_applied") or []:
+                sp = str(p)
+                if sp and sp not in kept:
+                    kept.append(sp)
+            state.enablement.kept_patches = kept
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
