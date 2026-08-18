@@ -278,7 +278,7 @@ def test_render_carries_validated_rocm_envs():
     assert "export NCCL_MIN_NCHANNELS=112" in text
 
 
-def test_render_model_always_exported():
+def test_render_model_path_is_exported():
     text = render_reference_script(framework="sglang", server_args="", model="/models/M")
     assert "export MODEL=/models/M" in text
 

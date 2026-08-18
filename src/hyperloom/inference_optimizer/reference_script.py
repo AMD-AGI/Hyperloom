@@ -322,8 +322,8 @@ def render_reference_script(
         gpu_type: GPU type string, emitted as ``export GPU_TYPE=<s>``.
         setup_commands: Ordered install commands to run before launching.
             Only emit when generating an enablement artifact.
-        patches: Ordered patch file paths (relative to the script or absolute)
-            to apply via ``git apply``.  Requires ``framework_root``.
+        patches: Ordered patch file paths, relative to the script directory, to
+            apply via ``git apply``.  Requires ``framework_root``.
         framework_root: Framework source tree root where patches are applied.
             Emitted as ``export FRAMEWORK_ROOT=<path>`` and used in the
             ``apply_patch`` helper.

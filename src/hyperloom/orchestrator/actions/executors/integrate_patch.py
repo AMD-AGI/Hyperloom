@@ -2112,10 +2112,10 @@ class IntegratePatchExecutor:
             # Only the manifest feeds switch_env, so an enablement round may instead
             # arm its gate through the proposal. One that is armed nowhere would
             # bench inert and reproduce the same failure, so it is still refused.
-            armed_by_proposal = {g for g in undeclared_gates if g in proposal_extra_envs}
-            unarmed_gates = [g for g in undeclared_gates if g not in armed_by_proposal]
-            if not params.get("enablement") or unarmed_gates:
-                if unarmed_gates and params.get("enablement"):
+            is_enablement = bool(params.get("enablement"))
+            unarmed_gates = [g for g in undeclared_gates if g not in proposal_extra_envs]
+            if not is_enablement or unarmed_gates:
+                if is_enablement:
                     reason = (
                         f"patch gates on environment switch(es) "
                         f"{', '.join(unarmed_gates)} that nothing turns on: declare "

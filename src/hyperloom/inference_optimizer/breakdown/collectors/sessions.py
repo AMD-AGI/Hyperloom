@@ -1474,6 +1474,9 @@ def collect_enablement(
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_kept_patches:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
+    framework_root = str(_eg(state, "framework_root", "") or "")
+    if framework_root:
+        out["framework_root"] = framework_root
     if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
         out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
     candidate_refs = _eg(state, "candidate_refs")

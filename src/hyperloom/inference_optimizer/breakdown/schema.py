@@ -2439,6 +2439,7 @@ class EnablementBreakdown(TypedDict, total=False):
             the round.
         trigger_evidence_excerpt: Tail of the captured eval-failure evidence.
         kept_patches: Session-relative paths of patches landed by enablement.
+        framework_root: Source tree ``kept_patches`` were applied against.
         kept_stack_action: The stack action behind the KEPT attempt runtime.
         candidate_refs: Bridging candidate refs considered for rotation.
         setup_commands: Setup commands the specialist requested.
@@ -2485,6 +2486,7 @@ class EnablementBreakdown(TypedDict, total=False):
     launch_log_excerpt: str
     trigger_evidence_excerpt: str
     kept_patches: list[str]
+    framework_root: str
     kept_stack_action: EnablementStackActionSummary
     candidate_refs: list[str]
     setup_commands: list[str]
