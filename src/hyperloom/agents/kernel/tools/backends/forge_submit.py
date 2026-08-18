@@ -2952,11 +2952,19 @@ def _run_loop_via_cli(
     # logged in". Pin codex instead, and disable the provider fallback (it
     # defaults to claude) so a missing Codex SDK fails loudly here rather than
     # degrading into an unauthenticated claude run.
+    #
+    # Model id uses the shared Forge ladder (FORGE_* → CLAUDE/CODEX_MODEL) so
+    # rewrite honors the same overrides as fusion and collective. Omit --model
+    # when unset so KernelForge keeps its own provider default.
+    from hyperloom.common.llm_config import resolve_forge_llm_model
+
     if _openai_only_provider():
         cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
-        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
-        if codex_model:
-            cmd += ["--model", codex_model]
+        forge_model = resolve_forge_llm_model("codex")
+    else:
+        forge_model = resolve_forge_llm_model("claude")
+    if forge_model:
+        cmd += ["--model", forge_model]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
@@ -3176,9 +3184,19 @@ def _run_rewrite_via_cli(
     # has no options for: it takes no --agent-backend, so its Config reads these.
     # Without them an OpenAI-only deployment resolves "auto" to the claude
     # provider and every session fails "Not logged in", after the whole budget.
+    #
+    # forge-rewrite-by-flydsl accepts --model (overrides KERNEL_AGENTS_MODEL /
+    # FORGE_AGENT_MODEL). KernelForge Config does not read FORGE_CLAUDE_MODEL /
+    # FORGE_CODEX_MODEL, so Hyperloom must resolve and pass the id explicitly —
+    # the same ladder forge-loop / fusion / collective already use.
+    from hyperloom.common.llm_config import resolve_forge_llm_model
+
     if _openai_only_provider():
         env["FORGE_AGENT_BACKEND"] = "codex"
         env["FORGE_AGENT_FALLBACK_PROVIDER"] = "none"
+        forge_model = resolve_forge_llm_model("codex")
+    else:
+        forge_model = resolve_forge_llm_model("claude")
     if "/aiter/" in (source_kernel or ""):
         env.pop("AITER_REBUILD", None)
         _ensure_flydsl_aiter_compat()
@@ -3219,6 +3237,8 @@ def _run_rewrite_via_cli(
     # rewrite producer files its port under an identity the model is part of,
     # and an unresolved model has to be said rather than left out.
     cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
+    if forge_model:
+        cmd += ["--model", forge_model]
     if source_entry:
         cmd += ["--source-entry", source_entry]
     if source_language:

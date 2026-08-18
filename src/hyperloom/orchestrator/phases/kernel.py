@@ -3300,7 +3300,6 @@ class KernelPhase(PhaseHandler):
                 # session baseline the headline uses.
                 "gain_pct": incremental_gain,
                 "patch_path": patch,
-                "target_file": fusion_result.get("source_file") or integrate_result.get("target_file"),
             },
         )
         if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:

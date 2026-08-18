@@ -250,6 +250,53 @@ def test_explain_stop_reason_unknown_is_empty():
     assert rp._explain_stop_reason("") == ""
 
 
+class _SweepState:
+    def __init__(self, last_conc_sweep):
+        self.last_conc_sweep = last_conc_sweep
+
+
+def test_a_skipped_sweep_is_not_described_as_a_finished_one():
+    """``conc_sweep_done`` is also the exit for a sweep that declined to run."""
+    state = _SweepState({"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
+    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    assert "did not run" in msg
+    assert "no_optimization_to_compare" in msg
+
+
+def test_a_sweep_that_ran_keeps_the_plain_explanation():
+    state = _SweepState({"status": "succeeded", "was_skipped": False})
+    assert rp._explain_stop_reason("conc_sweep_done", state) == rp._explain_stop_reason("conc_sweep_done")
+
+
+def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
+    state = _SweepState({"status": "succeeded", "was_skipped": True, "skip_reason": ""})
+    assert "did not run" in rp._explain_stop_reason("conc_sweep_done", state)
+
+
+def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran(tmp_path):
+    """The budget path records was_skipped for a sweep that ran its whole ladder."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    live = SharedState()
+    live.record_conc_sweep(
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "budget_exhausted": True,
+            "skip_reason": "budget_exhausted_no_successful_pairs",
+        }
+    )
+    live.save(tmp_path)
+    # The report is written from a reloaded state, so the flag that separates
+    # the two skips has to survive the round trip to be readable at all.
+    state = SharedState.load_or_init(tmp_path)
+
+    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    assert "did not run" not in msg
+    assert "budget" in msg
+    assert "budget_exhausted_no_successful_pairs" in msg
+
+
 def test_format_md_renders_stop_explanation():
     md = rp._format_md(
         {

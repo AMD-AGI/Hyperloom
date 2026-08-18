@@ -337,8 +337,8 @@ class PreludePhase(PhaseHandler):
         Reads the ``gemm``/``fusion``/``rewrite`` sub-columns the warm-start
         download provided, resolves every recorded file ref to its downloaded
         copy via ``KernelAgentKB.prior_file``, and returns one plan entry per
-        item carrying the local ``patch_path`` / ``source_paths`` plus the
-        item's non-file metadata. Refs that do not resolve are dropped.
+        item carrying the local Patch or tuned artifact plus non-file metadata.
+        Refs that do not resolve are dropped.
         """
         readers = (
             ("gemm", kb.read_gemm, "optimizations"),
@@ -361,112 +361,128 @@ class PreludePhase(PhaseHandler):
                 meta = {
                     k: v
                     for k, v in row.items()
-                    if k not in ("patch", "source_file", "source_files", "tuned_file", "files")
+                    if k
+                    not in (
+                        "patch",
+                        "source_file",
+                        "source_files",
+                        "target_file",
+                        "target_files",
+                        "target_path",
+                        "tuned_file",
+                        "files",
+                    )
                 }
-                if column == "rewrite":
-                    source_refs = [str(r) for r in (row.get("source_files") or []) if str(r or "").strip()]
-                elif column == "fusion":
-                    source_refs = [str(row.get("source_file"))] if row.get("source_file") else []
-                else:  # gemm
-                    source_refs = [str(row.get("tuned_file"))] if row.get("tuned_file") else []
-                source_paths: list[str] = []
-                for ref in source_refs:
-                    resolved = kb.prior_file(ref)
-                    if resolved is not None:
-                        source_paths.append(str(resolved))
                 entry: dict[str, Any] = {"column": column, "meta": meta}
                 # Preserve the exact Recipe row so CLOSE can carry the validated
                 # kernel content and its refs forward on the same inference page.
-                entry["recipe_row"] = dict(row)
+                entry["recipe_row"] = {
+                    key: value
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "source_file",
+                        "source_files",
+                        "target_file",
+                        "target_files",
+                        "target_path",
+                    }
+                }
                 patch_ref = str(row.get("patch") or "").strip()
                 if patch_ref:
                     patch_local = kb.prior_file(patch_ref)
                     if patch_local is not None:
                         entry["patch_path"] = str(patch_local)
-                if source_paths:
-                    entry["source_paths"] = source_paths
-                # A portable target path is only honoured when it exists on this
-                # host; cross-session records usually omit it, so most entries
-                # are loaded/recorded and their apply is left to the kernel phase.
-                target = str(row.get("target_path") or meta.get("target_path") or "").strip()
-                if target and Path(target).is_file():
-                    entry["target_file"] = target
-                if entry.get("patch_path") or entry.get("source_paths"):
+                tuned_ref = str(row.get("tuned_file") or "").strip()
+                if column == "gemm" and tuned_ref:
+                    tuned_local = kb.prior_file(tuned_ref)
+                    if tuned_local is not None:
+                        entry["source_paths"] = [str(tuned_local)]
+                if entry.get("patch_path") or (
+                    column == "gemm" and entry.get("source_paths")
+                ):
                     plan.append(entry)
         return plan
 
     @staticmethod
-    def _parse_diff_target(patch_path: str | None) -> str:
-        """Extract the patched file's repo-relative path from a unified diff.
-
-        Reads the ``+++ b/<path>`` header (falling back to ``diff --git a/x
-        b/y``) so a champion patch can be located in this session's source tree
-        even when the KB record did not persist an absolute target path.
-        """
+    def _parse_diff_targets(patch_path: str | None) -> list[str]:
+        """Extract every safe repo-relative target from a unified diff."""
         raw = str(patch_path or "").strip()
         if not raw:
-            return ""
+            return []
         try:
             text = Path(raw).read_text(errors="replace")
-        except OSError:
-            return ""
-        git_target = ""
-        for line in text.splitlines():
-            if line.startswith("+++ "):
-                candidate = line[4:].split("\t", 1)[0].strip()
-                if candidate.startswith("b/"):
-                    candidate = candidate[2:]
-                if candidate and candidate != "/dev/null":
-                    return candidate
-            elif line.startswith("diff --git ") and not git_target:
-                parts = line.split()
-                if len(parts) >= 4:
-                    candidate = parts[3]
-                    if candidate.startswith("b/"):
-                        candidate = candidate[2:]
-                    git_target = candidate
-        return git_target
+            from ..specialists.patch_safety import parse_patch_targets
+
+            return list(parse_patch_targets(text).all)
+        except (OSError, ValueError):
+            return []
+
+    @classmethod
+    def _parse_diff_target(cls, patch_path: str | None) -> str:
+        """Return the shared parser's first safe repo-relative Patch target.
+
+        Modify/delete/create targets come from paired pre/post-image headers;
+        mode-only and metadata-only rename patches fall back to ``diff --git``.
+        No persisted target metadata participates.
+        """
+        targets = cls._parse_diff_targets(patch_path)
+        return targets[0] if targets else ""
 
     def _resolve_kernel_target_path(self, entry: dict[str, Any]) -> str:
-        """Locate the champion patch's target file in this session's source tree.
+        """Locate the first Patch target under this Session's active root."""
+        targets = self._resolve_kernel_target_paths(entry)
+        return targets[0] if targets else ""
 
-        Aggressive resolution: an absolute target that exists is used as-is;
-        otherwise the repo-relative path parsed from the diff header is joined
-        against every trusted source root (:func:`resolve_patch_target_roots`)
-        and the first existing file wins. Returns '' when nothing resolves.
+    def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
+        """Resolve every declared Patch target under the Session active root.
+
+        Existing pre-images must be files, create destinations must be absent,
+        and resolved paths must remain beneath the root. Any read, parse, root,
+        boundary, or file-state failure records ``entry['resolution_error']``
+        and emits a warning before replay is deferred.
         """
-        target = str(entry.get("target_file") or "").strip()
-        if target and Path(target).is_file():
-            return target
-        rel = self._parse_diff_target(entry.get("patch_path"))
-        if not rel:
-            return ""
-        rel = rel.lstrip("/")
-        try:
-            from ..framework.paths import resolve_patch_target_roots
+        def reject(reason: str) -> list[str]:
+            entry["resolution_error"] = reason
+            log.warning("Kernel Patch replay rejected: %s", reason)
+            return []
 
-            roots = resolve_patch_target_roots()
-        except Exception:  # noqa: BLE001 — resolution must never raise
-            roots = ()
-        for root in roots:
-            candidate = Path(root) / rel
-            if candidate.is_file():
-                return str(candidate)
-        # Suffix fallback: the diff path may carry a package prefix the root
-        # already includes (e.g. ``sglang/foo`` under ``.../sglang/``). Only
-        # drop leading components while a package path remains — matching on a
-        # bare filename would happily point a whole-file replacement at an
-        # unrelated same-named module.
-        tail = Path(rel)
-        for root in roots:
-            base = Path(root.rstrip("/"))
-            if not base.is_dir():
-                continue
-            for depth in range(1, max(1, len(tail.parts) - 1)):
-                candidate = base / Path(*tail.parts[depth:])
-                if candidate.is_file():
-                    return str(candidate)
-        return ""
+        patch_path = Path(str(entry.get("patch_path") or "").strip())
+        try:
+            from ..framework.paths import resolve_session_framework_root
+            from ..specialists.patch_safety import parse_patch_targets
+
+            parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
+            root_value = resolve_session_framework_root()
+        except (OSError, ValueError) as exc:
+            return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
+        if not root_value:
+            return reject("Session active framework root is unset")
+        try:
+            root = Path(root_value).resolve(strict=False)
+            root_is_dir = root.is_dir()
+        except (OSError, RuntimeError) as exc:
+            return reject(
+                "active framework root cannot be resolved: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if not root_is_dir:
+            return reject(f"active framework root is invalid: {root}")
+
+        resolved: list[str] = []
+        for target in parsed.all:
+            candidate = (root / target).resolve(strict=False)
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                return reject(f"target escapes active root: {target}")
+            if target in parsed.existing and not candidate.is_file():
+                return reject(f"existing target is missing: {candidate}")
+            if target in parsed.created and candidate.exists():
+                return reject(f"create target already exists: {candidate}")
+            resolved.append(str(candidate))
+        entry.pop("resolution_error", None)
+        return resolved
 
     @staticmethod
     def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
@@ -551,14 +567,12 @@ class PreludePhase(PhaseHandler):
             materialize_unified_patch_snapshot,
         )
 
-        # A rewrite record may carry both a deploy patch and source snapshots
-        # used as authoring context.  The patch is authoritative: copying the
-        # first source snapshot onto the resolved target can replace an
-        # unrelated framework file (for example attention.py over
-        # prefix_prefill.py).  Source-only records retain the legacy fallback.
-        replacement = entry.get("patch_path") or (
-            entry.get("source_paths") or [None]
-        )[0]
+        replacement = entry.get("patch_path")
+        if not replacement:
+            return {
+                "status": "failed",
+                "error": "warm replay kernel source mutation is missing its Patch",
+            }
         kernel_id = str((entry.get("meta") or {}).get("kernel_name") or "warm_kernel")
         payload: dict[str, Any] = {
             "patch_path": replacement,
@@ -773,8 +787,10 @@ class PreludePhase(PhaseHandler):
             if entry.get("column") == "gemm":
                 if not envs:
                     continue
-            elif not self._resolve_kernel_target_path(entry):
-                continue
+            else:
+                targets = self._resolve_kernel_target_paths(entry)
+                if not any(targets):
+                    continue
             configs.append(
                 (
                     f"kernel[{index}]",
@@ -860,7 +876,7 @@ class PreludePhase(PhaseHandler):
         applied: list[dict[str, Any]] = []
         kernel_snapshots: list[dict[str, Any]] = []
         prepared_envs: dict[int, dict[str, str]] = {}
-        prepared_targets: dict[int, str] = {}
+        prepared_targets: dict[int, list[str]] = {}
         kernel_configs: list[tuple[str, Mapping[str, Any]]] = []
         for index, entry in enumerate(plan):
             envs = self._warm_kernel_extra_envs(entry)
@@ -868,10 +884,10 @@ class PreludePhase(PhaseHandler):
                 if not envs:
                     continue
             else:
-                target = self._resolve_kernel_target_path(entry)
-                if not target:
+                targets = self._resolve_kernel_target_paths(entry)
+                if not targets:
                     continue
-                prepared_targets[index] = target
+                prepared_targets[index] = targets
             prepared_envs[index] = envs
             kernel_configs.append(
                 (
@@ -923,18 +939,25 @@ class PreludePhase(PhaseHandler):
                     continue
                 entry["decision"] = "PENDING"
                 continue
-            target = prepared_targets.get(index, "")
-            if not target:
+            targets = prepared_targets.get(index, [])
+            if not targets:
                 entry["decision"] = "DEFERRED"
+                if entry.get("resolution_error"):
+                    entry["apply_result"] = {
+                        "status": "skipped",
+                        "reason": str(entry["resolution_error"])[:300],
+                    }
                 deferred += 1
                 continue
-            entry["target_file"] = target
+            anchor_target = targets[0]
+            entry["resolved_patch_targets"] = list(targets)
             try:
-                snapshot = self._snapshot_warm_kernel_target(
-                    target,
-                    len(kernel_snapshots),
-                )
-                kernel_snapshots.append(snapshot)
+                for target_path in targets:
+                    snapshot = self._snapshot_warm_kernel_target(
+                        target_path,
+                        len(kernel_snapshots),
+                    )
+                    kernel_snapshots.append(snapshot)
                 state.warm_replay_pending = {
                     **dict(state.warm_replay_pending or {}),
                     "status": "preparing_kernel",
@@ -945,7 +968,7 @@ class PreludePhase(PhaseHandler):
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "warm-kernel KB: pre-mutation snapshot persist failed for %s",
-                    target,
+                    targets,
                     exc_info=True,
                 )
                 entry["decision"] = "ERROR"
@@ -955,9 +978,13 @@ class PreludePhase(PhaseHandler):
                 errors += 1
                 break
             try:
-                apply_result = self._apply_warm_kernel_patch(entry, target)
+                apply_result = self._apply_warm_kernel_patch(entry, anchor_target)
             except Exception as exc:  # noqa: BLE001
-                log.warning("warm-kernel KB: apply failed for %s", target, exc_info=True)
+                log.warning(
+                    "warm-kernel KB: apply failed for %s",
+                    anchor_target,
+                    exc_info=True,
+                )
                 entry["decision"] = "ERROR"
                 entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
                 errors += 1
@@ -1265,6 +1292,17 @@ class PreludePhase(PhaseHandler):
                 }
                 state.save(self.session_dir)
                 return None
+            if sdk_replay.get("patches"):
+                from ..framework.paths import resolve_session_framework_root
+
+                if not resolve_session_framework_root():
+                    state.warm_replay_attempted = True
+                    state.warm_replay_outcome = {
+                        "status": "skipped",
+                        "reason": "active_framework_root_missing",
+                    }
+                    state.save(self.session_dir)
+                    return None
         try:
             kernel = (
                 await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
@@ -1491,6 +1529,38 @@ class PreludePhase(PhaseHandler):
             wsc_patches = self._filter_warm_patches_with_kg(
                 wsc_patches, wsc_advisory, state
             )
+        if wsc_patches:
+            from ..framework.paths import resolve_session_framework_root
+
+            if not resolve_session_framework_root():
+                rollback = (
+                    self._revert_warm_kernel_patches(
+                        kernel_applied,
+                        kernel_snapshots,
+                    )
+                    if kernel_applied or kernel_snapshots
+                    else {"ok": True, "errors": []}
+                )
+                if rollback.get("ok"):
+                    state.warm_replay_pending = {}
+                else:
+                    state.warm_replay_pending = {
+                        **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                        "status": "rollback_failed",
+                        "rollback_errors": list(rollback.get("errors") or []),
+                    }
+                    if hasattr(state, "set_stop_reason"):
+                        state.set_stop_reason("warm_replay_rollback_failed")
+                state.warm_replay_attempted = True
+                state.warm_replay_outcome = {
+                    "status": (
+                        "skipped" if rollback.get("ok") else "rollback_failed"
+                    ),
+                    "reason": "active_framework_root_missing",
+                    "rollback": rollback,
+                }
+                state.save(self.session_dir)
+                return None
 
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
             state.warm_replay_outcome = {
@@ -1549,6 +1619,61 @@ class PreludePhase(PhaseHandler):
             )
             combined_envs = dict(bc_envs)
             combined_envs.update(kernel_envs)
+        try:
+            from ..actions.executors._grid_server_args import (
+                validate_warm_replay_context_length,
+            )
+
+            validated_args, workload_compatibility = (
+                validate_warm_replay_context_length(
+                    combined_args,
+                    getattr(state, "framework", ""),
+                    int(getattr(state, "isl", 0) or 0),
+                    int(getattr(state, "osl", 0) or 0),
+                    getattr(state, "max_model_len", None),
+                )
+            )
+            if validated_args != combined_args:
+                raise RuntimeError(
+                    "warm replay context preflight must not mutate config"
+                )
+        except (ValueError, RuntimeError) as exc:
+            rollback = (
+                self._revert_warm_kernel_patches(
+                    kernel_applied,
+                    kernel_snapshots,
+                )
+                if kernel_applied or kernel_snapshots
+                else {"ok": True, "errors": []}
+            )
+            if rollback.get("ok"):
+                state.warm_replay_pending = {}
+            else:
+                state.warm_replay_pending = {
+                    **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                    "status": "rollback_failed",
+                    "rollback_errors": list(rollback.get("errors") or []),
+                }
+                if hasattr(state, "set_stop_reason"):
+                    state.set_stop_reason("warm_replay_rollback_failed")
+            state.warm_replay_attempted = True
+            state.warm_replay_outcome = {
+                "status": (
+                    "skipped" if rollback.get("ok") else "rollback_failed"
+                ),
+                "reason": (
+                    "workload_config_incompatible:"
+                    f"{type(exc).__name__}:{exc}"
+                )[:500],
+                "target_workload_shape": {
+                    "conc": int(getattr(state, "conc", 0) or 0),
+                    "isl": int(getattr(state, "isl", 0) or 0),
+                    "osl": int(getattr(state, "osl", 0) or 0),
+                },
+                "rollback": rollback,
+            }
+            state.save(self.session_dir)
+            return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "warm_replay_prelude",
@@ -1579,6 +1704,7 @@ class PreludePhase(PhaseHandler):
                 current_remote or kernel_pending
             ),
             "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(self.shared_state),
+            "workload_compatibility": workload_compatibility,
         }
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -1971,8 +2097,10 @@ class PreludePhase(PhaseHandler):
                 else ""
             )
             if promoted_checkout:
+                outcome["active_framework_root"] = promoted_checkout
+                # Resume re-points $INFERENCEX_PATH at this checkout, and stops
+                # the run when it has since vanished.
                 state.active_inferencex_path = promoted_checkout
-                outcome["active_inferencex_path"] = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
@@ -2026,7 +2154,7 @@ class PreludePhase(PhaseHandler):
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
             if promoted_checkout:
-                entry_extra["inferencex_path"] = promoted_checkout
+                entry_extra["framework_source_root"] = promoted_checkout
             kernel_outcome = self._book_combined_kernel_keep(result, task)
             outcome["kernel"] = dict(kernel_outcome)
             if kernel_outcome.get("kept"):
@@ -2062,8 +2190,6 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_pending = {}
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
-                if promoted_checkout:
-                    os.environ["INFERENCEX_PATH"] = promoted_checkout
                 return
             self._lift_to_current_best(
                 "replay_warm_recipe",
@@ -2136,8 +2262,6 @@ class PreludePhase(PhaseHandler):
         state.warm_replay_pending = {}
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
-        if promoted_checkout:
-            os.environ["INFERENCEX_PATH"] = promoted_checkout
 
     async def _maybe_enqueue_prelude_initial_analysis_after_baseline(
         self,

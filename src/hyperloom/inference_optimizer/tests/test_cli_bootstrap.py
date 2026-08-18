@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace
@@ -415,6 +417,93 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     assert cb._resolve_session_dir_for_summary(None) == tmp_path
     monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path / "missing"))
     assert cb._resolve_session_dir_for_summary(None) is None
+
+
+def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
+    """start_ts stays the budget anchor, so the resume timestamp is the only leg boundary."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=1)
+
+    cb._begin_resume_leg(state, reanchor_budget=False)
+
+    assert state.start_ts == "2026-08-01T00:00:00+00:00"
+    assert state.resumed_ts > state.start_ts
+    assert state.crash_count == 1
+
+
+def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4)
+    state.set_stop_reason("time_exhausted")
+    state.closing_phase = True
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.start_ts == state.resumed_ts
+    assert state.stop_reason == ""
+    assert state.stop_ts == ""
+    assert state.closing_phase is False
+    assert state.crash_count == 0
+
+
+def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
+    """A phase segment is only durable once banked, and stopping never banks it."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.set_stop_reason("time_exhausted")
+    # Pin where the leg ended so the banked segment is a checkable number.
+    state.stop_ts = "2026-08-01T00:30:00+00:00"
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.phase_elapsed_totals["PRELUDE"] == 1800.0
+    assert state.stop_ts == ""
+
+
+def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
+    """The first leg's segment is already durable; re-banking it would double-charge the phase."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = "2026-08-01T00:30:00+00:00"
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    # A second leg picked up a day later and ran an hour, still in PRELUDE.
+    state.resumed_ts = "2026-08-02T00:00:00+00:00"
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = "2026-08-02T01:00:00+00:00"
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.phase_elapsed_totals["PRELUDE"] == 1800.0 + 3600.0
+
+
+def test_a_resume_does_not_bank_a_stop_stamped_after_the_present() -> None:
+    """Banking past now charges the phase for time no leg ran, which ends it early."""
+    started = time.time() - 60.0
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = datetime.fromtimestamp(started, tz=timezone.utc).isoformat()
+    state.phase_started_unix = started
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = datetime.fromtimestamp(started + 10 * 86400.0, tz=timezone.utc).isoformat()
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert 60.0 <= state.phase_elapsed_totals["PRELUDE"] < 120.0
+
+
+def test_a_resume_with_no_recorded_stop_leaves_the_segment_unbanked() -> None:
+    """A clean stop records no end time; under-charge the phase rather than guess one."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+
+    cb._begin_resume_leg(state, reanchor_budget=False)
+
+    assert state.phase_elapsed_totals == {}
 
 
 def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> None:

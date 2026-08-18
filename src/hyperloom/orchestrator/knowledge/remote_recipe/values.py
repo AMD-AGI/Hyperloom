@@ -28,6 +28,7 @@ from .sanitize import (
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
+from ...specialists.patch_safety import parse_patch_targets
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +41,6 @@ _PATH_KEYS = (
     "patch",
     "patch_path",
     "report_path",
-    "source_file",
-    "target_file",
     "tuned_file",
 )
 _PATH_LIST_KEYS = (
@@ -50,7 +49,11 @@ _PATH_LIST_KEYS = (
     "changed_files",
     "patches",
     "patches_applied",
+)
+_SOURCE_METADATA_KEYS = (
+    "source_file",
     "source_files",
+    "target_file",
     "target_files",
 )
 _IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "conc_sweep", "sweep"}
@@ -70,6 +73,21 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _patch_declared_targets(path: Any) -> tuple[str, ...]:
+    """Return every safe target declared by a unified diff."""
+    patch = Path(str(path or ""))
+    try:
+        text = patch.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RemoteRecipeValidationError(
+            f"cannot read accepted patch targets: {patch}"
+        ) from exc
+    try:
+        return parse_patch_targets(text).all
+    except ValueError as exc:
+        raise RemoteRecipeValidationError(str(exc)) from exc
 
 
 def _positive_int(value: Any) -> int | None:
@@ -408,6 +426,8 @@ def _externalize_record(
 ) -> dict[str, Any]:
     """Preserve a result record while replacing known local file fields with refs."""
     out = dict(record)
+    for key in _SOURCE_METADATA_KEYS:
+        out.pop(key, None)
     required = required_keys or set()
     for key in _PATH_KEYS:
         if key not in out:
@@ -484,29 +504,49 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     if not stack_rows or str(integrated.get("decision") or "").upper() != "KEEP":
         return {"items": []}
     patch_source = stack_rows[-1].get("patch_path") or result.get("patch")
-    target_source = stack_rows[-1].get("target_file") or result.get("source_file")
-    if not str(patch_source or "").strip() or not str(target_source or "").strip():
+    if not str(patch_source or "").strip():
         raise RemoteRecipeValidationError(
-            "accepted kernel/fusion is missing its patch or target file"
+            "accepted kernel/fusion is missing its patch"
         )
     patch_ref = files.add(patch_source, category="kernel/fusion", kind="patches")
-    target_ref = files.add(target_source, category="kernel/fusion", kind="artifacts")
-    if not patch_ref or not target_ref:
+    if not patch_ref:
         raise RemoteRecipeValidationError(
-            "accepted kernel/fusion patch or target cannot be materialized: "
-            f"patch={patch_source!r} target={target_source!r}"
+            f"accepted kernel/fusion patch cannot be materialized: {patch_source!r}"
         )
+    _patch_declared_targets(patch_source)
+    integrated_for_publish = dict(integrated)
+    for key in (
+        "target_file",
+        "target_files",
+        "source_file",
+        "source_files",
+        "artifact_files",
+    ):
+        integrated_for_publish.pop(key, None)
+    e2e_record = _externalize_record(
+        integrated_for_publish,
+        files,
+        "kernel/fusion",
+    )
+    e2e_record.pop("target_file", None)
+    e2e_record.pop("target_files", None)
     record = {
         **result,
         **stack_rows[-1],
-        "e2e": _externalize_record(integrated, files, "kernel/fusion"),
+        "e2e": e2e_record,
         "phase": str(stack_rows[-1].get("phase") or "KERNEL_AGENT"),
         "patch": patch_ref,
-        "source_file": target_ref,
     }
     # Remove duplicate local-path aliases after establishing canonical refs.
-    record.pop("patch_path", None)
-    record.pop("target_file", None)
+    for key in (
+        "patch_path",
+        "target_file",
+        "target_files",
+        "source_file",
+        "source_files",
+        "artifact_files",
+    ):
+        record.pop(key, None)
     return {"items": [record]}
 
 
@@ -535,11 +575,6 @@ def match_rewrite_attempt(
             str(integrate.get("patch_path") or ""),
             lambda key, raw: str(raw.get("last_artifact_path") or raw.get("artifact_path") or "")
             == str(integrate.get("patch_path") or ""),
-        ),
-        (
-            str(integrate.get("target_file") or ""),
-            lambda key, raw: str(raw.get("last_source_file") or raw.get("source_file") or "")
-            == str(integrate.get("target_file") or ""),
         ),
     )
     for expected, predicate in criteria:
@@ -579,23 +614,17 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         # The integrated stack row is authoritative.  A matched micro attempt
         # may only fill a path that older stack rows omitted.
         patch_source = entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
-        source_source = entry.get("target_file") or raw.get("last_source_file") or raw.get("source_file")
         patch = files.add(
             patch_source,
             category="kernel/rewrite",
             kind="patches",
         )
-        source = files.add(
-            source_source,
-            category="kernel/rewrite",
-            kind="source",
-        )
-        if not patch or not source:
+        if not patch:
             raise RemoteRecipeValidationError(
-                "accepted kernel/rewrite patch or source cannot be materialized: "
-                f"integration_id={integration_id!r} patch={patch_source!r} "
-                f"source={source_source!r}"
+                "accepted kernel/rewrite patch cannot be materialized: "
+                f"integration_id={integration_id!r} patch={patch_source!r}"
             )
+        _patch_declared_targets(patch_source)
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
@@ -609,7 +638,6 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                     f"- E2E gain: {e2e_gain:g}%",
                     f"- Optimized throughput: {optimized_throughput:g}",
                     f"- Patch: {patch or 'unavailable'}",
-                    f"- Source: {source or 'unavailable'}",
                     "",
                 )
             ),
@@ -627,7 +655,6 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 "optimized_throughput": optimized_throughput,
                 "experience_document": experience,
                 "patch": patch,
-                "source_files": [source] if source else [],
             }
         )
     return {"items": rows}
@@ -864,11 +891,42 @@ def _unique_rows(rows: list[Any]) -> list[Any]:
 
 
 def _adopt_prior_kernel(
+    state: Any,
     sections: Any,
     value: dict[str, Any],
     files: "_Files",
 ) -> None:
-    """Carry prior kernel knowledge into the next throughput champion."""
+    """Carry prior Kernel rows only after that Kernel replay was reproduced."""
+    replay = _mapping(getattr(state, "warm_replay_outcome", {}))
+    kernel_replay = _mapping(replay.get("kernel"))
+    if (
+        str(replay.get("status") or "") != "reproduced"
+        or str(kernel_replay.get("status") or "") != "kept"
+        or (_positive_int(kernel_replay.get("kept")) or 0) <= 0
+    ):
+        return
+    list_keys = {
+        "gemm": "optimizations",
+        "fusion": "items",
+        "rewrite": "items",
+    }
+    selected_kernel: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for raw in getattr(state, "warm_kernel_kb_plan", []) or []:
+        if (
+            not isinstance(raw, Mapping)
+            or str(raw.get("decision") or "").upper() != "KEEP"
+        ):
+            continue
+        column = str(raw.get("column") or "").lower()
+        list_key = list_keys.get(column)
+        row = raw.get("recipe_row")
+        if list_key is None or not isinstance(row, Mapping):
+            continue
+        selected_kernel.setdefault(column, {list_key: []})[list_key].append(
+            dict(row)
+        )
+    if not selected_kernel:
+        return
     prior = sections.read("kernel")
     if prior is None:
         return
@@ -878,7 +936,8 @@ def _adopt_prior_kernel(
         for source in prior.files
         if source.is_file() and not source.is_symlink()
     }
-    referenced = extract_knowledge_artifact_refs(prior.knowledge, prior_paths)
+    prior_knowledge = sanitize_shared_knowledge(selected_kernel)
+    referenced = extract_knowledge_artifact_refs(prior_knowledge, prior_paths)
     missing = referenced - prior_paths
     if missing:
         raise RemoteRecipeValidationError(
@@ -890,12 +949,7 @@ def _adopt_prior_kernel(
         remapped[ref] = files.adopt_with_rename(source, ref)
 
     kernel = _mapping(value.get("kernel"))
-    list_keys = {
-        "gemm": "optimizations",
-        "fusion": "items",
-        "rewrite": "items",
-    }
-    prior_kernel = _mapping(_remap_artifact_refs(prior.knowledge, remapped))
+    prior_kernel = _mapping(_remap_artifact_refs(prior_knowledge, remapped))
     for column, list_key in list_keys.items():
         prior_column = _mapping(prior_kernel.get(column))
         if not prior_column:
@@ -1104,7 +1158,7 @@ def build_remote_knowledge(
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
-        _adopt_prior_kernel(sections, value, files)
+        _adopt_prior_kernel(state, sections, value, files)
     staged_sections = (
         merge_staged_sections(
             value,

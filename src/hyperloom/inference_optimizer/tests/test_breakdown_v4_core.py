@@ -483,6 +483,42 @@ def test_v4_state_snapshot_does_not_infer_canonical_entities_from_stack(tmp_path
     assert len(assemble_parts(tmp_path)["optimization_stack"]) == 3
 
 
+def _session_state(*, stop_reason: str, stop_ts: str) -> SimpleNamespace:
+    """A minimal state carrying only what the ``session`` snapshot reads.
+
+    Args:
+        stop_reason (str): The state's stop reason (empty while running).
+        stop_ts (str): The state's recorded stop timestamp.
+
+    Returns:
+        SimpleNamespace: The state stand-in to snapshot.
+    """
+    return SimpleNamespace(
+        session_id="session-5",
+        claw_session_id="claw-5",
+        sandbox_user_id="sandbox-5",
+        start_ts="2026-07-22T10:00:00Z",
+        stop_reason=stop_reason,
+        stop_ts=stop_ts,
+        max_minutes=30,
+        tick=5,
+        phase="CLOSE",
+    )
+
+
+def test_session_snapshot_carries_the_end_time_of_a_stopped_run(tmp_path):
+    snapshot_state_sections(tmp_path, _session_state(stop_reason="time_exhausted", stop_ts="2026-07-22T10:30:00+00:00"))
+    session = assemble_parts(tmp_path)["session"]
+    assert session["ended_at_utc"] == "2026-07-22T10:30:00Z"
+
+
+def test_session_snapshot_leaves_a_running_run_without_an_end_time(tmp_path):
+    # A resume clears the reason, so a leftover stop_ts must not end the session.
+    snapshot_state_sections(tmp_path, _session_state(stop_reason="", stop_ts="2026-07-22T10:30:00+00:00"))
+    session = assemble_parts(tmp_path)["session"]
+    assert session["ended_at_utc"] == ""
+
+
 def test_v4_critic_hook_mirrors_structured_kb_writes(tmp_path):
     record_critic_iteration(
         tmp_path,

@@ -15,10 +15,14 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .backends import _build_robustness_options
 from .parser import (
@@ -430,6 +434,74 @@ def _print_final_summary(
     print(f"  crash_count          : {state.crash_count}")
     _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _bank_previous_leg_phase_segment(state: SharedState) -> None:
+    """Bank the phase time the stopped leg spent but never recorded.
+
+    Per-phase totals are banked at each transition out of a phase, so a leg that
+    stopped mid-phase left its last segment live — and the resume boundary is
+    about to floor that segment away as the idle gap it mostly is.
+    :attr:`SharedState.stop_ts` is the only recorded evidence of when the leg
+    ended; a clean stop or a crash leaves none, and then the segment stays
+    unbanked. That under-charges the phase, which is the direction the phase
+    clock tolerates: over-charging ends a phase early.
+
+    The end is clamped to the present for the same reason: no leg can have run
+    past the moment it is being resumed, so a ``stop_ts`` stamped ahead of now
+    would bank the difference as spend the phase never had.
+
+    Must run before ``resumed_ts`` is restamped, which would floor the segment
+    to nothing.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+    """
+    stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
+    if stop_unix <= 0.0:
+        return
+    bank_phase_segment(state, until_unix=stop_unix)
+
+
+def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
+    """Mark the start of a resumed run leg on ``state`` (caller persists).
+
+    Every resume stamps :attr:`SharedState.resumed_ts`. The previous leg's
+    CLOSE transition stays in ``phase_history`` and would otherwise keep
+    speaking for the resumed run — a report reads it as the session's stop
+    reason and end time — and this boundary is what dates it as a previous
+    leg's. It is also what stops the phase clock charging the gap between the
+    two legs to whichever phase the session stopped in.
+
+    Only a previous leg that stopped for a recorded reason, or crashed
+    repeatedly, re-anchors the wall-clock budget. After a clean stop
+    ``start_ts`` is deliberately kept, so ``--max-hours`` still counts from the
+    original session start and the earlier legs' wall-clock stays spent. The
+    phase clock moves on either branch: the two answer different questions, and
+    neither answer includes time nothing was running.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+        reanchor_budget (bool): Whether the budget restarts from this leg.
+
+    Returns:
+        str: The timestamp stamped as this leg's boundary.
+    """
+    _bank_previous_leg_phase_segment(state)
+    state.resumed_ts = now_iso()
+    if reanchor_budget:
+        # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats
+        # forever think the work is done.
+        state.stop_reason = ""
+        state.stop_ts = ""
+        state.closing_phase = False
+        state.closing_started_unix = 0.0
+        state.closing_report_task_id = ""
+        # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
+        state.crash_count = 0
+        # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
+        state.start_ts = state.resumed_ts
+    return state.resumed_ts
 
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:

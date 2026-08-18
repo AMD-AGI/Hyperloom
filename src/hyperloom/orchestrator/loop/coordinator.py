@@ -1177,6 +1177,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_kernel_optimizations_from_state": "writeback",
         "_collect_attempt_provenance": "writeback",
         "_build_recipe_attrs_from_state": "writeback",
+        "ensure_recipe_finalized": "writeback",
         "finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_update_cumulative_gain_validated": "writeback",
@@ -1398,9 +1399,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """Signal shutdown, cancel reactor tasks, finalize, and close the DB.
 
         Sets the stop event, cancels and awaits every running reactor task,
-        runs the Recipe KB T4 safety-net finalize hook (in case the CLOSE phase
-        sequencer never ran), then closes the SQLite connection. Exceptions
-        raised by reactor tasks during teardown are logged, not propagated.
+        runs the Recipe KB T4 safety-net finalize hook when CLOSE never reached
+        a terminal publication status or its earlier attempt failed, then closes
+        the SQLite connection. Exceptions raised by reactor tasks during
+        teardown are logged, not propagated.
         """
         self._stop.set()
         for t in self._tasks_running:
@@ -1419,14 +1421,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.db.close()
 
     async def _recipe_kb_t4_hook(self) -> None:
-        """Finalize on graceful teardown/Ctrl-C when CLOSE did not finish.
+        """Finalize or retry on graceful teardown/Ctrl-C.
+
+        Terminal publication statuses are idempotent no-ops. An unfinished
+        CLOSE sequence, a missing status, or a prior retryable failure receives
+        one more in-process attempt before the database closes.
 
         This in-process hook cannot run after SIGKILL, container force-delete,
         host loss, or interpreter failure.
         """
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
-        if getattr(self.shared_state, "close_sequence_done", False):
+        finalize_status = str(
+            getattr(self.shared_state, "recipe_finalize_status", "") or ""
+        )
+        if (
+            getattr(self.shared_state, "close_sequence_done", False)
+            and finalize_status in {"written", "skipped", "disabled"}
+        ):
             return
         try:
             config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
@@ -1436,7 +1448,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 sid = (self.shared_state.recipe_kb_session_id or "").strip()
                 if not sid:
                     return
-            self.finalize_recipe_and_journal(source="t4_fallback")
+            self.ensure_recipe_finalized(source="t4_fallback")
         except Exception:  # noqa: BLE001 — defensive
             log.exception("recipe KB T4 fact_finalize fallback failed")
         try:
@@ -1748,6 +1760,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 or ("coordinator_exception" if last_tick_exc is not None else "unknown")
             )
             self.shared_state.save(self.session_dir)
+            # Every graceful terminal path gets one idempotent Recipe finalize
+            # attempt, including stop-check exits that never enter PHASE_CLOSE.
+            await self._recipe_kb_t4_hook()
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
                 "cumulative_gain_validated=%.2f%% max_minutes=%.0f",

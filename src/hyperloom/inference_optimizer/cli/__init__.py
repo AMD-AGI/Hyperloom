@@ -52,6 +52,7 @@ from ..model_config_utils import (
     summarize_model_config,
 )
 from .bootstrap import (
+    _begin_resume_leg,
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
@@ -1714,7 +1715,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     f"(cannot retroactively ungrade prior KEEPs)"
                 )
 
-        # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
         prior_crash = state.crash_count
 
         # target_reached is a terminal state requiring --force-resume to push
@@ -1748,18 +1748,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
 
-        if prior_stop or prior_crash >= 3:
-            state.stop_reason = ""
-            state.closing_phase = False
-            state.closing_started_unix = 0.0
-            state.closing_report_task_id = ""
-            # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
-            state.crash_count = 0
-            # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
-            from datetime import datetime, timezone
-
-            state.start_ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-            state.save(session_dir)
+        reanchor_budget = bool(prior_stop or prior_crash >= 3)
+        _begin_resume_leg(state, reanchor_budget=reanchor_budget)
+        state.save(session_dir)
+        if reanchor_budget:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")

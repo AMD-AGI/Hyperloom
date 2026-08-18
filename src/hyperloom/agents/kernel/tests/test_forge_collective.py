@@ -234,6 +234,39 @@ def test_cmd_carries_kb_identity(tmp_path):
     assert "--max-iters" not in cmd
 
 
+def test_cmd_pins_codex_backend_and_disables_claude_fallback(tmp_path):
+    """OpenAI-only collective must not silently fall back to unauthenticated Claude."""
+    cmd = fc._build_cmd(
+        _payload(
+            tmp_path,
+            agent_backend="codex",
+            llm_model="gpt-forge-only",
+        ),
+        _rig(tmp_path),
+        tmp_path,
+        deadline_unix=9_999_999_999,
+    )
+    assert cmd[cmd.index("--agent-backend") + 1] == "codex"
+    assert cmd[cmd.index("--agent-fallback-provider") + 1] == "none"
+    assert cmd[cmd.index("--model") + 1] == "gpt-forge-only"
+
+
+def test_cmd_pins_claude_backend_and_model(tmp_path):
+    cmd = fc._build_cmd(
+        _payload(
+            tmp_path,
+            agent_backend="claude",
+            llm_model="claude-forge-only",
+        ),
+        _rig(tmp_path),
+        tmp_path,
+        deadline_unix=9_999_999_999,
+    )
+    assert cmd[cmd.index("--agent-backend") + 1] == "claude"
+    assert "--agent-fallback-provider" not in cmd
+    assert cmd[cmd.index("--model") + 1] == "claude-forge-only"
+
+
 def test_cmd_resumes_an_interrupted_campaign(tmp_path):
     """A surviving run_state.json is the only state forge-loop resumes from."""
     repo = tmp_path / "repo"

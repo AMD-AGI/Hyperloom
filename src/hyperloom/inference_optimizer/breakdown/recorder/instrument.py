@@ -39,7 +39,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.timeutil import iso_z, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -776,7 +776,6 @@ def snapshot_state_sections(
     for name, fn in (
         ("session", _snapshot_session),
         ("explore_search", _snapshot_explore_search),
-        ("sweep", _snapshot_sweep),
         ("optimization_stack", _snapshot_optimization_stack),
         ("roofline", _snapshot_roofline),
     ):
@@ -863,6 +862,15 @@ def _snapshot_v4_run(rec, st: Any) -> None:
 def _snapshot_session(rec, st: Any) -> None:
     """Snapshot the ``session`` singleton from ``st`` (no-op without a session id).
 
+    A session that has stopped carries ``ended_at_utc``, taken from the state's
+    own stop timestamp: without it the exporter has no end to measure against
+    and reports the run as still going. ``start_ts`` is what the exported
+    elapsed time is measured from; a resume re-anchors it on the new leg only
+    when the previous one crashed or stopped for a recorded reason, so after a
+    clean stop it still names the original start. The manifest-derived fields
+    the live state cannot know (image, host, pid) are filled in by the
+    collector at export.
+
     Args:
         rec: the recorder used to write the singleton.
         st (Any): the live ``SharedState`` to snapshot.
@@ -870,6 +878,7 @@ def _snapshot_session(rec, st: Any) -> None:
     session_id = str(getattr(st, "session_id", "") or "")
     if not session_id:
         return
+    stop_reason = str(getattr(st, "stop_reason", "") or "")
     rec.record_singleton(
         "session",
         {
@@ -877,7 +886,10 @@ def _snapshot_session(rec, st: Any) -> None:
             "claw_session_id": getattr(st, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
             "start_ts": str(getattr(st, "start_ts", "") or ""),
-            "stop_reason": str(getattr(st, "stop_reason", "") or ""),
+            # A resumed run clears its reason but not necessarily the stale
+            # timestamp, so the pair is only ever emitted together.
+            "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
+            "stop_reason": stop_reason,
             "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
             "tick_count": int(getattr(st, "tick", 0) or 0),
             "phase": str(getattr(st, "phase", "") or ""),
@@ -905,19 +917,6 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
     search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
-
-
-def _snapshot_sweep(rec, st: Any) -> None:
-    """Snapshot the ``sweep`` singleton from ``st.last_sweep`` (no-op when empty).
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    last_sweep = dict(getattr(st, "last_sweep", None) or {})
-    if not last_sweep:
-        return
-    rec.record_singleton("sweep", last_sweep)
 
 
 def _snapshot_optimization_stack(rec, st: Any) -> None:

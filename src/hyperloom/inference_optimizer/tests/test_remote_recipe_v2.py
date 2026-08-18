@@ -67,9 +67,25 @@ def _state(tmp_path: Path) -> SimpleNamespace:
     tuned = tmp_path / "tuned.csv"
     tuned.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
     fusion = tmp_path / "fusion.patch"
-    fusion.write_text("fusion", encoding="utf-8")
+    fusion.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// optimized\n",
+        encoding="utf-8",
+    )
     rewrite = tmp_path / "rewrite.cu"
-    rewrite.write_text("// optimized", encoding="utf-8")
+    rewrite.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// rewrite optimized\n",
+        encoding="utf-8",
+    )
     source = tmp_path / "source.cu"
     source.write_text("// source", encoding="utf-8")
     return SimpleNamespace(
@@ -187,12 +203,59 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert rewrite["optimized_throughput"] == 130.0
     assert rewrite["experience_document"].endswith(".md")
     assert rewrite["patch"].startswith("kernel/rewrite/patches/")
-    assert rewrite["source_files"][0].startswith("kernel/rewrite/source/")
     assert (tmp_path / "files" / rewrite["experience_document"]).is_file()
     serialized = json.dumps(bundle.knowledge)
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
+
+
+def test_fusion_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    patch = Path(state.last_fusion["patch"])
+    patch.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// optimized\n"
+        "diff --git a/source_fused_ops.cu b/source_fused_ops.cu\n"
+        "--- /dev/null\n"
+        "+++ b/source_fused_ops.cu\n"
+        "@@ -0,0 +1 @@\n"
+        "+// new fused ops\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_remote_knowledge(state, tmp_path / "files-multi-fusion")
+
+    fusion = bundle.knowledge["value"]["kernel"]["fusion"]["items"][0]
+    assert fusion["patch"].startswith("kernel/fusion/patches/")
+
+
+def test_rewrite_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    patch = Path(state.optimization_stack[4]["patch_path"])
+    patch.write_text(
+        "diff --git a/source.cu b/source.cu\n"
+        "--- a/source.cu\n"
+        "+++ b/source.cu\n"
+        "@@ -1 +1 @@\n"
+        "-// source\n"
+        "+// optimized\n"
+        "diff --git a/source_helpers.cu b/source_helpers.cu\n"
+        "--- /dev/null\n"
+        "+++ b/source_helpers.cu\n"
+        "@@ -0,0 +1 @@\n"
+        "+// helper\n",
+        encoding="utf-8",
+    )
+
+    bundle = build_remote_knowledge(state, tmp_path / "files-multi-rewrite")
+
+    rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
+    assert rewrite["patch"].startswith("kernel/rewrite/patches/")
 
 
 def test_remote_recipe_projects_workload_shape_for_donor_gating(
@@ -271,7 +334,6 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
                     "rewrite": {
                         "workspace": "/workspace/hyperloom/session",
                         "api_token": "secret",
-                        "source_file": "kernel/rewrite/source/kernel.py",
                         "note": (
                             "failed at /home/operator/session/log.txt "
                             "with TOKEN=secret"
@@ -290,7 +352,6 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     rewrite = sanitized["value"]["kernel"]["rewrite"]
     assert "workspace" not in rewrite
     assert "api_token" not in rewrite
-    assert rewrite["source_file"] == "kernel/rewrite/source/kernel.py"
     assert "[LOCAL_PATH]" in rewrite["note"]
     assert "secret" not in rewrite["note"]
 
@@ -339,14 +400,39 @@ def test_micro_keep_without_integrate_stack_is_not_written(tmp_path: Path) -> No
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
 
-def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
+@pytest.mark.parametrize(
+    ("warm_replay_outcome", "adopted"),
+    [
+        (
+            {
+                "status": "reproduced",
+                "kernel": {"status": "kept", "kept": 1},
+            },
+            True,
+        ),
+        (
+            {
+                "status": "failed",
+                "kernel": {"status": "reverted", "kept": 0},
+            },
+            False,
+        ),
+    ],
+)
+def test_prior_kernel_adoption_requires_successful_kernel_replay(
     tmp_path: Path,
+    warm_replay_outcome: dict,
+    adopted: bool,
 ) -> None:
     prior_root = tmp_path / "prior"
     prior_ref = "kernel/gemm/artifacts/tuned.csv"
     prior_file = prior_root / "files" / prior_ref
     prior_file.parent.mkdir(parents=True)
     prior_file.write_text("prior\n", encoding="utf-8")
+    unreplayed_ref = "kernel/gemm/artifacts/unreplayed.csv"
+    (prior_root / "files" / unreplayed_ref).write_text(
+        "unreplayed\n", encoding="utf-8"
+    )
     (prior_root / "recipe.json").write_text(
         json.dumps(
             {
@@ -354,7 +440,11 @@ def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
                     "kernel": {
                         "gemm": {
                             "optimizations": [
-                                {"id": "prior-gemm", "tuned_file": prior_ref}
+                                {"id": "prior-gemm", "tuned_file": prior_ref},
+                                {
+                                    "id": "unreplayed-gemm",
+                                    "tuned_file": unreplayed_ref,
+                                },
                             ]
                         },
                         "fusion": {"items": []},
@@ -375,6 +465,14 @@ def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
     state.last_fusion = {}
     state.last_fusion_integrate = {}
     state.kernel_opt_task_attempts = {}
+    state.warm_replay_outcome = warm_replay_outcome
+    state.warm_kernel_kb_plan = [
+        {
+            "column": "gemm",
+            "decision": "KEEP",
+            "recipe_row": {"id": "prior-gemm", "tuned_file": prior_ref},
+        }
+    ]
     sections = KnowledgeSections(
         tmp_path / "draft",
         warm_start_dir=prior_root,
@@ -389,8 +487,12 @@ def test_prior_kernel_survives_a_higher_throughput_non_kernel_run(
     optimizations = bundle.knowledge["value"]["kernel"]["gemm"][
         "optimizations"
     ]
-    assert optimizations == [{"id": "prior-gemm", "tuned_file": prior_ref}]
-    assert {artifact.path for artifact in bundle.artifacts} == {prior_ref}
+    if adopted:
+        assert optimizations == [{"id": "prior-gemm", "tuned_file": prior_ref}]
+        assert {artifact.path for artifact in bundle.artifacts} == {prior_ref}
+    else:
+        assert optimizations == []
+        assert bundle.artifacts == []
 
 
 def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
@@ -420,6 +522,17 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
         encoding="utf-8",
     )
     state = _state(tmp_path)
+    state.warm_replay_outcome = {
+        "status": "reproduced",
+        "kernel": {"status": "kept", "kept": 1},
+    }
+    state.warm_kernel_kb_plan = [
+        {
+            "column": "gemm",
+            "decision": "KEEP",
+            "recipe_row": {"id": "prior-gemm", "tuned_file": prior_ref},
+        }
+    ]
     sections = KnowledgeSections(
         tmp_path / "draft-conflict",
         warm_start_dir=prior_root,
@@ -462,19 +575,15 @@ def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
 
-def test_integrate_stack_is_authoritative_for_rewrite_files(tmp_path: Path) -> None:
+def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> None:
     state = _state(tmp_path)
     unintegrated_patch = tmp_path / "micro-only.cu"
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
-    unintegrated_source = tmp_path / "micro-source.cu"
-    unintegrated_source.write_text("// micro source", encoding="utf-8")
     attempt = state.kernel_opt_task_attempts["rmsnorm"]
     attempt["last_artifact_path"] = str(unintegrated_patch)
-    attempt["last_source_file"] = str(unintegrated_source)
     bundle = build_remote_knowledge(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
-    assert rewrite["source_files"][0].endswith("/source.cu")
     assert "micro-only.cu" not in json.dumps(rewrite)
     assert rewrite["speedup"] == 1.5
 
@@ -1369,7 +1478,7 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
             "items": [
                 {
                     "kernel_name": "verified",
-                    "source_files": ["kernel/rewrite/verified.bin"],
+                    "patch": "kernel/rewrite/verified.bin",
                 }
             ]
         }
@@ -1386,7 +1495,9 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
 
     kernel = KernelAgentKB.open()
 
-    assert kernel.read_rewrite()["items"][0]["kernel_name"] == "verified"
+    rewrite = kernel.read_rewrite()["items"][0]
+    assert rewrite["kernel_name"] == "verified"
+    assert rewrite["patch"] == "kernel/rewrite/verified.bin"
     assert kernel.prior_file("kernel/rewrite/verified.bin") is not None
     assert [call[0] for call in store.calls].count(
         "get_hyperloom_recipe_view"

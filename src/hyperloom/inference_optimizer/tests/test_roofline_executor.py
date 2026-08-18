@@ -547,11 +547,11 @@ def _roofline_result(snapshot_id: int = 1) -> dict:
 
 
 def test_shared_state_has_roofline_audit_fields_by_default():
-    """``roofline_attempts`` is the audit trail the collectors read."""
+    """Both audit mirrors are declared fields, so both survive a save."""
     s = SharedState()
-    assert hasattr(s, "roofline_attempts")
     assert s.roofline_attempts == []
-    assert not hasattr(s, "last_roofline")
+    assert s.last_roofline == {}
+    assert {"roofline_attempts", "last_roofline"} <= set(s.to_dict())
 
 
 def test_audit_actions_includes_roofline_in_both_modules():

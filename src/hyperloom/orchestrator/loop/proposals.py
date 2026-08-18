@@ -27,6 +27,43 @@ log = _logging.getLogger(__name__)
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
 
 
+def apply_critic_grid_filter(
+    params: dict[str, Any],
+    *,
+    original_grid: list[Any],
+    approved_variant_names: set[str] | None,
+) -> bool:
+    """Restrict ``params['grid']`` to Critic-approved variant names.
+
+    ``None`` leaves the grid untouched. Non-dict slots cannot carry a name:
+    they pass through only when there is no filter.
+
+    Args:
+        params: Task params mutated in place; must already hold ``grid``.
+        original_grid: The proposer's grid, used for the filter audit count.
+        approved_variant_names: Names that may run; ``None`` keeps the full grid.
+
+    Returns:
+        ``False`` when a filter was set and no variant survived; ``True`` otherwise.
+    """
+    stamped_grid: list[Any] = []
+    for variant in original_grid:
+        if not isinstance(variant, dict):
+            if approved_variant_names is None:
+                stamped_grid.append(variant)
+            continue
+        vname = str(variant.get("name") or "").strip()
+        if approved_variant_names is not None and vname not in approved_variant_names:
+            continue
+        stamped_grid.append(dict(variant))
+    params["grid"] = stamped_grid
+    if approved_variant_names is None:
+        return True
+    original_grid_len = len([v for v in original_grid if isinstance(v, dict)])
+    params["critic_filtered_count"] = max(0, original_grid_len - len(stamped_grid))
+    return bool(stamped_grid)
+
+
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
     """Read canonical ``extra_server_args`` from a payload."""
     value = payload.get("extra_server_args")
@@ -400,28 +437,24 @@ class ProposalsCollaborator:
             )
         # Filter the grid to the Critic-approved subset.
         if pending.action_name == "explore" and isinstance(params.get("grid"), list):
-            stamped_grid: list[dict[str, Any]] = []
-            for variant in params["grid"]:
-                if not isinstance(variant, dict):
-                    # Non-dict slots can't carry a name: dropped under a filter, pass-through otherwise.
-                    if approved_variant_names is None:
-                        stamped_grid.append(variant)
-                    continue
-                vname = str(variant.get("name") or "").strip()
-                # Drop variants the Critic rejected before they hit the executor.
-                if approved_variant_names is not None and vname not in approved_variant_names:
-                    continue
-                stamped_grid.append(dict(variant))
-            params["grid"] = stamped_grid
-            # Audit hint: how many variants the Critic filtered.
-            if approved_variant_names is not None:
-                original_grid_len = len(
-                    [v for v in (pending.payload.get("params") or {}).get("grid", []) if isinstance(v, dict)]
+            original_grid = list(params["grid"])
+            if not apply_critic_grid_filter(
+                params,
+                original_grid=original_grid,
+                approved_variant_names=approved_variant_names,
+            ):
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "proposal_materialize_skipped",
+                        "reason": "critic_filter_empty_grid",
+                        "proposal_msg_id": pending.proposal_msg_id,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                    },
                 )
-                params["critic_filtered_count"] = max(
-                    0,
-                    original_grid_len - len(approved_variant_names),
-                )
+                return
         if pending.action_name == "profile":
             # Stamp the server config that produced this trace.
             inject_stack_base_params(params, self.shared_state)

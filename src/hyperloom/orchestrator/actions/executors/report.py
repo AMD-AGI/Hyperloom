@@ -414,12 +414,53 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
 }
 
 
-def _explain_stop_reason(stop_reason):
+def _explain_stop_reason(stop_reason, state=None):
     """Return a human-readable explanation for a terminal ``stop_reason``.
+
+    ``conc_sweep_done`` is the SWEEP exit for a concurrency sweep that reached
+    a terminal result, which includes one that declined to run at all and one
+    that spent its budget without a comparable pair. The generic wording then
+    tells the reader a sweep finished when none happened, so a skip is named
+    when ``state`` is available to say so.
 
     Returns ``""`` for unknown/empty reasons so callers can omit the line.
     """
-    return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
+    reason = str(stop_reason or "").strip()
+    text = _STOP_REASON_EXPLANATIONS.get(reason, "")
+    if reason == "conc_sweep_done" and text:
+        return _explain_conc_sweep_skip(state) or text
+    return text
+
+
+def _explain_conc_sweep_skip(state) -> str:
+    """Name a skipped concurrency sweep, or ``""`` when one ran to a result.
+
+    A sweep that consumed its whole budget without reaching a comparable pair
+    is recorded as skipped too, and telling the reader it never ran is the
+    more expensive claim to believe in exactly the sessions where the budget
+    is the thing under investigation.
+
+    Args:
+        state: The session's shared state, or ``None``.
+
+    Returns:
+        str: The explanation line, or ``""`` when nothing was skipped.
+    """
+    last = getattr(state, "last_conc_sweep", None)
+    if not isinstance(last, dict) or not last.get("was_skipped"):
+        return ""
+    # Imported here, not at module scope: ``kernel.conc_sweep`` imports the
+    # grid runner in this same package, so a top-level import is the edge
+    # CodeQL reports as a cycle.
+    from ...kernel.conc_sweep import conc_sweep_declined_to_run  # noqa: PLC0415
+
+    detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
+    if conc_sweep_declined_to_run(last):
+        return f"Post-sweep concurrency sweep did not run ({detail}); the phase settled and the run closed."
+    return (
+        f"Post-sweep concurrency sweep exhausted its budget without a comparable "
+        f"baseline/optimized pair ({detail}); the phase settled and the run closed."
+    )
 
 
 def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
@@ -487,7 +528,7 @@ def _build_summary_dict(
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
         "stop_reason": stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(stop_reason),
+        "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,

@@ -211,7 +211,7 @@ optimization. Model names must exist in your key's catalog:
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
 | GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Forge (kernel fusion subprocess) | `FORGE_CLAUDE_MODEL` / `FORGE_CODEX_MODEL` | for example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` or `CODEX_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
+| Forge (fusion / rewrite / collective) | `FORGE_CLAUDE_MODEL` / `FORGE_CODEX_MODEL` | for example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` or `CODEX_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
 | Codex / external | `CODEX_MODEL` | Any model in the gateway catalog; `gpt-5.6-sol` preferred, with `gpt-5.5` / `gpt-5.4` as fallbacks | WARN-only: preflight steps down that ladder when the gateway lacks the chosen id, but never aborts. |
 
 - Do *not* append effort/thinking suffixes (for example
