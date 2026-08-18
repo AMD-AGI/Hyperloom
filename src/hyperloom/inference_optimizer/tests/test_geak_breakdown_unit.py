@@ -22,6 +22,7 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.collectors import collect_geak
+from hyperloom.inference_optimizer.breakdown.collectors.geak import _geak_kind_index
 from hyperloom.orchestrator.actions.executors._geak_sweep import (
     _parse_isl_osl,
     _serving_gpus,
@@ -855,6 +856,106 @@ def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> 
     assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
     assert kernel["kind"] == "authored"
     assert kernel["kind_source"] == "result_json"
+
+
+def test_collect_geak_backfill_reads_kind_from_the_stack_when_result_json_is_empty(
+    tmp_path: Path,
+) -> None:
+    # ``result.json`` is rewritten once per cycle and the last write wins, so a
+    # later cycle that accepts nothing blanks the lanes an earlier one declared.
+    # The ``geak_e2e`` optimization_stack entry is append-only and keeps them
+    # (KernelPhase copies both lanes into it verbatim). Reading only
+    # ``result.json`` here left every recovered row ``kind_source: absent`` and
+    # the ``env`` exclusion could not run at all -- the collector counted a CK
+    # library selection as an authored kernel.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [],
+            "eval_dir": str(eval_dir),
+        },
+        "optimization_stack": [
+            {"action": "integrate", "kernel_id": "unrelated"},
+            {
+                "action": "geak_e2e",
+                "accepted_kernels": [],
+                "accepted_heads": [
+                    {
+                        "short_name": "dsa_sparse_attn_prefill_main_kernel",
+                        "kind": "env",
+                        "backend": "ck",
+                    }
+                ],
+            },
+        ],
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 0
+    assert out["accepted_kernels"] == []
+
+
+def test_collect_geak_backfill_stack_kind_is_labelled_as_from_the_stack(
+    tmp_path: Path,
+) -> None:
+    # The converse, and the provenance. An authored declaration in the stack
+    # keeps the row, and ``kind_source`` says *which* artifact declared it, so a
+    # stack-sourced kind is never reported as something ``result.json`` said.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [],
+            "eval_dir": str(eval_dir),
+        },
+        "optimization_stack": [
+            {
+                "action": "geak_e2e",
+                "accepted_kernels": [
+                    {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
+                ],
+                "accepted_heads": [],
+            }
+        ],
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    kernel = out["accepted_kernels"][0]
+    assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    assert kernel["kind"] == "authored"
+    assert kernel["kind_source"] == "stack"
+
+
+def test_geak_kind_index_prefers_the_run_s_own_result_json_over_the_stack(
+    tmp_path: Path,
+) -> None:
+    # Adding a second source must not let it overwrite what the run published.
+    # A *declared* kind beats an undeclared one whichever artifact holds it;
+    # between two declarations ``result.json`` wins.
+    result = {
+        "accepted_kernels": [{"short_name": "a", "kind": "authored"}, {"short_name": "b"}],
+    }
+    stack = [
+        {
+            "action": "geak_e2e",
+            "accepted_heads": [
+                {"short_name": "a", "kind": "env"},
+                {"short_name": "b", "kind": "env"},
+                {"short_name": "c", "kind": "env"},
+            ],
+        }
+    ]
+    index = _geak_kind_index(result, stack)
+    assert index["a"] == ("authored", "result_json")  # published kind untouched
+    assert index["b"] == ("env", "stack")  # undeclared lane filled in
+    assert index["c"] == ("env", "stack")  # name only the stack knows
+    assert _geak_kind_index(result) == {"a": ("authored", "result_json"), "b": (None, "result_json")}
 
 
 def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path: Path) -> None:

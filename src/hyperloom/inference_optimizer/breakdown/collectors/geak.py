@@ -139,15 +139,39 @@ def _geak_kind_reader() -> Any:
         return geak_spec_kind
 
 
-def _geak_kind_index(result: dict[str, Any]) -> dict[str, str | None]:
-    """Map every acceptance name in ``result.json`` to its declared ``kind``.
+def _geak_kind_index(
+    result: dict[str, Any],
+    stack: Any = None,
+) -> dict[str, tuple[str | None, str]]:
+    """Map every acceptance name GEAK declared to its ``kind``, and to its source.
+
+    Two artifacts declare a kind, in the same two lanes and the same spelling:
+    ``result.json``, and the ``action == "geak_e2e"`` entries of
+    ``state.optimization_stack``, which the KERNEL phase copies from the result
+    of *that* cycle.
+
+    Reading only the first loses runs. ``result.json`` is rewritten per cycle
+    and the last write wins, so a later cycle that accepts nothing blanks the
+    lanes an earlier cycle declared. The stack entry is append-only and keeps
+    them. On ``Qwen3-14B-FP8/20260816T050457Z`` the flushed ``result.json``
+    names 0 lanes while the run accepted three rows, so reading it alone leaves
+    every recovered row ``kind_source: absent`` and the exclusion cannot run on
+    them at all. (That ``state.json`` is mode 600 and was not read here; the
+    stack is trusted because the KERNEL phase writes both lanes into the entry
+    verbatim, not because this run's copy was inspected.)
 
     Args:
         result (dict[str, Any]): The normalized ``result.json``.
+        stack (Any): ``state["optimization_stack"]``, if available. Non-list
+            values and non-``geak_e2e`` entries are ignored.
 
     Returns:
-        dict[str, str | None]: Name to declared kind. A name present with a
-        value of ``None`` means the lane exists but declared no kind.
+        dict[str, tuple[str | None, str]]: Name to ``(kind, origin)``, where
+        ``origin`` is ``"result_json"`` or ``"stack"``. A ``kind`` of ``None``
+        means the lane exists but declared no kind. A declared kind always
+        beats an undeclared one; between two declarations the earlier artifact
+        (``result.json``) wins, so adding the stack can never change a kind the
+        run itself published.
     """
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import (
@@ -172,20 +196,34 @@ def _geak_kind_index(result: dict[str, Any]) -> dict[str, str | None]:
                 return None
             return str(raw).strip().lower() or None
 
-    index: dict[str, str | None] = {}
-    if not isinstance(result, dict):
-        return index
-    lanes = list(result.get("accepted_kernels") or []) + list(result.get("accepted_heads") or [])
-    for spec in lanes:
-        name = _geak_spec_name(spec)
-        if name:
-            index[name] = geak_spec_kind(spec)
+    index: dict[str, tuple[str | None, str]] = {}
+
+    def _absorb(specs: Any, origin: str) -> None:
+        for spec in specs or []:
+            name = _geak_spec_name(spec)
+            if not name:
+                continue
+            kind = geak_spec_kind(spec)
+            prior = index.get(name)
+            if prior is not None and (kind is None or prior[0] is not None):
+                continue
+            index[name] = (kind, origin)
+
+    if isinstance(result, dict):
+        _absorb(result.get("accepted_kernels"), "result_json")
+        _absorb(result.get("accepted_heads"), "result_json")
+    for entry in stack if isinstance(stack, list) else []:
+        if not isinstance(entry, dict) or entry.get("action") != "geak_e2e":
+            continue
+        _absorb(entry.get("accepted_kernels"), "stack")
+        _absorb(entry.get("accepted_heads"), "stack")
     return index
 
 
 def _stamp_journey_kind(
     rows: list[dict[str, Any]],
     result: dict[str, Any],
+    stack: Any = None,
 ) -> list[dict[str, Any]]:
     """Stamp each backfilled row with a ``kind`` and say where it came from.
 
@@ -211,12 +249,16 @@ def _stamp_journey_kind(
     Args:
         rows (list[dict[str, Any]]): Collapsed accepted-kernel descriptors.
         result (dict[str, Any]): The normalized ``result.json`` for the run.
+        stack (Any): ``state["optimization_stack"]``, the second place a kind
+            is declared. See :func:`_geak_kind_index`.
 
     Returns:
         list[dict[str, Any]]: The same rows, each with ``kind`` and
-        ``kind_source``, and with known-env rows removed.
+        ``kind_source``, and with known-env rows removed. ``kind_source`` names
+        the artifact that supplied the kind (``result_json`` or ``stack``, each
+        with an ``_undeclared`` form) or ``absent`` when neither did.
     """
-    index = _geak_kind_index(result)
+    index = _geak_kind_index(result, stack)
     kept: list[dict[str, Any]] = []
     for row in rows:
         names = [str(row.get("name") or "").strip(), str(row.get("kernel_id") or "").strip()]
@@ -225,8 +267,8 @@ def _stamp_journey_kind(
         source = "absent"
         for name in names:
             if name and name in index:
-                kind = index[name]
-                source = "result_json" if kind else "result_json_undeclared"
+                kind, origin = index[name]
+                source = origin if kind else f"{origin}_undeclared"
                 break
         row["kind"] = kind
         row["kind_source"] = source
@@ -346,6 +388,7 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
 def _geak_accepted_kernels_from_journey(
     result: dict[str, Any],
     warnings: list[str],
+    stack: Any = None,
 ) -> list[dict[str, Any]]:
     """Derive the accepted (KEEP/integrated) kernels from ``kernel_journey.json``.
 
@@ -358,6 +401,9 @@ def _geak_accepted_kernels_from_journey(
         result (dict[str, Any]): The normalized ``result.json`` (carries
             ``kernel_journey_path`` / ``eval_dir`` used to locate the journey).
         warnings (list[str]): Shared warnings list (mutated in place).
+        stack (Any): ``state["optimization_stack"]``, forwarded to
+            :func:`_stamp_journey_kind` so the ``env`` exclusion can still run
+            when ``result.json`` was rewritten empty by a later cycle.
 
     Returns:
         list[dict[str, Any]]: The accepted-kernel descriptors, or ``[]`` when the
@@ -420,7 +466,7 @@ def _geak_accepted_kernels_from_journey(
                 "source": "kernel_journey_backfill",
             }
         )
-    return _stamp_journey_kind(_collapse_journey_aliases(accepted), result)
+    return _stamp_journey_kind(_collapse_journey_aliases(accepted), result, stack)
 
 
 def _geak_accepted_kernels_from_integrate_results(
@@ -513,6 +559,7 @@ def _geak_accepted_kernels_from_integrate_results(
 def _geak_reconstruct_from_disk(
     session_dir: Path,
     warnings: list[str],
+    stack: Any = None,
 ) -> dict[str, Any] | None:
     """Best-effort reconstruction of a GEAK run from on-disk survivors.
 
@@ -528,6 +575,10 @@ def _geak_reconstruct_from_disk(
     Args:
         session_dir (Path): Absolute session root.
         warnings (list[str]): Shared warnings list (mutated in place).
+        stack (Any): ``state["optimization_stack"]``. The reconstruction runs
+            because ``state.geak_result`` is empty, but the stack can still
+            hold the ``geak_e2e`` entry an earlier cycle appended, so it is
+            often the only surviving declaration of a recovered row's kind.
 
     Returns:
         dict[str, Any] | None: The recovered evidence, or ``None``.
@@ -635,6 +686,7 @@ def _geak_reconstruct_from_disk(
                         "accepted_heads": flushed.get("accepted_heads") or [],
                     },
                     warnings,
+                    stack,
                 )
                 source = "kernel_journey_backfill"
         except OSError as exc:
@@ -648,6 +700,7 @@ def _geak_reconstruct_from_disk(
                         "accepted_kernels": flushed.get("accepted_kernels") or [],
                         "accepted_heads": flushed.get("accepted_heads") or [],
                     },
+                    stack,
                 )
                 source = "integrate_result_backfill"
         if source:
@@ -789,7 +842,9 @@ def collect_geak(
     if not has_result:
         # Engaged via the flag but no result recorded; reconstruct from the
         # on-disk ``geak/`` working tree before surfacing ``missing``.
-        recon = _geak_reconstruct_from_disk(session_dir, warnings)
+        recon = _geak_reconstruct_from_disk(
+            session_dir, warnings, state.get("optimization_stack")
+        )
         if recon is None:
             return {
                 "engaged": True,
@@ -881,7 +936,9 @@ def collect_geak(
     # stay excluded: those runs never produced a trustworthy workflow return.
     accepted_kernels_source = "result" if accepted_kernels else None
     if not accepted_kernels and status in ("ok", "no_gain"):
-        backfilled = _geak_accepted_kernels_from_journey(result, warnings)
+        backfilled = _geak_accepted_kernels_from_journey(
+            result, warnings, state.get("optimization_stack")
+        )
         if backfilled:
             accepted_kernels = backfilled
             accepted_kernels_source = "kernel_journey_backfill"
