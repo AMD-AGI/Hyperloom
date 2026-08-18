@@ -267,6 +267,22 @@ def test_collect_enablement_kept_patches_relativized_and_log_bounded():
 
 
 
+def test_collect_enablement_framework_root_surfaced():
+    """kept_patches are unreadable without the tree they apply to."""
+    out = collect_enablement(
+        Path("/tmp/sess"),
+        _state(
+            enablement_kept_patches=["/tmp/sess/patches/001.patch"],
+            enablement_framework_root="/sgl-workspace/sglang",
+        ),
+        [],
+    )
+    assert out["framework_root"] == "/sgl-workspace/sglang"
+    assert "framework_root" not in collect_enablement(
+        Path("/tmp/sess"), _state(enablement_attempts=1), []
+    )
+
+
 def test_collect_enablement_setting_script_field(tmp_path):
     script = tmp_path / "reports" / "enablement" / "enablement_setting.sh"
     script.parent.mkdir(parents=True)
