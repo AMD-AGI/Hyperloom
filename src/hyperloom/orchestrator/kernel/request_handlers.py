@@ -4869,8 +4869,11 @@ _TRACE_ERROR_CHARS = 400
 
 #: Audit keys emitted even when null, so the entry keeps the shape readers have
 #: always seen. ``kept`` is in here for that reason alone: nothing on the GEMM
-#: path writes it -- it is null in all 364 tuner entries across the 320 traces on
-#: record -- so no reader can be indexing on its value, only on its presence.
+#: path writes it -- re-measured 18 Aug 2026, it is null in all 366 tuner
+#: entries across the 322 traces on record -- so no reader can be indexing on
+#: its value, only on its presence. The write-back that would populate it,
+#: ``_validate_forge_gemm_tuning_e2e``, writes a separate ``e2e_results`` list
+#: and runs after this trace fires; that gap is real and is not fixed here.
 #: Every other key is dropped when empty, which keeps a failure's row about as
 #: small as a clean one's rather than making either smaller than before.
 _TRACE_TUNER_KEEP_NULL = frozenset({"tuner", "best_micro_speedup", "kept"})
