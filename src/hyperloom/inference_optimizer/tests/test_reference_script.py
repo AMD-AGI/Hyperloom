@@ -276,6 +276,83 @@ def test_render_carries_validated_rocm_envs():
     assert "export NCCL_MIN_NCHANNELS=112" in text
 
 
+def test_render_model_always_exported():
+    text = render_reference_script(framework="sglang", server_args="", model="/models/M")
+    assert "export MODEL=/models/M" in text
+
+
+def test_render_no_model_no_export():
+    text = render_reference_script(framework="sglang", server_args="")
+    assert "export MODEL=" not in text
+
+
+def test_render_enablement_has_strict_mode():
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        setup_commands=["pip install vllm==0.24"],
+    )
+    assert "set -euo pipefail" in text
+    assert "pip install vllm==0.24" in text
+
+
+def test_render_patches_emit_apply_function():
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        patches=["patches/001_fix.patch"],
+        framework_root="/sgl-workspace/sglang",
+    )
+    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
+    assert "apply_patch" in text
+    assert 'apply_patch "patches/001_fix.patch"' in text
+    assert "for lvl in 1 0 2" in text
+
+
+def test_render_runtime_note_emitted():
+    text = render_reference_script(
+        framework="vllm",
+        server_args="",
+        runtime="/session/enablement/stacks/vllm/spec-1/venv",
+    )
+    assert "isolated attempt venv" in text
+    assert "/session/enablement/stacks/vllm/spec-1/venv" in text
+
+
+def test_render_base_params_unchanged_without_enablement():
+    """No setup_commands/patches/framework_root → output identical to original."""
+    text = render_reference_script(
+        framework="vllm",
+        server_args="--block-size 128",
+        envs={"VLLM_ROCM_USE_AITER": "1"},
+        tp=8,
+        gpu_type="mi300x",
+    )
+    assert "set -euo pipefail" not in text
+    assert "apply_patch" not in text
+    assert "export TP=8" in text
+    assert "vllm serve $MODEL" in text
+    assert "VLLM_ROCM_USE_AITER" in text
+
+
+def test_render_round_trip_with_enablement_params(tmp_path):
+    """Inserting setup/patch lines does not confuse parse_reference_script."""
+    text = render_reference_script(
+        framework="sglang",
+        server_args="--tp 8",
+        envs={"VLLM_ROCM_USE_AITER": "1"},
+        model="/models/M",
+        setup_commands=["pip install vllm==0.24"],
+        patches=["patches/fix.patch"],
+        framework_root="/sgl-workspace/sglang",
+    )
+    sh = tmp_path / "enablement_setting.sh"
+    sh.write_text(text, encoding="utf-8")
+    r = parse_reference_script(str(sh), framework="sglang")
+    assert "--tp 8" in r.server_args
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+
+
 # --- bootstrap._resolve_reference_recipe tests ---
 
 def test_resolve_no_flag_returns_empty(monkeypatch):
