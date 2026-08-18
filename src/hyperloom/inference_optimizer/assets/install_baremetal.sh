@@ -110,7 +110,7 @@ DEEPSEEK_* values are migrated automatically.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
-SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
+SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_KERNEL_VERSION, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
 VLLM_VENV_ROOT.
@@ -482,6 +482,45 @@ PY
   fi
 }
 
+# SGLang v0.5.17+ ships sglang-kernel as a separate PyPI package; older tags
+# still carry an in-tree sgl-kernel/ tree built via setup_rocm.py.
+resolve_sglang_kernel_pip_version() {
+  local sglang_root="$1" pyproject="${1}/python/pyproject.toml" ver=""
+  ver="${SGLANG_KERNEL_VERSION:-}"
+  if [ -n "$ver" ]; then
+    printf '%s' "$ver"
+    return 0
+  fi
+  if [ -f "$pyproject" ]; then
+    ver="$(grep -E '^\s*"sglang-kernel==' "$pyproject" | head -1 \
+      | sed -E 's/.*"sglang-kernel==([^"]+)".*/\1/')"
+    if [ -n "$ver" ]; then
+      printf '%s' "$ver"
+      return 0
+    fi
+  fi
+  printf '%s' "0.4.5"
+}
+
+install_sglang_kernel_rocm() {
+  local py="$1" sglang_root="$2" arch="$3" kernel_ver constraint_file
+  if [ -f "${sglang_root}/sgl-kernel/setup_rocm.py" ]; then
+    log "building in-tree sgl-kernel from ${sglang_root}/sgl-kernel (legacy layout, arch=${arch})"
+    (cd "${sglang_root}/sgl-kernel" && AMDGPU_TARGET="$arch" "$py" setup_rocm.py install)
+    return $?
+  fi
+
+  kernel_ver="$(resolve_sglang_kernel_pip_version "$sglang_root")"
+  log "SGLang ${SGLANG_REF}: no in-tree sgl-kernel/; installing sglang-kernel==${kernel_ver} from PyPI"
+  constraint_file="$(mktemp)"
+  write_rocm_torch_constraints "$py" "$constraint_file"
+  "$py" -m pip install --constraint "$constraint_file" "sglang-kernel==${kernel_ver}" \
+    || { rm -f "$constraint_file"; return 1; }
+  rm -f "$constraint_file"
+  "$py" -c "import sgl_kernel" >/dev/null \
+    || die "sglang-kernel==${kernel_ver} installed but sgl_kernel is not importable"
+}
+
 # Install SGLang from source for Python versions not supported by AMD wheels.
 install_sglang_from_source() {
   local py="$1" deps_root="$2" sglang_root arch constraint_file
@@ -501,7 +540,7 @@ install_sglang_from_source() {
   fi
 
   "$py" -m pip install --upgrade pip wheel setuptools
-  (cd "${sglang_root}/sgl-kernel" && AMDGPU_TARGET="$arch" "$py" setup_rocm.py install)
+  install_sglang_kernel_rocm "$py" "$sglang_root" "$arch"
   if [ -f "${sglang_root}/python/pyproject_other.toml" ]; then
     cp "${sglang_root}/python/pyproject_other.toml" "${sglang_root}/python/pyproject.toml"
   fi
@@ -637,6 +676,11 @@ PY
       log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
     else
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
+      if [ -f "${SGLANG_ROOT:-${deps_root}/sglang}/sgl-kernel/setup_rocm.py" ]; then
+        log "would build in-tree sgl-kernel via setup_rocm.py (legacy layout)"
+      else
+        log "would install sglang-kernel from PyPI (v0.5.17+ layout; no in-tree sgl-kernel/)"
+      fi
       log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
     fi
     if [ -n "$AITER_REF" ]; then
