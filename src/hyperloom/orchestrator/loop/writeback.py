@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
+from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -485,7 +486,14 @@ class WritebackCollaborator:
                 (result or {}).get("kernel_id") if isinstance(result, dict) else None,
             )
 
-    def _update_cumulative_gain_validated(self, new_tput: float) -> None:
+    def _update_cumulative_gain_validated(
+        self,
+        new_tput: float,
+        *,
+        source: str = "writeback",
+        measurement_basis: str = "e2e_rebench",
+        ts: str | None = None,
+    ) -> None:
         """Update cumulative_gain_validated, its timestamp, and stack-length watermark.
 
         Call only when ``baseline_tput > 0`` and ``new_tput`` is a positive
@@ -495,11 +503,46 @@ class WritebackCollaborator:
         Args:
             new_tput: The newly measured throughput to promote as the validated
                 gain anchor.
+            source: Which promotion path produced this figure, recorded so the
+                breakdown can name it.
+            measurement_basis: ``e2e_rebench`` when ``new_tput`` was measured
+                end to end, ``derived_speedup`` when it was inferred from a
+                micro-benchmark.
+            ts: Author-time stamp the caller already minted for this
+                promotion; defaults to now.
         """
         validated_gain = (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+        ts = str(ts or datetime.now(timezone.utc).isoformat())
         self.shared_state.cumulative_gain_validated = float(validated_gain)
-        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+        self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+        # The breakdown's own total is the sum of its ledger, so without this
+        # record there is nothing for it to disagree with.
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=float(self.shared_state.baseline_tput),
+                validated_tput=float(new_tput),
+                validated_gain_pct=float(validated_gain),
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source=source,
+                measurement_basis=measurement_basis,
+                ts=ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("record_session_validation failed", exc_info=True)
+            # Losing this one costs the export its only independent check on
+            # the ledger: with no promoted figure to compare against, the
+            # session total falls back to the sum of the very steps it is
+            # meant to be checking.
+            trace_recording_skipped(
+                "session_validation",
+                reason="caller raised before the recorder",
+                entity=source,
+                error=exc,
+            )
 
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.
@@ -1293,7 +1336,9 @@ class WritebackCollaborator:
             reason = None
         else:
             error_class = str(result_dict.get("error_class") or "") or None
-            reason = str(result_dict.get("reason") or "") or None
+            # A skip states its own cause under ``skip_reason``; without it the
+            # timeline shows a step that did nothing and never says why.
+            reason = str(result_dict.get("reason") or result_dict.get("skip_reason") or "") or None
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
@@ -1878,6 +1923,59 @@ class WritebackCollaborator:
             )
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
+
+    def ensure_recipe_finalized(
+        self,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        """Idempotently publish terminal Recipe state and persist its outcome."""
+        state = self.shared_state
+        prior = dict(getattr(state, "recipe_finalize_outcome", {}) or {})
+        prior_status = str(
+            getattr(state, "recipe_finalize_status", "")
+            or prior.get("status")
+            or ""
+        )
+        if prior_status in {"written", "skipped", "disabled"}:
+            return prior
+
+        attempts = int(getattr(state, "recipe_finalize_attempts", 0) or 0) + 1
+        state.recipe_finalize_attempts = attempts
+        state.recipe_finalize_status = "pending"
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — publication can still proceed
+            log.exception("Recipe finalize pending-state save failed")
+
+        try:
+            raw = self.finalize_recipe_and_journal(source=source) or {}
+            outcome = {
+                **dict(raw),
+                "source": source,
+                "attempt": attempts,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:  # noqa: BLE001 — persist retryable failure
+            log.exception("Recipe finalize raised")
+            outcome = {
+                "status": "error",
+                "reason": type(exc).__name__,
+                "source": source,
+                "attempt": attempts,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        raw_status = str(outcome.get("status") or "error")
+        state.recipe_finalize_status = (
+            "failed" if raw_status == "error" else raw_status
+        )
+        state.recipe_finalize_outcome = outcome
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — T4 can still retry in-process
+            log.exception("Recipe finalize outcome save failed")
+        return outcome
 
     def finalize_recipe_and_journal(
         self,
@@ -2730,7 +2828,10 @@ class WritebackCollaborator:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
                 result_status = str(result.get("status") or "succeeded")
-                kept = task_kind == "framework_agent" and result_status.lower() == "kept"
+                # Every promotable kind reports its own verdict; hardcoding
+                # "discarded" for the rest made kept integrate_patch work look
+                # rejected in the breakdown and stripped its attribution.
+                kept = result_status.lower() in {"kept", "kept_inert", "promoted", "adopted"}
                 v4_result = dict(result)
                 v4_result.setdefault(
                     "workload",

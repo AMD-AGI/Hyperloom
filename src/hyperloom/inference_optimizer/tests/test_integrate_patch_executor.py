@@ -374,6 +374,7 @@ def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch
     scriptable = _scriptable_frameworks()
     assert scriptable, "no scriptable framework registered to exercise the prefixed path"
     prefix = scriptable[0].upper()
+    monkeypatch.delenv("FRAMEWORK", raising=False)
 
     session = tmp_path / "session-checkout"
     session.mkdir()
@@ -391,6 +392,25 @@ def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch
     prefixed.mkdir()
     monkeypatch.setenv(f"{prefix}_REPO_PATH", str(prefixed))
     assert resolve_session_framework_root() == f"{prefixed}/"
+
+
+def test_session_framework_root_ignores_other_framework_env(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from hyperloom.orchestrator.framework.paths import resolve_session_framework_root
+
+    active = tmp_path / "active-sglang"
+    stale = tmp_path / "stale-vllm"
+    active.mkdir()
+    stale.mkdir()
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+    monkeypatch.delenv("SGLANG_DIR", raising=False)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(active))
+    monkeypatch.setenv("VLLM_REPO_PATH", str(stale))
+
+    assert resolve_session_framework_root() == f"{active}/"
 
 
 def test_resolve_framework_root_returns_none_when_no_candidate(monkeypatch, tmp_path: Path):
@@ -895,7 +915,7 @@ async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkey
 @pytest.mark.asyncio
 async def test_enablement_keeps_verified_when_accuracy_above_floor(tmp_path: Path, monkeypatch):
     """Booted + eval accuracy above the absolute floor -> KEEP, non-provisional."""
-    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, enablement_accuracy=0.42)
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, enablement_accuracy=0.9)
     assert result["status"] == "kept"
     assert result["runnable"] is True
     assert result["correctness_verified"] is True

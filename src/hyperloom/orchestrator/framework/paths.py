@@ -486,8 +486,23 @@ def resolve_session_framework_root() -> str:
     Returns:
         str: The normalised checkout root, or ``""`` when the session named none.
     """
-    roots = _discover_scriptable_repo_roots() or _discover_explicit_framework_root()
-    return roots[0] if roots else ""
+    framework = os.environ.get("FRAMEWORK", "").strip().upper()
+    if framework:
+        for key in (f"{framework}_REPO_PATH", f"{framework}_DIR"):
+            candidate = os.environ.get(key, "").strip()
+            if candidate and Path(candidate).is_dir():
+                return _normalize_root(candidate)
+        generic = _discover_explicit_framework_root()
+        return generic[0] if generic else ""
+
+    # Compatibility for callers that set one prefixed root but not FRAMEWORK.
+    # More than one is ambiguous and must not be resolved by probe order.
+    prefixed = _discover_scriptable_repo_roots()
+    if len(prefixed) == 1:
+        return prefixed[0]
+
+    generic = _discover_explicit_framework_root()
+    return generic[0] if generic else ""
 
 
 def resolve_patch_target_roots() -> tuple[str, ...]:

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import (
@@ -495,19 +496,60 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     return None
 
 
-def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
-    """Recover terminal reason/time from the CLOSE phase transition (next-best when ``state.stop_reason`` wasn't mirrored).
+def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
+    """When the session's current run leg began.
+
+    ``start_ts`` alone does not answer this. A resume re-anchors it only after
+    a crash or a stop with a reason; a resume after a clean stop deliberately
+    keeps it, so that ``--max-hours`` still counts from the original start.
+    ``state.resumed_ts`` is stamped by every resume, so the later of the two is
+    the boundary on both paths.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
+        start_ts (str): The session's resolved start (see
+            :func:`collect_session`).
+
+    Returns:
+        str: The later of the two timestamps, or whichever one is parseable.
+    """
+    resumed_ts = str(state.get("resumed_ts") or "")
+    dated = [(to_unix(ts), ts) for ts in (start_ts, resumed_ts)]
+    parseable = [(at, ts) for at, ts in dated if at is not None]
+    if not parseable:
+        return start_ts
+    return max(parseable)[1]
+
+
+def _close_phase_stop_reason(state: dict[str, Any], *, leg_start_ts: str) -> tuple[str, str]:
+    """Recover terminal reason/time from the current leg's CLOSE transition (next-best when ``state.stop_reason`` wasn't mirrored).
+
+    A resume clears ``state.stop_reason`` and ``stop_ts`` but cannot clear the
+    previous leg's CLOSE row, and that row is not evidence about the leg
+    running now: honouring it reports a live session as having stopped, for
+    the reason it stopped last time. A row from before the leg boundary is
+    skipped whole -- reason and timestamp -- because the timestamp is stamped
+    as the session's end even when the reason itself is not adopted, and the
+    scan carries on so a history written out of order can still be answered
+    from a row that does belong to this leg.
+
+    A row is only disqualified on comparable evidence. When either timestamp
+    is missing or unparseable the row stands, since the whole point of the
+    fallback is a session whose reason never reached the state file.
+
+    Args:
+        state (dict[str, Any]): Parsed ``state.json``.
+        leg_start_ts (str): Start of the current leg (see
+            :func:`_leg_start_ts`); ``""`` when the session recorded none.
 
     Returns:
         tuple[str, str]: ``(reason, ts)`` from the most recent CLOSE
-        transition, or ``("", "")`` when no such transition exists.
+        transition of the current leg, or ``("", "")`` when there is none.
     """
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         return "", ""
+    leg_start = to_unix(leg_start_ts)
     for row in reversed(history):
         if not isinstance(row, dict):
             continue
@@ -515,8 +557,95 @@ def _close_phase_stop_reason(state: dict[str, Any]) -> tuple[str, str]:
             continue
         reason = str(row.get("reason") or row.get("stop_reason") or row.get("exit_reason") or "").strip()
         ts = str(row.get("ts") or row.get("entered_ts") or "").strip()
+        closed_at = to_unix(ts)
+        if leg_start is not None and closed_at is not None and closed_at < leg_start:
+            continue
         return reason, ts
     return "", ""
+
+
+def _first_recorded_end(*candidates: Any) -> str:
+    """The first candidate that reads as a timestamp, canonicalised to ``...Z``.
+
+    A value that does not parse is no more an end time than a missing one:
+    passed through it lands in ``ended_at_utc`` verbatim and collapses the
+    measured duration to zero, where the next candidate (or the export clock)
+    still answers.
+
+    Args:
+        *candidates (Any): Recorded end timestamps, best evidence first.
+
+    Returns:
+        str: The first parseable candidate, or ``""`` when none is.
+    """
+    for value in candidates:
+        if to_unix(value) is not None:
+            return iso_z(value)
+    return ""
+
+
+def _session_has_ended(stop_reason: Any) -> bool:
+    """Whether a stop reason marks the session as no longer running.
+
+    Args:
+        stop_reason (Any): Raw ``stop_reason`` from a state or session section.
+
+    Returns:
+        bool: ``True`` once a non-blank stop reason has been recorded.
+    """
+    return bool(str(stop_reason or "").strip())
+
+
+def _measured_duration_seconds(start_ts: Any, ended_at_utc: Any, stop_reason: Any) -> int | None:
+    """Seconds the session ran, or ``None`` when no window can be established.
+
+    A finished session is measured to its recorded end; only one still running
+    may be measured up to now, since extrapolating a finished session grows its
+    duration on every re-export and reads as a plausible number rather than as
+    missing evidence.
+
+    Args:
+        start_ts (Any): Start of the window (see :func:`collect_session` for
+            which start that is across a resume).
+        ended_at_utc (Any): Recorded end of the window, if any.
+        stop_reason (Any): Terminal reason; a non-blank one means the session
+            is no longer running.
+
+    Returns:
+        int | None: Whole seconds between start and end, or ``None``.
+    """
+    start = to_unix(start_ts)
+    if start is None:
+        return None
+    end = to_unix(ended_at_utc)
+    if end is None and not _session_has_ended(stop_reason):
+        end = datetime.now(timezone.utc).timestamp()
+    if end is None or end <= start:
+        return None
+    return int(round(end - start))
+
+
+def session_elapsed_minutes(session_section: dict[str, Any]) -> float:
+    """Wall-clock minutes of the leg described by a resolved ``session`` section.
+
+    Derived from the section's own timestamps rather than stored, so a section
+    assembled from the live recorder's snapshot reports the same elapsed time
+    as one built by :func:`collect_session`. ``session_meta`` measures the same
+    window from the same fields; the two agree because both producers of the
+    section carry those timestamps, not because either reads the other.
+
+    Args:
+        session_section (dict[str, Any]): A ``session`` section.
+
+    Returns:
+        float: Minutes elapsed, or ``0.0`` when no window can be established.
+    """
+    duration_s = _measured_duration_seconds(
+        session_section.get("start_ts") or session_section.get("created_at_utc"),
+        session_section.get("ended_at_utc"),
+        session_section.get("stop_reason"),
+    )
+    return round(duration_s / 60.0, 2) if duration_s is not None else 0.0
 
 
 def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> bool:
@@ -613,10 +742,21 @@ def collect_session(
     """Collect the session-identification + lifecycle section.
 
     Merges identifiers and timing from ``state`` and ``manifest`` (state
-    taking precedence on overlapping fields), computes ``elapsed_minutes``
-    from the start timestamp, resolves the container image, and stamps
-    ``ended_at_utc`` only once a ``stop_reason`` is present. When no image can
-    be detected a warning is appended.
+    taking precedence on overlapping fields), resolves the container image,
+    and stamps ``ended_at_utc`` from the recorded stop timestamp only once a
+    ``stop_reason`` is present -- one the state file carries, or one recovered
+    from a CLOSE transition belonging to the current leg (see
+    :func:`_close_phase_stop_reason`). When no image can be detected a warning
+    is appended.
+
+    ``elapsed_minutes`` runs from ``state.start_ts``, the same anchor
+    ``--max-hours`` is counted against, to the recorded end (or to now while
+    the run is still going), so the two stay comparable. A resume re-anchors
+    ``start_ts`` only when the previous leg crashed or stopped for a recorded
+    reason; after a clean stop it keeps the original start, and the elapsed
+    time then spans the gap between the legs -- as the budget does. The
+    manifest's ``created_at_utc`` names the first launch either way, and is
+    the fallback start only for a session that never recorded one.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -630,31 +770,28 @@ def collect_session(
     """
     start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
     stop_reason = str(state.get("stop_reason") or "").strip()
-    close_stop_reason, close_ts = _close_phase_stop_reason(state)
+    close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
         stop_reason = close_stop_reason
     ended_at_utc = ""
-    if stop_reason:
-        ended_at_utc = iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
-    elapsed_min: float | None = None
-    if start_ts:
-        try:
-            start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
-            elapsed_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
-        except (ValueError, TypeError):
-            pass
+    if _session_has_ended(stop_reason):
+        # ``stop_ts`` is stamped once, when the reason is written, so a re-export
+        # of a finished session keeps reporting the same end. The CLOSE
+        # transition and the export clock are only next-best guesses.
+        ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
     image = _detect_image_for_session(manifest)
     if image is None:
         warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")
-    return {
+    section = {
         "session_id": str(state.get("session_id") or manifest.get("session_id") or ""),
         "claw_session_id": manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id": manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc": manifest.get("created_at_utc") or start_ts,
+        "start_ts": start_ts,
         "ended_at_utc": ended_at_utc,
         "stop_reason": stop_reason,
         "max_minutes": int(state.get("max_minutes") or manifest.get("max_minutes") or 0),
-        "elapsed_minutes": round(elapsed_min, 2) if elapsed_min is not None else 0.0,
+        "elapsed_minutes": 0.0,
         "host": str(manifest.get("host") or ""),
         "image": image,
         "code_revision": str(manifest.get("code_revision") or ""),
@@ -669,6 +806,41 @@ def collect_session(
         # Crash / interruption / resume history.
         "recovery": _collect_recovery(state),
     }
+    section["elapsed_minutes"] = session_elapsed_minutes(section)
+    return section
+
+
+def _session_duration_seconds(
+    session_section: dict[str, Any],
+    manifest: dict[str, Any],
+) -> int:
+    """How long the session ran, in whole seconds.
+
+    Measures the same window as ``session.elapsed_minutes`` (see
+    :func:`collect_session`) so the machine field and the human-readable one
+    cannot disagree, then falls back to ``elapsed_minutes`` for callers that
+    supply it and no usable timestamps.
+
+    Args:
+        session_section (dict[str, Any]): The resolved ``session`` dict.
+        manifest (dict[str, Any]): Parsed ``manifest.json``.
+
+    Returns:
+        int: The duration, or ``0`` when it cannot be established.
+    """
+    duration_s = _measured_duration_seconds(
+        session_section.get("start_ts")
+        or session_section.get("created_at_utc")
+        or manifest.get("created_at_utc"),
+        session_section.get("ended_at_utc"),
+        session_section.get("stop_reason"),
+    )
+    if duration_s is not None:
+        return duration_s
+    elapsed_min = session_section.get("elapsed_minutes")
+    if isinstance(elapsed_min, (int, float)) and elapsed_min > 0:
+        return int(round(elapsed_min * 60))
+    return 0
 
 
 # session_meta enrichment
@@ -682,6 +854,12 @@ def collect_session_meta(
     Emitted straight from the manifest + resolved ``session`` section; the CI
     step only gap-fills fields the sandbox could not know (e.g. ``category``).
 
+    The duration is measured from the session's own timestamps rather than
+    read from a sibling key. Two producers fill the ``session`` section -- the
+    live recorder's snapshot and this module's collector -- and only the
+    collector writes ``elapsed_minutes``, so a run recorded live reported a
+    session that lasted zero seconds.
+
     Args:
         manifest (dict[str, Any]): Parsed ``manifest.json``.
         session_section (dict[str, Any]): The already-built ``session`` dict.
@@ -693,8 +871,7 @@ def collect_session_meta(
     """
     image = session_section.get("image")
     image_str = image if isinstance(image, str) and image.strip() else ""
-    elapsed_min = session_section.get("elapsed_minutes")
-    duration_s = int(round(elapsed_min * 60)) if isinstance(elapsed_min, (int, float)) and elapsed_min > 0 else 0
+    duration_s = _session_duration_seconds(session_section, manifest)
     return {
         "code_revision": str(manifest.get("code_revision") or ""),
         "image": image_str or None,
@@ -1474,6 +1651,9 @@ def collect_enablement(
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_kept_patches:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
+    framework_root = str(_eg(state, "framework_root", "") or "")
+    if framework_root:
+        out["framework_root"] = framework_root
     if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
         out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
     candidate_refs = _eg(state, "candidate_refs")
@@ -1494,6 +1674,9 @@ def collect_enablement(
     accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
     if accepted_cfg:
         out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
+    setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
+    if setting_script_path.is_file():
+        out["setting_script"] = str(_rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh")
     accepted_config = _eg(state, "accepted_config")
     if isinstance(accepted_config, dict) and accepted_config:
         out["accepted_config"] = {

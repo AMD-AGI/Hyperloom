@@ -416,7 +416,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     """Project one ``decision_trace.jsonl`` row onto one or more Score dicts.
 
     Always emits a CATEGORICAL ``decision_outcome`` score (KEEP / REVERT /
-    no_promote); additionally NUMERIC ``gain_pct`` (measured gain),
+    no_promote / skipped); additionally NUMERIC ``gain_pct`` (measured gain),
     ``predicted_gain_pct`` (the proposer's estimate) and ``proposal_score``
     (mean pre-decision rater score) when the decision carries them. Each
     returned dict is transport-agnostic
