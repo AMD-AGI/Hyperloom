@@ -109,6 +109,36 @@ def _derive_collective_attempt_id(result: dict[str, Any]) -> str:
     return "collective-" + hashlib.sha256(encoded).hexdigest()[:24]
 
 
+
+def _geak_decline_status(decline_reason: Any) -> str:
+    """Map a 2b decline reason to the status left on ``geak_pending``.
+
+    ``rebench_unavailable`` is not reused here, because the two states are
+    different facts that lead to different actions. ``rebench_unavailable``
+    means the rebench never got to run -- a scheduling or dispatch problem, and
+    the candidate should be retried. A decline means the rebench was refused on
+    purpose and the GEAK-harness fallback did not rescue it. When the refusal
+    was the overlay, retrying changes nothing: the kernel cannot install.
+
+    Collapsing the two would overwrite a live diagnostic. The field is already
+    in use across the campaign and carries only two error strings, so a third
+    meaning folded into it is unreadable.
+
+    The status is derived from the reason rather than hardcoded, so a future
+    ``geak_harness`` fallback with a different cause does not silently inherit
+    the overlay label.
+
+    Args:
+        decline_reason (Any): ``reason`` from the 2b dispatcher's summary.
+
+    Returns:
+        str: ``"overlay_unloadable"`` when the overlay was the refusal,
+        ``"rebench_declined"`` for every other refusal.
+    """
+    reason = str(decline_reason or "").strip().lower()
+    return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
+
+
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -853,7 +883,7 @@ class KernelPhase(PhaseHandler):
                     # 2a promotes and clears geak_pending itself.
                     return True
                 pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
-                pending["status"] = "rebench_unavailable"
+                pending["status"] = _geak_decline_status((summary or {}).get("reason"))
                 pending.pop("revalidation_task_id", None)
                 pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
                 state.geak_pending = pending

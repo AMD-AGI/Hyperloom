@@ -56,6 +56,208 @@ def _journey_paths(result: dict[str, Any]) -> list[Path]:
     return paths
 
 
+def _geak_cand_tag_test() -> Any:
+    """Return the one test for "this id is a slot tag, not a kernel symbol".
+
+    The ledger
+    (:func:`~hyperloom.orchestrator.loop.coordinator_helpers.geak_is_cand_tag`)
+    owns the definition so the collector and the ledger cannot disagree about
+    which half of a twin is the kernel. Collectors also run offline against a
+    tarball with no orchestrator package importable; that case repeats the
+    pattern rather than giving up and keeping an arbitrary id.
+
+    Returns:
+        Any: A callable taking one id and returning True for the slot-tag form.
+    """
+    try:
+        from hyperloom.orchestrator.loop.coordinator_helpers import geak_is_cand_tag
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+        import re as _re
+
+        _tag = _re.compile(r"^(cand[_-])?c\d+([_-]|$)", _re.IGNORECASE)
+
+        def geak_is_cand_tag(name: Any) -> bool:
+            text = str(name or "").strip()
+            return bool(text) and bool(_tag.match(text))
+
+    return geak_is_cand_tag
+
+
+def _kind_source_counts(rows: list[Any]) -> dict[str, int]:
+    """Count how each admitted kernel got its ``kind``.
+
+    Without this the report shows a kernel count and nothing else, and a reader
+    cannot tell "7 kernels GEAK declared authored" from "7 rows nobody
+    classified". A backfilled row's kind is recovered by a name join, and the
+    join does not always land; the miss has to be countable or it is silent.
+
+    The ``result`` path does not join, so its rows carry no ``kind_source``.
+    They are still classified here rather than left uncounted: measured over the
+    recorded campaign, 3 of 4 rows on that path declare no ``kind`` at all, so
+    treating the path as "always declared" would empty the counter exactly where
+    a reader needs it. Every admitted row is counted on every path.
+
+    Args:
+        rows (list[Any]): The admitted accepted-kernel descriptors.
+
+    Returns:
+        dict[str, int]: ``kind_source`` value to row count. One entry per
+        admitted row, so the values sum to ``len(rows)``.
+    """
+    kind_of = _geak_kind_reader()
+    counts: dict[str, int] = {}
+    for row in rows:
+        source = str(row.get("kind_source") or "").strip() if isinstance(row, dict) else ""
+        if not source:
+            # Straight off a ``result.json`` lane: declared, or declared empty.
+            source = "result_json" if kind_of(row) else "result_json_undeclared"
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _geak_kind_reader() -> Any:
+    """Return the canonical ``kind`` reader, with an offline fallback.
+
+    Returns:
+        Any: A callable taking one acceptance spec and returning its declared
+        ``kind``, or ``None`` when it declares none.
+    """
+    try:
+        from hyperloom.orchestrator.loop.coordinator_helpers import geak_spec_kind
+
+        return geak_spec_kind
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+
+        def geak_spec_kind(spec: Any) -> str | None:
+            if not isinstance(spec, dict):
+                return None
+            raw = spec.get("kind")
+            if raw is None:
+                return None
+            return str(raw).strip().lower() or None
+
+        return geak_spec_kind
+
+
+def _geak_kind_index(result: dict[str, Any]) -> dict[str, str | None]:
+    """Map every acceptance name in ``result.json`` to its declared ``kind``.
+
+    Args:
+        result (dict[str, Any]): The normalized ``result.json``.
+
+    Returns:
+        dict[str, str | None]: Name to declared kind. A name present with a
+        value of ``None`` means the lane exists but declared no kind.
+    """
+    try:
+        from hyperloom.orchestrator.loop.coordinator_helpers import (
+            _geak_spec_name,
+            geak_spec_kind,
+        )
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+        def _geak_spec_name(spec: Any) -> str:
+            if isinstance(spec, str):
+                return spec.strip()
+            if not isinstance(spec, dict):
+                return ""
+            return str(
+                spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or ""
+            ).strip()
+
+        def geak_spec_kind(spec: Any) -> str | None:
+            if not isinstance(spec, dict):
+                return None
+            raw = spec.get("kind")
+            if raw is None:
+                return None
+            return str(raw).strip().lower() or None
+
+    index: dict[str, str | None] = {}
+    if not isinstance(result, dict):
+        return index
+    lanes = list(result.get("accepted_kernels") or []) + list(result.get("accepted_heads") or [])
+    for spec in lanes:
+        name = _geak_spec_name(spec)
+        if name:
+            index[name] = geak_spec_kind(spec)
+    return index
+
+
+def _stamp_journey_kind(
+    rows: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Stamp each backfilled row with a ``kind`` and say where it came from.
+
+    A journey row carries no ``kind`` field — measured over
+    ``/shared_nfs/hyperloom-claw``, 0 of 36 accepted journey rows have one. So
+    the collector could not run the ``kind == "env"`` exclusion that
+    :func:`~hyperloom.orchestrator.loop.coordinator_helpers._geak_accepted_kernel_specs`
+    runs, and the same PR would have shipped two different admission tests: the
+    ledger dropping library selections, the collector counting them as authored
+    kernels.
+
+    ``kind`` is recovered by joining the row's symbol to the same run's
+    ``result.json`` lane, which does declare it. That join only became reliable
+    once :func:`_collapse_journey_aliases` started keeping the resolved symbol
+    rather than the slot tag — the two changes are one fix in two places.
+
+    Where no lane names the row, the kind is genuinely unknown. Unknown is
+    recorded as unknown and the row is admitted: guessing "authored" would
+    inflate the kernel bucket with library picks, and guessing "env" would
+    delete real kernels from dead runs, which is the loss this collector exists
+    to recover. ``kind_source`` makes the residual countable instead of silent.
+
+    Args:
+        rows (list[dict[str, Any]]): Collapsed accepted-kernel descriptors.
+        result (dict[str, Any]): The normalized ``result.json`` for the run.
+
+    Returns:
+        list[dict[str, Any]]: The same rows, each with ``kind`` and
+        ``kind_source``, and with known-env rows removed.
+    """
+    index = _geak_kind_index(result)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        names = [str(row.get("name") or "").strip(), str(row.get("kernel_id") or "").strip()]
+        names += [str(a).strip() for a in (row.get("aliases") or [])]
+        kind: str | None = None
+        source = "absent"
+        for name in names:
+            if name and name in index:
+                kind = index[name]
+                source = "result_json" if kind else "result_json_undeclared"
+                break
+        row["kind"] = kind
+        row["kind_source"] = source
+        # One admission test, shared with the ledger: exclude only what is
+        # *known* to be an env selection.
+        if kind == "env":
+            continue
+        kept.append(row)
+    return kept
+
+
+def _journey_row_symbol(row: dict[str, Any]) -> str:
+    """Return the kernel symbol a journey row carries.
+
+    ``kernel_id`` is a slug: GEAK strips the leading underscore when it builds
+    one, so the row for ``_mxfp8_linear_kernel`` has
+    ``kernel_id="mxfp8_linear_kernel"``. ``name`` keeps the symbol as written.
+    Measured over ``/shared_nfs/hyperloom-claw``, joining on ``kernel_id``
+    misses every underscore-prefixed kernel while joining on ``name`` matches
+    the ``result.json`` lane exactly, so ``name`` is the id and ``kernel_id``
+    is the fallback.
+
+    Args:
+        row (dict[str, Any]): One accepted-kernel descriptor.
+
+    Returns:
+        str: The symbol, or ``""`` when the row carries neither field.
+    """
+    return str(row.get("name") or row.get("kernel_id") or "").strip()
+
+
 def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse the twin rows GEAK writes for one accepted kernel.
 
@@ -67,9 +269,28 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
 
     Rows are grouped by gain (rounded — the twin is sometimes the rounded copy).
     A group holding both a measured and an unmeasured row is one kernel: the
-    measured row survives and the unmeasured ids move to its ``aliases``. Groups
+    measured row survives and the other ids move to its ``aliases``. Groups
     that are all-measured or all-unmeasured are distinct kernels and are left
     alone, so a run that genuinely accepts two kernels of equal gain keeps both.
+
+    Which row survives and which id it is named by are two separate questions,
+    and answering them as one was a bug. The measurement only exists on the
+    candidate row, so that row survives. The *name* has to be the resolved
+    symbol, because that is the id
+    :func:`~hyperloom.orchestrator.loop.coordinator_helpers._geak_accepted_kernel_specs`
+    keeps for the same kernel — before this, ``collect_geak`` reported
+    ``c0_triton`` while ``kernel_lifecycle.adopted`` reported
+    ``dsa_sparse_attn_prefill_main_kernel``, one kernel under two names in two
+    tables of the same report.
+
+    The symbol is taken from the *unmeasured* twin, which is what the paragraph
+    above defines it to be — not from "whichever id does not look like a slot
+    tag". Both rules agree on ``c0_triton`` / ``dsa_sparse_attn_prefill_main_kernel``,
+    and they disagree on ``decode_attention_grouped_mla`` /
+    ``_fwd_grouped_kernel_stage1 (+_fwd_kernel_stage2)``, where neither id is a
+    slot tag and only the second is what ``result.json`` names. Checked against
+    all 10 twin groups in ``/shared_nfs/hyperloom-claw``: taking the unmeasured
+    twin's symbol reproduces the ledger's name in every group that has one.
 
     Args:
         accepted (list[dict[str, Any]]): Accepted-kernel descriptors, in order.
@@ -77,6 +298,8 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
     Returns:
         list[dict[str, Any]]: The descriptors with alias twins folded in.
     """
+    is_cand_tag = _geak_cand_tag_test()
+
     groups: dict[Any, list[dict[str, Any]]] = {}
     for row in accepted:
         gain = row.get("e2e_gain_pct")
@@ -93,7 +316,25 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
         if not measured or not unmeasured:
             continue
         primary = measured[0]
-        primary["aliases"] = sorted({str(r.get("kernel_id") or "") for r in unmeasured if r.get("kernel_id")})
+
+        # The unmeasured twin is the resolved symbol, by construction. When
+        # several are unmeasured, prefer one that is not a slot tag; fall back
+        # to the primary's own id so a group of slot tags still gets a name.
+        candidates = [_journey_row_symbol(r) for r in unmeasured]
+        candidates = [c for c in candidates if c]
+        symbols = [c for c in candidates if not is_cand_tag(c)]
+        chosen = (symbols or candidates or [_journey_row_symbol(primary)])[0]
+
+        every_id: list[str] = []
+        for r in group:
+            for field in ("name", "kernel_id"):
+                text = str(r.get(field) or "").strip()
+                if text and text not in every_id:
+                    every_id.append(text)
+        if chosen:
+            primary["kernel_id"] = chosen
+            primary["name"] = chosen
+        primary["aliases"] = sorted({i for i in every_id if i != chosen})
         dropped.update(id(r) for r in unmeasured)
 
     for row in accepted:
@@ -179,7 +420,7 @@ def _geak_accepted_kernels_from_journey(
                 "source": "kernel_journey_backfill",
             }
         )
-    return _collapse_journey_aliases(accepted)
+    return _stamp_journey_kind(_collapse_journey_aliases(accepted), result)
 
 
 def _geak_accepted_kernels_from_integrate_results(
@@ -382,8 +623,18 @@ def _geak_reconstruct_from_disk(
         source = ""
         try:
             if kj.is_file():
+                # ``flushed`` is passed for its acceptance lanes, not its
+                # status: a killed run often flushed a partial ``result.json``,
+                # and that is the only thing on disk that declares a ``kind``.
+                # When it is absent every recovered row is marked
+                # ``kind_source: absent`` rather than assumed authored.
                 recon["accepted_kernels"] = _geak_accepted_kernels_from_journey(
-                    {"kernel_journey_path": str(kj)}, warnings
+                    {
+                        "kernel_journey_path": str(kj),
+                        "accepted_kernels": flushed.get("accepted_kernels") or [],
+                        "accepted_heads": flushed.get("accepted_heads") or [],
+                    },
+                    warnings,
                 )
                 source = "kernel_journey_backfill"
         except OSError as exc:
@@ -391,7 +642,13 @@ def _geak_reconstruct_from_disk(
         if not recon.get("accepted_kernels"):
             recovered = _geak_accepted_kernels_from_integrate_results(exp_root, warnings)
             if recovered:
-                recon["accepted_kernels"] = recovered
+                recon["accepted_kernels"] = _stamp_journey_kind(
+                    recovered,
+                    {
+                        "accepted_kernels": flushed.get("accepted_kernels") or [],
+                        "accepted_heads": flushed.get("accepted_heads") or [],
+                    },
+                )
                 source = "integrate_result_backfill"
         if source:
             recon["accepted_kernels_source"] = source
@@ -574,6 +831,7 @@ def collect_geak(
                 if recovered_kernels
                 else None
             ),
+            "accepted_kernels_kind_sources": _kind_source_counts(recovered_kernels),
             "accepted_heads": [],
             "kernels_optimized": len(recovered_kernels),
         }
@@ -651,6 +909,9 @@ def collect_geak(
         # Provenance of ``accepted_kernels``: ``result``,
         # ``kernel_journey_backfill``, or ``None``.
         "accepted_kernels_source": accepted_kernels_source,
+        # How each admitted kernel's ``kind`` was resolved. Values sum to
+        # ``kernels_optimized`` on every path.
+        "accepted_kernels_kind_sources": _kind_source_counts(accepted_kernels),
         "accepted_heads": accepted_heads,
         "kernels_optimized": len(accepted_kernels),
         "accepted_config": dict(result.get("accepted_config") or {}),
