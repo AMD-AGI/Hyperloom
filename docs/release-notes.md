@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b2, including the Magpie v0.2.0 upgrade, the single remote Recipe KB Store contract, the consolidated action catalogue, and a set of breaking removals."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b2, including the official upstream vLLM ROCm image, the Magpie v0.2.0 upgrade, the single remote Recipe KB Store contract, the consolidated action catalogue, and a set of breaking removals."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
@@ -19,12 +19,20 @@ summarizes the headline capabilities.
 ## Hyperloom 1.0.0b2 release
 
 The [1.0.0b2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2)
-builds on 1.0.0b1 with the Magpie v0.2.0 benchmark upgrade, a single current
-remote Recipe KB Store contract, and a consolidation pass that removes several
-surfaces that never had a runtime effect. It carries breaking changes; review
-the list below before upgrading.
+builds on 1.0.0b1 with the move to the official upstream vLLM ROCm image, the
+Magpie v0.2.0 benchmark upgrade, a single current remote Recipe KB Store
+contract, and a consolidation pass that removes several surfaces that never had
+a runtime effect. It carries breaking changes; review the list below before
+upgrading.
 
 ### 1.0.0b2 highlights
+
+- **Official upstream vLLM ROCm image**: every vLLM image reference moves from
+  `rocm/hyperloom:vllm-v0.27.1-rocm7.2.3` to `vllm/vllm-openai-rocm:v0.27.1`,
+  since AMD deprecated `rocm/vllm` and `rocm/vllm-dev`. The tag is a 1:1
+  replacement, but its entrypoint is `vllm serve`, so override it (for example
+  `--entrypoint tail`) when starting a long-running Hyperloom container. SGLang
+  images are unchanged.
 
 - **Magpie benchmark upgraded to v0.2.0**: the default benchmark dependency
   moves from v0.1.0 to v0.2.0. Both the installer and the runtime preflight stay

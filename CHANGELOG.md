@@ -64,6 +64,13 @@ for the user-facing summary.
 
 ### Changed
 
+- The recommended vLLM container image is now the official upstream
+  `vllm/vllm-openai-rocm:v0.27.1` instead of
+  `rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`, because AMD deprecated `rocm/vllm`
+  and `rocm/vllm-dev`. The tag is a 1:1 replacement, but its entrypoint is
+  `vllm serve`, so a long-running Hyperloom container has to override it (for
+  example `--entrypoint tail`). SGLang images are unchanged.
+
 - The default Magpie benchmark dependency is upgraded from v0.1.0 to v0.2.0.
   Both the installer and runtime preflight remain pinned to the immutable
   v0.2.0 release commit for reproducible installs.
