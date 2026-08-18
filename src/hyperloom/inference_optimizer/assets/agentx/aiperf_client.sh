@@ -175,6 +175,14 @@ DURATION="${AGENTX_DURATION:-3600}"
 WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-10}"
 WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-1800}"
 
+# Per-trajectory-tree idle cap. NOT the same thing as the scenario's 10s
+# whole-system cap, and NOT scenario-locked -- upstream passes it explicitly
+# alongside the scenario. Without it a trace carrying a 20-minute recorded idle
+# gap replays that gap in full, and because --benchmark-duration is a fixed
+# window the lost time comes straight out of measured requests: throughput lands
+# systematically below the published row for the same server config.
+IDLEGAP="${AGENTX_TRACE_IDLE_GAP_CAP_SECONDS:-300}"
+
 # aiperf reads AIPERF_-prefixed env into its own pydantic settings; scrub any
 # stray exported ones (keep AIPERF_BIN, which is ours) so they can't corrupt it.
 # Ours are exported AFTER the scrub so they are authoritative; operators tune
@@ -240,6 +248,7 @@ run_aiperf() {
     --trajectory-start-max-ratio 0.75 \
     --warmup-requests-per-lane "$WARMLANE" \
     --warmup-grace-period "$WARMGRACE" \
+    --trace-idle-gap-cap-seconds "$IDLEGAP" \
     --failed-request-threshold "$FRT" \
     --stats-interval 30 \
     --slice-duration 1.0 \
@@ -345,8 +354,15 @@ else
           RESULT_FILENAME="${RESULT_FILENAME}.leaderboard" \
           KV_OFFLOADING="${KV_OFFLOADING:-none}" \
           python3 -m utils.agentic.aggregation.process_agentic_result ) >"${_agg_note}.log" 2>&1; then
-    log "leaderboard aggregate -> ${RESULT_DIR}/${RESULT_FILENAME}.leaderboard.json"
-    printf 'ok: %s\n' "${RESULT_DIR}/${RESULT_FILENAME}.leaderboard.json" > "$_agg_note"
+    # Record WHICH checkout produced it. An operator-pinned $INFERENCEX_PATH is
+    # a supported override, so the aggregator here is not necessarily the one
+    # this Hyperloom commit pins -- and a stale one computes leaderboard numbers
+    # under the previous rules. Naming the ref keeps that visible instead of
+    # leaving two differently-produced aggregates indistinguishable on disk.
+    _ix_ref="$(git -C "$_ix_root" rev-parse HEAD 2>/dev/null || echo unknown)"
+    log "leaderboard aggregate -> ${RESULT_DIR}/${RESULT_FILENAME}.leaderboard.json (InferenceX ${_ix_ref})"
+    printf 'ok: %s\naggregator_inferencex_ref: %s\n' \
+      "${RESULT_DIR}/${RESULT_FILENAME}.leaderboard.json" "$_ix_ref" > "$_agg_note"
   else
     log "WARN leaderboard aggregate failed; see ${_agg_note}.log (measurement itself is unaffected)"
     printf 'failed: see %s\n' "${_agg_note}.log" > "$_agg_note"

@@ -675,6 +675,7 @@ def apply_agentx_workload_guard(
             if not (
                 k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES
                 or k.strip().upper().startswith("AGENTX_")
+                or k.strip().upper() == "AIPERF_BIN"
             )
         ]
         if len(keep_unset) != len(unset):
