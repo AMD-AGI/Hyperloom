@@ -283,3 +283,29 @@ def test_workload_guard_leaves_genuine_speed_knobs_alone(monkeypatch):
     kept, notes = _guard([gv])
     assert kept[0].extra_server_args == args
     assert notes == []
+
+
+@pytest.mark.parametrize(
+    "args,expected,removed",
+    [
+        ("--max-model-len 4096", "", True),
+        ("--max-model-len=4096", "", True),
+        ("--max-model-len", "", True),  # flag at end, no value
+        ("--max-model-len --enable-prefix-caching", "--enable-prefix-caching", True),
+        ("--a 1 --max-model-len 4096 --b 2", "--a 1 --b 2", True),
+        ("--max-model-len 1 --max-model-len 2", "", True),
+        ("", "", False),
+        # Prefix collision: a longer flag that merely starts with the same text
+        # must survive untouched. Getting this wrong silently deletes an
+        # unrelated tuning knob.
+        ("--max-model-len-extra 5", "--max-model-len-extra 5", False),
+        ("--enable-prefix-caching", "--enable-prefix-caching", False),
+    ],
+)
+def test_strip_server_flag_edges(args, expected, removed):
+    from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+        _strip_server_flag,
+    )
+
+    out, hit = _strip_server_flag(args, "--max-model-len")
+    assert (out, hit) == (expected, removed)
