@@ -4030,7 +4030,9 @@ class BaselineExecutor:
             config_path=config_path,
             output_dir=output_dir,
             **common,
-        )    async def _mn_warmup_pass(
+        )
+
+    async def _mn_warmup_pass(
         self,
         *,
         cmd: list[str],
