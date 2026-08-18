@@ -461,11 +461,18 @@ def build_candidates(
                 finder_patchable = True
                 finder_status = "resolved"
             elif method == "non_patchable":
+                # A positive "known not rewritable" verdict (e.g. a CK template
+                # instantiation, Tensile GEMM, or MIOpen convolution), NOT a
+                # miss. Record it and DO NOT fall through to the repo-scan tier,
+                # which could otherwise override the finder with a coincidental
+                # kernel-name hit.
                 source_method = method
                 finder_patchable = False
                 finder_status = "non_rewritable"
                 finder_reason = f"non-patchable kernel ({reason})" if reason else "non-patchable kernel"
-        # Repo-scan is the last resort, and only for a genuine miss.
+        # Repo-scan is the last resort, and only for a genuine miss -- never
+        # when the finder already returned an authoritative non_patchable
+        # verdict or tier 1 identified a non-editable kernel_file.
         if not source_file and kname and source_method == "unresolved":
             source_file, method = resolve_by_kernel_name(kname)
             if source_file:
