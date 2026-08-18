@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Regression: SGLang v0.5.17+ has no in-tree sgl-kernel/; installer must pick pip path.
+# Regression: baremetal ROCm kernel path selection for legacy vs v0.5.17+ layouts.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_SH="${SCRIPT_DIR}/install_baremetal.sh"
+FIXTURE_ROOT="${SCRIPT_DIR}/../tests/fixtures/sglang_kernel_layouts"
 
 fail() {
   echo "[test] FAIL: $*" >&2
@@ -14,30 +15,25 @@ pass() {
   echo "[test] PASS: $*"
 }
 
-eval "$(sed -n '/^resolve_sglang_kernel_pip_version()/,/^}/p' "$INSTALL_SH")"
+eval "$(sed -n '/^sglang_kernel_rocm_build_dir()/,/^}/p' "$INSTALL_SH")"
 
-if [ ! -d /tmp/sglang-517/.git ]; then
-  git clone --depth 1 --branch v0.5.17 https://github.com/sgl-project/sglang.git /tmp/sglang-517
-fi
-if [ ! -d /tmp/sglang-516/.git ]; then
-  git clone --depth 1 --branch v0.5.16 https://github.com/sgl-project/sglang.git /tmp/sglang-516
-fi
+legacy="${FIXTURE_ROOT}/legacy"
+aot="${FIXTURE_ROOT}/v0517_aot"
+empty="${FIXTURE_ROOT}/empty"
 
-[ -f /tmp/sglang-517/python/pyproject.toml ] || fail "v0.5.17 checkout missing pyproject.toml"
-[ ! -f /tmp/sglang-517/sgl-kernel/setup_rocm.py ] || fail "v0.5.17 should not have in-tree sgl-kernel"
-[ -f /tmp/sglang-516/sgl-kernel/setup_rocm.py ] || fail "v0.5.16 should have in-tree sgl-kernel"
+[ -f "${legacy}/sgl-kernel/setup_rocm.py" ] || fail "legacy fixture missing"
+[ -f "${aot}/python/sglang/kernels/aot/setup_rocm.py" ] || fail "aot fixture missing"
+[ ! -f "${empty}/sgl-kernel/setup_rocm.py" ] || fail "empty fixture should lack kernel"
 
-grep -q 'install_sglang_kernel_rocm' "$INSTALL_SH" || fail "install_sglang_kernel_rocm helper missing"
-grep -q 'no in-tree sgl-kernel/' "$INSTALL_SH" || fail "pip fallback log line missing"
+dir="$(sglang_kernel_rocm_build_dir "$legacy")"
+[ "$dir" = "${legacy}/sgl-kernel" ] || fail "legacy path got ${dir}"
+pass "legacy -> sgl-kernel/"
 
-ver="$(resolve_sglang_kernel_pip_version /tmp/sglang-517)"
-[ "$ver" = "0.4.5" ] || fail "expected sglang-kernel 0.4.5 for v0.5.17, got ${ver}"
-pass "resolve_sglang_kernel_pip_version v0.5.17 -> ${ver}"
+dir="$(sglang_kernel_rocm_build_dir "$aot")"
+[ "$dir" = "${aot}/python/sglang/kernels/aot" ] || fail "aot path got ${dir}"
+pass "v0.5.17+ -> python/sglang/kernels/aot/"
 
-export SGLANG_KERNEL_VERSION="9.9.9"
-ver="$(resolve_sglang_kernel_pip_version /tmp/sglang-517)"
-[ "$ver" = "9.9.9" ] || fail "SGLANG_KERNEL_VERSION override ignored"
-unset SGLANG_KERNEL_VERSION
-pass "SGLANG_KERNEL_VERSION override"
+sglang_kernel_rocm_build_dir "$empty" >/dev/null 2>&1 && fail "empty layout should fail"
+pass "missing layout returns non-zero"
 
 pass "sglang-kernel layout regression checks"
