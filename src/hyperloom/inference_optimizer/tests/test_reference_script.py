@@ -283,6 +283,35 @@ def test_render_model_always_exported():
     assert "export MODEL=/models/M" in text
 
 
+def test_render_bare_model_name_stays_a_comment():
+    """parse_reference_script records a basename; exporting it would break --model-path."""
+    text = render_reference_script(framework="sglang", server_args="", model="minimaxm3")
+    assert "export MODEL=" not in text
+    assert "# model: minimaxm3" in text
+
+
+def test_render_quotes_env_values():
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        envs={"HL_OPTS": "a b; rm -rf /"},
+        gpu_type="mi300x",
+    )
+    assert "export HL_OPTS='a b; rm -rf /'" in text
+
+
+def test_render_redacts_secret_shaped_envs():
+    """The script is archived and uploaded, so credentials are named but not written."""
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        envs={"HF_TOKEN": "hf_realsecret", "VLLM_ROCM_USE_AITER": "1"},
+    )
+    assert "hf_realsecret" not in text
+    assert "# export HF_TOKEN=<redacted; supply manually>" in text
+    assert "export VLLM_ROCM_USE_AITER=1" in text
+
+
 def test_render_no_model_no_export():
     text = render_reference_script(framework="sglang", server_args="")
     assert "export MODEL=" not in text
@@ -306,8 +335,7 @@ def test_render_patches_emit_apply_function():
         framework_root="/sgl-workspace/sglang",
     )
     assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
-    assert "apply_patch" in text
-    assert 'apply_patch "patches/001_fix.patch"' in text
+    assert "apply_patch patches/001_fix.patch" in text
     assert "for lvl in 1 0 2" in text
 
 
