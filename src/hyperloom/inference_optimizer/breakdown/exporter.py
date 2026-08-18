@@ -91,6 +91,56 @@ def _merge_phase_timeline(
     return base
 
 
+def _recorded_session_value(value: Any) -> bool:
+    """Whether a recorder ``session`` field carries evidence.
+
+    The snapshot writes every key on every save, so an unset field arrives as
+    the type's empty value rather than as a missing key -- ``0`` for the
+    budget and the tick count exactly as ``""`` for the ids. Only a value that
+    says something may overwrite what the collector resolved.
+
+    Args:
+        value (Any): A fragment field value.
+
+    Returns:
+        bool: ``True`` when the field was actually recorded.
+    """
+    if value is None or value == "":
+        return False
+    return not (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
+
+
+def _merge_session(fragment: Any, collector_value: Any) -> Any:
+    """Overlay the recorder's live ``session`` fields on the collected section.
+
+    The recorder snapshots what the running state knows -- ids, phase, tick,
+    the start and end timestamps -- while everything derived from
+    ``manifest.json`` (container image, host, pid) and everything derived from
+    the timestamps (``elapsed_minutes``) only exists on the collector side.
+    Replacing the section wholesale dropped those, so a live-recorded run
+    reported no wall-clock elapsed time and no image. An empty fragment value
+    is absence of evidence and never overwrites a collected one, but it still
+    lands on a key the collector does not fill (``phase``), which the section
+    carried before this merge existed.
+
+    Args:
+        fragment: The recorder ``session`` fragment (may be any type).
+        collector_value: The collector-computed session section.
+
+    Returns:
+        The merged section, or ``collector_value`` when no fragment was
+        recorded.
+    """
+    if not isinstance(fragment, dict) or not fragment:
+        return collector_value
+    merged = dict(collector_value) if isinstance(collector_value, dict) else {}
+    for key, value in fragment.items():
+        if _recorded_session_value(value) or key not in merged:
+            merged[key] = value
+    merged["elapsed_minutes"] = collectors.session_elapsed_minutes(merged)
+    return merged
+
+
 def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str, Any]:
     """Read a session JSON file as a dict; ``{}`` + warning on failure.
 
@@ -248,8 +298,9 @@ def build(
     exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # Section collectors (each catches its own errors via warnings).
-    session_section = _pick(
-        "session", _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings)
+    session_section = _merge_session(
+        assembled.get("session"),
+        _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings),
     )
     # Author-side ``session_meta`` enrichment, emitted from the manifest +
     # resolved ``session`` block.

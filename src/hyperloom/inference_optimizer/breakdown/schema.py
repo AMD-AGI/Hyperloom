@@ -83,13 +83,23 @@ class SessionMeta(TypedDict, total=False):
         session_id (str): Hyperloom internal id (``manifest.session_id``).
         claw_session_id (str | None): SaFE / Claw session id (env ``CLAW_SESSION_ID``).
         sandbox_user_id (str | None): Sandbox user identifier, if any.
-        created_at_utc (str): ISO UTC timestamp when the session started.
+        created_at_utc (str): ISO UTC timestamp when the session was first
+            created; unchanged by a resume.
+        start_ts (str): ISO UTC timestamp the wall-clock budget is counted
+            from. A resume re-anchors it on the new leg only when the previous
+            one crashed or stopped for a recorded reason; after a clean stop it
+            stays at the original start, because ``--max-hours`` keeps counting
+            from there.
         ended_at_utc (str): ISO UTC timestamp when the session ended.
         stop_reason (str): Why the run stopped (``target_reached`` /
             ``time_exhausted`` / ``global_converged`` / ``max_ticks`` /
             ``baseline_failed`` / ...).
         max_minutes (int): Configured time budget in minutes.
-        elapsed_minutes (float): Wall-clock minutes the session ran.
+        elapsed_minutes (float): Wall-clock minutes from ``start_ts`` to the
+            end, or to now while still running, so it stays comparable with
+            ``max_minutes``. When a resume kept ``start_ts`` this spans the
+            gap between the legs as well, which is the span the budget is
+            charged for too.
         host (str): Hostname the session executed on.
         code_revision (str): Source revision of the optimizer.
         pid (int): Process id of the optimizer.
@@ -107,6 +117,7 @@ class SessionMeta(TypedDict, total=False):
     claw_session_id: str | None  # SaFE / Claw session id (env CLAW_SESSION_ID)
     sandbox_user_id: str | None
     created_at_utc: str
+    start_ts: str  # budget anchor; re-anchored only by a resume after a crash or a recorded stop
     ended_at_utc: str
     stop_reason: str  # target_reached / time_exhausted / global_converged / max_ticks / baseline_failed / ...
     max_minutes: int
@@ -376,8 +387,8 @@ class PhaseEvent(TypedDict, total=False):
         kernel_id (str | None): Kernel id for kernel_agent-owned actions, else None.
         status (str): Outcome (``succeeded`` / ``failed``).
         decision (str): Decision label (``promoted`` / ``discarded`` /
-            ``salvaged`` / ``no_promote`` / ``error`` / ``KEEP`` / ``PARTIAL`` /
-            ``REVERT``).
+            ``salvaged`` / ``no_promote`` / ``skipped`` / ``error`` / ``KEEP`` /
+            ``PARTIAL`` / ``REVERT``).
         key_metric (float | None): Headline metric value, or None.
         key_metric_kind (str | None): Type/label of the key metric, or None.
         workspace (str | None): Benchmark workspace path, or None.
@@ -398,7 +409,7 @@ class PhaseEvent(TypedDict, total=False):
     task_id: str
     kernel_id: str | None  # only for kernel_agent-owned actions
     status: str  # succeeded / failed
-    decision: str  # promoted / discarded / salvaged / no_promote / error / KEEP / PARTIAL / REVERT
+    decision: str  # promoted / discarded / salvaged / no_promote / skipped / error / KEEP / PARTIAL / REVERT
     key_metric: float | None
     key_metric_kind: str | None
     workspace: str | None

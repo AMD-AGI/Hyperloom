@@ -534,6 +534,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
     {
         "current_best",
         "stop_reason",
+        # Paired with stop_reason and written by the same setter: locking one
+        # without the other lets an update_state move the session's end time
+        # away from the reason it was stamped for.
+        "stop_ts",
         "last_tick_exception",
         "cumulative_gain",
         "cumulative_gain_validated",
@@ -548,6 +552,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "model_name",
         "model_class",
         "start_ts",
+        # Where the current run leg begins; a forged value hands a previous
+        # leg's CLOSE transition back the right to speak for this one.
+        "resumed_ts",
         "max_minutes",
         # fact-layer KEEP ledger; Coordinator is the sole writer.
         "optimization_stack",
