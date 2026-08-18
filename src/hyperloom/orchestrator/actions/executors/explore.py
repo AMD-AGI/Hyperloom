@@ -79,6 +79,7 @@ from ._server_lifecycle import (
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
+    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
 )
