@@ -59,13 +59,25 @@ def _reset_vendor_operator_playbooks_cache() -> None:
 
 
 def _candidate_haystack(candidate: dict[str, Any]) -> str:
-    """Join every text field a playbook's ``any_marker`` may match against."""
+    """Join every text field a playbook's ``any_marker`` may match against.
+
+    Includes ``trace_launcher_file`` alongside the resolved-source fields:
+    for a kernel whose device launch is hidden behind a CUDA/HIP-graph
+    replay (TraceLens reconstructs it as a "Synthetic Op" with no surviving
+    module chain -- mori's EP dispatch/combine hit this in practice), the
+    normal ``library``/``source_file``/``kernel_repo`` trio all resolve
+    empty and the Python call-stack frame that first launched the op (e.g.
+    ``.../site-packages/mori/jit/hip_driver.py``) is the *only* place the
+    vendor identity marker survives. Omitting it silently drops exactly the
+    graph-captured candidates this registry exists to route.
+    """
     fields = (
         candidate.get("name"),
         candidate.get("operation"),
         candidate.get("library"),
         candidate.get("source_file"),
         candidate.get("kernel_repo"),
+        candidate.get("trace_launcher_file"),
     )
     return " ".join(str(f or "") for f in fields).lower()
 
