@@ -13,9 +13,15 @@ every entry. A real 24h session entered KERNEL_AGENT three times, burned a fresh
 These tests pin the fixed contract: ``phase_cumulative_seconds`` totals every
 entry, the cap/budget guards read that total, and ``phase_elapsed_seconds``
 keeps its per-entry meaning for renderers and evidence dicts.
+
+They also pin the resume half of it: a phase entry is not closed by the process
+exiting, so the current entry spans the idle gap between two run legs unless the
+leg boundary floors it.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 import pytest
 
@@ -36,6 +42,19 @@ GAP_SEC = 600.0
 # A real epoch: zero reads as "phase not entered yet" throughout the machine.
 T0 = 1_700_000_000.0
 T0_ISO = "2023-11-14T22:13:20+00:00"
+
+# A 3h session that stopped half an hour into PRELUDE and was resumed 3 days
+# later: long enough that charging the gap to PRELUDE dwarfs the whole budget.
+RESUMED_SESSION_MINUTES = 180
+PRELUDE_LEG_SEC = 1800.0
+IDLE_GAP_SEC = 3 * 24 * 3600.0
+RESUME_UNIX = T0 + PRELUDE_LEG_SEC + IDLE_GAP_SEC
+# What the resumed leg has run by the time the guards are asked.
+NEW_LEG_SEC = 120.0
+
+
+def _iso(at_unix: float) -> str:
+    return datetime.fromtimestamp(at_unix, tz=timezone.utc).isoformat()
 
 
 def _kernel_state() -> SharedState:
@@ -211,6 +230,84 @@ def test_history_rebuild_skips_unusable_rows():
     assert ps.phase_elapsed_totals_from_history(history) == {"SWEEP": 800.0}
     assert ps.phase_elapsed_totals_from_history(None) == {}
     assert ps.phase_elapsed_totals_from_history("nope") == {}
+
+
+def _resumed_prelude_state() -> SharedState:
+    """A session still in PRELUDE whose previous leg stopped 3 days ago."""
+    state = SharedState()
+    state.max_minutes = RESUMED_SESSION_MINUTES
+    state.phase = ps.PHASE_PRELUDE
+    state.phase_started_unix = T0
+    state.phase_started_ts = T0_ISO
+    state.resumed_ts = _iso(RESUME_UNIX)
+    return state
+
+
+def test_a_resume_does_not_charge_the_phase_for_the_gap_it_was_not_running():
+    # phase_started_unix is only rewritten on a phase transition, and exiting
+    # the process is not one, so the current entry spans both legs.
+    state = _resumed_prelude_state()
+    now = RESUME_UNIX + NEW_LEG_SEC
+
+    assert ps.phase_elapsed_seconds(state, now_unix=now) == pytest.approx(NEW_LEG_SEC)
+    assert ps.phase_cumulative_seconds(state, now_unix=now) == pytest.approx(NEW_LEG_SEC)
+
+
+def test_a_resumed_phase_is_not_capped_by_time_the_process_was_down():
+    state = _resumed_prelude_state()
+    state.phase_budget_pct = {ps.PHASE_PRELUDE: 0.4}
+    now = RESUME_UNIX + NEW_LEG_SEC
+
+    assert ps.phase_cap_seconds(state) == pytest.approx(RESUMED_SESSION_MINUTES * 60.0 * 0.4)
+    assert ps.phase_cap_exceeded(state, now_unix=now) is False
+
+
+def test_the_charge_back_base_of_a_resumed_phase_stays_inside_the_session():
+    # The crash / recorded-stop branch re-anchors start_ts, so the session clock
+    # restarts. A phase clock that still spans the gap reconstructs a base of
+    # "the whole budget plus three days" and hands the phase an allotment the
+    # session cannot pay for.
+    state = _resumed_prelude_state()
+    state.start_ts = state.resumed_ts
+    now = RESUME_UNIX + NEW_LEG_SEC
+
+    budget = ps.normalize_budget_pct(None)
+    denom = sum(pct for pct in budget.values() if pct > 0.0)
+    session_sec = RESUMED_SESSION_MINUTES * 60.0
+    total = ps._phase_budget_total_seconds(state, now_unix=now)
+
+    assert total == pytest.approx(session_sec * budget[ps.PHASE_PRELUDE] / denom)
+
+
+def test_a_kept_budget_anchor_charges_the_resumed_phase_the_smaller_base():
+    # The clean-stop branch keeps start_ts, so the session stays charged for the
+    # idle gap while the phase clock no longer is. The base is then what the
+    # session had left when THIS leg began, not when the phase was entered.
+    idle_gap = 3600.0
+    state = _resumed_prelude_state()
+    state.start_ts = T0_ISO
+    state.resumed_ts = _iso(T0 + PRELUDE_LEG_SEC + idle_gap)
+    now = T0 + PRELUDE_LEG_SEC + idle_gap + NEW_LEG_SEC
+
+    budget = ps.normalize_budget_pct(None)
+    denom = sum(pct for pct in budget.values() if pct > 0.0)
+    base = RESUMED_SESSION_MINUTES * 60.0 - (PRELUDE_LEG_SEC + idle_gap)
+    total = ps._phase_budget_total_seconds(state, now_unix=now)
+
+    assert total == pytest.approx(base * budget[ps.PHASE_PRELUDE] / denom)
+
+
+def test_a_later_phase_entry_supersedes_the_resume_boundary():
+    # The leg boundary only floors the entry it interrupted; once the phase is
+    # re-entered its own stamp is the later of the two.
+    state = _resumed_prelude_state()
+    _enter(state, ps.PHASE_FRAMEWORK_AGENT, RESUME_UNIX + NEW_LEG_SEC)
+
+    assert state.phase_elapsed_totals[ps.PHASE_PRELUDE] == pytest.approx(NEW_LEG_SEC)
+    assert ps.phase_elapsed_seconds(
+        state,
+        now_unix=RESUME_UNIX + NEW_LEG_SEC + 180.0,
+    ) == pytest.approx(180.0)
 
 
 def test_budget_exit_evidence_reports_the_time_it_judged_on():

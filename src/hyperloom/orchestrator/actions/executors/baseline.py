@@ -97,6 +97,13 @@ _EVAL_FAILURE_MARKERS = (
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
 
+# The cold-start guard's two round directories. The warmup round is the only one
+# that measures accuracy (``RUN_EVAL=true``); the measured round is hot
+# throughput alone, so it carries no accuracy by construction.
+_WARMUP_ROUND_DIR = "warmup_round"
+_MEASURE_ROUND_DIR = "measure_round"
+_DOUBLE_RUN_ROUND_DIRS = (_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR)
+
 # Markers identifying a MoE quant scheme with no implementation for the
 # ``--moe-runner-backend`` in use: ``create_moe_runner`` falls through without
 # building a runner and the first forward pass dies (e.g. Quark MXFP4 on
@@ -390,6 +397,34 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     if str(task_kind or "") != "baseline":
         return False
     return not (params or {}).get("quality_ref_exempt")
+
+
+def _is_double_run_accuracy_handoff(
+    result: dict[str, Any],
+    salvaged: dict[str, Any] | None,
+) -> bool:
+    """Whether accuracy came from the warmup round because that is the design.
+
+    The cold-start guard splits one baseline into a warmup round that measures
+    accuracy and a measured round that measures hot throughput only, then
+    decides on the measured round -- which by construction has no accuracy of
+    its own. Reading the warmup round's score there is the intended handoff,
+    not a recovery, and logging it as one makes every healthy double-run
+    baseline look like it survived a fault.
+
+    Args:
+        result (dict[str, Any]): The deciding round's result dict.
+        salvaged (dict[str, Any] | None): The salvage record, whose
+            ``source_file`` names the round the accuracy came from.
+
+    Returns:
+        bool: ``True`` only for measured-round decision + warmup-round source.
+    """
+    out_dir = str((result or {}).get("output_dir") or "")
+    if not out_dir or Path(out_dir).name != _MEASURE_ROUND_DIR:
+        return False
+    source = str((salvaged or {}).get("source_file") or "")
+    return _WARMUP_ROUND_DIR in Path(source).parts
 
 
 # Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
@@ -1880,7 +1915,7 @@ class BaselineExecutor:
         root = Path(out_dir)
         # Double-run: the failure markers may live in the sibling warmup round,
         # so climb to the shared task root to scan both rounds.
-        if root.name in ("warmup_round", "measure_round"):
+        if root.name in _DOUBLE_RUN_ROUND_DIRS:
             root = root.parent
         if not root.exists():
             return False
@@ -1941,7 +1976,7 @@ class BaselineExecutor:
         root = Path(out_dir)
         # Double-run: the failure markers may live in the sibling warmup round,
         # so climb to the shared task root to scan both rounds.
-        if root.name in ("warmup_round", "measure_round"):
+        if root.name in _DOUBLE_RUN_ROUND_DIRS:
             root = root.parent
         if not root.exists():
             return False, ""
@@ -2337,14 +2372,28 @@ class BaselineExecutor:
         # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
-            log.warning(
-                "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
-                "but salvaged a measured baseline accuracy=%.4f from a sibling "
-                "attempt (%s)",
-                acc_val,
-                salvaged.get("source_file", ""),
+            expected_handoff = _is_double_run_accuracy_handoff(result, salvaged)
+            acc_val = self._apply_salvaged_accuracy(
+                result,
+                salvaged,
+                shared_state,
+                expected_handoff=expected_handoff,
             )
+            if expected_handoff:
+                log.info(
+                    "baseline_executor: cold-start guard — reading accuracy=%.4f from "
+                    "the warmup round (%s), the only round that measures it",
+                    acc_val,
+                    salvaged.get("source_file", ""),
+                )
+            else:
+                log.warning(
+                    "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
+                    "but salvaged a measured baseline accuracy=%.4f from a sibling "
+                    "attempt (%s)",
+                    acc_val,
+                    salvaged.get("source_file", ""),
+                )
             # Floor 0.0 reproduces the non-enablement "any positive accuracy is
             # usable" rule; ``accuracy_meets_floor`` rejects zero either way.
             if accuracy_meets_floor(acc_val, floor if eval_enablement else 0.0):
@@ -2391,6 +2440,8 @@ class BaselineExecutor:
         result: dict[str, Any],
         salvaged: dict[str, Any],
         shared_state: Any,
+        *,
+        expected_handoff: bool = False,
     ) -> float:
         """Record a salvaged sibling accuracy, publishing it as the gate
         reference only when it can serve as one.
@@ -2406,6 +2457,11 @@ class BaselineExecutor:
             salvaged: The parsed eval dict from
                 :meth:`_salvage_sibling_baseline_accuracy`.
             shared_state: The live SharedState, or ``None``.
+            expected_handoff: Whether this read is the double-run design
+                (see :func:`_is_double_run_accuracy_handoff`) rather than a
+                recovery. The structured warning is for the recovery only;
+                raising it on every healthy double-run baseline leaves the
+                record claiming a fault the run never hit.
 
         Returns:
             float: The salvaged accuracy.
@@ -2417,8 +2473,9 @@ class BaselineExecutor:
         result["accuracy_task"] = salvaged.get("task", "gsm8k")
         result["accuracy_metric"] = salvaged.get("metric", "")
         result["accuracy_source"] = salvaged.get("source_file", "")
-        result.setdefault("nonfatal_warnings", [])
-        result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+        if not expected_handoff:
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             try:
                 shared_state.baseline_accuracy = acc_val
