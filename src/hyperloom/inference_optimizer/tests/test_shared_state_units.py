@@ -314,6 +314,21 @@ class TestApplyChanges:
         assert s.current_action == "baseline"
         assert s.cumulative_gain == before  # core write dropped
 
+    def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
+        # stop_reason is a core field, so a changes dict that carries both must
+        # not land the timestamp half either: the pair is what the export reads
+        # as "the session ended then, for this reason".
+        s = SharedState()
+        s.set_stop_reason("time_exhausted")
+        pinned = s.stop_ts
+        applied = s.apply_changes(
+            {"stop_reason": "target_reached", "stop_ts": "2026-01-01T00:01:00+00:00"},
+            allow_core=False,
+        )
+        assert applied == {}
+        assert s.stop_reason == "time_exhausted"
+        assert s.stop_ts == pinned
+
     def test_core_field_written_when_allow_core_true(self):
         s = SharedState()
         applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)

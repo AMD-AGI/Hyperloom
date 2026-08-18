@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
@@ -1135,6 +1135,28 @@ def _skip(reason: str, **extras: Any) -> dict[str, Any]:
     return payload
 
 
+def conc_sweep_declined_to_run(record: Mapping[str, Any] | None) -> bool:
+    """Whether a conc-sweep record is one that never started a variant.
+
+    ``was_skipped`` covers two different outcomes: the pre-flight envelope
+    from :func:`_skip`, which declines before a server boots, and a sweep that
+    ran its whole ladder but exhausted its budget before producing a
+    comparable pair (see :func:`_budget_limited_without_valid_pair`). Only the
+    second can set ``budget_exhausted``, which separates them without reading
+    ``skip_reason``. Any future skip raised after variants start must set it
+    too, or it will be misread as a sweep that declined.
+
+    Args:
+        record (Mapping[str, Any] | None): A conc-sweep payload or the
+            ``last_conc_sweep`` record persisted from one.
+
+    Returns:
+        bool: ``True`` when the sweep declined before running anything.
+    """
+    rec = record or {}
+    return bool(rec.get("was_skipped")) and not rec.get("budget_exhausted")
+
+
 async def run_conc_sweep(
     state: SharedState,
     session_dir: Path,
@@ -1418,5 +1440,6 @@ __all__ = [
     "_flush_conc_sweep_report",
     "_flush_partial_conc_sweep_report",
     "_order_concs_desc",
+    "conc_sweep_declined_to_run",
     "run_conc_sweep",
 ]

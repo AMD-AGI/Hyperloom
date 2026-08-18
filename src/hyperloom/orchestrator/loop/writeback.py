@@ -1288,7 +1288,9 @@ class WritebackCollaborator:
             reason = None
         else:
             error_class = str(result_dict.get("error_class") or "") or None
-            reason = str(result_dict.get("reason") or "") or None
+            # A skip states its own cause under ``skip_reason``; without it the
+            # timeline shows a step that did nothing and never says why.
+            reason = str(result_dict.get("reason") or result_dict.get("skip_reason") or "") or None
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
