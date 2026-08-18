@@ -626,10 +626,15 @@ def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: Sha
         ],
     )
     untried = state.untried_hot_reusable_kernels()
-    # Both members carry the group's full aggregate: whichever the fallback
-    # identity-dedup keeps (they share source_file+name, differing only in
-    # gpu_pct) must clear the gate.
-    assert untried, "vendor-playbook group must not be dropped as below_min_gpu_pct"
+    # Both members carry the group's full aggregate and must both clear the
+    # gate. No task_groups metadata is supplied here, and the two rows do
+    # NOT share (source_file, name) -- names differ (`::dispatch` vs
+    # `::combine`) -- so neither the group-key dedup nor the identity-dedup
+    # fallback collapses them into one; both remain distinct, separately
+    # gated rows.
+    assert set(untried) == {"k010", "k011"}, (
+        "vendor-playbook group must not be dropped as below_min_gpu_pct"
+    )
 
 
 def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedState):
@@ -654,6 +659,102 @@ def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedSt
     # playbook's own floor (10.0) still applies.
     untried = state.untried_hot_reusable_kernels(min_gpu_pct=1.0)
     assert untried == []
+
+
+def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state: SharedState):
+    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate
+    was a no-op on the production path because ``untried_hot_reusable_kernels()``
+    reads ``hot_kernels_top15`` (SharedState._build_hot_kernel_summaries()'s
+    projected ``summary_entry``, an explicit key whitelist) in preference to
+    raw ``hot_kernels``, and that whitelist dropped
+    ``vendor_playbook_aggregate_gpu_pct`` / ``vendor_playbook_min_gpu_pct_floor``
+    / ``vendor_playbook_group_id`` / ``patch_strategy`` entirely.
+
+    ``_set_trace()`` (used by the sibling tests above) assigns
+    ``last_trace_analyze`` directly and never populates ``hot_kernels_top15``,
+    so those tests fall through to the raw, unprojected ``hot_kernels`` and
+    cannot catch this -- this test goes through the real
+    ``record_trace_analyze()`` entry point instead, exactly like a live
+    trace-analyze result would.
+    """
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {
+                    "kernel_id": "k010",
+                    "gpu_pct": 7.0,
+                    "vendor_playbook_aggregate_gpu_pct": 12.0,
+                    "vendor_playbook_group_id": "mori_ep_dispatch_combine",
+                    "patch_strategy": "vendor_playbook",
+                    "reusable_native_kernel": True,
+                    "source_file": "/opt/venv/.../mori_ep_config.py",
+                    "name": "mori::EpDispatchCombineOp::dispatch",
+                },
+                {
+                    "kernel_id": "k011",
+                    "gpu_pct": 5.0,
+                    "vendor_playbook_aggregate_gpu_pct": 12.0,
+                    "vendor_playbook_group_id": "mori_ep_dispatch_combine",
+                    "patch_strategy": "vendor_playbook",
+                    "reusable_native_kernel": True,
+                    "source_file": "/opt/venv/.../mori_ep_config.py",
+                    "name": "mori::EpDispatchCombineOp::combine",
+                },
+            ],
+        },
+    )
+    # The projection must actually carry the fields through -- this is the
+    # exact assertion that fails without the _build_hot_kernel_summaries() fix.
+    projected = {row["kernel_id"]: row for row in state.last_trace_analyze["hot_kernels_top15"]}
+    assert projected["k010"]["vendor_playbook_aggregate_gpu_pct"] == 12.0
+    assert projected["k010"]["patch_strategy"] == "vendor_playbook"
+    assert projected["k010"]["vendor_playbook_group_id"] == "mori_ep_dispatch_combine"
+
+    # Split-load pass-through direction: neither member clears the 10%
+    # default alone (7%, 5%), but the pair's aggregate (12%) must.
+    untried = state.untried_hot_reusable_kernels()
+    assert set(untried) == {"k010", "k011"}, (
+        "aggregate gate must not degrade to bare gpu_pct on the real "
+        "record_trace_analyze() -> hot_kernels_top15 production path"
+    )
+
+
+def test_untried_hot_kernels_vendor_playbook_floor_still_applies_via_real_projection(
+    state: SharedState,
+):
+    """Unsafe-direction counterpart of the test above: a playbook's own
+    ``min_gpu_pct_floor`` must still block dispatch through the real
+    projection path, even when the caller has loosened
+    ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``. Before the projection fix this
+    degraded to the bare (loosened) threshold, letting a below-floor group
+    burn a whole forge-loop session."""
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {
+                    "kernel_id": "k010",
+                    "gpu_pct": 2.0,
+                    "vendor_playbook_aggregate_gpu_pct": 3.0,
+                    "vendor_playbook_min_gpu_pct_floor": 10.0,
+                    "reusable_native_kernel": True,
+                    "source_file": "/opt/venv/.../mori_ep_config.py",
+                    "name": "mori::EpDispatchCombineOp::dispatch",
+                },
+            ],
+        },
+    )
+    projected = state.last_trace_analyze["hot_kernels_top15"][0]
+    assert projected["vendor_playbook_min_gpu_pct_floor"] == 10.0
+
+    untried = state.untried_hot_reusable_kernels(min_gpu_pct=1.0)
+    assert untried == [], (
+        "the playbook's own floor must survive the real projection path "
+        "and still block dispatch even under a loosened env override"
+    )
 
 
 def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
