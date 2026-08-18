@@ -9,6 +9,7 @@ from hyperloom.orchestrator.knowledge.trajectory_reviewer import (
     _stalled_cycle_count,
     build_trajectory_digest,
 )
+from hyperloom.orchestrator.state.optimization_journal import OUTCOME_SKIP
 
 
 @dataclass
@@ -54,6 +55,15 @@ def test_exhausted_clusters_ignores_high_gain():
     ]
     dead = _exhausted_clusters(entries)
     assert dead == []
+
+
+def test_skips_are_not_harvested_as_a_dead_end():
+    """Two benign conc_sweep skips per macro-cycle are the ordinary case."""
+    entries = [
+        _FakeEntry(outcome=OUTCOME_SKIP, kind="other", change="conc_sweep"),
+        _FakeEntry(outcome=OUTCOME_SKIP, kind="other", change="conc_sweep"),
+    ]
+    assert _exhausted_clusters(entries) == []
 
 
 def test_exhausted_clusters_none_gain():

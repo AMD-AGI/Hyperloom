@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -640,8 +640,11 @@ def cited_advisory_reason_code(entry: dict[str, Any]) -> str:
 
 # Priority a batch of per-variant verdicts collapses by: one approved variant
 # carries the proposal, otherwise one reject sinks it, and advice outranks a
-# request for more review.
+# request for more review. :func:`collapse_verdict_map` applies this to the
+# proceedable subset first so a genuine reject cannot sink siblings that may
+# still run.
 _VERDICT_COLLAPSE_ORDER: tuple[str, ...] = ("approve", _REJECT_VERDICT, ADVISE_VERDICT, "needs_review")
+_PROCEEDABLE_VERDICTS: frozenset[str] = frozenset({"approve", ADVISE_VERDICT})
 
 
 def collapse_verdicts(verdicts: Iterable[str]) -> str:
@@ -659,6 +662,48 @@ def collapse_verdicts(verdicts: Iterable[str]) -> str:
         if candidate in present:
             return candidate
     return "needs_review"
+
+
+def proceedable_variant_names(held_by_name: Mapping[str, str]) -> set[str]:
+    """Return variant names whose held verdict lets them reach a benchmark.
+
+    ``approve`` and ``advise`` both mean dispatch may proceed; ``reject`` and
+    ``needs_review`` do not. Blank names cannot match a grid slot and are
+    dropped.
+
+    Args:
+        held_by_name: Per-variant verdicts after any hold-to-rule.
+
+    Returns:
+        The non-blank names whose verdict is proceedable.
+    """
+    return {
+        name
+        for name, verdict in held_by_name.items()
+        if verdict in _PROCEEDABLE_VERDICTS and str(name).strip()
+    }
+
+
+def collapse_verdict_map(held_by_name: Mapping[str, str]) -> tuple[str, set[str] | None]:
+    """Collapse a held ``verdict_map`` and name the variants that may run.
+
+    A genuine reject on one variant must not sink siblings the Critic approved
+    or advised through. When any variant is proceedable, the summary is the
+    collapse of *those* verdicts and the set is the materialize filter.
+    Otherwise the summary is the collapse of the whole map and the filter is
+    ``None`` (nothing to dispatch).
+
+    Args:
+        held_by_name: Per-variant verdicts after any hold-to-rule.
+
+    Returns:
+        ``(summary_verdict, approved_variant_names)``. The set is ``None``
+        when no variant is proceedable.
+    """
+    proceedable = proceedable_variant_names(held_by_name)
+    if proceedable:
+        return collapse_verdicts(held_by_name[name] for name in proceedable), proceedable
+    return collapse_verdicts(held_by_name.values()), None
 
 
 def _states_findings(value: Any) -> bool:

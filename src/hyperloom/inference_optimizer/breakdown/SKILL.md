@@ -35,15 +35,13 @@ authoritative.
 | `final`              | `current_best` throughput, validated cumulative gain, action path, extra args/envs.                      |
 | `phase_timeline`     | Chronological list of every action attempt + kernel_opt + integrate event.                               |
 | `capability_summary` | One row per live capability: geak / forge / explore / sweep / specialist, plus legacy rows kept for archived sessions. |
-| `geak_invocations`   | Per-attempt detail: prompt path, optimized files, verification, decision, micro_speedup.                 |
-| `forge_invocations`  | Per-attempt detail for the forge backend.                                                               |
+| `optimizations`      | Canonical adopted-optimization API, projected from author-time recorder streams. **Read `available` first**: `false` means the records are missing, not that nothing was adopted. `attempts[]` holds every attempt, `entries[]` the adopted ledger, `validation` the reconciliation. |
 | `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
 | `collective`         | Collective-lane campaigns: `only_mode` / `attempts[]` / `last`. Adoption is decided by `integration_decision` (E2E gate), not `decision` (microbenchmark). |
 | `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
 | `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
 | `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
 | `telemetry`          | Paths to `benchmark_report.json` / `torch_trace` / `system_profile` / server logs + aggregated GPU monitor. `telemetry.orchestration_context` carries the compaction-loop health: `seed_prompts`, `delta_prompts`, `compactions`, `degenerate_compactions`, `tick_count`, `compactions_per_tick`, `delta_ratio`, `context_tokens_at_compaction`. See `docs/reference/session-breakdown.md §telemetry.orchestration_context`. |
-| `attribution`        | Per-stack-entry gain ledger + family breakdown (geak / forge / explore / sweep / legacy aliases).        |
 | `warnings`           | Best-effort caveats (missing files, partial sections, reconstructed fields).                             |
 | `source_files`       | Mapping from logical section to relative path under `session_dir`.                                       |
 
@@ -130,21 +128,19 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 
 | Section              | Reads from                                                                                                            |
 |----------------------|----------------------------------------------------------------------------------------------------------------------|
-| `session`            | `manifest.json` + `state.{session_id, stop_reason, max_minutes, tick, start_ts}`                                     |
+| `session`            | `manifest.json` + `state.{session_id, stop_reason, stop_ts, max_minutes, tick, start_ts, resumed_ts}`                |
 | `workload`           | `manifest.{framework, model_*, gpu_type, tp, workload, objective}` + `state.{model_class, framework, gpu_type}`      |
 | `baseline`           | `state.{baseline_tput, baseline_accuracy, last_baseline.workspace, baseline_attempts}` + `<workspace>/benchmark_*/benchmark_report.json` |
 | `final`              | `state.{current_best, cumulative_gain, cumulative_gain_validated_*, optimization_stack}`                            |
 | `phase_timeline`     | `state.{<action>_attempts, kernel_opt_attempts.history, kernel_integrate_attempts.attempts}` sorted by `ts`           |
 | `capability_summary` | Reduces invocations + per-action attempts + search ledgers into 8 rows: geak / forge / explore / sweep / specialist plus the backends / params / validate_stack compatibility rows |
-| `geak_invocations`   | `kernel-agent/runs/<sid>/{optimization_attempts.jsonl, prompts/, optimized/, results/, verification/}` filtered by `backend == "geak"` (also scans legacy `kernel-agent-workspace/.../kernel-agent/runs/...` for historical sessions). Per-attempt files under `optimized/` are discovered by `glob("<attempt_id>*")`, so both the historical `<attempt_id>_optimized.<suffix>` name and the post-2026-05 `<attempt_id>_stdout.log` name are picked up transparently — see `docs/conceptual/kernel-execution-path.md` § *Per-attempt stdout file naming*. |
-| `forge_invocations`  | Same as GEAK, filtered by `backend == "forge"`                                                                        |
+| `optimizations`      | The recorder's own streams only — `operations` / `adoptions` / `measurements` / `artifacts`, as the producers wrote them. Never rebuilt from `state.json`; when the records are absent the section reports `available: false` instead. |
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
 | `collective`         | `state.{collective_only_mode, collective_attempts, last_collective}`                                                  |
 | `param_search`       | `state.{explore_search, discovered_flags}` (`synergy_attempted` now comes from `explore_search`; `winner_history` / `backend_winners_history` are emitted empty); `params` / `backends` ledgers are historical aliases only |
 | `sweep`              | `state.last_sweep` + `runs/sweep/<task>/variant_*/benchmark_*/benchmark_report.json`                                |
 | `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |
 | `telemetry`          | All `runs/**/benchmark_*/benchmark_report.json` + `torch_trace/` + `system_profile/` + `server*.log`                  |
-| `attribution`        | `state.gain_per_stack_entry` (preferred) OR best-effort reconstruction from `state.optimization_stack`              |
 
 ## What is NOT in scope
 
@@ -164,8 +160,9 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 |----------------------------------------------------|--------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
 | `warnings: ["state.json missing"]`                 | Session was created (manifest written) but `Coordinator.save()` never ran                        | Sections fall back to manifest-only data.                                                  |
 | `warnings: ["manifest.json missing"]`              | Session was created without the standard cli.py path (rare)                                      | `session.session_id` falls back to `state.session_id`.                                     |
-| `attribution.notes ≠ []`                            | `Coordinator` did not write `state.gain_per_stack_entry`                                         | Attribution is reconstructed from `optimization_stack`; consumer should treat as approximate. |
-| Empty `geak_invocations` & `forge_invocations`      | Kernel-agent never ran, or wrote to a non-standard workspace                                     | Verify `$SD/kernel-agent/runs/` exists (or, for pre-migration sessions, `$SD/kernel-agent-workspace/kernel-agent/runs/`). |
+| `optimizations.available = false`                   | No operations were recorded, or the projection failed                                            | Read `unavailable_reason`. The empty arrays mean unknown, not none; a `warnings` entry says whether `state.json` knew of adopted work the recorder missed. |
+| `optimizations.validation.unclaimed_integration_count > 0` | A change recorded as integrated has no adoption crediting it                              | The adoption write was lost. `unattributed_gain_pct` is overstated by whatever those steps earned. |
+| `optimizations.entries[].gain_method = local_gain_projected` | The step recorded no finishing throughput                                              | Its gain is projected from the executor's own percentage, not measured against the chain. |
 | `kernel_lifecycle.detected = []`                    | `profile` action never ran or its `benchmark_report.json` had no `kernel_summary`                | Re-run profile, or fall back to `recommended` from `state.last_trace_analyze`.            |
 | Large `warnings[]`                                   | Multiple JSON parse failures on `optimization_attempts.jsonl`                                    | Inspect `kernel-agent-workspace/.../logs/` for the corresponding kernel-agent CLI logs.    |
 
@@ -174,11 +171,14 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 - `schema_version` (in `schema.py`) carries the **major** contract
   version; it is bumped ONLY on breaking changes (renamed/removed
   fields, changed semantics).
-- Two strings are in production today: `…v3.0` when the exporter
-  aggregates author-time recorder fragments, `…v2` for the legacy
-  collector-only fallback. They share one additive wire shape, so
-  consumers MUST match on the `vN` major prefix (or allowlist both),
-  never on exact-string equality.
+- New exports carry `hyperloom.session_breakdown.v5.0`. V5 is a breaking
+  cutover for optimization results: `optimizations` is reshaped, and the
+  `optimization_stack`, `attribution`, `geak_invocations`,
+  `forge_invocations`, and `gemm_tuning` projections are gone. Consumers
+  MUST match on the `vN` major prefix, never on exact-string equality, and
+  archived V2/V3/V4 documents need a migration before a V5 reader sees them.
+- `optimizations` carries its own `schema_version` (currently `5`),
+  independent of the envelope's.
 - Adding optional fields is **never** a breaking change.
 - `exporter_version` tracks the exporter implementation independently;
   consumers can ignore it.

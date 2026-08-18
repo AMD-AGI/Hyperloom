@@ -32,6 +32,9 @@ class _BareState:
     recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     stop_reason: str = ""
     close_sequence_done: bool = False
+    recipe_finalize_status: str = ""
+    recipe_finalize_attempts: int = 0
+    recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     save_count: int = 0
 
@@ -259,7 +262,13 @@ async def test_enqueue_internal_session_breakdown_task(coord):
 @pytest.mark.asyncio
 async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
+    tmp_path,
+    monkeypatch,
 ):
+    monkeypatch.setenv(
+        "HYPERLOOM_SESSION_PACKAGE_DEST",
+        str(tmp_path / "session-packages"),
+    )
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.recipe_kb = _StubRecipeKB()
     coord.shared_state.recipe_kb_session_id = "sid-test"
@@ -272,18 +281,19 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     steps = [r["step"] for r in rows]
     assert steps == [
         "sequencer_started",
+        "fact_finalize",
         "report",
         "session_breakdown",
         "artifact_package",
-        "fact_finalize",
         "ndjson_drain",
         "done",
     ]
     by_step = {r["step"]: r for r in rows}
     assert by_step["report"]["status"] == "done"
     assert by_step["session_breakdown"]["status"] == "done"
-    # No curated artifacts in tmp_path, so packaging records "skipped".
-    assert by_step["artifact_package"]["status"] == "skipped"
+    # fact_finalize now runs first and writes optimization_journal.json, so the
+    # artifact package has a curated file to include.
+    assert by_step["artifact_package"]["status"] == "done"
     assert by_step["fact_finalize"]["status"] == "done"
     assert "status=written" in by_step["fact_finalize"]["detail"]
     assert "backend=local" in by_step["fact_finalize"]["detail"]
@@ -301,9 +311,9 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     monkeypatch.setattr(
-        coord,
+        coord.writeback,
         "finalize_recipe_and_journal",
-        lambda: {
+        lambda *, source: {
             "status": "error",
             "reason": "KBStoreError",
             "backend": "kb-store",
@@ -407,12 +417,26 @@ async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     assert coord.shared_state.close_sequence_done is True
 
 
-def test_close_sequence_done_in_core_state_fields():
+def test_close_and_recipe_finalize_fields_in_core_state_fields():
     """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
-    assert "close_sequence_done" in CORE_STATE_FIELDS
+    assert {
+        "close_sequence_done",
+        "recipe_finalize_status",
+        "recipe_finalize_attempts",
+        "recipe_finalize_outcome",
+    } <= CORE_STATE_FIELDS
 
 
-def test_policy_blocks_llm_close_sequence_done_write():
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("close_sequence_done", True),
+        ("recipe_finalize_status", "written"),
+        ("recipe_finalize_attempts", 99),
+        ("recipe_finalize_outcome", {"status": "skipped"}),
+    ],
+)
+def test_policy_blocks_llm_recipe_finalize_state_write(field, value):
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
@@ -428,7 +452,7 @@ def test_policy_blocks_llm_close_sequence_done_write():
     gate = PolicyGate(role_registry=default_role_registry())
     intent = Intent(
         type=IntentType.UPDATE_STATE,
-        payload={"changes": {"close_sequence_done": True}},
+        payload={"changes": {field: value}},
     )
     with pytest.raises(PolicyDenied):
         gate.validate_intent("orchestration", intent)
@@ -503,6 +527,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
     )
     coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
     coord.shared_state.close_sequence_done = True
+    coord.shared_state.recipe_finalize_status = "written"
 
     await coord._recipe_kb_t4_hook()
     assert coord.recipe_kb.drain_calls == 0
@@ -531,10 +556,11 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
 
     finalize_calls: list[str] = []
 
-    def _spy(*, source: str) -> None:
+    def _spy(*, source: str) -> dict:
         finalize_calls.append(source)
+        return {"status": "written"}
 
-    coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
+    coord.writeback.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
     await coord._recipe_kb_t4_hook()
     assert finalize_calls == ["t4_fallback"]
 
@@ -567,15 +593,18 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
 
     finalize_calls: list[str] = []
     save_calls: list[Path] = []
-    coord.finalize_recipe_and_journal = (  # type: ignore[method-assign]
-        lambda *, source: finalize_calls.append(source)
-    )
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
     coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
     await coord._recipe_kb_t4_hook()
 
     assert finalize_calls == ["t4_fallback"]
-    assert save_calls == [session_dir]
+    assert save_calls
+    assert all(path == session_dir for path in save_calls)
 
 
 @pytest.mark.asyncio
@@ -603,6 +632,7 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = True
+    coord.shared_state.recipe_finalize_status = "written"
 
     finalize_calls: list[int] = []
     coord.finalize_recipe_and_journal = lambda: finalize_calls.append(1)  # type: ignore[method-assign]
@@ -610,6 +640,49 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     await coord._recipe_kb_t4_hook()
 
     assert finalize_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
+    tmp_path: Path,
+):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    backends = {
+        "orchestration": MockBackend(idle_plan),
+        "critic": MockBackend(idle_plan),
+        "robustness": MockBackend(idle_plan),
+    }
+    config = KnowledgeConfig(
+        mode=KnowledgeStoreMode.REMOTE,
+        local_root=str(tmp_path / "knowledge"),
+        kb_store_url="https://kb-store.example.test",
+        kb_store_token="test-token",
+    )
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=default_role_registry(),
+        recipe_kb=None,
+        knowledge_plane=SimpleNamespace(config=config),
+    )
+    coord.shared_state.close_sequence_done = True
+    coord.shared_state.recipe_finalize_status = "failed"
+    coord.shared_state.recipe_finalize_outcome = {"status": "error"}
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.writeback.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == ["t4_fallback"]
+    assert coord.shared_state.recipe_finalize_status == "written"
+    assert coord.shared_state.recipe_finalize_attempts == 1
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,8 @@ Fields::
                                 extra_envs, workspace, latency means)
     cumulative_gain     float — % over baseline
     stop_reason         str   — set when graceful stop fires
+    stop_ts             str   — ISO timestamp of the first stop_reason write
+    resumed_ts          str   — ISO timestamp of the most recent --resume
     current_action      str   — what's running right now (set by Orchestration)
     crash_count         int   — incremented by the Coordinator when a tick/agent
                                 exception is recorded; also appends to
@@ -549,6 +551,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     kb_stage_outbox: list = field(default_factory=list)
     # Owner sections dropped because their persisted artifacts disappeared.
     kb_stage_dead_letter: list = field(default_factory=list)
+    # Idempotent terminal Recipe publication state. Independent from CLOSE
+    # report completion so a failed remote write remains retryable at teardown.
+    recipe_finalize_status: str = ""
+    recipe_finalize_attempts: int = 0
+    recipe_finalize_outcome: dict = field(default_factory=dict)
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
     # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded at
@@ -610,6 +617,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""
+    # When the session first stopped, and therefore its end time for
+    # consumers. Stamped by the first ``set_stop_reason`` write and left alone
+    # by later ones, so the CLOSE sequence's own artifacts and any re-export
+    # quote the same end; cleared with the reason on resume.
+    stop_ts: str = ""
+    # When the current run leg began, i.e. the most recent ``--resume``; empty
+    # for a session that has only ever run once. ``start_ts`` cannot answer
+    # this: a resume after a clean stop deliberately keeps it so the wall-clock
+    # budget still counts from the original start, which leaves this the only
+    # record of where the previous leg ended.
+    resumed_ts: str = ""
     # Closing phase — set when wall-clock deadline fires; Coordinator only drains a ``report`` task. Cleared on resume.
     closing_phase: bool = False
     closing_started_unix: float = 0.0
@@ -918,8 +936,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # re-entered once per macro-cycle. That turned "KERNEL gets 15% of the run"
     # into "KERNEL gets 15% of the run every time it is entered": three entries
     # burned 288% of the cap while the other phases starved. The guards read
-    # this total plus the live segment instead. ``record_phase_transition`` is
-    # the only writer; unlike ``explore_elapsed_accum_s`` there is no "unknown"
+    # this total plus the live segment instead. ``bank_phase_segment`` is the
+    # only writer; unlike ``explore_elapsed_accum_s`` there is no "unknown"
     # sentinel, because a budget guard must never read "unknown" as "no cap"
     # (see ``from_raw`` for how a pre-upgrade state is reconstructed).
     phase_elapsed_totals: dict[str, float] = field(default_factory=dict)
@@ -1313,8 +1331,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # transition in phase_history, so the completed segments are
         # reconstructible. Rebuilding beats defaulting to an empty dict: an empty
         # dict silently re-arms the per-entry bug for the rest of a resumed run.
-        # phase_history is capped, so the rebuild is a LOWER bound — the safe
-        # direction, since it can only under-charge a phase, never invent time.
+        # The rebuild errs in both directions — the cap drops old segments, and a
+        # segment straddling a resume carries the idle gap (see the helper).
         if not isinstance(filtered.get("phase_elapsed_totals"), dict):
             from ..phases.machine_state import phase_elapsed_totals_from_history
 
@@ -1734,9 +1752,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> str:
         """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``"unknown"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written.
 
+        The first write also stamps :attr:`stop_ts`, so the session's end is
+        recorded once by its producer instead of being guessed by whoever reads
+        the state later.
+
         Args:
             value (str): The proposed stop reason; blank clears
-                :attr:`stop_reason`.
+                :attr:`stop_reason` and :attr:`stop_ts`.
             strict (bool | None): When ``True`` an out-of-vocab value raises;
                 when ``None`` the mode is read from
                 ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``.
@@ -1754,10 +1776,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         text = str(value or "").strip()
         if not text:
             self.stop_reason = ""
+            self.stop_ts = ""
             return ""
         if is_valid_stop_reason(text):
-            self.stop_reason = text
-            return text
+            return self._commit_stop_reason(text)
         if strict is None:
             strict_env = (
                 os.environ.get(
@@ -1779,8 +1801,28 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "INFERENCE_OPTIMIZER_STRICT_STOP_REASON=1 to fail-fast.",
             text,
         )
-        self.stop_reason = "unknown"
-        return "unknown"
+        return self._commit_stop_reason("unknown")
+
+    def _commit_stop_reason(self, reason: str) -> str:
+        """Write a validated stop reason, stamping the end time on the first one.
+
+        The session ends when its first terminal reason is recorded. Later
+        calls may refine the reason -- CLOSE stops the session on entry and the
+        Coordinator's ``finally`` re-asserts it -- but the CLOSE sequence writes
+        ``session_breakdown.json`` in between, so moving the timestamp would
+        leave the shipped artifact and the state disagreeing about when the run
+        ended.
+
+        Args:
+            reason (str): The validated, non-blank reason to record.
+
+        Returns:
+            str: ``reason``, so callers can return it unchanged.
+        """
+        self.stop_reason = reason
+        if not self.stop_ts:
+            self.stop_ts = _now_iso()
+        return reason
 
     # escalate hint plumbing
     def set_pending_escalate_hint(self, hint: str) -> str:
