@@ -2641,6 +2641,7 @@ class IntegratePatchExecutor:
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
+        switch_problems: list[str] = list(getattr(ctx, "_ip_switch_problems", None) or [])
 
         def _gc_on_revert() -> None:
             """GC the attempt runtime dir on a non-KEEP enablement outcome."""
@@ -2741,6 +2742,7 @@ class IntegratePatchExecutor:
                         "config_changes_applied": config_changes_applied,
                         "extra_envs_applied": extra_envs_applied,
                         "extra_server_args_applied": extra_server_args_applied,
+                        "framework_switch_problems": switch_problems,
                         "output_throughput": new_tput,
                         "enablement": True,
                         "advanced": True,
@@ -2779,6 +2781,7 @@ class IntegratePatchExecutor:
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
+                    "framework_switch_problems": switch_problems,
                     "output_throughput": new_tput,
                     "enablement": True,
                     "runnable": False,
@@ -2809,6 +2812,7 @@ class IntegratePatchExecutor:
             "config_changes_applied": config_changes_applied,
             "extra_server_args_applied": extra_server_args_applied,
             "extra_envs_applied": extra_envs_applied,
+            "framework_switch_problems": switch_problems,
             "output_throughput": new_tput,
             "enablement": True,
             "runnable": True,

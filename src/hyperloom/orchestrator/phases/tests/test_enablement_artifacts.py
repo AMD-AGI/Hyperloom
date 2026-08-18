@@ -99,3 +99,15 @@ def test_launch_log_excerpt_is_bounded(tmp_path):
 def test_unsafe_task_id_is_refused(tmp_path):
     with pytest.raises(ValueError):
         snapshot_round(tmp_path, _res(specialist_task_id="../evil"))
+
+
+def test_demoted_switch_gate_is_recorded(tmp_path):
+    snapshot_round(tmp_path, _res(framework_switch_problems=["patch gates on undeclared HL_X"]))
+    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
+    assert data["framework_switch_problems"] == ["patch gates on undeclared HL_X"]
+
+
+def test_round_without_a_specialist_is_skipped(tmp_path):
+    """Phase-synthesised rounds carry no task id and would all collide."""
+    snapshot_round(tmp_path, {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
+    assert not (tmp_path / "reports" / "enablement").exists()

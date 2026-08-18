@@ -1262,3 +1262,7 @@ async def test_env_gated_patch_proceeds_to_bench_on_enablement_round(tmp_path, m
         "enablement round must not be refused for an undeclared env gate"
     )
     assert legs_en, "enablement round must have attempted a bench"
+    problems = result_en.get("framework_switch_problems") or []
+    assert any("undeclared environment switch" in p for p in problems), (
+        f"the demoted gate must stay auditable in the result, got {problems!r}"
+    )

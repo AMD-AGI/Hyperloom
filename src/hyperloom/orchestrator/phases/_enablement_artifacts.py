@@ -37,11 +37,16 @@ def _copy(src: Path, dest: Path) -> None:
 def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
     """Archive one enablement round's patches, specialist result and launch config.
 
+    Rounds synthesised by the phase itself carry no specialist task id and no
+    deliverables, so they are skipped rather than all colliding on one directory.
+
     Args:
         session_dir: The session root directory.
         res: The ``integrate_patch`` result for an enablement round.
     """
     task_id = str(res.get("specialist_task_id") or "").strip()
+    if not task_id:
+        return
     round_dir = enablement_round_dir(Path(session_dir), task_id)
     round_dir.mkdir(parents=True, exist_ok=True)
 
@@ -56,6 +61,7 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
             "extra_envs_applied": res.get("extra_envs_applied") or {},
             "extra_server_args_applied": res.get("extra_server_args_applied") or "",
             "setup_commands_applied": res.get("setup_commands_applied") or [],
+            "framework_switch_problems": res.get("framework_switch_problems") or [],
             "after_signature": res.get("after_signature") or {},
             "enablement_accepted_config_path": res.get("enablement_accepted_config_path") or "",
             "enablement_effective_config": res.get("enablement_effective_config") or {},
