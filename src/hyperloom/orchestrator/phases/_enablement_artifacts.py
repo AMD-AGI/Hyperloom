@@ -30,12 +30,17 @@ _FILE_SIZE_LIMIT = 2 * 1024 * 1024
 _LAUNCH_LOG_EXCERPT_CHARS = 1200
 
 
-def _copy(src: Path, dest: Path) -> None:
-    """Copy ``src`` to ``dest`` when it exists and is under the size limit."""
+def _copy(src: Path, dest: Path) -> bool:
+    """Copy ``src`` to ``dest`` when it exists and is under the size limit.
+
+    Returns:
+        ``True`` when the file landed at ``dest``.
+    """
     if not src.is_file() or src.stat().st_size > _FILE_SIZE_LIMIT:
-        return
+        return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(src.read_bytes())
+    return True
 
 
 def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
@@ -100,7 +105,6 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
 def write_setting_script(
     session_dir: str | Path,
     enablement: "EnablementRound",
-    res: dict[str, Any],
     framework: str,
     *,
     model: str | None = None,
@@ -110,14 +114,15 @@ def write_setting_script(
 ) -> str:
     """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state.
 
-    Idempotently rewritten on every ``kept`` or ``advanced`` verdict.  Patches
-    are copied to ``reports/enablement/patches/`` and referenced by name so
-    the directory is self-contained.
+    Idempotently rewritten on every ``kept`` or ``advanced`` verdict.  Patches are
+    copied to ``reports/enablement/patches/`` under a stack-ordered name, since
+    specialists across rounds pick colliding file names, and are referenced only
+    once the copy lands.  Patches are dropped entirely without a framework root,
+    because ``git apply`` would have no target to run against.
 
     Args:
         session_dir: The session root directory.
         enablement: The current ``EnablementRound`` state object.
-        res: The ``integrate_patch`` result for the current round.
         framework: Framework identifier for the server entrypoint.
         model: Model path emitted as ``export MODEL=``.
         tp: Tensor-parallel degree.
@@ -129,30 +134,23 @@ def write_setting_script(
     """
     from hyperloom.inference_optimizer.reference_script import render_reference_script
 
-    patches_dest = enablement_dir(Path(session_dir)) / "patches"
-    patches_dest.mkdir(parents=True, exist_ok=True)
+    framework_root = str(enablement.framework_root or "").strip()
 
-    all_patches: list[str] = list(enablement.kept_patches or [])
     script_patches: list[str] = []
-    for patch_str in all_patches:
-        src = Path(patch_str)
-        if src.is_file():
-            dest = patches_dest / src.name
-            _copy(src, dest)
-            script_patches.append(f"patches/{src.name}")
-        else:
-            script_patches.append(patch_str)
+    if framework_root:
+        patches_dest = enablement_dir(Path(session_dir)) / "patches"
+        for idx, patch_str in enumerate(enablement.kept_patches or [], start=1):
+            src = Path(str(patch_str))
+            name = f"{idx:03d}_{src.name}"
+            if _copy(src, patches_dest / name):
+                script_patches.append(f"patches/{name}")
 
     accepted_cfg = dict(enablement.accepted_config or {})
     extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}
     extra_server_args = str(accepted_cfg.get("extra_server_args") or "").strip()
 
-    framework_root = str(res.get("framework_root") or "").strip()
-
-    runtime_path = ""
     active = enablement.active_runtime or {}
-    if isinstance(active, dict):
-        runtime_path = str(active.get("venv_root") or "").strip()
+    runtime_path = str(active.get("venv_root") or "").strip() if isinstance(active, dict) else ""
 
     text = render_reference_script(
         framework=framework,
@@ -164,12 +162,12 @@ def write_setting_script(
         gpu_type=gpu_type,
         setup_commands=list(enablement.setup_commands or []) or None,
         patches=script_patches or None,
-        framework_root=framework_root or None,
+        framework_root=framework_root if script_patches else None,
         runtime=runtime_path or None,
     )
 
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"
-    atomic_write_text(out, text, mode=0o700)
+    atomic_write_text(out, text, make_parents=True, mode=0o700)
     return str(out.relative_to(session_dir))
 
 
