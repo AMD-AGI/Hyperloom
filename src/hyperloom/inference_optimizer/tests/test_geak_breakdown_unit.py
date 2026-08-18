@@ -762,6 +762,12 @@ def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> 
 def test_collect_geak_backfill_collapses_alias_twin(tmp_path: Path) -> None:
     # The journey records one acceptance twice: the candidate id carries the
     # measurement, the resolved profiler symbol carries gpu_pct=None. One kernel.
+    #
+    # Which row survives and which id names it are two separate questions. The
+    # measured row survives, because it is the only one holding ``gpu_pct``; it
+    # is then named by the *symbol*, because that is the id the acceptance
+    # ledger keeps for the same kernel. Naming it ``c0_triton`` here put one
+    # kernel under two names in two tables of the same report.
     eval_dir = tmp_path / "geak" / "e2e_cycle0"
     _alias_journey(eval_dir, primary_gain=29.994, twin_gain=29.994)
     state = {
@@ -771,9 +777,10 @@ def test_collect_geak_backfill_collapses_alias_twin(tmp_path: Path) -> None:
     out = collect_geak(tmp_path, state, [])
     assert out["kernels_optimized"] == 1
     kernel = out["accepted_kernels"][0]
-    assert kernel["kernel_id"] == "c0_triton"
+    assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    # The measurement survives the rename: it came from the row that had it.
     assert kernel["gpu_pct"] == 20.2
-    assert kernel["aliases"] == ["dsa_sparse_attn_prefill_main_kernel"]
+    assert kernel["aliases"] == ["c0_triton"]
 
 
 def test_collect_geak_backfill_collapses_rounded_alias_twin(tmp_path: Path) -> None:
@@ -786,7 +793,8 @@ def test_collect_geak_backfill_collapses_rounded_alias_twin(tmp_path: Path) -> N
     }
     out = collect_geak(tmp_path, state, [])
     assert out["kernels_optimized"] == 1
-    assert out["accepted_kernels"][0]["aliases"] == ["dsa_sparse_attn_prefill_main_kernel"]
+    assert out["accepted_kernels"][0]["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    assert out["accepted_kernels"][0]["aliases"] == ["c0_triton"]
 
 
 def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path: Path) -> None:

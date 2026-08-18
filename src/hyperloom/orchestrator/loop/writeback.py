@@ -5145,6 +5145,19 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        # Overlay identity, captured BEFORE the replay so it can be compared
+        # after. 2a replays GEAK's own launch script, which is why a
+        # ``succeeded`` status proves the *config* engaged -- but the overlay is
+        # a separate artifact on a path in ``result.json``, and it can be gone
+        # or inert by the time the replay runs. Measured over
+        # ``/shared_nfs/hyperloom-claw``: of 64 runs declaring a
+        # ``final_overlay``, 25 name a directory that does not exist and 30 name
+        # one holding no ``sitecustomize.py``. Only 9 can install a kernel. A
+        # non-empty string is therefore not evidence the kernel ran, and using
+        # it as evidence would stamp 55 flag-only measurements as kernel wins.
+        # Same check 2b runs; see ``_geak_overlay_is_loadable``.
+        ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
+        overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -5225,13 +5238,27 @@ class WritebackCollaborator:
                 except Exception:  # noqa: BLE001
                     log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
+            # The replay proves the config engaged. It does not prove the
+            # overlay did: the overlay has to still be loadable, and still be
+            # the same overlay, at the moment the replay ran.
+            overlay_loaded_2a = bool(ps_overlay_2a) and _geak_overlay_is_loadable(ps_overlay_2a)
+            if overlay_loaded_2a and overlay_digest_before:
+                overlay_loaded_2a = _geak_overlay_digest(ps_overlay_2a) == overlay_digest_before
+            if ps_overlay_2a and not overlay_loaded_2a:
+                log.warning(
+                    "geak 2a: overlay %r is not loadable evidence "
+                    "(loadable=%r digest before=%r after=%r) -> gain credited "
+                    "to config, not to a kernel",
+                    ps_overlay_2a,
+                    _geak_overlay_is_loadable(ps_overlay_2a),
+                    overlay_digest_before,
+                    _geak_overlay_digest(ps_overlay_2a),
+                )
             self._promote_geak_from_candidate(
                 ps,
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
-                # 2a replays GEAK's own launch script, so an authored overlay
-                # engages by construction — a ``succeeded`` replay is the proof.
-                overlay_loaded=bool(str(ps.get("final_overlay") or "").strip()),
+                overlay_loaded=overlay_loaded_2a,
             )
             base = float(self.shared_state.baseline_tput or 0.0)
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0

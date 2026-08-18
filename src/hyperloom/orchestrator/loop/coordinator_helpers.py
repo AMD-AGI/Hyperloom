@@ -1105,11 +1105,70 @@ def _normalize_geak_overlay_dir(overlay: str) -> str:
 _GEAK_CAND_TAG_RE = re.compile(r"^(cand[_-])?c\d+([_-]|$)", re.IGNORECASE)
 
 
+def geak_is_cand_tag(name: Any) -> bool:
+    """Return True when ``name`` is a GEAK slot tag, not a kernel symbol.
+
+    ``cand_c0_triton`` names the slot a candidate was dispatched into;
+    ``dsa_sparse_attn_prefill_main_kernel`` names what the slot produced. Both
+    spell the same acceptance, so every reader that has to pick one must pick
+    the same one. The symbol is the stable id — it survives a re-run into a
+    different slot — so the symbol wins and the tag becomes an alias.
+
+    Args:
+        name (Any): A candidate identity, in any of the written shapes.
+
+    Returns:
+        bool: True when the text matches the slot-tag form.
+    """
+    text = str(name or "").strip()
+    return bool(text) and bool(_GEAK_CAND_TAG_RE.match(text))
+
+
 def _geak_spec_name(spec: Any) -> str:
-    """Return the display name of one GEAK acceptance entry."""
+    """Return the display name of one GEAK acceptance entry.
+
+    Accepts both shapes an acceptance is written in: the dict GEAK emits, and
+    the bare string the revalidation path carries. One resolver keeps the
+    ledger and the attribution row naming a kernel the same way.
+    """
+    if isinstance(spec, str):
+        return spec.strip()
     if not isinstance(spec, dict):
         return ""
     return str(spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or "").strip()
+
+
+def geak_spec_name(spec: Any) -> str:
+    """Public alias of :func:`_geak_spec_name` for out-of-module readers."""
+    return _geak_spec_name(spec)
+
+
+def geak_spec_kind(spec: Any) -> str | None:
+    """Return the acceptance ``kind``, or ``None`` when the source omits it.
+
+    ``None`` is a real state, not a default. The ``kernel_journey.json`` rows
+    carry no ``kind`` field at all — measured over ``/shared_nfs/hyperloom-claw``,
+    0 of 36 accepted journey rows have one — so a reader that treats a missing
+    ``kind`` as "not env" and one that treats it as "env" would disagree on the
+    same run. Callers get the unknown and must say what they do with it.
+    """
+    if not isinstance(spec, dict):
+        return None
+    raw = spec.get("kind")
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    return text or None
+
+
+def geak_spec_is_env(spec: Any) -> bool:
+    """Return True only when the acceptance is *known* to be an env selection.
+
+    An env acceptance picks an existing library or environment variable; no
+    kernel was authored, so it belongs in the config half of GEAK's gain. An
+    unknown ``kind`` is not env: it is admitted and tagged, never guessed.
+    """
+    return geak_spec_kind(spec) == "env"
 
 
 def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
@@ -1147,7 +1206,7 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
     for k in lanes:
         if not isinstance(k, dict):
             continue
-        if str(k.get("kind") or "").strip().lower() == "env":
+        if geak_spec_is_env(k):
             continue
         try:
             delta = float(k.get("e2e_delta_pct") or 0.0)

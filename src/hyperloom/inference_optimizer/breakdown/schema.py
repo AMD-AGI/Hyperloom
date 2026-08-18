@@ -1039,6 +1039,7 @@ class Geak(TypedDict, total=False):
     output_parity: str | None
     accepted_kernels: list[Any]
     accepted_kernels_source: str | None
+    accepted_kernels_kind_sources: dict[str, int]
     accepted_heads: list[Any]
     kernels_optimized: int
     accepted_config: dict[str, Any]
