@@ -3875,6 +3875,13 @@ def _steal_stale_claim(claim_path: Path) -> bool:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
+            # Best-effort scratch-file cleanup only: by now tmp_path has
+            # already been atomically replaced onto claim_path (success) or
+            # never fully written (failure), so nothing downstream depends
+            # on this unlink -- it must never raise out of a claim-stealing
+            # attempt over something as inconsequential as a leftover temp
+            # file (missing_ok=True already covers the common "already
+            # gone" case; this only guards rarer failures like EPERM).
             pass
     return current.get("nonce") == nonce
 
