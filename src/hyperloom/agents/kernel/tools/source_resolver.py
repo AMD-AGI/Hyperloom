@@ -107,17 +107,18 @@ class ResolveResult:
     elapsed_ms: float
     reason: str = ""
 
-    def as_legacy_tuple(self) -> tuple[str, str]:
-        """Legacy ``(source_file, method)`` shape for drop-in compatibility.
+    def as_legacy_tuple(self) -> tuple[str, str, str]:
+        """Legacy ``(source_file, method, reason)`` shape.
 
         A hit keeps its ``method`` (``"symbol_index"``); ``"non_patchable"`` is
         preserved even though its ``source_file`` is empty (so callers can tell
         "known not rewritable" from "not found"); every other empty-source
-        outcome collapses to ``"unresolved"``.
+        outcome collapses to ``"unresolved"``. ``reason`` carries the specific
+        non-patchable kind (e.g. ``"tensile_precompiled"``).
         """
         if self.source_file or self.method == "non_patchable":
-            return (self.source_file, self.method)
-        return ("", "unresolved")
+            return (self.source_file, self.method, self.reason)
+        return ("", "unresolved", "")
 
 
 # ----------------------------------------------------------------------------

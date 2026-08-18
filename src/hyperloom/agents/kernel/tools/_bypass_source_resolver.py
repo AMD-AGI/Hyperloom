@@ -90,27 +90,22 @@ def resolve_source(
     *,
     framework: str = "",
     device_kernel_name: str = "",
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """Resolve a native kernel to its live installed source via the active finder.
 
     This is the deterministic op->source tier for the bypass route: it delegates
     to :func:`source_resolver.resolve_source`, which demangles the device kernel
     symbol and looks it up in a live ``__global__`` index (method
     ``"symbol_index"``). There is no static op_to_source map; any import/lookup
-    failure yields ``("", "unresolved")`` so the caller can fall back to the
+    failure yields ``("", "unresolved", "")`` so the caller can fall back to the
     repo-scan tier.
 
-    Args:
-        op_name: The launching op name (carried for reporting, not lookup).
-        framework: Serving framework hint used to rank multi-tree matches.
-        device_kernel_name: Device kernel symbol from the trace (authoritative).
-
     Returns:
-        ``(source_file, "symbol_index")`` on a hit, else ``("", "unresolved")``
-        / ``("", "non_patchable")``.
+        ``(source_file, method, reason)`` — reason carries the specific
+        non-patchable kind (e.g. ``"tensile_precompiled"``).
     """
     if not device_kernel_name:
-        return "", "unresolved"
+        return "", "unresolved", ""
     try:
         try:  # package import (TraceLens route / tests)
             from . import source_resolver
@@ -120,7 +115,7 @@ def resolve_source(
         return source_resolver.resolve_source(op_name, framework=framework, device_kernel_name=device_kernel_name)
     except (ImportError, OSError, ValueError) as exc:
         log.debug("bypass resolve_source failed for %r: %s", device_kernel_name, exc)
-        return "", "unresolved"
+        return "", "unresolved", ""
 
 
 # Triton kernel definition: @triton.jit then optional decorators then def NAME.
