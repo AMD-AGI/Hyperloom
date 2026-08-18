@@ -76,9 +76,21 @@ _ANTHROPIC_USAGE_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
-# OpenAI HTTP client timeout defaults for critic review calls.
+# HTTP client timeout defaults for critic review calls. A completion is not
+# streamed, so the read half is what bounds generation: the server holds the
+# connection open until the whole reply exists.
+#
+# It is therefore coupled to the output cap above and has to move with it. The
+# 120s this used to sit at is the budget a completion is elsewhere given, and it
+# was the right one while the cap was 2000 tokens: a reply that short always
+# came back inside it, so the cap doubled as a latency bound. Raising the
+# ceiling removed that guarantee, and a batch large enough to need the new room
+# would now hit the timeout instead of finishing — a timeout that then repeats
+# on identical input, which is the failure shape this whole fix exists to end.
+# 300s is what the orchestration paths floor a multi-turn budget at, and it
+# covers any review that could plausibly be worth waiting for.
 CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
-CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 120.0
+CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 300.0
 
 # Cap on per-turn workdirs kept on disk; older ones are pruned each turn.
 CRITIC_AGENT_WORKDIR_KEEP_COUNT = 50
@@ -1067,11 +1079,22 @@ class CriticAgentBackend:
                 finish,
                 retry_tokens,
             )
-            text, finish = await self._run_reasoning_loop(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_tokens=retry_tokens,
-            )
+            try:
+                text, finish = await self._run_reasoning_loop(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=retry_tokens,
+                )
+            except BackendError as exc:
+                # A provider whose own output limit sits below the doubled cap
+                # rejects the retry outright. Letting that transport error
+                # surface on its own would name the retry as the problem and
+                # bury the truncation that caused it, pointing the reader at
+                # the wrong thing.
+                raise BackendError(
+                    f"CriticAgentBackend: review reply was truncated at {max_tokens} tokens "
+                    f"and the retry at {retry_tokens} was rejected: {exc}"
+                ) from exc
             self._record_critic_conversation(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,

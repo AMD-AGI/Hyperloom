@@ -57,14 +57,17 @@ class FakeResp:
 
 
 class FakeChatCompletions:
-    def __init__(self, replies: list[str]):
+    def __init__(self, replies: list[str | tuple[str, str]]):
         self._replies = list(replies)
         self.calls: list[dict[str, Any]] = []
 
     async def create(self, *, model, messages, **kwargs):
         self.calls.append({"model": model, "messages": messages, "kwargs": kwargs})
-        text = self._replies.pop(0) if self._replies else ""
-        return FakeResp(choices=[FakeChoice(message=FakeMessage(content=text))])
+        reply = self._replies.pop(0) if self._replies else ""
+        # A reply may carry its own finish reason as ``(text, finish_reason)``;
+        # a bare string keeps the default so existing callers read unchanged.
+        text, finish_reason = reply if isinstance(reply, tuple) else (reply, "stop")
+        return FakeResp(choices=[FakeChoice(message=FakeMessage(content=text), finish_reason=finish_reason)])
 
 
 class FakeChat:
@@ -73,7 +76,7 @@ class FakeChat:
 
 
 class FakeOpenAIClient:
-    def __init__(self, replies: list[str]):
+    def __init__(self, replies: list[str | tuple[str, str]]):
         self.completions = FakeChatCompletions(replies)
         self.chat = FakeChat(self.completions)
 
@@ -194,7 +197,7 @@ def _make_backend(
     fake_critic_root: Path,
     fake_session_dir: Path,
     *,
-    codex_replies: list[str],
+    codex_replies: list[str | tuple[str, str]],
     judge_bundle: dict[str, Any],
     fail_phase: str | None = None,
     runtime_calls: list[RuntimeCall] | None = None,
@@ -674,6 +677,78 @@ async def test_unparseable_llm_reply_fails_the_turn(
     )
     with pytest.raises(BackendError, match="no parseable review_verdicts"):
         await backend.run("prompt")
+
+
+def _single_proposal_judge_bundle() -> dict[str, Any]:
+    return {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "m", "framework": "sglang"},
+        "proposals": [
+            {
+                "msg_id": "px",
+                "from_agent": "orchestration",
+                "action_name": "baseline",
+                "payload": {},
+                "predicted_gain_pct": 0.0,
+            }
+        ],
+        "kb_priors_by_proposal": {"px": []},
+        "kb_read_skipped_reason": None,
+        "review_constraints": {},
+        "notes": [],
+        "missing_context": [],
+        "required_context": [],
+    }
+
+
+# Case 4b: the same truncation handling over the OpenAI transport, which spells
+# the cut-off reason "length" and carries the cap as max_completion_tokens.
+@pytest.mark.asyncio
+async def test_openai_truncated_review_is_retried_with_a_bigger_cap(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    complete = (
+        '{"review_verdicts": [{"target_proposal_msg_id": "px", '
+        '"verdict": "approve", "source": "critic", "reasoning": "ok"}]}'
+    )
+    backend, client = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[('{"review_verdicts": [{"target_prop', "length"), complete],
+        judge_bundle=_single_proposal_judge_bundle(),
+    )
+
+    res = await backend.run("prompt")
+
+    verdicts = [i for i in res.intents if i.type == IntentType.REVIEW_VERDICT]
+    assert len(verdicts) == 1
+    assert verdicts[0].payload["target_proposal_msg_id"] == "px"
+    calls = client.completions.calls
+    assert len(calls) == 2
+    assert calls[0]["kwargs"]["max_completion_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    assert calls[1]["kwargs"]["max_completion_tokens"] == (
+        CRITIC_AGENT_MAX_COMPLETION_TOKENS * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_review_truncated_twice_fails_the_turn(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    truncated = ('{"review_verdicts": [{"target_prop', "length")
+    backend, client = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[truncated, truncated],
+        judge_bundle=_single_proposal_judge_bundle(),
+    )
+
+    with pytest.raises(BackendError, match="no parseable review_verdicts"):
+        await backend.run("prompt")
+
+    assert len(client.completions.calls) == 2
 
 
 # Case 5: required_context non-empty -> needs_review + critic_unavailable
@@ -1846,6 +1921,37 @@ async def test_review_truncated_twice_fails_the_turn(
     # The message has to name the cap, or an operator cannot tell a truncated
     # review from a model that answered in prose.
     assert "max_tokens" in str(excinfo.value)
+    assert len(fake_completion.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_rejected_retry_still_reports_the_truncation(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A model whose own output limit sits below the doubled cap rejects the
+    retry. Surfacing only that rejection would send the reader after the retry
+    instead of the truncation that forced it."""
+    backend, fake_completion = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        monkeypatch,
+        results=[
+            _truncated_anthropic_result(),
+            RuntimeError("max_tokens: 64000 > 32000, the maximum allowed for this model"),
+        ],
+        judge_bundle=_minimal_judge_bundle(),
+    )
+
+    with pytest.raises(BackendError, match="was truncated at") as excinfo:
+        await backend.run("prompt", system_prompt="critic system")
+
+    message = str(excinfo.value)
+    assert str(CRITIC_AGENT_MAX_COMPLETION_TOKENS) in message
+    assert str(CRITIC_AGENT_MAX_COMPLETION_TOKENS * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR) in message
+    # The provider's own words are kept, so the cap that was too large is named.
+    assert "maximum allowed for this model" in message
     assert len(fake_completion.calls) == 2
 
 
