@@ -1542,6 +1542,12 @@ class ExploreExecutor:
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
+                            # The verdict this KEEP rests on. ``None`` means the
+                            # variant was not gated (not high-risk, or no
+                            # baseline to compare against) rather than that it
+                            # scored nothing — without it the ledger cannot say
+                            # afterwards whether a kept config was ever checked.
+                            "accuracy": accuracy_value,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
                             "single_workspace": r.workspace,

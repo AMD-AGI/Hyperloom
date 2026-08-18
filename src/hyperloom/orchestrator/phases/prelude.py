@@ -1924,6 +1924,85 @@ class PreludePhase(PhaseHandler):
         self.shared_state.save(self.session_dir)
         return False
 
+    def _warm_replay_accuracy_ok(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: dict,
+    ) -> bool:
+        """Whether a replayed config may be promoted on accuracy grounds.
+
+        Only high-risk configs owe a verdict, and only when a positive baseline
+        accuracy exists to compare against — the same trigger
+        :class:`ExploreExecutor` applies, so a config is not judged by one lane
+        and waved through by the other. A high-risk config that produced no
+        verdict fails closed: "no evidence" is the exact state that let 45 of
+        241 promoted replays land while the model was emitting garbage.
+
+        Args:
+            result: The ``replay_warm_recipe`` result envelope.
+            task: The originating task, carrying the replayed args/envs.
+            outcome: The warm-replay outcome dict, stamped on rejection.
+
+        Returns:
+            ``True`` when promotion may proceed; ``False`` when the caller must
+            stop (the rollback and outcome have already been recorded).
+        """
+        from ..actions.executors._accuracy_gate import (
+            accuracy_passed,
+            is_high_accuracy_risk,
+            parse_eval_results,
+        )
+
+        state = self.shared_state
+        try:
+            baseline_accuracy = float(getattr(state, "baseline_accuracy", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            baseline_accuracy = 0.0
+        if baseline_accuracy <= 0:
+            return True
+
+        params = (task.params if task is not None else {}) or {}
+        if not is_high_accuracy_risk(
+            extra_args=str(params.get("extra_server_args") or ""),
+            extra_envs=dict(params.get("extra_envs") or {}),
+        ):
+            return True
+
+        measured = result.get("accuracy")
+        if not isinstance(measured, (int, float)):
+            measured = None
+            workspace = str(result.get("workspace") or "").strip()
+            if workspace:
+                try:
+                    parsed = parse_eval_results(Path(workspace)).get("accuracy")
+                except Exception:  # noqa: BLE001 — an unreadable eval is "no verdict"
+                    parsed = None
+                if isinstance(parsed, (int, float)):
+                    measured = float(parsed)
+
+        if measured is not None and accuracy_passed(baseline_accuracy, float(measured)):
+            outcome["replay_accuracy"] = float(measured)
+            return True
+
+        reason = (
+            "accuracy regression on the replayed config "
+            f"(baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
+            if measured is not None
+            else "high-risk config replayed with no accuracy verdict"
+        )
+        if not self._require_combined_warm_rollback(result, task, outcome):
+            return False
+        outcome["status"] = "accuracy_failed"
+        outcome["reason"] = reason
+        if measured is not None:
+            outcome["replay_accuracy"] = float(measured)
+        outcome["baseline_accuracy"] = baseline_accuracy
+        state.warm_replay_outcome = outcome
+        state.save(self.session_dir)
+        log.info("warm-replay REJECTED on accuracy: %s", reason)
+        return False
+
     def _promote_warm_replay(
         self,
         result: dict,
@@ -2016,6 +2095,15 @@ class PreludePhase(PhaseHandler):
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
+            return
+        # A replayed config lands on ``current_best``, so every later
+        # measurement in the session is taken against it. Promoting one on
+        # throughput alone is how a config that makes the model emit garbage
+        # becomes the session's reference: breaking the numerics is itself a
+        # large throughput win, so the objective actively selects for it.
+        # Trigger on the same condition ExploreExecutor uses, so the two lanes
+        # that can promote a serving config agree on when accuracy is owed.
+        if not self._warm_replay_accuracy_ok(result, task, outcome):
             return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         result["combined_gain_pct"] = round(measured_gain, 3)

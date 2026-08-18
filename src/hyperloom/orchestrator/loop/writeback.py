@@ -107,11 +107,76 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
     return None
 
 
+def _config_is_high_risk(config: Mapping[str, Any] | None) -> bool:
+    """Whether a champion config touches a knob that can change numerics."""
+    from ..actions.executors._accuracy_gate import is_high_accuracy_risk
+
+    cfg = config or {}
+    return is_high_accuracy_risk(
+        extra_args=str(cfg.get("extra_server_args") or ""),
+        extra_envs=dict(cfg.get("extra_envs") or {}),
+    )
+
+
 class WritebackCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
     def __init__(self, coordinator) -> None:
         self._coord = coordinator
+
+    def _champion_accuracy_ok(self, attrs: Mapping[str, Any]) -> bool:
+        """Whether this session's champion may overwrite the KB's ``best_config``.
+
+        The recipe carries no accuracy of its own, so a config written here is
+        indistinguishable from a safe one when a later session replays it. A
+        champion that touches a high-risk knob therefore has to point at a
+        recorded, passing accuracy verdict from this session; otherwise the
+        prior champion stays and this session contributes only its experience
+        entries.
+
+        A champion with no high-risk knob is unchanged: those cannot alter
+        numerics, and gating them would stall the KB on eval-less setups.
+
+        Args:
+            attrs: The recipe attributes built from session state.
+
+        Returns:
+            ``True`` when ``best_config`` may be overwritten.
+        """
+        config = attrs.get("best_config") or {}
+        if not _config_is_high_risk(config):
+            return True
+
+        ss = self.shared_state
+        try:
+            baseline_accuracy = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            baseline_accuracy = 0.0
+        if baseline_accuracy <= 0:
+            # No reference exists, so no verdict could have been produced and
+            # withholding the write would strand the KB permanently.
+            return True
+
+        from ..actions.executors._accuracy_gate import accuracy_passed
+
+        champion_args = str(config.get("extra_server_args") or "").strip()
+        accepted = ((getattr(ss, "explore_search", {}) or {}).get("accepted")) or []
+        for row in accepted:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("extra_server_args") or "").strip() != champion_args:
+                continue
+            score = row.get("accuracy")
+            if isinstance(score, (int, float)) and accuracy_passed(baseline_accuracy, float(score)):
+                return True
+
+        log.info(
+            "recipe finalize: withholding best_config overwrite — the champion "
+            "carries a high-risk knob with no passing accuracy on record "
+            "(baseline=%.4f). Experience entries are still written.",
+            baseline_accuracy,
+        )
+        return False
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
@@ -2166,7 +2231,7 @@ class WritebackCollaborator:
                 live_tput = float(existing_row.get("best_throughput") or 0.0)
             except (TypeError, ValueError):
                 live_tput = 0.0
-            if has_validated_win and my_tput > live_tput:
+            if has_validated_win and my_tput > live_tput and self._champion_accuracy_ok(attrs):
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
             # Merge stack_fingerprint rather than replace (CLOSE only has the sha; T0 stamps version keys).
