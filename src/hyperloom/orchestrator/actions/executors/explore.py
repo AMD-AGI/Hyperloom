@@ -54,6 +54,7 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._explore_screen import screen_variants
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -1163,6 +1164,14 @@ class ExploreExecutor:
                 runnable,
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
+
+        # Drop the variants a cheap reduced-scale probe puts decisively behind
+        # the stack. Off by default; a no-op when the probe cannot run, or when
+        # it cannot be held in the deployment's kernel regime.
+        runnable, screened_out = screen_variants(
+            runnable, config_path, session_dir=_resolve_session_dir()
+        )
+        skipped_dup.extend(screened_out)
 
         round_id_seed = int(search.get("cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"

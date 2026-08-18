@@ -375,6 +375,18 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
+
+def _plateau_round_window_enabled() -> bool:
+    """Whether the EXPLORE plateau reads recent rounds instead of recent winners.
+
+    Set ``HYPERLOOM_EXPLORE_PLATEAU_ROUND_WINDOW=0`` to restore the window over
+    the last ``lookback`` winners and the no-proposal streak.
+    """
+    import os
+
+    raw = os.environ.get("HYPERLOOM_EXPLORE_PLATEAU_ROUND_WINDOW")
+    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off"}
+
 # FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
 DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 5
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
@@ -1397,12 +1409,45 @@ def compute_plateau_explore(
         return False, {"reason": "lookback_disabled"}
     keep_gain_threshold_pct = float(keep_gain_threshold_pct or 0.0)
     empty_streak_threshold = int(empty_streak_threshold or 0)
+    round_window = _plateau_round_window_enabled()
 
     explore_search = getattr(state, "explore_search", None) or {}
     if not isinstance(explore_search, dict):
         explore_search = {}
     winners_history = _rows_for_current_cycle(explore_search.get("winners_history") or [], state)
-    recent_winners = list(winners_history[-lookback:])
+    specialist_rounds = _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
+
+    # Scope the gain window to the last ``lookback`` *rounds* rather than the
+    # last ``lookback`` winners. A winner is in this ledger only because it
+    # cleared the KEEP threshold, so a window over winners holds entries that
+    # are each >= that threshold and sums to more than the plateau floor no
+    # matter how long ago they were found. Taken literally that makes the gain
+    # arm unsatisfiable from the first KEEP onward, and since the trigger is an
+    # AND, one early win disables the plateau exit for the rest of the cycle.
+    # Scoped to rounds the sum falls to zero once recent rounds stop keeping
+    # anything, which is the question the arm was written to ask.
+    recent_round_ids = {
+        str(row.get("round_id"))
+        for row in specialist_rounds[-lookback:]
+        if isinstance(row, dict) and row.get("round_id") is not None
+    }
+    winners_carry_rounds = any(
+        isinstance(w, dict) and w.get("round_id") is not None for w in winners_history
+    )
+    # A ledger whose winners predate round attribution would read as an empty
+    # window and plateau the phase on missing data, so that case keeps the
+    # winner-window behaviour: the failure mode is exploring longer.
+    scoped_by_round = bool(
+        round_window and recent_round_ids and (winners_carry_rounds or not winners_history)
+    )
+    if scoped_by_round:
+        recent_winners = [
+            w
+            for w in winners_history
+            if isinstance(w, dict) and str(w.get("round_id")) in recent_round_ids
+        ]
+    else:
+        recent_winners = list(winners_history[-lookback:])
     recent_keep_gain = 0.0
     for w in recent_winners:
         if not isinstance(w, dict):
@@ -1413,7 +1458,14 @@ def compute_plateau_explore(
         except (TypeError, ValueError):
             continue
 
-    specialist_rounds = _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
+    def _kept_count(row: dict[str, Any]) -> int:
+        """KEEPs recorded by a specialist-round summary."""
+        try:
+            return int(
+                row.get("proposals_kept") if row.get("proposals_kept") is not None else row.get("kept_count") or 0,
+            )
+        except (TypeError, ValueError):
+            return 0
 
     def _round_is_empty(row: Any) -> bool:
         """Return True when a specialist-round summary produced no work.
@@ -1436,18 +1488,26 @@ def compute_plateau_explore(
             )
         except (TypeError, ValueError):
             proposals = 0
-        try:
-            kept = int(
-                row.get("proposals_kept") if row.get("proposals_kept") is not None else row.get("kept_count") or 0,
-            )
-        except (TypeError, ValueError):
-            kept = 0
-        return proposals == 0 and kept == 0
+        return proposals == 0 and _kept_count(row) == 0
 
-    # Walk from newest to oldest counting the trailing-empty streak.
+    def _round_kept_nothing(row: Any) -> bool:
+        """Return True when a round ended without keeping anything.
+
+        The streak arm is asking whether EXPLORE has stopped finding wins, and a
+        round that proposed a full grid and kept none of it answers that as
+        plainly as a round that proposed nothing. Counting only the latter means
+        a proposer that keeps generating losing candidates holds the streak at
+        zero indefinitely.
+        """
+        if not isinstance(row, dict):
+            return False
+        return _kept_count(row) == 0
+
+    # Walk from newest to oldest counting the trailing unproductive streak.
+    unproductive = _round_kept_nothing if round_window else _round_is_empty
     streak = 0
     for row in reversed(specialist_rounds):
-        if _round_is_empty(row):
+        if unproductive(row):
             streak += 1
         else:
             break
@@ -1458,6 +1518,8 @@ def compute_plateau_explore(
         "keep_gain_threshold_pct": keep_gain_threshold_pct,
         "empty_streak": int(streak),
         "empty_streak_threshold": empty_streak_threshold,
+        "empty_streak_basis": "kept_nothing" if round_window else "no_proposals",
+        "gain_window": "recent_rounds" if scoped_by_round else "recent_winners",
         "lookback": int(lookback),
         "winners_seen": len(recent_winners),
         "specialist_rounds_seen": len(specialist_rounds),
