@@ -99,6 +99,35 @@ def test_inbox_parses_multiple_messages_with_python_repr_payload():
     assert ctx.parse_warnings == []
 
 
+def test_inbox_parses_per_topic_summary_fields_without_a_payload():
+    """``delegated_result`` renders ``kind=/state=/error=`` and no ``payload=``;
+    the repeated-failure signal reads those keys, so they must survive."""
+    prompt = _prompt(
+        "session_id=sess-2b\ncrash_count=0\n",
+        textwrap.dedent(
+            """\
+            === Inbox for robustness (newest last) ===
+              seq=1 msg_id=abc from=coordinator topic=delegated_result kind='baseline' state='succeeded' gain=4.875 kept=True
+              seq=2 from=coordinator topic=delegated_result kind='explore' state='failed' error='exited -8: run_1stage = False, k=v inside'
+              seq=3 msg_id=ghi from=coordinator topic=observation kind='retry' payload={'kind': 'retry', 'task_id': 't-1'}
+            """
+        ),
+    )
+    ctx = from_coordinator_prompt(prompt)
+    first, second, third = ctx.inbox
+    assert first.payload == {"kind": "baseline", "state": "succeeded", "gain": 4.875, "kept": True}
+    # A quoted value owns its inner ``k=v``; splitting there would corrupt the
+    # error text and invent a bogus ``k`` key.
+    assert second.msg_id == ""
+    assert second.payload == {
+        "kind": "explore",
+        "state": "failed",
+        "error": "exited -8: run_1stage = False, k=v inside",
+    }
+    assert third.payload == {"kind": "retry", "task_id": "t-1"}
+    assert ctx.parse_warnings == []
+
+
 def test_unparsable_inbox_line_is_warned_not_raised():
     prompt = _prompt(
         "session_id=sess-3\ncrash_count=0\n",
