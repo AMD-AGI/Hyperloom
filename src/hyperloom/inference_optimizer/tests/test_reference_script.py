@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -307,6 +309,23 @@ def test_render_patches_emit_apply_function():
     assert "apply_patch" in text
     assert 'apply_patch "patches/001_fix.patch"' in text
     assert "for lvl in 1 0 2" in text
+
+
+def test_render_enablement_script_is_valid_bash(tmp_path):
+    text = render_reference_script(
+        framework="sglang",
+        server_args="--tp 8",
+        envs={"VLLM_ROCM_USE_AITER": "1"},
+        model="/models/M",
+        setup_commands=["pip install aiter==0.1.4"],
+        patches=["patches/001.patch"],
+        framework_root="/sgl-workspace/sglang",
+        runtime="/session/enablement/stacks/sglang/s1/venv",
+    )
+    sh = tmp_path / "enablement_setting.sh"
+    sh.write_text(text, encoding="utf-8")
+    proc = subprocess.run(["bash", "-n", str(sh)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_render_runtime_note_emitted():

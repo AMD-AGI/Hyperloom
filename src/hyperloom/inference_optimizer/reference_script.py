@@ -275,8 +275,10 @@ _APPLY_PATCH_FUNC = """\
 apply_patch() {
   local patch_file="$1"
   for lvl in 1 0 2 3 4 5 6 7 8; do
-    git -C "$FRAMEWORK_ROOT" apply --check -p"$lvl" "$patch_file" 2>/dev/null && \
-      git -C "$FRAMEWORK_ROOT" apply -p"$lvl" "$patch_file" && return 0
+    if git -C "$FRAMEWORK_ROOT" apply --check -p"$lvl" "$patch_file" 2>/dev/null; then
+      git -C "$FRAMEWORK_ROOT" apply -p"$lvl" "$patch_file"
+      return 0
+    fi
   done
   echo "ERROR: could not apply $patch_file at any strip level" >&2
   return 1
