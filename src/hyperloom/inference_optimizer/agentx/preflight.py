@@ -65,9 +65,19 @@ def check_aiperf_capability(
         help_text = probe(aiperf_bin)
     except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
         raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
-    if "weka-trace" not in (help_text or ""):
+    # weka-trace alone is not enough: the pre-062126 builds carry it but their
+    # scenario allowlist rejects the current corpus, and they have no
+    # --benchmark-duration. Probing for the flags the client actually emits
+    # turns "your aiperf is too old" into a startup error instead of a failure
+    # an hour into a run.
+    missing = [
+        flag
+        for flag in ("weka-trace", "--scenario", "--benchmark-duration")
+        if flag not in (help_text or "")
+    ]
+    if missing:
         raise AgentXPreflightError(
-            f"aiperf at {aiperf_bin!r} lacks AgentX weka-trace capability; install "
-            "the pinned SemiAnalysisAI/aiperf (cjq/agentx-v0.3) build or point "
-            "AIPERF_BIN at one."
+            f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "
+            f"{', '.join(missing)}); install the pinned SemiAnalysisAI/aiperf "
+            "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one."
         )

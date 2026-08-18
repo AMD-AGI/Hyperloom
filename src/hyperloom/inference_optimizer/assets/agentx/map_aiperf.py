@@ -22,8 +22,20 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             return v.get(sub, v.get("avg", default))
         return v if v is not None else default
 
+    def _submission_outcome(export):
+        # Tri-state: True / False / None(absent). Absent is NOT valid -- it means
+        # no --scenario was requested or the aiperf build predates the field.
+        md = export.get("metadata")
+        if not isinstance(md, dict) or "submission_valid" not in md:
+            return None, []
+        reasons = md.get("submission_invalid_reasons") or []
+        if not isinstance(reasons, list):
+            reasons = [str(reasons)]
+        return bool(md.get("submission_valid")), [str(r) for r in reasons]
+
     def map_aiperf(export):
         d = export
+        _verdict, _reasons = _submission_outcome(d)
         m = d if ("time_to_first_token" in d or "output_token_throughput" in d) else d.get("metrics", d)
         out_tput = _stat(m, "output_token_throughput")
         in_tput = _stat(m, "input_token_throughput")
@@ -55,6 +67,8 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "p99_e2el_ms": _stat(m, "request_latency", "p99"),
             "std_e2el_ms": _stat(m, "request_latency", "std"),
             "theoretical_prefix_cache_hit": _stat(m, "theoretical_prefix_cache_hit"),
+            "submission_valid": _verdict,
+            "submission_invalid_reasons": _reasons,
         }
 
 

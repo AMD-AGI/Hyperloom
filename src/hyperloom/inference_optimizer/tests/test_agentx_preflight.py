@@ -63,12 +63,36 @@ def test_capability_absent_raises():
     assert "weka-trace" in str(ei.value) or "capab" in str(ei.value).lower()
 
 
+_CAPABLE_HELP = (
+    "usage: aiperf profile\n"
+    "  --custom-dataset-type weka-trace ...\n"
+    "  --scenario TEXT  Lock all benchmark invariants for a named scenario\n"
+    "  --benchmark-duration FLOAT\n"
+)
+
+
 def test_capability_present_ok():
     def _probe(_bin):
-        return "usage: aiperf profile\n  --custom-dataset-type weka-trace ...\n"
+        return _CAPABLE_HELP
 
     # must not raise
     check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+
+
+def test_capability_rejects_pre_scenario_build():
+    """weka-trace alone is stale: those builds predate the 062126 corpus.
+
+    Their scenario allowlist rejects the corpus the client now requests and
+    they have no ``--benchmark-duration``, so accepting them would defer the
+    failure to an hour into a run instead of surfacing it at startup.
+    """
+
+    def _probe(_bin):
+        return "usage: aiperf profile\n  --custom-dataset-type weka-trace ...\n"
+
+    with pytest.raises(AgentXPreflightError) as ei:
+        check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+    assert "--scenario" in str(ei.value)
 
 
 def test_probe_failure_raises_not_crash():

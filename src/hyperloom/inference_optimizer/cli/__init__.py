@@ -43,6 +43,7 @@ from .backends import (
 from .model_gate import (
     _autodetect_gpu_type,
     _gpu_runner_type,
+    _load_model_max_position_embeddings,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
@@ -58,10 +59,14 @@ from .bootstrap import (
     _reconcile_crash_count,
     _seed_shared_state,
     _snapshot_system_prompts,
+    agentx_state_is_stale,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    agentx_enabled as _agentx_enabled,
+)
 
 from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
@@ -1140,6 +1145,89 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
+# AgentX per-variant budgets. Trace replay has a much wider runtime spread than
+# a fixed synthetic shape, so the stock 2.0x overtime multiplier reaps healthy
+# variants; 3.0x keeps the guard useful without making it the dominant failure
+# mode. The conc-sweep budgets scale with the per-round cost.
+_AGENTX_OVERTIME_KILL_RATIO = 3.0
+_AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
+_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 43200  # 12 h for the whole sweep action
+
+
+def _preflight_agentx_backend(args: argparse.Namespace) -> None:
+    """Reject the one backend combination where AgentX silently does nothing.
+
+    The AgentX switch works by overwriting ``benchmark.benchmark_script``. The
+    bypass backend never reads that field for a serving framework, so
+    ``HYPERLOOM_AGENTX=1`` with ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` produces
+    a full run of ordinary synthetic measurements labelled as an AgentX session
+    -- with no warning anywhere. Nobody sets both on purpose; refuse instead of
+    handing back numbers that mean something other than what they claim.
+
+    Args:
+        args: Parsed CLI namespace (unused; kept uniform with the other gates).
+
+    Raises:
+        SystemExit: When both AgentX and the bypass backend are requested.
+    """
+    del args
+    if not _agentx_enabled():
+        return
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        resolve_backend_name,
+    )
+
+    backend = resolve_backend_name()
+    if backend == "bypass":
+        print(
+            "ERROR: HYPERLOOM_AGENTX=1 with HYPERLOOM_BENCHMARK_BACKEND=bypass. "
+            "The bypass backend ignores benchmark_script for serving frameworks, "
+            "so AgentX would not run and the session would report synthetic "
+            "measurements as AgentX results. Pick one.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
+    """Widen the per-variant time budgets for AgentX's much longer runs.
+
+    A synthetic benchmark round is minutes; an AgentX round replays a real trace
+    corpus for a fixed measurement window plus dataset load, cache warmup and
+    drain. The stock budgets are sized for the former, so under AgentX they reap
+    healthy variants -- and an overtime kill is terminal: the variant is recorded
+    as ``KILLED_OVERTIME`` with no throughput and skips the KEEP/REVERT ladder
+    entirely, so it can never be adopted no matter how good it was.
+
+    Only knobs still at their parser default are touched; a value the operator
+    typed is left exactly as typed. ``--max-hours`` is deliberately NOT raised:
+    it is the operator's contract with the scheduler / pod lease, and silently
+    extending it gets the job killed from outside, which is far harder to
+    diagnose than running out of budget. It only warns.
+
+    No-op unless ``HYPERLOOM_AGENTX`` is on.
+
+    Args:
+        args: Parsed CLI namespace, mutated in place.
+    """
+    if not _agentx_enabled():
+        return
+    if float(getattr(args, "max_hours", 0) or 0) == 2.0:
+        print(
+            "NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of 2.0. "
+            "One AgentX round (corpus load + warmup + drain + measurement window) "
+            "typically exceeds that on its own; pass an explicit --max-hours sized "
+            "to the number of candidates you intend to measure.",
+            file=sys.stderr,
+        )
+    if float(getattr(args, "explore_overtime_kill_ratio", 0) or 0) == 2.0:
+        args.explore_overtime_kill_ratio = _AGENTX_OVERTIME_KILL_RATIO
+    if int(getattr(args, "conc_sweep_timeout_sec", 0) or 0) == 1800:
+        args.conc_sweep_timeout_sec = _AGENTX_CONC_SWEEP_TIMEOUT_SEC
+    if int(getattr(args, "conc_sweep_total_budget_sec", 0) or 0) == 9000:
+        args.conc_sweep_total_budget_sec = _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
+
+
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
     if getattr(args, "max_model_len", None):
@@ -1154,6 +1242,26 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
                 file=sys.stderr,
             )
             raise SystemExit(2)
+    # AgentX replays real agentic traces whose lengths come from the corpus, so
+    # ISL/OSL are meaningless placeholders here (they default to 1024/1024) and
+    # ``ISL+OSL+headroom`` would pin the server at ~6k against traces reaching
+    # ~1M tokens -- the corpus would then be silently reduced to whatever fits.
+    # Upstream's agentic path requires the model's own default context; mirror
+    # that. Explicit operator values above still win.
+    if _agentx_enabled():
+        native = _load_model_max_position_embeddings(str(args.model or ""))
+        if native:
+            return int(native), "agentx-native-context"
+        # Model not on disk yet (uncached HF id): aiperf_client.sh re-resolves
+        # from $MODEL_PATH once it exists. Fall through rather than guess, but
+        # say so -- the interim value is a synthetic-shape derivation that does
+        # not describe this workload.
+        print(
+            "WARNING: HYPERLOOM_AGENTX is on but the model's native context "
+            "could not be read yet; MAX_MODEL_LEN falls back to the synthetic "
+            "ISL+OSL derivation until the benchmark client re-resolves it.",
+            file=sys.stderr,
+        )
     return (
         _resolve_max_model_len(
             args.isl,
@@ -1536,6 +1644,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if args.resume_from and not args.resume:
         args.resume = True
 
+    # Before either session branch: these are read by the fresh-launch seeding
+    # AND by the resume path, so this is the one place that covers both.
+    _preflight_agentx_backend(args)
+    _apply_agentx_budget_profile(args)
+
     if args.resume:
         # Resume mode: USER_DATA_PATH stays at workspace level; pick the
         # per-session subdir via --resume-from or auto-pick the latest. Pin
@@ -1604,6 +1717,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
         state = SharedState.load_or_init(session_dir)
+        _stale = agentx_state_is_stale(state)
+        if _stale:
+            print(
+                f"ERROR: cannot resume this session -- {_stale}. "
+                "Start a fresh session instead of mixing the two measurement sets.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
