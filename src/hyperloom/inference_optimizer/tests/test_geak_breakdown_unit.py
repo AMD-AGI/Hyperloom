@@ -797,6 +797,66 @@ def test_collect_geak_backfill_collapses_rounded_alias_twin(tmp_path: Path) -> N
     assert out["accepted_kernels"][0]["aliases"] == ["c0_triton"]
 
 
+def test_collect_geak_backfill_excludes_declared_env_selection(tmp_path: Path) -> None:
+    # Real shape, Qwen3-14B-FP8/20260814T163051Z: the journey holds an alias
+    # twin whose resolved symbol is a CK library GEMM. ``accepted_kernels`` is
+    # empty and the win sits in ``accepted_heads`` declaring ``kind: env``.
+    #
+    # The collapse must run before the kind join, or the join has only the slot
+    # tag ``c1_ck`` to look up and finds nothing. Once the row is named by the
+    # symbol, ``result.json`` answers the question GEAK already answered: this
+    # is a library selection, not an authored kernel. It belongs to the config
+    # bucket, so ``kernels_optimized`` is 0 -- the run's e2e gain is unaffected.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [
+                {
+                    "short_name": "dsa_sparse_attn_prefill_main_kernel",
+                    "kind": "env",
+                    "backend": "ck",
+                    "e2e_delta_pct": 14.924,
+                }
+            ],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 0
+    assert out["accepted_kernels"] == []
+
+
+def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> None:
+    # The converse, so the exclusion above can never be widened into a drop:
+    # the same twin declared ``authored`` survives, named by the symbol, and
+    # records where its kind came from. Only a *declared* env is excluded --
+    # a row no lane names stays admitted with ``kind_source: absent``, because
+    # guessing "env" would delete real kernels from dead runs.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [
+                {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
+            ],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    kernel = out["accepted_kernels"][0]
+    assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    assert kernel["kind"] == "authored"
+    assert kernel["kind_source"] == "result_json"
+
+
 def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path: Path) -> None:
     # Two genuinely distinct kernels that happen to share a gain must both stay:
     # the collapse needs a measured row AND an unmeasured row to fire.
