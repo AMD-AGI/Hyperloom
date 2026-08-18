@@ -3169,3 +3169,304 @@ class TestValidateForgeGemmTuningE2E:
 
         # Fallback budget is 15 minutes.
         assert captured["budget"] == 15
+
+
+class TestForgeGemmE2EApplyGate:
+    """A measured gain is only creditable if the artifact was actually used.
+
+    Both checks answer a question throughput cannot: the shape keys never
+    resolved (coverage), or the table never reached the server (apply verdict).
+    Each is a positive finding, so each blocks the KEEP -- while "cannot tell"
+    deliberately does not, because hit lines require AITER_LOG_TUNED_CONFIG=1
+    and a scan of 60 production logs found it set in none of them.
+    """
+
+    @staticmethod
+    def _result():
+        return {
+            "recommended_env": {"X": "1"},
+            "extra_envs": {"X": "1"},
+            "requires_e2e_validation": True,
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "improved_shapes": 2,
+                    "tuner": "dense",
+                    "env_var": "X",
+                    "env_value": "1",
+                    "best_micro_speedup": 1.1,
+                },
+            ],
+        }
+
+    @staticmethod
+    def _wire(monkeypatch, *, coverage, verdict):
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        monkeypatch.setattr(
+            KernelPhase, "_gemm_tuned_config_coverage", lambda self, *a, **k: coverage
+        )
+        monkeypatch.setattr(
+            KernelPhase, "_gemm_apply_verdict", lambda self, *a, **k: verdict
+        )
+        return fake
+
+    @pytest.mark.asyncio
+    async def test_unmerged_artifact_blocks_a_measured_keep(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        self._wire(
+            monkeypatch,
+            coverage=None,
+            verdict={
+                "verdict": "not_merged",
+                "blocks_keep": True,
+                "conclusive": True,
+                "detail": "1 tuned table(s) absent from the server's merge list",
+            },
+        )
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        # +30% was measured, and is still refused: the server was running its
+        # bundled default table, so the delta is drift, not tuning.
+        assert coord.shared_state.optimization_stack == []
+        assert coord.shared_state.cumulative_gain_validated == 0.0
+        assert result["decision"] == "REVERT"
+        reverted = result["e2e_results"]["reverted"]
+        assert len(reverted) == 1
+        assert "tuned_config_never_applied[not_merged]" in reverted[0]["reason"]
+        assert reverted[0]["apply_verdict"]["verdict"] == "not_merged"
+
+    @pytest.mark.asyncio
+    async def test_unreachable_shape_keys_block_a_measured_keep(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        self._wire(
+            monkeypatch,
+            coverage={
+                "artifact_applied": False,
+                "not_applied_reason": "no_shape_key_matched",
+                "requested": 42,
+                "covered": 0,
+            },
+            verdict=None,
+        )
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        assert coord.shared_state.optimization_stack == []
+        assert result["decision"] == "REVERT"
+        reason = result["e2e_results"]["reverted"][0]["reason"]
+        assert "tuned_config_never_applied[no_shape_key_matched]" in reason
+
+    @pytest.mark.asyncio
+    async def test_both_blockers_are_named(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        self._wire(
+            monkeypatch,
+            coverage={
+                "artifact_applied": False,
+                "not_applied_reason": "artifact_table_not_consulted",
+                "requested": 7,
+                "covered": 0,
+            },
+            verdict={"verdict": "not_merged", "blocks_keep": True, "conclusive": True},
+        )
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        reason = result["e2e_results"]["reverted"][0]["reason"]
+        assert "artifact_table_not_consulted+not_merged" in reason
+
+    @pytest.mark.asyncio
+    async def test_inconclusive_verdict_does_not_block(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        self._wire(
+            monkeypatch,
+            coverage={"artifact_applied": True, "coverage_pct": 88.0, "covered": 7, "requested": 8},
+            verdict={
+                "verdict": "inconclusive_no_hit_logging",
+                "blocks_keep": False,
+                "conclusive": False,
+                "detail": "misses logged but hit logging was off",
+            },
+        )
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "KEEP"
+        assert len(coord.shared_state.optimization_stack) == 1
+        assert coord.shared_state.current_best["tput"] == 130.0
+
+    @pytest.mark.asyncio
+    async def test_served_verdict_keeps(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        self._wire(
+            monkeypatch,
+            coverage={"artifact_applied": True, "coverage_pct": 100.0, "covered": 8, "requested": 8},
+            verdict={
+                "verdict": "served",
+                "blocks_keep": False,
+                "conclusive": True,
+                "hits": 512,
+            },
+        )
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "KEEP"
+        kept = result["e2e_results"]["kept"]
+        assert kept[0]["apply_verdict"]["hits"] == 512
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(30.0)
+
+    @pytest.mark.asyncio
+    async def test_missing_evidence_leaves_the_decision_alone(self, tmp_path, monkeypatch):
+        """No server log at all must not turn into an accusation."""
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        self._wire(monkeypatch, coverage=None, verdict=None)
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        assert result["decision"] == "KEEP"
+        assert len(coord.shared_state.optimization_stack) == 1
+
+
+class TestForgeGemmPairedConfirmation:
+    """The promoted gain must say whether it was confirmed against drift.
+
+    ``base_tput`` and ``new_tput`` are measured at different times, so the two
+    are a block comparison and any drift between them lands in the result.
+    Interleaving separates the two, and when it is not run the number is still
+    promoted -- but labelled for what it is.
+    """
+
+    @staticmethod
+    def _run_e2e(coord, monkeypatch, tputs):
+        fake = _make_integrate([
+            {"decision": "KEEP", "new_tput": t, "gain_pct": (t - 100.0)} for t in tputs
+        ])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        monkeypatch.setattr(
+            KernelPhase, "_gemm_tuned_config_coverage", lambda self, *a, **k: None
+        )
+        monkeypatch.setattr(KernelPhase, "_gemm_apply_verdict", lambda self, *a, **k: None)
+        return fake
+
+    @staticmethod
+    def _result():
+        return {
+            "recommended_env": {"X": "1"},
+            "extra_envs": {"X": "1"},
+            "requires_e2e_validation": True,
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "improved_shapes": 2,
+                    "tuner": "dense",
+                    "env_var": "X",
+                    "env_value": "1",
+                    "best_micro_speedup": 1.1,
+                },
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_unpaired_by_default_and_labelled_as_such(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_GEMM_PAIRED_PAIRS", raising=False)
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        basis: dict[str, str] = {}
+        monkeypatch.setattr(
+            coord,
+            "_update_cumulative_gain_validated",
+            lambda tput, **kw: basis.update(
+                {"basis": kw.get("measurement_basis", ""), "tput": tput}
+            ),
+        )
+        fake = self._run_e2e(coord, monkeypatch, [130.0])
+
+        await coord._validate_forge_gemm_tuning_e2e(self._result())
+
+        # One integrate call: the confirmation pass did not run.
+        assert len(fake.calls) == 1
+        assert basis["basis"] == "e2e_rebench_unpaired"
+        assert basis["tput"] == 130.0
+
+    @pytest.mark.asyncio
+    async def test_paired_confirmation_runs_interleaved_and_labels_the_gain(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "2")
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        basis: dict[str, str] = {}
+        monkeypatch.setattr(
+            coord,
+            "_update_cumulative_gain_validated",
+            lambda tput, **kw: basis.update({"basis": kw.get("measurement_basis", "")}),
+        )
+        # 1 validation call, then A,B,A,B: baseline ~100, candidate ~130.
+        fake = self._run_e2e(coord, monkeypatch, [130.0, 100.0, 130.0, 101.0, 131.0])
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        assert len(fake.calls) == 5
+        # The confirmation pass alternates env-free and env-carrying runs.
+        assert [bool(c["extra_envs"]) for c in fake.calls[1:]] == [False, True, False, True]
+        paired = result["paired_confirmation"]
+        assert paired["decisive"] is True
+        assert paired["reason"] == "candidate_faster"
+        assert len(paired["pairs"]) == 2
+        assert basis["basis"] == "e2e_paired"
+
+    @pytest.mark.asyncio
+    async def test_drifting_pairs_are_not_labelled_confirmed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "2")
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        basis: dict[str, str] = {}
+        monkeypatch.setattr(
+            coord,
+            "_update_cumulative_gain_validated",
+            lambda tput, **kw: basis.update({"basis": kw.get("measurement_basis", "")}),
+        )
+        # The pairs disagree about which side is faster: the machine moved.
+        self._run_e2e(coord, monkeypatch, [130.0, 100.0, 130.0, 140.0, 120.0])
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        assert result["paired_confirmation"]["reason"] == "sign_disagreement"
+        assert result["paired_confirmation"]["decisive"] is False
+        assert basis["basis"] == "e2e_paired_sign_disagreement"
+
+    @pytest.mark.asyncio
+    async def test_confirmation_failure_falls_back_to_insufficient_pairs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "2")
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        calls: list[dict] = []
+
+        async def _fake(payload, *, session_dir):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}
+            raise RuntimeError("benchmark host went away")
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake)
+        monkeypatch.setattr(
+            KernelPhase, "_gemm_tuned_config_coverage", lambda self, *a, **k: None
+        )
+        monkeypatch.setattr(KernelPhase, "_gemm_apply_verdict", lambda self, *a, **k: None)
+        result = self._result()
+
+        await coord._validate_forge_gemm_tuning_e2e(result)
+
+        # A confirmation that could not run must not revert the artifact, and
+        # must not claim to have confirmed anything either.
+        assert result["decision"] == "KEEP"
+        assert result["paired_confirmation"]["reason"] == "insufficient_pairs"
