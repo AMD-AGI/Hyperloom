@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -27,15 +27,7 @@ from typing import Any
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
-
-def _params_indicates_geak_rebench(params_json: str | None) -> bool:
-    """Return True when queued task params mark a GEAK same-harness revalidation."""
-    try:
-        params = json.loads(params_json) if params_json else {}
-    except json.JSONDecodeError:
-        return False
-    return isinstance(params, dict) and bool(params.get("geak_fallback"))
-
+SpareQueuedFn = Callable[[str, str, dict[str, Any]], bool]
 
 TASK_STATES = (
     "queued",
@@ -660,15 +652,13 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
             cur.execute(
-                f"SELECT task_id, params, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
+                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 family_kinds,
             )
-            rows = [(r["task_id"], r["params"], r["history"]) for r in cur.fetchall()]
+            rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
             now = _now_iso()
-            for task_id, params_json, history_json in rows:
+            for task_id, history_json in rows:
                 if str(task_id or "").strip() in spared:
-                    continue
-                if _params_indicates_geak_rebench(params_json):
                     continue
                 history = json.loads(history_json)
                 history.append(
@@ -691,8 +681,22 @@ class TaskRegistry:
         *,
         allowed_kinds: set[str] | frozenset[str],
         reason: str,
+        spare_queued: SpareQueuedFn | None = None,
     ) -> list[str]:
-        """Bulk-cancel queued tasks whose kind is not allowed at a phase boundary."""
+        """Bulk-cancel queued tasks whose kind is not allowed at a phase boundary.
+
+        Args:
+            allowed_kinds: Task kinds permitted in the phase being entered.
+            reason: Stamped onto each cancellation's history evidence.
+            spare_queued: Optional ``(task_id, kind, params) -> bool`` hook.
+                When it returns ``True`` the queued row is left untouched even
+                though its kind is outside ``allowed_kinds``. Callers use this
+                for narrowly scoped cross-phase work (for example GEAK 2b
+                rebench survives into SWEEP but not into CLOSE).
+
+        Returns:
+            The task ids that were cancelled (empty when none matched).
+        """
         allowed = {str(kind or "").strip() for kind in allowed_kinds if str(kind or "").strip()}
         cancelled: list[str] = []
         async with self.db.transaction() as cur:
@@ -702,7 +706,17 @@ class TaskRegistry:
             for task_id, kind, params_json, history_json in rows:
                 if str(kind or "").strip() in allowed:
                     continue
-                if _params_indicates_geak_rebench(params_json):
+                try:
+                    params = json.loads(params_json) if params_json else {}
+                except json.JSONDecodeError:
+                    params = {}
+                if not isinstance(params, dict):
+                    params = {}
+                if spare_queued is not None and spare_queued(
+                    str(task_id or "").strip(),
+                    str(kind or "").strip(),
+                    params,
+                ):
                     continue
                 history = json.loads(history_json)
                 history.append(

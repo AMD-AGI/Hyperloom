@@ -854,8 +854,13 @@ class WritebackCollaborator:
         if task.kind == "explore" and bool(params.get("geak_fallback")):
             pending = getattr(self.shared_state, "geak_pending", None) or {}
             pending_task_id = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
-            tracked_ids = {task.task_id, str(task.idempotency_key or "")}
-            if not pending_task_id or pending_task_id in tracked_ids:
+            from ..phases.geak_rebench import geak_rebench_tracks_pending_task
+
+            if geak_rebench_tracks_pending_task(
+                pending_task_id,
+                task,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            ):
                 geak_result = (
                     dict(self.shared_state.geak_result)
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -3513,14 +3518,28 @@ class WritebackCollaborator:
                         ):
                             decision = "no_material"
                 if decision == "validated":
-                    # Write the headline from the measured orchestrator-harness
-                    # rebench: lift current_best + optimization_stack + the
-                    # validated gain and clear geak_pending.
-                    self._promote_geak_from_candidate(
-                        ps,
-                        measured_tput=float(measured),
-                        provenance="geak_orch_harness_validated",
+                    pending = getattr(self.shared_state, "geak_pending", None) or {}
+                    pending_tid = (
+                        str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
                     )
+                    from ..phases.geak_rebench import geak_rebench_tracks_pending_task
+
+                    macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                    if not geak_rebench_tracks_pending_task(pending_tid, task, macro_cycle=macro_cycle):
+                        log.warning(
+                            "geak 2b: ignoring promote from untracked rebench task %s (pending=%s)",
+                            task.task_id,
+                            pending_tid or "<unset>",
+                        )
+                    else:
+                        # Write the headline from the measured orchestrator-harness
+                        # rebench: lift current_best + optimization_stack + the
+                        # validated gain and clear geak_pending.
+                        self._promote_geak_from_candidate(
+                            ps,
+                            measured_tput=float(measured),
+                            provenance="geak_orch_harness_validated",
+                        )
                 elif decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
                     # is same-config measurement noise. Do not touch the
@@ -5066,7 +5085,7 @@ class WritebackCollaborator:
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
-                from ..phases.machine_state import geak_revalidate_idempotency_key
+                from ..phases.geak_rebench import geak_revalidate_idempotency_key
 
                 idempotency_key = geak_revalidate_idempotency_key(
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0)

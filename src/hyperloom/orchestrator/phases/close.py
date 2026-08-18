@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 import logging as _logging
+from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import Task
@@ -123,6 +124,15 @@ class ClosePhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
+        try:
+            dropped = await _geak_rebench.cancel_queued_geak_rebench_tasks(
+                self.tasks,
+                reason="close_sequence",
+            )
+            if dropped:
+                log.info("CLOSE: cancelled %d queued GEAK rebench task(s) before close sequence", len(dropped))
+        except Exception:  # noqa: BLE001
+            log.exception("CLOSE: GEAK rebench drain failed (non-fatal)")
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
