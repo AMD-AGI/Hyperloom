@@ -111,10 +111,9 @@ def write_setting_script(
 ) -> str:
     """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state.
 
-    The script is idempotently rewritten on every ``kept`` or ``advanced``
-    verdict, so it always reflects the latest cumulative fix.  Patches are
-    copied alongside the script under ``reports/enablement/patches/`` and
-    referenced by name, making the directory self-contained.
+    Idempotently rewritten on every ``kept`` or ``advanced`` verdict.  Patches
+    are copied to ``reports/enablement/patches/`` and referenced by name so
+    the directory is self-contained.
 
     Args:
         session_dir: The session root directory.
@@ -127,7 +126,7 @@ def write_setting_script(
         gpu_type: GPU type string.
 
     Returns:
-        Session-relative path of the written script (empty string on error).
+        Session-relative path of the written script.
     """
     from hyperloom.inference_optimizer.reference_script import render_reference_script
 
@@ -173,10 +172,7 @@ def write_setting_script(
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"
     atomic_write_text(out, text)
     os.chmod(out, 0o755)
-    try:
-        return str(out.relative_to(session_dir))
-    except ValueError:
-        return str(out)
+    return str(out.relative_to(session_dir))
 
 
 __all__ = ["snapshot_round", "write_setting_script"]
