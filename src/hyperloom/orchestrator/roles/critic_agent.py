@@ -998,7 +998,12 @@ class CriticAgentBackend:
             raw model text, and the final finish reason.
 
         Raises:
-            BackendError: If no reply yields parseable ``review_verdicts`` JSON.
+            BackendError: If no reply yields parseable ``review_verdicts``
+                JSON. The turn ends here, so ``commit-review``, the breakdown
+                record and the Langfuse mirror are all skipped — there is no
+                half-built envelope to hand on. The prompt and the unusable
+                reply are already on ``conversations.jsonl``, which is where a
+                post-mortem finds them.
         """
         preamble = self._load_skill_preamble()
         bundle_view: dict[str, Any] = {
@@ -1043,6 +1048,12 @@ class CriticAgentBackend:
             # again at the same byte, so the retry only makes sense with more
             # room. One is enough: a bundle that overflows twice this much is a
             # sizing problem, not a flaky call.
+            #
+            # Only the HTTP transports always name the reason. The Claude CLI
+            # reports a stop reason only when the model supplies one, so a
+            # truncated reply can arrive as finish=None and fall through to the
+            # raise below. That path loses the retry but still fails loudly,
+            # which is the half of this fix that matters.
             retry_tokens = max_tokens * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
             log.warning(
                 "critic_agent_backend: review reply stopped at the %d-token cap "
