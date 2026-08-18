@@ -10,7 +10,6 @@ archive and the fix cannot be replayed by a later session.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -170,8 +169,7 @@ def write_setting_script(
     )
 
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"
-    atomic_write_text(out, text)
-    os.chmod(out, 0o755)
+    atomic_write_text(out, text, mode=0o700)
     return str(out.relative_to(session_dir))
 
 
