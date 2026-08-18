@@ -854,7 +854,8 @@ class WritebackCollaborator:
         if task.kind == "explore" and bool(params.get("geak_fallback")):
             pending = getattr(self.shared_state, "geak_pending", None) or {}
             pending_task_id = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
-            if not pending_task_id or pending_task_id == task.task_id:
+            tracked_ids = {task.task_id, str(task.idempotency_key or "")}
+            if not pending_task_id or pending_task_id in tracked_ids:
                 geak_result = (
                     dict(self.shared_state.geak_result)
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -5008,8 +5009,9 @@ class WritebackCollaborator:
         delta becomes the validated cumulative gain. Tagged
         ``source=resume_stack_revalidate`` so ``_promote_to_shared_state``
         reconciles ``cumulative_gain_validated_stack_len`` + clears
-        ``resume_pending_revalidation`` from the measured throughput. Idempotent
-        via a fixed idempotency key.
+        ``resume_pending_revalidation`` from the measured throughput. GEAK 2b
+        revalidations are idempotent per macro-cycle via
+        ``geak_revalidate_idempotency_key``.
 
         Args:
             reason: Human-readable reason stamped on the task params.
@@ -5064,10 +5066,15 @@ class WritebackCollaborator:
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
+                from ..phases.machine_state import geak_revalidate_idempotency_key
+
+                idempotency_key = geak_revalidate_idempotency_key(
+                    int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                )
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
-                    idempotency_key="geak-revalidate",
+                    idempotency_key=idempotency_key,
                 )
                 try:
                     from hyperloom.inference_optimizer.breakdown.recorder import instrument

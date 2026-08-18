@@ -41,6 +41,11 @@ PHASE_NAMES: tuple[str, ...] = (
 PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
 
 
+def geak_revalidate_idempotency_key(macro_cycle: int) -> str:
+    """Idempotency key for same-harness GEAK rebench, scoped per macro-cycle."""
+    return f"geak-revalidate-c{int(macro_cycle or 0)}"
+
+
 def phase_index(phase: str) -> int:
     """Return monotonic index of ``phase`` (Inv-2.1 check); unknown → -1.
 
@@ -3116,6 +3121,7 @@ __all__ = [
     "ESCALATE_HINT_SKIP_TO_KERNEL",
     "ESCALATE_HINT_SKIP_TO_SWEEP",
     "ESCALATE_HINT_VOCAB",
+    "geak_revalidate_idempotency_key",
     "LIFECYCLE_STATUSES",
     "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
