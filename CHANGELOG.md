@@ -12,7 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   duplicate dispatch while a rebench is already queued or running, and are
   cancelled before the CLOSE sequencer so post-opt roofline is not starved.
   Orphan rebench completions no longer promote when they are not tracked in
-  ``geak_pending.revalidation_task_id``.
+  ``geak_pending.revalidation_task_id``; resume revalidations with an empty
+  pending slot still reconcile validated gain. CLOSE entry finalizes dangling
+  ``geak_pending`` after cancelling queued rebench tasks.
 
 ## [v1.0.0b2] - 2026-08-18
 Current packaged version (`pyproject.toml`). See
