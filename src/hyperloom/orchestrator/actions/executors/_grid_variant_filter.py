@@ -570,3 +570,137 @@ def apply_user_skip_list(
             }
         )
     return kept, dropped
+
+
+# Workload-defining server flags. Not "risky" flags -- these are the two that
+# decide how much of the trace corpus the client and the server agree to
+# exchange. A variant that lowers either desynchronises them: aiperf keeps
+# replaying full-length traces while the server starts refusing them.
+_AGENTX_WORKLOAD_SERVER_FLAGS = ("--max-model-len", "--context-length")
+
+
+def _strip_server_flag(args: str, flag: str) -> tuple[str, bool]:
+    """Remove ``flag`` and its value from a server-arg string.
+
+    Handles both ``--flag value`` and ``--flag=value``. Other tokens keep their
+    order and spacing-insensitive identity.
+
+    Args:
+        args (str): The server-arg string.
+        flag (str): The flag to remove, e.g. ``--max-model-len``.
+
+    Returns:
+        tuple[str, bool]: ``(remaining_args, removed_anything)``.
+    """
+    toks = str(args or "").split()
+    out: list[str] = []
+    removed = False
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == flag:
+            removed = True
+            i += 2 if i + 1 < len(toks) and not toks[i + 1].startswith("-") else 1
+            continue
+        if t.startswith(f"{flag}="):
+            removed = True
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    return " ".join(out), removed
+
+
+def apply_agentx_workload_guard(
+    grid: list["GridVariant"],
+) -> tuple[list["GridVariant"], list[dict]]:
+    """Strip workload-redefining knobs from AgentX variant proposals.
+
+    Under AgentX the workload is a fixed trace corpus replayed against a fixed
+    contract. A variant that reaches the knobs defining that contract is not
+    proposing a faster configuration of the same benchmark -- it is quietly
+    swapping the benchmark, and the result still looks like a clean number.
+    Three channels reach them, none of which is filtered today for vllm/sglang
+    (those frameworks have no seed grid at all, so every variant is free-form
+    LLM text validated only for shell metacharacters):
+
+    - ``extra_envs`` -- the AgentX client is env-driven end to end, so this is
+      the widest hole: ``CONC`` retargets concurrency, ``MAX_MODEL_LEN`` the
+      context contract, and ``AGENTX_DATASET`` swaps the corpus outright.
+    - ``unset_envs`` -- deleting a key is just another way of overwriting it.
+    - ``extra_server_args`` -- ``--max-model-len`` / ``--context-length``
+      desynchronise the server from the client, which surfaces as a partial
+      error storm whose surviving short sessions score *higher*.
+
+    Offending keys are STRIPPED, not the whole variant dropped: a proposal
+    usually carries other flags that are genuinely worth measuring, and
+    discarding the round would waste an AgentX-sized amount of wall-clock.
+
+    A STRICT no-op when ``HYPERLOOM_AGENTX`` is off.
+
+    Args:
+        grid (list[GridVariant]): The candidate variants to sanitise.
+
+    Returns:
+        tuple[list[GridVariant], list[dict]]: ``(kept, notes)`` where each note
+        carries ``name`` / ``source`` (``"agentx_workload_guard"``) /
+        ``reason`` describing what was removed. ``kept`` is the same length as
+        ``grid``; nothing is dropped.
+    """
+    from ._workload_envs import agentx_enabled
+
+    if not agentx_enabled():
+        return list(grid), []
+
+    from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES
+
+    kept: list["GridVariant"] = []
+    notes: list[dict] = []
+    for gv in grid:
+        removed: list[str] = []
+
+        envs = dict(getattr(gv, "extra_envs", None) or {})
+        for key in sorted(envs):
+            up = str(key).strip().upper()
+            if up in BLOCKED_EXTERNAL_ENV_NAMES or up.startswith("AGENTX_") or up == "AIPERF_BIN":
+                envs.pop(key, None)
+                removed.append(f"env {up}")
+        if removed:
+            gv.extra_envs = envs
+
+        unset = [str(k) for k in (getattr(gv, "unset_envs", None) or [])]
+        keep_unset = [
+            k
+            for k in unset
+            if not (
+                k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES
+                or k.strip().upper().startswith("AGENTX_")
+            )
+        ]
+        if len(keep_unset) != len(unset):
+            removed.extend(f"unset {k.strip().upper()}" for k in unset if k not in keep_unset)
+            gv.unset_envs = keep_unset
+
+        args = str(getattr(gv, "extra_server_args", "") or "")
+        for flag in _AGENTX_WORKLOAD_SERVER_FLAGS:
+            args, hit = _strip_server_flag(args, flag)
+            if hit:
+                removed.append(f"arg {flag}")
+        if any(n.startswith("arg ") for n in removed):
+            gv.extra_server_args = args
+
+        if removed:
+            notes.append(
+                {
+                    "name": str(getattr(gv, "name", "?")),
+                    "source": "agentx_workload_guard",
+                    "reason": (
+                        "removed workload-defining overrides ("
+                        + ", ".join(removed)
+                        + "); these redefine what is measured rather than tune it, "
+                        "and the run-wide values own them under AgentX"
+                    ),
+                }
+            )
+        kept.append(gv)
+    return kept, notes

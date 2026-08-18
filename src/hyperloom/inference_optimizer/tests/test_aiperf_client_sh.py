@@ -47,7 +47,13 @@ done
 mkdir -p "$art"
 echo '{"output_token_throughput":{"avg":1.0},"request_count":{"avg":1}}' > "$art/profile_export_aiperf.json"
 printf '%s\n' "$@" > "$art/aiperf_args.txt"
-{ echo "AIPERF_BIN=${AIPERF_BIN:-UNSET}"; echo "AIPERF_FOO=${AIPERF_FOO:-UNSET}"; } > "${AGENTX_TEST_MARKER}"
+{
+  echo "AIPERF_BIN=${AIPERF_BIN:-UNSET}"
+  echo "AIPERF_FOO=${AIPERF_FOO:-UNSET}"
+  echo "AIPERF_DATASET_CONFIGURATION_TIMEOUT=${AIPERF_DATASET_CONFIGURATION_TIMEOUT:-UNSET}"
+  echo "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=${AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT:-UNSET}"
+  echo "AIPERF_DATASET_MMAP_CACHE_DIR=${AIPERF_DATASET_MMAP_CACHE_DIR:-UNSET}"
+} > "${AGENTX_TEST_MARKER}"
 exit "${FAKE_RC:-0}"
 """
 
@@ -92,9 +98,6 @@ def _run(bench, bind, res, tmp_path, **extra_env):
         GPU_TYPE="mi300x",
         AIPERF_BIN=str(bind / "aiperf"),
         AGENTX_TEST_MARKER=str(tmp_path / "marker.txt"),
-        AGENTX_NUM_ENTRIES="2",
-        AGENTX_WARMUP_DURATION="0",
-        AGENTX_NUM_WARMUP_SESSIONS="1",
     )
     env.update(extra_env)
     return subprocess.run(
@@ -153,22 +156,121 @@ def _aiperf_args(res):
     return (res / "aiperf_artifacts" / "aiperf_args.txt").read_text()
 
 
-def test_warmup_on_passes_flags(tmp_path):
+def test_no_max_context_length_flag(tmp_path):
+    """AgentX must never cap the replay context from ``$MAX_MODEL_LEN``.
+
+    ``--max-context-length`` makes aiperf DROP every trace whose peak exceeds
+    it (not truncate), and ``$MAX_MODEL_LEN`` is itself derived from the
+    synthetic ISL+OSL shape the agentic corpus never uses. Emitting the flag
+    therefore shrinks the 393-trace corpus to its short-trace tail while every
+    status marker still reports a clean run. Upstream's agentic path unsets
+    ``MAX_MODEL_LEN`` and never emits the flag; the server's own context window
+    is the only limit that may apply.
+    """
     bench, bind, res = _sandbox(tmp_path)
-    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_DURATION="20", AGENTX_NUM_WARMUP_SESSIONS="2")
+    r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
-    args = _aiperf_args(res)
-    assert "--warmup-duration" in args and "--num-warmup-sessions" in args
+    assert "--max-context-length" not in _aiperf_args(res)
 
 
-def test_warmup_off_omits_flags(tmp_path):
-    """aiperf rejects an explicit 0 warmup; disabling must OMIT the flags."""
+def test_failed_request_threshold_is_passed(tmp_path):
+    """A partial error storm must fail the run, not be scored as a clean result.
+
+    aiperf defaults ``--failed-request-threshold`` to None, which DISABLES the
+    check, so without the flag a run whose requests mostly 4xx still exits 0
+    and is mapped as a normal measurement. ``map_aiperf.py`` carries no error
+    counters, so nothing downstream can notice.
+    """
     bench, bind, res = _sandbox(tmp_path)
-    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_DURATION="0", AGENTX_NUM_WARMUP_SESSIONS="0")
+    r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
-    args = _aiperf_args(res)
-    assert "--warmup-duration" not in args
-    assert "--num-warmup-sessions" not in args
+    assert "--failed-request-threshold" in _aiperf_args(res)
+
+
+# The upstream contract, flag by flag. A golden list rather than scattered
+# substring checks: the failure mode this guards against is a flag quietly
+# going missing, which no individual assertion would notice.
+_UPSTREAM_FLAGS = (
+    ("--scenario", "inferencex-agentx-mvp"),
+    ("--endpoint", "/v1/chat/completions"),
+    ("--endpoint-type", "chat"),
+    ("--num-dataset-entries", "393"),
+    ("--benchmark-duration", "3600"),
+    ("--random-seed", "42"),
+    ("--trajectory-start-min-ratio", "0.25"),
+    ("--trajectory-start-max-ratio", "0.75"),
+    ("--warmup-requests-per-lane", "10"),
+    ("--warmup-grace-period", "1800"),
+    ("--failed-request-threshold", "0.10"),
+    ("--stats-interval", "30"),
+    ("--slice-duration", "1.0"),
+)
+
+_UPSTREAM_BARE_FLAGS = ("--streaming", "--use-server-token-count", "--no-gpu-telemetry",
+                        "--tokenizer-trust-remote-code")
+
+
+def test_upstream_flag_contract(tmp_path):
+    """Every leaderboard-defining flag is present with the upstream value."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    argv = _aiperf_args(res).splitlines()
+    for flag, value in _UPSTREAM_FLAGS:
+        assert flag in argv, f"missing {flag}"
+        assert argv[argv.index(flag) + 1] == value, f"{flag} != {value}"
+    for flag in _UPSTREAM_BARE_FLAGS:
+        assert flag in argv, f"missing {flag}"
+
+
+def test_removed_warmup_flags_are_gone(tmp_path):
+    """The old warmup pair measured a different thing; the scenario rejects it.
+
+    Kept as an explicit assertion rather than deleting the coverage outright,
+    so a re-introduction has to argue with a red test.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    argv = _aiperf_args(res)
+    assert "--warmup-duration" not in argv
+    assert "--num-warmup-sessions" not in argv
+
+
+def test_corpus_defaults_to_256k_variant_for_unlisted_family(tmp_path):
+    """An unmatched model family gets the capped corpus, like upstream."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)  # MODEL=/m -> not in the whitelist
+    assert r.returncode == 0, r.stderr
+    assert "semianalysis_cc_traces_weka_062126_256k" in _aiperf_args(res)
+
+
+def test_corpus_full_variant_for_whitelisted_family(tmp_path):
+    """The 1M-context families replay the unfiltered corpus."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, MODEL="/models/Kimi-K3")
+    assert r.returncode == 0, r.stderr
+    argv = _aiperf_args(res)
+    assert "semianalysis_cc_traces_weka_062126" in argv
+    assert "semianalysis_cc_traces_weka_062126_256k" not in argv
+
+
+def test_corpus_override_wins(tmp_path):
+    """WEKA_LOADER_OVERRIDE pins the loader regardless of family."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, WEKA_LOADER_OVERRIDE="weka_trace")
+    assert r.returncode == 0, r.stderr
+    assert "weka_trace" in _aiperf_args(res)
+
+
+def test_aiperf_env_contract_survives_the_scrub(tmp_path):
+    """The scrub must not eat the timeouts the corpus load needs."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    marker = (tmp_path / "marker.txt").read_text()
+    assert "AIPERF_DATASET_CONFIGURATION_TIMEOUT=1800" in marker
+    assert "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=1800" in marker
 
 
 def test_framework_sglang_delegates_to_sglang_builtin(tmp_path):

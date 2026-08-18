@@ -998,6 +998,16 @@ def materialize_config_with_envs(
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         if delay_iters < 0:
             delay_iters = 0
+        # The iteration-based delay assumes the client streams a predictable
+        # number of decode steps before steady state. The AgentX client instead
+        # brackets a WALL-CLOCK window with /start_profile and /stop_profile, so
+        # an iteration delay computed from the placeholder OSL (6080 steps at the
+        # 1024/1024 defaults) is never reached inside that window and the trace
+        # comes back empty. Hand the delay to the client and keep only the
+        # capture bound, which is what stops the worker accumulating events in
+        # host RAM until the OOM killer arrives.
+        if agentx_enabled():
+            delay_iters = 0
         # Operator hard-override of captured steps (e.g. a small eager FlyDSL
         # profile). Honored verbatim; warn when outside the safe band rather
         # than silently clamping.
