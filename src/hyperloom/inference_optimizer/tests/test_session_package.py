@@ -288,6 +288,18 @@ def test_loose_does_not_wipe_dest_root(tmp_path: Path) -> None:
     assert (dest / "session_breakdown.json").is_file()  # loose copy still landed
 
 
+def test_current_setting_sh_is_included(tmp_path: Path) -> None:
+    """current_setting.sh at session root is collected."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "current_setting.sh", "#!/usr/bin/env bash\nvllm serve $MODEL\n")
+    dest = tmp_path / "ws"
+
+    out = package_session_artifacts(sd, session_id="cs-sid", dest_root=dest)
+    assert out is not None
+    assert "current_setting.sh" in _zip_names(out)
+
+
 def test_enablement_artifacts_are_included(tmp_path: Path) -> None:
     """reports/enablement/** covers round.json, patches, and the setting script."""
     sd = tmp_path / "session"
