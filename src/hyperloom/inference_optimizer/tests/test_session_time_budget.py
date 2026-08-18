@@ -526,6 +526,58 @@ class TestPreDispatchBackstop:
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
 
+    @pytest.mark.asyncio
+    async def test_a_queued_conc_sweep_the_budget_outlived_is_recorded_as_skipped(
+        self,
+        coord: Coordinator,
+    ):
+        """Cancelling conc_sweep at dispatch must stamp last_conc_sweep so SWEEP can close."""
+        from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+        _set_budget(coord, minutes=180)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="conc_sweep",
+            params={},
+            idempotency_key="q-conc-sweep",
+        )
+        _set_budget(coord, minutes=180, elapsed_min=166.0)
+
+        spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=set())
+
+        assert [t.task_id for t, _, _ in spawned] == []
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+        assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+        assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+        assert coord.shared_state.last_conc_sweep["was_skipped"] is True
+        result = exit_normal_sweep(coord.shared_state)
+        assert result is not None
+        reason, evidence = result
+        assert reason == "conc_sweep_done"
+        assert evidence["conc_sweep_status"] == "skipped"
+
+    @pytest.mark.asyncio
+    async def test_dropping_an_over_budget_conc_sweep_does_not_erase_a_prior_result(
+        self,
+        coord: Coordinator,
+    ):
+        """A later cancel must not overwrite a conc_sweep the session already measured."""
+        _set_budget(coord, minutes=180)
+        coord.shared_state.record_conc_sweep(
+            {"status": "succeeded", "was_skipped": False, "summary": {"successful_pairs": 3}}
+        )
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="conc_sweep",
+            params={},
+            idempotency_key="q-conc-sweep-prior",
+        )
+        _set_budget(coord, minutes=180, elapsed_min=166.0)
+
+        await coord.dispatcher._spawn_fitting_queued(exclude_ids=set())
+
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+        assert coord.shared_state.last_conc_sweep["status"] == "succeeded"
+
+
 # One of the closing actions, exempt from the budget because the closing reserve
 # is held back so it can run.
 _CLOSING_ACTION = "report"

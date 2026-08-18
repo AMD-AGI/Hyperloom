@@ -1661,11 +1661,36 @@ def compute_plateau_kernel(
     }
 
 
+# Statuses on last_sweep / last_conc_sweep that exit_normal_sweep already
+# treats as SWEEP closeout. skip_to_close must not override those: the LLM
+# emits it when conc_sweep was refused, and mapping that to
+# robustness_escalated turns a successful run into a CI failure.
+_SWEEP_DONE_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed"})
+_CONC_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset(
+    {"succeeded", "partial", "completed", "skipped", "failed"}
+)
+
+
+def _sweep_has_recorded_closeout(state: Any) -> bool:
+    """Whether SWEEP already recorded a result the phase machine can close on."""
+    last_sweep = getattr(state, "last_sweep", None) or {}
+    if isinstance(last_sweep, dict):
+        if str(last_sweep.get("status") or "").lower() in _SWEEP_DONE_STATUSES:
+            return True
+    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    if isinstance(last_conc, dict):
+        if str(last_conc.get("status") or "").lower() in _CONC_SWEEP_CLOSEOUT_STATUSES:
+            return True
+    return False
+
+
 # terminal / abort (global)
 def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
-    Priority: 1. ``skip_to_close`` → ``robustness_escalated``; 2. Coordinator ``stop_reason``.
+    Priority: 1. ``skip_to_close`` → ``robustness_escalated``, except in SWEEP
+    when a sweep/conc_sweep closeout is already recorded (the honest SWEEP
+    exit wins); 2. Coordinator ``stop_reason``.
 
     Args:
         state (Any): Frozen SharedState view exposing ``stop_reason`` and any
@@ -1677,6 +1702,9 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
+        current = (getattr(state, "phase", "") or "").strip().upper()
+        if current == PHASE_SWEEP and _sweep_has_recorded_closeout(state):
+            return None
         return "robustness_escalated", {
             "evidence": "llm_escalation",
             "hint": hint,
