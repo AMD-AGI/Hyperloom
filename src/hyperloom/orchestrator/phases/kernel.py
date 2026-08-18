@@ -1524,6 +1524,17 @@ class KernelPhase(PhaseHandler):
                     "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                 }
             )
+            # Max over attempts, matching the canonical ledger writer in
+            # ``_kernel_decisions.py`` -- ``by_kernel`` and
+            # ``kernel_lifecycle`` read this one field from both writers, so a
+            # second, worse rebench must not lower the kernel's best. ``None``
+            # is kept rather than that writer's ``0.0`` default: here it means
+            # "not attributable", which is not the same claim as "no gain".
+            gains = [
+                float(a["gain_pct"])
+                for a in attempts
+                if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
+            ]
             entry.update(
                 {
                     "key": kid,
@@ -1531,7 +1542,7 @@ class KernelPhase(PhaseHandler):
                     "source": "geak_e2e",
                     "attempts": attempts,
                     "attempt_count": len(attempts),
-                    "best_gain_pct": rebench_gain if attributable else None,
+                    "best_gain_pct": max(gains) if gains else None,
                     "last_decision": "KEEP",
                     "last_status": "ok",
                     "validated": attributable,
