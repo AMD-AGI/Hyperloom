@@ -4941,8 +4941,9 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         # run that actually failed: a tuner may fail inside a run that succeeds,
         # and stamping that row would break the invariant readers rely on, that
         # ``error_class`` means the run did not succeed. It holds in every trace on
-        # record -- 0 of 318 ``ok`` rows carry one, while 119 of them have a tuner
-        # that returned no speedup and would be promoted from here ungated.
+        # record -- re-measured 18 Aug 2026, 0 of 320 ``ok`` rows carry one,
+        # while 121 of them have a tuner that returned no speedup and would be
+        # promoted from here ungated.
         "error_class": result.get("error_class") or (tuner_error_class if envelope_failed else None),
     }
     row = {k: v for k, v in row.items() if v is not None}
