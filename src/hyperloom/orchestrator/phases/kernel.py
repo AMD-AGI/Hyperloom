@@ -2092,9 +2092,23 @@ class KernelPhase(PhaseHandler):
         for t in result.get("tuners_run") or []:
             if not isinstance(t, dict):
                 continue
-            if t.get("status") != "ok":
+            # partial_output is a real artifact: the tuner wrote fewer rows than
+            # shapes it was given (the grouped batch budget ran out), but the
+            # rows it did write are deployable.
+            if t.get("status") not in ("ok", "partial_output"):
                 continue
-            if not bool(t.get("candidate")) and int(t.get("improved_shapes") or 0) <= 0:
+            # improved_shapes can never exceed 0 for tuners with no comparable
+            # baseline -- TunableOp never times the untuned dispatch, the
+            # candidate-CSV fallback has no per-shape Pre/Post table, and a
+            # hipblaslt-only bf16 run has no torch candidate to measure against.
+            # They report unverified_shapes instead, so gating on improved_shapes
+            # alone would drop exactly the artifacts that need e2e to say
+            # anything at all about them.
+            if (
+                not bool(t.get("candidate"))
+                and int(t.get("improved_shapes") or 0) <= 0
+                and int(t.get("unverified_shapes") or 0) <= 0
+            ):
                 continue
             env_var = str(t.get("env_var") or "").strip()
             env_value = str(t.get("env_value") or "").strip()
