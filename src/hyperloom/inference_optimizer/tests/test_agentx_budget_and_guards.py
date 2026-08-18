@@ -58,13 +58,54 @@ def test_budget_profile_is_noop_without_agentx(monkeypatch):
     assert vars(args) == vars(_budget_args())
 
 
-def test_budget_profile_widens_defaults_under_agentx(monkeypatch):
+def test_budget_profile_widens_conc_sweep_defaults_under_agentx(monkeypatch):
     _on(monkeypatch)
     args = _budget_args()
     _apply_agentx_budget_profile(args)
-    assert args.explore_overtime_kill_ratio > 2.0
     assert args.conc_sweep_timeout_sec > 1800
     assert args.conc_sweep_total_budget_sec > 9000
+
+
+def test_budget_profile_leaves_the_kill_ratio_alone(monkeypatch):
+    """A duration-based replay compresses runtime spread, it does not widen it.
+
+    The measurement window is fixed, so only warmup scales with how slow a
+    config is: a variant with 3x slower warmup still lands at ~1.8x the baseline
+    total (measured: 46 min warmup + 60 min window + 5 min setup). The stock
+    2.0x guard is not the thing that needed loosening -- the per-variant hard
+    cap was, and raising this instead would invert the two.
+    """
+    _on(monkeypatch)
+    args = _budget_args()
+    _apply_agentx_budget_profile(args)
+    assert args.explore_overtime_kill_ratio == 2.0
+
+
+def test_hard_cap_stays_above_the_soft_kill_at_agentx_baselines(monkeypatch):
+    """The layering `_compute_explore_variant_timeout` documents must hold.
+
+    At the measured ~111 min baseline the stock 4h ceiling clamps the hard cap
+    to 240 min while the soft kill sits at 222 min -- barely intact -- and a
+    longer baseline inverts it, so the generic timeout fires and the round loses
+    its KILLED_OVERTIME diagnosis. The AgentX ceiling keeps the ordering.
+    """
+    from hyperloom.orchestrator.actions.executors.explore import (
+        AGENTX_EXPLORE_TIMEOUT_CEILING_SEC,
+        DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
+        _compute_explore_variant_timeout,
+    )
+
+    measured_baseline = 111 * 60  # the E4 round
+    for baseline in (measured_baseline, 2 * 60 * 60):
+        soft_kill = baseline * 2.0
+        stock = _compute_explore_variant_timeout(
+            baseline, 2.0, ceiling_sec=DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
+        )
+        agentx = _compute_explore_variant_timeout(
+            baseline, 2.0, ceiling_sec=AGENTX_EXPLORE_TIMEOUT_CEILING_SEC
+        )
+        assert agentx > soft_kill, f"layering inverted at baseline={baseline}"
+        assert agentx >= stock
 
 
 def test_budget_profile_never_touches_max_hours(monkeypatch):

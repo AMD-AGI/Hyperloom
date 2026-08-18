@@ -617,6 +617,11 @@ def _default_grid_for_framework(
 DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min
 DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — roofline composite budget
 DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5  # hard cap ≥ baseline × (kill_ratio + 0.5)
+# AgentX ceiling. A measured round (35B / conc 64 / 3600s window) is ~111 min,
+# so the stock 4h ceiling would clamp the hard cap under the soft kill and
+# invert the layering. 8h keeps the ordering intact for baselines up to ~2.3h at
+# the default kill ratio, which covers the models this mode targets.
+AGENTX_EXPLORE_TIMEOUT_CEILING_SEC = 28800  # 8 h
 
 
 def _compute_explore_variant_timeout(
@@ -842,10 +847,25 @@ class ExploreExecutor:
                 )
             except (TypeError, ValueError):
                 safety_margin = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
+            # The stock 4h ceiling assumes a synthetic round measured in
+            # minutes. An AgentX round is a fixed measurement window plus corpus
+            # load, per-lane warmup and drain -- measured at ~111 min for a 35B
+            # model at conc 64 -- so the ceiling clamps the hard cap BELOW the
+            # soft kill and inverts the layering this function documents: the
+            # generic timeout fires first and the round is recorded as a plain
+            # timeout instead of KILLED_OVERTIME with its diagnostic ratio.
+            # Raise the ceiling (not the kill ratio) so the ordering holds for
+            # the long baselines AgentX produces.
+            _ceiling = (
+                AGENTX_EXPLORE_TIMEOUT_CEILING_SEC
+                if agentx_enabled()
+                else DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
+            )
             timeout_sec = _compute_explore_variant_timeout(
                 baseline_runtime_sec=baseline_runtime_sec,
                 kill_ratio=overtime_kill_ratio,
                 floor_sec=int(self.variant_timeout_sec),
+                ceiling_sec=_ceiling,
                 safety_margin=safety_margin,
             )
 

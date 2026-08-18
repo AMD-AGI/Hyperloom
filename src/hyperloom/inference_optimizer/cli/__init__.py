@@ -1145,11 +1145,17 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
-# AgentX per-variant budgets. Trace replay has a much wider runtime spread than
-# a fixed synthetic shape, so the stock 2.0x overtime multiplier reaps healthy
-# variants; 3.0x keeps the guard useful without making it the dominant failure
-# mode. The conc-sweep budgets scale with the per-round cost.
-_AGENTX_OVERTIME_KILL_RATIO = 3.0
+# AgentX conc-sweep budgets, sized from a measured round: 35B / conc 64 /
+# 3600s window = ~111 min end to end (46 min per-lane warmup + 60 min
+# measurement + ~5 min boot, corpus load and mapping).
+#
+# The overtime kill ratio is deliberately NOT raised. It was, until the measured
+# round showed the reasoning was wrong: a duration-based replay COMPRESSES
+# runtime spread rather than widening it, because the measurement window is
+# fixed. Only warmup scales with how slow a config is, so a variant with 3x
+# slower warmup still lands at 1.8x the baseline total -- comfortably inside the
+# stock 2.0x. Raising it would also have inverted the hard-cap/soft-kill
+# layering (see AGENTX_EXPLORE_TIMEOUT_CEILING_SEC), which is the real fix.
 _AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
 _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 43200  # 12 h for the whole sweep action
 
@@ -1193,17 +1199,22 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     """Widen the per-variant time budgets for AgentX's much longer runs.
 
     A synthetic benchmark round is minutes; an AgentX round replays a real trace
-    corpus for a fixed measurement window plus dataset load, cache warmup and
-    drain. The stock budgets are sized for the former, so under AgentX they reap
-    healthy variants -- and an overtime kill is terminal: the variant is recorded
-    as ``KILLED_OVERTIME`` with no throughput and skips the KEEP/REVERT ladder
-    entirely, so it can never be adopted no matter how good it was.
+    corpus for a fixed measurement window plus dataset load, per-lane warmup and
+    drain -- measured at ~111 min for a 35B model at concurrency 64. The stock
+    conc-sweep budgets are sized for the former and would record every AgentX
+    variant as ``budget_exhausted`` before it finished.
 
     Only knobs still at their parser default are touched; a value the operator
-    typed is left exactly as typed. ``--max-hours`` is deliberately NOT raised:
-    it is the operator's contract with the scheduler / pod lease, and silently
-    extending it gets the job killed from outside, which is far harder to
-    diagnose than running out of budget. It only warns.
+    typed is left exactly as typed. Two things are deliberately NOT changed:
+
+    - ``--max-hours`` is the operator's contract with the scheduler / pod lease.
+      Silently extending it gets the job killed from outside the process, which
+      is far harder to diagnose than running out of budget. It only warns.
+    - ``--explore-overtime-kill-ratio`` stays at its default, because a
+      duration-based replay compresses runtime spread instead of widening it
+      (only warmup scales with a slow config; the measurement window is fixed).
+      The per-variant hard cap is what needed adjusting, and that lives in
+      ``explore.AGENTX_EXPLORE_TIMEOUT_CEILING_SEC``.
 
     No-op unless ``HYPERLOOM_AGENTX`` is on.
 
@@ -1220,8 +1231,6 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
             "to the number of candidates you intend to measure.",
             file=sys.stderr,
         )
-    if float(getattr(args, "explore_overtime_kill_ratio", 0) or 0) == 2.0:
-        args.explore_overtime_kill_ratio = _AGENTX_OVERTIME_KILL_RATIO
     if int(getattr(args, "conc_sweep_timeout_sec", 0) or 0) == 1800:
         args.conc_sweep_timeout_sec = _AGENTX_CONC_SWEEP_TIMEOUT_SEC
     if int(getattr(args, "conc_sweep_total_budget_sec", 0) or 0) == 9000:
