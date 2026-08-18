@@ -1,0 +1,333 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The bottom-up PerfModel roofline and the HF metadata it reads.
+
+The op formulas mirror TraceLens PerfModel, so they are pinned against the
+arithmetic in their own docstrings rather than against recorded outputs: a
+recorded number cannot tell a corrected formula apart from a broken one.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from hyperloom.orchestrator.kernel import roofline_ceiling as rc
+
+
+# ---- op formulas ----
+
+
+def test_gemm_flops_is_two_mnk():
+    assert rc._gemm_flops(4, 8, 16) == 2.0 * 4 * 8 * 16
+
+
+def test_gemm_bytes_separates_activation_from_weight_precision():
+    """A quantized weight is read at its own width; activations stay bf16."""
+    m, n, k = 4, 8, 16
+    both_fp8 = rc._gemm_bytes(m, n, k, weight_bpe=1.0)
+    assert both_fp8 == m * k * 1.0 + k * n * 1.0 + m * n * 1.0
+
+    split = rc._gemm_bytes(m, n, k, weight_bpe=1.0, act_bpe=2.0)
+    assert split == m * k * 2.0 + k * n * 1.0 + m * n * 2.0
+    # Only the weight read stays narrow, so the split total is the larger one.
+    assert split > both_fp8
+
+
+def test_sdpa_flops_counts_both_matmuls():
+    b, n_q, h_q, n_kv, h_kv, d = 2, 3, 8, 5, 2, 64
+    expected = b * h_q * (2.0 * n_q * n_kv * d) * 2
+    assert rc._sdpa_flops(b, n_q, h_q, n_kv, h_kv, d, d, causal=False) == expected
+
+
+def test_causal_masking_halves_prefill_attention_only():
+    """Halved when the two lengths match; decode (N_Q=1) is untouched."""
+    args = (2, 7, 8, 7, 2, 64, 64)
+    assert rc._sdpa_flops(*args, causal=True) == rc._sdpa_flops(*args, causal=False) / 2.0
+
+    decode = (2, 1, 8, 7, 2, 64, 64)
+    assert rc._sdpa_flops(*decode, causal=True) == rc._sdpa_flops(*decode, causal=False)
+
+
+def test_sdpa_bytes_reads_kv_at_the_kv_head_count():
+    """GQA is the point of the split: K/V are sized by H_KV, Q and out by H_Q."""
+    b, n_q, h_q, n_kv, h_kv, d, bpe = 2, 3, 8, 5, 2, 64, 2.0
+    expected = (b * n_q * h_q * d + b * n_kv * h_kv * d * 2 + b * n_q * h_q * d) * bpe
+    assert rc._sdpa_bytes(b, n_q, h_q, n_kv, h_kv, d, d, False, bpe) == expected
+
+
+def test_sdpa_bytes_ignores_causal():
+    """Causal masking skips compute, not the KV read."""
+    args = (2, 7, 8, 7, 2, 64, 64)
+    assert rc._sdpa_bytes(*args, True, 2.0) == rc._sdpa_bytes(*args, False, 2.0)
+
+
+def test_fused_moe_flops_counts_gate_up_down_and_aggregation():
+    m, k, n, topk = 4, 16, 32, 2
+    expected = 2.0 * m * k * n * topk * 2 + 2.0 * m * k * n * topk + m * k * (2 * topk - 1)
+    assert rc._fused_moe_flops(m, k, n, topk) == expected
+
+
+def test_fused_moe_active_experts_saturate_with_batch_size():
+    """Coupon collector: one token touches topk experts, a large batch touches all."""
+    k, n, num_experts, topk, bpe = 16, 32, 8, 2, 2.0
+
+    def _expert_bytes(m):
+        # Subtract the activation terms to leave the expert-weight reads.
+        return rc._fused_moe_bytes(m, k, n, num_experts, topk, bpe) - 2 * m * k * bpe
+
+    one_token = _expert_bytes(1)
+    assert one_token == pytest.approx(topk * n * k * bpe * 3)
+
+    all_experts = num_experts * n * k * bpe * 3
+    assert _expert_bytes(4096) == pytest.approx(all_experts)
+    assert one_token < _expert_bytes(8) < all_experts
+
+
+def test_fused_moe_bytes_defaults_activations_to_the_weight_width():
+    args = (4, 16, 32, 8, 2)
+    assert rc._fused_moe_bytes(*args, 1.0) == rc._fused_moe_bytes(*args, 1.0, act_bpe=1.0)
+
+
+# ---- compute_roofline_from_perfmodel ----
+
+
+def _dense_meta(**over) -> rc.ModelMeta:
+    """A small dense model whose every PerfModel input is populated."""
+    base = dict(
+        weight_bytes=16 * 1024**3,
+        num_layers=4,
+        num_kv_heads=2,
+        head_dim=64,
+        weight_dtype_bytes=2.0,
+        hidden_size=512,
+        intermediate_size=1024,
+        vocab_size=32000,
+        num_attention_heads=8,
+    )
+    base.update(over)
+    return rc.ModelMeta(**base)
+
+
+_UNSET = object()
+
+
+def _perfmodel(meta=_UNSET, **over):
+    kw = dict(
+        meta=_dense_meta() if meta is _UNSET else meta,
+        gpu_type="mi300x",
+        concurrency=8,
+        isl=128,
+        osl=64,
+    )
+    kw.update(over)
+    return rc.compute_roofline_from_perfmodel(**kw)
+
+
+def test_perfmodel_breaks_a_dense_forward_into_its_operators():
+    out = _perfmodel()
+    assert out is not None
+    names = [op.name for op in out.ops]
+    assert names == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "lm_head", "sdpa"]
+    assert out.bound_kind in {"compute", "memory"}
+    assert out.decode_tok_per_s > 0
+    assert out.prefill_tok_per_s > 0
+
+
+def test_perfmodel_op_shares_are_normalised_over_the_forward():
+    out = _perfmodel()
+    assert sum(op.pct_time for op in out.ops) == pytest.approx(1.0)
+    assert all(op.time_s > 0 and op.flops > 0 and op.bytes_moved > 0 for op in out.ops)
+    assert all(op.ai == pytest.approx(op.flops / op.bytes_moved) for op in out.ops)
+
+
+def test_perfmodel_decode_sits_between_its_own_memory_and_compute_ceilings():
+    """The roofline takes the slower side, so its rate is the lower of the two."""
+    out = _perfmodel()
+    assert out.decode_tok_per_s == pytest.approx(min(out.decode_mem_tok_per_s, out.decode_cmp_tok_per_s))
+    slower = "memory" if out.decode_mem_tok_per_s <= out.decode_cmp_tok_per_s else "compute"
+    assert out.bound_kind == slower
+
+
+def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
+    """A MoE model replaces the three dense FFN GEMMs with one fused op."""
+    out = _perfmodel(_dense_meta(num_experts=8, experts_per_tok=2, moe_intermediate_size=256))
+    names = [op.name for op in out.ops]
+    assert "moe_fused" in names
+    assert not {"gate_proj", "up_proj", "down_proj"} & set(names)
+
+
+def test_perfmodel_scales_the_hardware_by_the_gpu_count():
+    one, four = _perfmodel(num_gpus=1), _perfmodel(num_gpus=4)
+    assert four.hbm_bw_gbps == one.hbm_bw_gbps * 4
+    assert four.peak_achievable_tflops == one.peak_achievable_tflops * 4
+    assert four.decode_tok_per_s > one.decode_tok_per_s
+
+
+def test_perfmodel_declines_what_it_cannot_model():
+    assert _perfmodel(None) is None
+    assert _perfmodel(_dense_meta(hidden_size=0)) is None
+    assert _perfmodel(_dense_meta(num_attention_heads=0)) is None
+    assert _perfmodel(_dense_meta(num_layers=0)) is None
+    # Unknown GPU, and a GPU with no achievable TFLOPS at this precision.
+    assert _perfmodel(gpu_type="h100") is None
+    assert _perfmodel(precision_tag="int3") is None
+
+
+def test_perfmodel_drops_the_lm_head_when_the_vocab_is_unknown():
+    out = _perfmodel(_dense_meta(vocab_size=0))
+    assert "lm_head" not in [op.name for op in out.ops]
+
+
+# ---- load_model_meta ----
+
+
+def _write_model(dir_path: Path, cfg: dict, *, weight_bytes: int = 4096) -> Path:
+    """Write a minimal local HF model dir: config.json + one weight shard."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    (dir_path / "model.safetensors").write_bytes(b"\0" * weight_bytes)
+    return dir_path
+
+
+_DENSE_CFG = {
+    "num_hidden_layers": 4,
+    "hidden_size": 512,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 2,
+    "intermediate_size": 1024,
+    "vocab_size": 32000,
+    "torch_dtype": "bfloat16",
+}
+
+
+def test_load_model_meta_reads_the_dense_shape(tmp_path):
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8192))
+
+    assert meta.weight_bytes == 8192
+    assert (meta.num_layers, meta.num_kv_heads, meta.hidden_size) == (4, 2, 512)
+    assert meta.head_dim == 512 // 8
+    assert meta.weight_dtype_bytes == 2.0
+    # Dense: no expert decomposition, so the whole weight set is active.
+    assert (meta.num_experts, meta.expert_weight_bytes) == (0, 0)
+    assert meta.active_weight_bytes == meta.weight_bytes
+
+
+def test_load_model_meta_prefers_the_safetensors_index_over_the_shard_sizes(tmp_path):
+    """The index records the byte-exact total; the shards on disk may be sparse."""
+    d = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=10)
+    (d / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": 123456}}), encoding="utf-8"
+    )
+    assert rc.load_model_meta(d).weight_bytes == 123456
+
+
+def test_load_model_meta_falls_back_when_the_index_is_unusable(tmp_path):
+    d = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=777)
+    (d / "model.safetensors.index.json").write_text("{not json", encoding="utf-8")
+    assert rc.load_model_meta(d).weight_bytes == 777
+
+
+def test_load_model_meta_takes_the_head_dim_the_config_states(tmp_path):
+    """An explicit head_dim wins over hidden_size / heads, which need not divide."""
+    cfg = {**_DENSE_CFG, "head_dim": 128}
+    assert rc.load_model_meta(_write_model(tmp_path / "m", cfg)).head_dim == 128
+
+
+def test_load_model_meta_treats_a_missing_kv_head_count_as_multi_head(tmp_path):
+    cfg = {k: v for k, v in _DENSE_CFG.items() if k != "num_key_value_heads"}
+    assert rc.load_model_meta(_write_model(tmp_path / "m", cfg)).num_kv_heads == 8
+
+
+def test_load_model_meta_sizes_weights_by_the_quantization_method(tmp_path):
+    """quant_method outranks torch_dtype: the checkpoint is stored quantized."""
+    cfg = {**_DENSE_CFG, "quantization_config": {"quant_method": "fp8"}}
+    assert rc.load_model_meta(_write_model(tmp_path / "m", cfg)).weight_dtype_bytes == 1.0
+
+
+def test_load_model_meta_decomposes_a_moe_checkpoint(tmp_path):
+    """Only the routed experts a token activates count toward its weight IO."""
+    cfg = {
+        **_DENSE_CFG,
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_size": 256,
+    }
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=64 * 1024**2))
+
+    assert (meta.num_experts, meta.experts_per_tok) == (8, 2)
+    assert 0 < meta.expert_weight_bytes < meta.weight_bytes
+    # Non-expert weights, plus the 2-of-8 share of the expert weights.
+    assert meta.active_weight_bytes == (
+        meta.weight_bytes - meta.expert_weight_bytes + int(2 / 8 * meta.expert_weight_bytes)
+    )
+    assert meta.active_weight_bytes < meta.weight_bytes
+
+
+def test_load_model_meta_sizes_routed_experts_at_their_own_precision(tmp_path):
+    """fp4 experts under an fp8 model: the global dtype would over-count them."""
+    cfg = {
+        **_DENSE_CFG,
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_size": 256,
+        "quantization_config": {"quant_method": "fp8"},
+        "expert_dtype": "fp4",
+    }
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=64 * 1024**2))
+
+    assert meta.weight_dtype_bytes == 1.0
+    assert meta.expert_weight_dtype_bytes == 0.5
+    assert meta.expert_weight_bytes > 0
+
+
+def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
+    """An implausible decomposition is dropped rather than published."""
+    cfg = {
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "hidden_size": 512,
+        "num_hidden_layers": 4,
+        "moe_intermediate_size": 256,
+    }
+    active, total, experts, per_tok = rc._compute_expert_decomposition(
+        cfg, weight_bytes=1024, dtype_bytes=2.0
+    )
+    assert (active, total, experts, per_tok) == (1024, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"num_experts": 0, "num_experts_per_tok": 2},
+        {"num_experts": 8, "num_experts_per_tok": 0},
+        {"num_experts": 8, "num_experts_per_tok": 2, "hidden_size": 0},
+    ],
+)
+def test_moe_decomposition_needs_a_complete_config(cfg):
+    assert rc._compute_expert_decomposition(cfg, weight_bytes=999, dtype_bytes=2.0) == (999, 0, 0, 0)
+
+
+def test_load_model_meta_declines_an_unreadable_model(tmp_path):
+    assert rc.load_model_meta("") is None
+    # A dir with a config but no weights, and one with weights but no config.
+    no_weights = tmp_path / "a"
+    no_weights.mkdir()
+    (no_weights / "config.json").write_text(json.dumps(_DENSE_CFG), encoding="utf-8")
+    assert rc.load_model_meta(no_weights) is None
+
+    no_config = tmp_path / "b"
+    no_config.mkdir()
+    (no_config / "model.safetensors").write_bytes(b"\0" * 16)
+    assert rc.load_model_meta(no_config) is None
+
+
+def test_load_model_meta_declines_a_config_that_is_not_a_mapping(tmp_path):
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    (d / "model.safetensors").write_bytes(b"\0" * 16)
+    assert rc.load_model_meta(d) is None
