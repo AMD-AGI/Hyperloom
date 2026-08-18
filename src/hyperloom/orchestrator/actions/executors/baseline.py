@@ -660,6 +660,13 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     return not (params or {}).get("quality_ref_exempt")
 
 
+# Above this cold-start delta the measured round is unlikely to have settled
+# either: the observed pathological case climbed 14,202 -> 19,374 -> 22,425
+# tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
+# another +16% into round 3.
+_COLD_START_DELTA_WARN_PCT = 25.0
+
+
 def _is_double_run_accuracy_handoff(
     result: dict[str, Any],
     salvaged: dict[str, Any] | None,
@@ -2245,6 +2252,48 @@ class BaselineExecutor:
         return False
 
     @staticmethod
+    def _record_baseline_convergence(
+        result: dict[str, Any],
+        warmup_tput: Any,
+    ) -> None:
+        """Record how steady the baseline anchor actually is.
+
+        The double-run discards round 1 by design, which leaves exactly one
+        usable measurement -- and one measurement cannot be shown to be steady.
+        That is worth stating rather than assuming: the whole gain ledger is
+        graded against this number with a 3% KEEP threshold, and a real session
+        once produced 14,202 -> 19,374 -> 22,425 tok/s from one unchanged
+        configuration. Establishing convergence needs a third round.
+
+        So the verdict is recorded (it will read ``insufficient_rounds``) along
+        with the cold-start delta, and a warning is raised only when that delta
+        is large enough to suggest round 2 had not settled either. Never raises,
+        and never fails the baseline -- halting here would stall the session.
+        """
+        try:
+            from hyperloom.orchestrator.measurement.convergence import assess_convergence
+
+            warm = float(warmup_tput or 0.0)
+            measured = float(result.get("output_throughput") or 0.0)
+            verdict = assess_convergence([warm, measured])
+            record: dict[str, Any] = verdict.to_dict()
+            if warm > 0 and measured > 0:
+                delta_pct = (measured - warm) / warm * 100.0
+                record["cold_start_delta_pct"] = round(delta_pct, 2)
+                if delta_pct > _COLD_START_DELTA_WARN_PCT:
+                    result.setdefault("nonfatal_warnings", [])
+                    result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
+                    log.warning(
+                        "baseline_executor: measured round is %.1f%% above the warm-up round "
+                        "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
+                        "anchor every later gain is graded against may be low",
+                        delta_pct, warm, measured,
+                    )
+            result["baseline_convergence"] = record
+        except Exception:  # noqa: BLE001 - observability must never break a baseline
+            log.debug("baseline convergence record failed", exc_info=True)
+
+    @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
         """Detect an eval-rooted baseline failure and capture bounded evidence.
 
@@ -3496,6 +3545,7 @@ class BaselineExecutor:
                     "baseline_double_run_discarded_first",
                 )
                 result["warmup_round_tput"] = warmup_tput
+                self._record_baseline_convergence(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the
                 # explore soft-kill anchor. Explore variants restart the server,
                 # so report round 1's full boot+client wall-clock; round 2's
