@@ -21,6 +21,8 @@ from . import machine_state as _phase_state
 from ._enablement_artifacts import snapshot_round
 from ..bus.message_bus import Message
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_server_args import merge_server_args
+from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
@@ -1774,6 +1776,8 @@ class FrameworkPhase(PhaseHandler):
                 state.enablement.accepted_config_path = accepted_cfg
             effective = res.get("enablement_effective_config")
             if isinstance(effective, dict) and effective:
+                # Replaced, not merged: this is what the KEEP bench actually
+                # launched, so it already supersedes every prior advanced round.
                 state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
@@ -1809,11 +1813,12 @@ class FrameworkPhase(PhaseHandler):
                 cfg = dict(state.enablement.accepted_config or {})
                 merged = dict(cfg.get("extra_envs") or {})
                 merged.update({str(k): str(v) for k, v in adv_envs.items()})
-                existing_args = str(cfg.get("extra_server_args") or "").strip()
-                if adv_args and adv_args not in existing_args:
-                    existing_args = (existing_args + " " + adv_args).strip()
                 cfg["extra_envs"] = merged
-                cfg["extra_server_args"] = existing_args
+                # merge is left-to-right override, so a flag this round restates
+                # wins over the same flag from an earlier round.
+                cfg["extra_server_args"] = _dedupe_extra_server_args(
+                    merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
+                )
                 cfg.setdefault("args_mode", "append")
                 state.enablement.accepted_config = cfg
             new_log = str(res.get("enablement_launch_log") or "").strip()

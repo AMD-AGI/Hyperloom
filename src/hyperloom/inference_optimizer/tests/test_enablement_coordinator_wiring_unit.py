@@ -1246,3 +1246,32 @@ async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch):
     assert cfg["extra_envs"].get("B") == "2"
     assert "--flag-a" in cfg["extra_server_args"]
     assert "--flag-b" in cfg["extra_server_args"]
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_merges_args_by_flag_not_substring(monkeypatch):
+    """A flag that is a prefix of an accumulated one must not be swallowed.
+
+    A later round restating the same flag overrides it rather than duplicating.
+    """
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    for tid, args in (
+        ("spec-1", "--enable-chunked-prefill --tp 4"),
+        ("spec-2", "--enable-chunked"),
+        ("spec-3", "--tp 8"),
+    ):
+        fake.shared_state.enablement.inflight_task_id = tid
+        fake._maybe_rearm_enablement(
+            {
+                "enablement": True,
+                "status": "advanced",
+                "patches_applied": [],
+                "extra_envs_applied": {},
+                "extra_server_args_applied": args,
+                "setup_commands_applied": [],
+            }
+        )
+    merged = fake.shared_state.enablement.accepted_config["extra_server_args"].split()
+    assert "--enable-chunked-prefill" in merged
+    assert "--enable-chunked" in merged
+    assert merged[merged.index("--tp") + 1] == "8"
