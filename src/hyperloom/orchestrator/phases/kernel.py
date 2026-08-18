@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import machine_state as _phase_state
 from ..kernel import collective_recovery as _collective_recovery
+from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
@@ -1331,11 +1332,12 @@ class KernelPhase(PhaseHandler):
 
         base = float(self.shared_state.baseline_tput or 0.0)
         if base > 0:
-            gain = (measured - base) / base * 100.0
-            self.shared_state.cumulative_gain = gain
-            self.shared_state.cumulative_gain_validated = gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+            self.shared_state.cumulative_gain = (measured - base) / base * 100.0
+            self._update_cumulative_gain_validated(
+                measured,
+                source="geak_e2e_promote",
+                ts=ts,
+            )
         self.shared_state.cumulative_gain_provenance = provenance
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
@@ -1441,6 +1443,9 @@ class KernelPhase(PhaseHandler):
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
                         route_strategy="legacy_only",
+                        # Replaying must land on the reading it originally
+                        # recorded, not count itself as a fresh one.
+                        occurrence=e2e.get("occurrence"),
                     )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
@@ -1521,6 +1526,12 @@ class KernelPhase(PhaseHandler):
                     ),
                     result=evidence,
                     route_strategy="legacy_only",
+                    # This is a second look at a kernel that was already kept,
+                    # and ``evidence`` still carries the original integrate's
+                    # identity. Without a namespace of its own, the reading
+                    # that rejects the kernel would land on the reading that
+                    # adopted it.
+                    occurrence="revalidation",
                 )
             except Exception:  # noqa: BLE001
                 log.debug(
@@ -2194,10 +2205,34 @@ class KernelPhase(PhaseHandler):
             "workspace": result.get("workspace"),
             "extra_envs": extra_envs,
         }
+        # Unlike every other promotion this figure is inferred from a
+        # micro-benchmark's speedup, never measured end to end, so it is
+        # recorded as such rather than through the e2e path.
         self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
         self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
         self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=float(self.shared_state.baseline_tput or 0.0) or None,
+                validated_tput=float(tuned_tput) if tuned_tput else None,
+                validated_gain_pct=float(self.shared_state.cumulative_gain),
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source="gemm_tuning_promote",
+                measurement_basis="derived_speedup",
+                ts=ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("record_session_validation failed", exc_info=True)
+            trace_recording_skipped(
+                "session_validation",
+                reason="caller raised before the recorder",
+                entity="gemm_tuning_promote",
+                error=exc,
+            )
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
@@ -2502,9 +2537,18 @@ class KernelPhase(PhaseHandler):
             }
             total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
             self.shared_state.cumulative_gain = total_gain
-            self.shared_state.cumulative_gain_validated = total_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
+            if baseline_tput > 0:
+                self._update_cumulative_gain_validated(
+                    running_tput,
+                    source="forge_gemm_tuning_e2e",
+                    ts=ts,
+                )
+            else:
+                self.shared_state.cumulative_gain_validated = total_gain
+                self.shared_state.cumulative_gain_validated_ts = ts
+                self.shared_state.cumulative_gain_validated_stack_len = len(
+                    self.shared_state.optimization_stack or []
+                )
             log.info(
                 "forge gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
@@ -3267,6 +3311,47 @@ class KernelPhase(PhaseHandler):
         self.shared_state.cumulative_gain_validated_stack_len = len(
             self.shared_state.optimization_stack
         )
+        # This lane settles its own verdict instead of going through the kernel
+        # integrate queue, so no kernel recorder fires for it. Without these two
+        # the change is invisible to the read model: the patch lands, the
+        # workload moves, and every point it earned reports as belonging to no
+        # step at all.
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_collective_promotion(
+                self.session_dir,
+                integration_id=integration_id,
+                kernel_id=str(collective_result.get("kernel_id") or ""),
+                baseline_tput=baseline_tput,
+                new_tput=new_tput,
+                gain_pct=incremental_gain,
+                patch_path=patch,
+                target_file=str(entry["target_file"] or ""),
+                collective_op=str(collective_result.get("collective_op") or ""),
+                world_size=collective_result.get("world_size"),
+                kernel_speedup=collective_result.get("kernel_speedup"),
+                configuration=envs,
+                ts=ts,
+            )
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=baseline_tput,
+                validated_tput=new_tput,
+                validated_gain_pct=total_gain,
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source="collective_promote",
+                measurement_basis="e2e_rebench",
+                ts=ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("record_collective_promotion failed", exc_info=True)
+            trace_recording_skipped(
+                "kernel_collective",
+                reason="caller raised before the recorder",
+                entity=integration_id,
+                error=exc,
+            )
 
     async def _run_forge_fusion(self) -> None:
         """Run autonomous kernel fusion during KERNEL entry."""
@@ -3494,12 +3579,11 @@ class KernelPhase(PhaseHandler):
         except (TypeError, ValueError):
             baseline_tput = 0.0
         if baseline_tput > 0:
-            total_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
-            self.shared_state.cumulative_gain = total_gain
-            self.shared_state.cumulative_gain_validated = total_gain
-            self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack or []
+            self.shared_state.cumulative_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
+            self._update_cumulative_gain_validated(
+                new_tput,
+                source="fusion_promote",
+                ts=ts,
             )
 
     def _current_tput_from_validated_gain(self) -> float:

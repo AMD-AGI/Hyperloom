@@ -9,182 +9,61 @@ from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_attribution,
     collect_optimization_stack,
-    collect_optimizations,
-    collect_v4_optimizations,
+    collect_recorded_optimizations,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 
 
-def test_collect_optimizations_unifies_warm_framework_and_explore():
-    state = {
-        "session_id": "s1",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 70.0,
-        "cumulative_gain_validated_stack_len": 3,
-        "optimization_stack": [
-            {
-                "action": "replay_warm_recipe",
-                "variant_name": "warm",
-                "tput": 150.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-            {
-                "action": "integrate_patch",
-                "source_phase": "FRAMEWORK_AGENT",
-                "framework_agent_authoring": True,
-                "variant_name": "framework-patch",
-                "tput": 160.0,
-                "ts": "1970-01-01T00:00:20+00:00",
-                "patch_path": "/tmp/framework.patch",
-            },
-            {
-                "action": "integrate_patch",
-                "source_phase": "EXPLORE",
-                "domain": "serving_specialist",
-                "variant_name": "explore-config",
-                "tput": 170.0,
-                "ts": "1970-01-01T00:00:30+00:00",
-                "operation_kind": "env",
-            },
-        ],
-        # Legacy cumulative ledger: the attribution collector promotes it.
-        "gain_per_stack_entry": [50.0, 60.0, 70.0],
-        "phase_history": [
-            {"to_phase": "PRELUDE", "ts_unix": 0.0},
-            {"to_phase": "FRAMEWORK_AGENT", "ts_unix": 15.0},
-            {"to_phase": "EXPLORE", "ts_unix": 25.0},
-        ],
-    }
-    warnings: list[str] = []
-    attribution = collect_attribution(state, [], [], warnings)
+def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
+    """The collective lane settles its own verdict, outside the integrate queue.
 
-    result = collect_optimizations(state, attribution, [], [], warnings)
-
-    assert [entry["source"] for entry in result["entries"]] == [
-        "warm_replay",
-        "framework_agent",
-        "explore",
-    ]
-    assert [entry["gain_pct"] for entry in result["entries"]] == [50.0, 10.0, 10.0]
-    assert result["entries"][1]["action"] == "integrate_patch"
-    assert result["entries"][1]["variant_name"] == "framework-patch"
-    assert result["entries"][1]["optimization_kind"] == "framework_patch"
-    assert result["entries"][2]["optimization_kind"] == "env"
-    summary = result["summary_by_source"]
-    assert summary["warm_replay"] == {"keeps": 1, "total_gain_pct": 50.0}
-    assert summary["framework_agent"] == {"keeps": 1, "total_gain_pct": 10.0}
-    assert summary["explore"] == {"keeps": 1, "total_gain_pct": 10.0}
-    source_breakdown = attribution["source_breakdown"]
-    assert source_breakdown["framework_pct_of_total"] == 10.0
-    assert source_breakdown["explore_pct_of_total"] == 10.0
-    assert source_breakdown["unattributed_pct_of_total"] == 0.0
-
-
-def test_fusion_after_warm_replay_is_attributed_to_kernel_agent():
-    state = {
-        "session_id": "warm-then-fusion",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 80.0,
-        "cumulative_gain_validated_stack_len": 2,
-        "optimization_stack": [
-            {
-                "action": "replay_warm_recipe",
-                "source_phase": "PRELUDE",
-                "variant_name": "warm",
-                "tput": 120.0,
-                "gain_pct": 20.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-            {
-                "action": "fusion",
-                "source_phase": "KERNEL_AGENT",
-                "variant_name": "forge_fusion",
-                "backend": "forge",
-                "tput": 180.0,
-                # The stack entry retains integrate's increment relative to
-                # warm=120; the authoritative ledger remains baseline-relative.
-                "gain_pct": 50.0,
-                "ts": "1970-01-01T00:00:20+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [20.0, 80.0],
-        "phase_history": [
-            {"to_phase": "PRELUDE", "ts_unix": 0.0},
-            {"to_phase": "KERNEL_AGENT", "ts_unix": 15.0},
-        ],
-    }
+    No kernel recorder fires for it, so without a record of its own the change
+    is invisible to the read model: the patch lands, the workload moves, and
+    every point it earned reports as belonging to no step.
+    """
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="integration-1",
+        kernel_id="k007",
+        baseline_tput=100.0,
+        new_tput=130.0,
+        gain_pct=30.0,
+        patch_path="/ws/collective.patch",
+        collective_op="all_reduce",
+        world_size=8,
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    operations = list(parts.get("operations") or [])
+    measurements = list(parts.get("measurements") or [])
+    operations.append(
+        {"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]}
+    )
+    measurements.append(
+        {"measurement_id": "m-base", "name": "throughput", "value": 100.0}
+    )
     warnings: list[str] = []
 
-    attribution = collect_attribution(state, [], [], warnings)
-    result = collect_optimizations(state, attribution, [], [], warnings)
+    result = collect_recorded_optimizations(
+        "s1",
+        operations,
+        measurements,
+        list(parts.get("adoptions") or []),
+        list(parts.get("artifacts") or []),
+        [],
+        [],
+        warnings,
+    )
 
-    source_breakdown = attribution["source_breakdown"]
-    assert source_breakdown["replay_warm_recipe_pct_of_total"] == 20.0
-    assert source_breakdown["kernel_unattributed_pct_of_total"] == 60.0
-    assert source_breakdown["unattributed_pct_of_total"] == 0.0
-    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 60.0
-    assert not any("actions: fusion" in warning for warning in warnings)
-    assert [entry["source"] for entry in result["entries"]] == [
-        "warm_replay",
-        "kernel_agent",
-    ]
-    assert result["entries"][1]["optimization_kind"] == "kernel_fusion"
-
-
-def test_collective_keep_is_attributed_to_its_own_family():
-    state = {
-        "session_id": "collective-keep",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 30.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "collective",
-                "source_phase": "KERNEL_AGENT",
-                "variant_name": "forge_collective",
-                "backend": "forge",
-                "engine": "forge_collective",
-                "provenance": "forge_collective",
-                "kernel_id": "k007",
-                "tput": 130.0,
-                "gain_pct": 30.0,
-                "patch_path": "/ws/collective.patch",
-                "target_file": "/aiter/csrc/include/custom_all_reduce.cuh",
-                "kernel_speedup": 1.4,
-                "collective_op": "all_reduce",
-                "world_size": 8,
-                "ts": "1970-01-01T00:00:20+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [30.0],
-        "phase_history": [
-            {"to_phase": "PRELUDE", "ts_unix": 0.0},
-            {"to_phase": "KERNEL_AGENT", "ts_unix": 15.0},
-        ],
-    }
-    warnings: list[str] = []
-
-    attribution = collect_attribution(state, [], [], warnings)
-    result = collect_optimizations(state, attribution, [], [], warnings)
-
-    source_breakdown = attribution["source_breakdown"]
-    assert source_breakdown["collective_pct_of_total"] == 30.0
-    assert source_breakdown["unattributed_pct_of_total"] == 0.0
-    assert source_breakdown["kernel_unattributed_pct_of_total"] == 0.0
-    assert not any("actions: collective" in warning for warning in warnings)
-    kernel_phase = attribution["phase_breakdown"]["kernel_agent"]
-    assert kernel_phase["total_gain_pct"] == 30.0
-    assert kernel_phase["by_kernel_id"] == {"k007": 30.0}
     entry = result["entries"][0]
-    assert entry["source"] == "kernel_agent"
     assert entry["optimization_kind"] == "kernel_collective"
+    assert entry["source"] == "kernel_agent"
     assert entry["backend"] == "forge"
-    assert entry["execution_mode"] == "per_kernel"
-    assert entry["kernel_id"] == "k007"
-    assert result["summary_by_kind"]["kernel_collective"]["by_backend"]["forge"] == {
-        "keeps": 1,
-        "total_gain_pct": 30.0,
-    }
+    assert entry["gain_method"] == "baseline_chain"
+    assert result["summary_by_kind"]["kernel_collective"]["total_gain_pct"] == 30.0
     assert result["validation"]["attributed_total_gain_pct"] == 30.0
+    assert result["validation"]["unattributed_gain_pct"] == 0.0
+    assert warnings == []
 
 
 def test_collective_stack_entry_keeps_campaign_evidence():
@@ -215,288 +94,6 @@ def test_collective_stack_entry_keeps_campaign_evidence():
     assert entry["validated"] is True
 
 
-def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
-    """A runnable-baseline patch is config provenance, not a Framework gain."""
-    state = {
-        "session_id": "enablement-before-warm",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 2,
-        "optimization_stack": [
-            {
-                "action": "integrate_patch",
-                "source_phase": "PRELUDE",
-                "baseline_enablement": True,
-                "attribution_eligible": False,
-                "variant_name": "make-model-runnable",
-                "tput": 100.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-            {
-                "action": "replay_warm_recipe",
-                "source_phase": "PRELUDE",
-                "variant_name": "warm",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:20+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [None, 10.0],
-        "phase_history": [
-            {"to_phase": "PRELUDE", "ts_unix": 0.0},
-        ],
-    }
-    warnings: list[str] = []
-
-    attribution = collect_attribution(state, [], [], warnings)
-    result = collect_optimizations(state, attribution, [], [], warnings)
-
-    assert attribution["gain_per_stack_entry"][1]["cum_gain_before"] == 0.0
-    assert attribution["source_breakdown"]["framework_pct_of_total"] == 0.0
-    assert attribution["source_breakdown"]["replay_warm_recipe_pct_of_total"] == 10.0
-    assert [entry["source"] for entry in result["entries"]] == ["warm_replay"]
-    assert result["entries"][0]["throughput_before"] == 100.0
-    assert result["entries"][0]["gain_pct"] == 10.0
-
-
-def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
-    state = {
-        "session_id": "unknown-integrate-owner",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "integrate_patch",
-                "source_phase": "",
-                "variant_name": "unknown-owner",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
-    }
-    warnings: list[str] = []
-
-    attribution = collect_attribution(state, [], [], warnings)
-    result = collect_optimizations(state, attribution, [], [], warnings)
-
-    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
-    assert any("reported as unattributed" in note for note in attribution["notes"])
-    assert any("reported as unattributed" in warning for warning in warnings)
-    assert result["entries"][0]["source"] == "unattributed"
-    assert result["summary_by_source"]["unattributed"] == {
-        "keeps": 1,
-        "total_gain_pct": 10.0,
-    }
-    assert result["entries"][0]["source_method"] == "unknown"
-    assert result["entries"][0]["optimization_kind"] != "kernel_patch"
-    assert result["validation"]["attributed_total_gain_pct"] == 0.0
-    assert result["validation"]["attribution_gap_pct"] == 10.0
-    assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
-    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
-
-
-def test_ownerless_integrate_patch_ignores_framework_and_explore_timeline():
-    for timeline_phase in ("EXPLORE", "FRAMEWORK_AGENT"):
-        state = {
-            "session_id": f"ownerless-{timeline_phase.lower()}",
-            "baseline_tput": 100.0,
-            "cumulative_gain_validated": 10.0,
-            "cumulative_gain_validated_stack_len": 1,
-            "optimization_stack": [
-                {
-                    "action": "integrate_patch",
-                    "variant_name": "ownerless",
-                    "tput": 110.0,
-                    "ts": "1970-01-01T00:00:10+00:00",
-                },
-            ],
-            "gain_per_stack_entry": [10.0],
-            "phase_history": [{"to_phase": timeline_phase, "ts_unix": 0.0}],
-        }
-        warnings: list[str] = []
-
-        attribution = collect_attribution(state, [], [], warnings)
-        result = collect_optimizations(state, attribution, [], [], warnings)
-
-        assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
-        assert attribution["source_breakdown"]["explore_pct_of_total"] == 0.0
-        assert attribution["source_breakdown"]["framework_pct_of_total"] == 0.0
-        assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
-        assert result["entries"][0]["source"] == "unattributed"
-        assert result["validation"]["attribution_gap_pct"] == 10.0
-        assert result["validation"]["source_breakdown"]["unattributed_gain_pct"] == 10.0
-        assert any("reported as unattributed" in warning for warning in warnings)
-
-
-def test_integrate_patch_with_only_kernel_completion_phase_is_unattributed():
-    state = {
-        "session_id": "kernel-integrate-owner",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "integrate_patch",
-                "source_phase": "KERNEL_AGENT",
-                "backend": "forge",
-                "engine": "forge",
-                "final_overlay": "/tmp/not-kernel-ownership.patch",
-                "variant_name": "unknown-owner",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-    }
-    warnings: list[str] = []
-
-    attribution = collect_attribution(state, [], [], warnings)
-    result = collect_optimizations(state, attribution, [], [], warnings)
-
-    assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 0.0
-    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
-    assert result["entries"][0]["source"] == "unattributed"
-    assert result["entries"][0]["source_method"] == "unknown"
-    assert result["entries"][0]["optimization_kind"] != "kernel_patch"
-    assert result["validation"]["attributed_total_gain_pct"] == 0.0
-    assert result["validation"]["attribution_gap_pct"] == 10.0
-    assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
-    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
-
-
-def test_integrate_patch_domain_survives_legacy_ledger_and_owns_all_breakdowns():
-    state = {
-        "session_id": "cross-phase-serving-config",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "integrate_patch",
-                "source_phase": "KERNEL_AGENT",
-                "domain": "serving_specialist",
-                "operation_kind": "param",
-                "variant_name": "fp8-per-channel-int4-quickreduce-stack",
-                "candidate_extra_server_args": "--quantization fp8_per_channel",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
-    }
-    warnings: list[str] = []
-
-    attribution = collect_attribution(state, [], [], warnings)
-    result = collect_optimizations(state, attribution, [], [], warnings)
-
-    assert attribution["source_breakdown"]["explore_pct_of_total"] == 10.0
-    assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 0.0
-    assert result["entries"][0]["source"] == "explore"
-    assert result["entries"][0]["optimization_kind"] == "param"
-    assert result["entries"][0]["kernel_id"] is None
-    assert attribution["phase_breakdown"]["explore"]["total_gain_pct"] == 10.0
-    assert attribution["phase_breakdown"]["explore"]["by_domain"] == {
-        "serving_specialist": 10.0,
-    }
-    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
-
-
-def test_framework_proposal_integrate_patch_overrides_kernel_completion_phase():
-    state = {
-        "session_id": "cross-phase-framework-config",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "integrate_patch",
-                "source_phase": "KERNEL_AGENT",
-                "framework_agent_authoring": True,
-                "provenance": "specialist:serving_specialist",
-                "domain": "serving_specialist",
-                "operation_kind": "param",
-                "variant_name": "fp8-per-channel-int4-quickreduce-stack",
-                "candidate_extra_server_args": "--quantization fp8_per_channel",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-    }
-
-    attribution = collect_attribution(state, [], [], [])
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
-    assert result["entries"][0]["source"] == "framework_agent"
-    assert result["entries"][0]["optimization_kind"] == "serving_config"
-
-
-def test_direct_framework_action_ignores_delayed_completion_phase():
-    state = {
-        "session_id": "cross-phase-direct-framework",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "framework",
-                "source_phase": "KERNEL_AGENT",
-                "variant_name": "PR:123",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-    }
-
-    attribution = collect_attribution(state, [], [], [])
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
-    assert result["entries"][0]["source"] == "framework_agent"
-    assert result["entries"][0]["source_method"] == "action_family"
-
-
-def test_framework_stack_label_is_credited_by_both_collectors():
-    """Both readers must credit the exact label the promote path stamps.
-
-    The fixture takes its label from the writer's own constant instead of
-    spelling it out, so renaming one side without the other fails here rather
-    than silently routing FRAMEWORK gain into ``unattributed``. The entry
-    deliberately carries no ``source_phase``: that field lets the optimizations
-    collector resolve the owner without consulting the action label at all, and
-    would therefore hide exactly the mismatch this test exists to catch.
-    """
-    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
-
-    state = {
-        "session_id": "framework-label-contract",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": _FRAMEWORK_STACK_ACTION,
-                "variant_name": "https://example.com/pull/1",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-    }
-
-    attribution = collect_attribution(state, [], [], [])
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
-    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 0.0
-    assert attribution["phase_breakdown"]["framework"]["total_gain_pct"] == 10.0
-    assert result["entries"][0]["source"] == "framework_agent"
-    assert result["entries"][0]["source_method"] == "action_family"
 
 
 def test_phase_breakdown_schema_declares_every_emitted_bucket():
@@ -533,320 +130,13 @@ def test_phase_breakdown_schema_declares_every_emitted_bucket():
     assert not undeclared, f"phase_breakdown buckets missing from the schema: {undeclared}"
 
 
-def test_integrate_patch_projects_source_manifest_and_changed_files():
-    state = {
-        "session_id": "integrate-patch-artifacts",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "integrate_patch",
-                "source_phase": "EXPLORE",
-                "domain": "serving_specialist",
-                "variant_name": "quantization-patch",
-                "source_manifest": (
-                    "/session/optimization_stack/src/spec-1/manifest.json"
-                ),
-                "target_files": [
-                    "vllm/model_executor/layers/quantization/foo.py",
-                    "vllm/model_executor/layers/quantization/bar.py",
-                ],
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-    }
+def test_a_session_whose_records_never_arrived_says_so(tmp_path):
+    """An optimized session with no recorder parts is a gap, not a zero.
 
-    attribution = collect_attribution(state, [], [], [])
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert result["entries"][0]["artifacts"] == [
-        {
-            "kind": "source_manifest",
-            "path": "/session/optimization_stack/src/spec-1/manifest.json",
-        },
-        {
-            "kind": "target_file",
-            "path": "vllm/model_executor/layers/quantization/foo.py",
-        },
-        {
-            "kind": "target_file",
-            "path": "vllm/model_executor/layers/quantization/bar.py",
-        },
-    ]
-
-
-def test_integrate_with_kernel_evidence_remains_kernel_agent():
-    state = {
-        "session_id": "kernel-integrate-k001",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "integrate",
-                "source_phase": "KERNEL_AGENT",
-                "kernel_id": "k001",
-                "backend": "forge",
-                "patch_path": "/runs/k001.patch",
-                "target_file": "vllm/_aiter_ops.py",
-                "variant_name": "k001",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
-    }
-
-    attribution = collect_attribution(state, [], [], [])
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert result["entries"][0]["source"] == "kernel_agent"
-    assert result["entries"][0]["source_method"] == "action_family"
-    assert result["entries"][0]["kernel_id"] == "k001"
-    assert result["entries"][0]["backend"] == "forge"
-
-
-def test_collect_optimizations_splits_kernel_backend():
-    state = {
-        "session_id": "s2",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 20.0,
-        "cumulative_gain_validated_stack_len": 2,
-        "optimization_stack": [
-            {
-                "action": "geak_e2e",
-                "variant_name": "geak",
-                "tput": 110.0,
-                "source": "geak_e2e",
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-            {
-                "action": "gemm_tuning",
-                "variant_name": "forge-gemm",
-                "tput": 120.0,
-                "backend": "forge",
-                "kernel_id": "k1",
-                "source_phase": "KERNEL_AGENT",
-                "accepted_heads": ["mla"],
-                "extra_server_args_is_invariant": True,
-                "candidate_flags": {"fast_math": True},
-                "ts": "1970-01-01T00:00:20+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0, 20.0],
-        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
-    }
-    attribution = collect_attribution(state, [], [], [])
-    geak_invocations = [
-        {
-            "attempt_id": "geak-failed",
-            "kernel_id": "k0",
-            "backend": "geak",
-            "decision": "FAILED",
-            "ts": "1970-01-01T00:00:05+00:00",
-            "duration_sec": 3.0,
-            "error_class": "CompileError",
-            "error": "compile failed",
-        }
-    ]
-    forge_invocations = [
-        {
-            "attempt_id": "forge-kept",
-            "kernel_id": "k1",
-            "backend": "forge",
-            "decision": "KEEP",
-            "ts": "1970-01-01T00:00:15+00:00",
-            "elapsed_sec": 7.5,
-        }
-    ]
-
-    result = collect_optimizations(
-        state,
-        attribution,
-        geak_invocations,
-        forge_invocations,
-        [],
-        gemm_tuning={
-            "runs": [
-                {
-                    "engine": "forge",
-                    "status": "succeeded",
-                    "decision": "KEEP",
-                    "adopted": True,
-                }
-            ]
-        },
-    )
-
-    assert result["entries"][0]["backend"] == "geak"
-    assert result["entries"][0]["execution_mode"] == "whole_pipeline"
-    assert result["entries"][1]["backend"] == "forge"
-    assert result["entries"][1]["execution_mode"] == "per_kernel"
-    assert result["entries"][1]["adopted_attempt_id"] == "forge-kept"
-    assert result["entries"][1]["source_phase"] == "KERNEL_AGENT"
-    assert result["entries"][1]["gain_method"] == "legacy_ledger_derived"
-    assert result["entries"][1]["accepted_heads"] == ["mla"]
-    assert result["entries"][1]["extra_server_args_is_invariant"] is True
-    assert result["entries"][1]["candidate_flags"] == {"fast_math": True}
-    assert result["backend_attempts"] == [
-        {
-            "attempt_id": "geak-failed",
-            "run_id": "",
-            "kernel_id": "k0",
-            "backend": "geak",
-            "decision": "FAILED",
-            "ts": "1970-01-01T00:00:05+00:00",
-            "duration_sec": 3.0,
-            "micro_speedup": None,
-            "compile_passed": None,
-            "correctness_passed": None,
-            "error_class": "CompileError",
-            "error": "compile failed",
-            "result_path": None,
-            "verification_path": None,
-            "sequence": 1,
-        },
-        {
-            "attempt_id": "forge-kept",
-            "run_id": "",
-            "kernel_id": "k1",
-            "backend": "forge",
-            "decision": "KEEP",
-            "ts": "1970-01-01T00:00:15+00:00",
-            "duration_sec": 7.5,
-            "micro_speedup": None,
-            "compile_passed": None,
-            "correctness_passed": None,
-            "error_class": None,
-            "error": None,
-            "result_path": None,
-            "verification_path": None,
-            "sequence": 1,
-        },
-    ]
-    by_backend = result["summary_by_source"]["kernel_agent"]["by_backend"]
-    assert by_backend["geak"] == {"keeps": 1, "total_gain_pct": 10.0}
-    assert by_backend["forge"] == {"keeps": 1, "total_gain_pct": 10.0}
-    assert result["summary_by_kind"]["gemm_tuning"] == {
-        "keeps": 1,
-        "total_gain_pct": 10.0,
-        "by_backend": {
-            "geak": {"keeps": 0, "total_gain_pct": 0.0},
-            "forge": {"keeps": 1, "total_gain_pct": 10.0},
-            "unattributed": {"keeps": 0, "total_gain_pct": 0.0},
-        },
-    }
-    assert result["validation"]["method"] == "reconstructed"
-    assert result["validation"]["validated_total_gain_pct"] == 20.0
-    assert result["validation"]["attribution_gap_pct"] == 0.0
-    assert result["validation"]["validated_at_stack_len"] == 2
-    assert result["gemm_tuning_runs"][0]["engine"] == "forge"
-
-
-def test_collect_optimizations_excludes_non_optimization_stack_anchors():
-    state = {
-        "session_id": "anchors",
-        "optimization_stack": [
-            {"action": "baseline", "tput": 100.0},
-            {"action": "sweep", "tput": 110.0},
-            {"action": "validate_stack", "tput": 115.0},
-            {"action": "explore", "variant_name": "kept", "tput": 120.0},
-        ],
-        "gain_per_stack_entry": [0.0, 10.0, 15.0, 20.0],
-        "cumulative_gain_validated": 20.0,
-        "cumulative_gain_validated_stack_len": 4,
-        "phase_history": [{"to_phase": "EXPLORE", "ts_unix": 0.0}],
-    }
-    attribution = collect_attribution(state, [], [], [])
-
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert [entry["name"] for entry in result["entries"]] == ["kept"]
-    assert result["validation"]["source_breakdown"]["sweep_gain_pct"] == 10.0
-
-
-def test_collect_optimizations_generates_stable_attempt_ids_and_rejects_ambiguous_keep():
-    state = {
-        "session_id": "stable",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "kernel_optimize",
-                "kernel_id": "k1",
-                "backend": "forge",
-                "tput": 110.0,
-            }
-        ],
-        "gain_per_stack_entry": [
-            {
-                "delta_pct": 10.0,
-                "cum_gain_after": 10.0,
-            }
-        ],
-    }
-    attribution = collect_attribution(state, [], [], [])
-
-    single = collect_optimizations(
-        state,
-        attribution,
-        [],
-        [{"kernel_id": "k1", "backend": "forge", "decision": "KEEP"}],
-        [],
-    )
-
-    generated = "stable:kernel-attempt:k1:forge:1"
-    assert single["backend_attempts"][0]["attempt_id"] == generated
-    assert single["entries"][0]["adopted_attempt_id"] == generated
-
-    warnings: list[str] = []
-    ambiguous = collect_optimizations(
-        state,
-        attribution,
-        [],
-        [
-            {
-                "attempt_id": "keep-1",
-                "kernel_id": "k1",
-                "backend": "forge",
-                "decision": "KEEP",
-            },
-            {
-                "attempt_id": "keep-2",
-                "kernel_id": "k1",
-                "backend": "forge",
-                "decision": "KEEP",
-            },
-        ],
-        warnings,
-    )
-
-    assert ambiguous["entries"][0]["adopted_attempt_id"] is None
-    assert any("multiple KEEP attempts" in warning for warning in warnings)
-
-
-def test_collect_optimizations_keeps_unknown_source_honest():
-    state = {
-        "session_id": "legacy",
-        "optimization_stack": [{"action": "integrate_patch", "tput": 10.0}],
-        "gain_per_stack_entry": [3.0],
-        "cumulative_gain_validated_stack_len": 1,
-    }
-    attribution = collect_attribution(state, [], [], [])
-
-    result = collect_optimizations(state, attribution, [], [], [])
-
-    assert result["entries"][0]["source"] == "unattributed"
-    assert result["entries"][0]["source_method"] == "unknown"
-    assert result["summary_by_source"]["unattributed"]["keeps"] == 1
-
-
-def test_exporter_emits_canonical_optimizations(tmp_path):
+    Rebuilding the section from ``state.json`` made a run whose fragments went
+    missing look exactly like a run that adopted nothing. The stack in
+    ``state.json`` is read only to tell those two apart.
+    """
     state = {
         "session_id": "export",
         "baseline_tput": 100.0,
@@ -861,36 +151,23 @@ def test_exporter_emits_canonical_optimizations(tmp_path):
             }
         ],
         "gain_per_stack_entry": [10.0],
-        "gemm_tuning_attempts": [
-            {
-                "engine": "geak",
-                "status": "failed",
-                "decision": "FAILED",
-                "duration_sec": 4.5,
-                "error_class": "TuningError",
-                "error": "no valid candidate",
-                "parameters": {"libtype": "ck"},
-                "candidates": [{"name": "candidate-1", "status": "eliminated"}],
-            }
-        ],
     }
     (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
     (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
 
     result = exporter.build(tmp_path)
+    optimizations = result["optimizations"]
 
     assert result["schema_version"] == "hyperloom.session_breakdown.v5.0"
-    assert result["optimizations"]["schema_version"] == 2
-    assert result["optimizations"]["entries"][0]["source"] == "warm_replay"
-    assert result["optimizations"]["validation"]["validated_total_gain_pct"] == 10.0
-    assert result["optimizations"]["gemm_tuning_runs"][0]["duration_sec"] == 4.5
-    assert result["optimizations"]["gemm_tuning_runs"][0]["error_class"] == "TuningError"
-    assert result["optimizations"]["gemm_tuning_runs"][0]["parameters"] == {
-        "libtype": "ck"
-    }
-    assert result["optimizations"]["gemm_tuning_runs"][0]["candidates"] == [
-        {"name": "candidate-1", "status": "eliminated"}
-    ]
+    assert optimizations["schema_version"] == 5
+    assert optimizations["source_of_truth"] == "recorder"
+    assert optimizations["available"] is False
+    assert optimizations["entries"] == []
+    assert optimizations["attempts"] == []
+    assert any(
+        "state.json carries 1 adopted optimization" in warning
+        for warning in result["warnings"]
+    )
     assert "optimization_stack" not in result
     assert "attribution" not in result
     assert "geak_invocations" not in result
@@ -899,57 +176,1137 @@ def test_exporter_emits_canonical_optimizations(tmp_path):
     assert "gemm_tuning" not in result
 
 
-def test_v4_optimizations_derive_from_validated_adoptions():
-    run = {"session_id": "v4"}
-    operations = [
-        {
-            "operation_id": "op1",
-            "kind": "kernel_optimization",
-            "name": "k1",
-            "phase": "KERNEL_AGENT",
-            "strategy": "kernel_agent_forge",
-            "subject": {"kind": "kernel", "name": "k1"},
-        }
-    ]
-    measurements = [
-        {
-            "measurement_id": "m1",
-            "name": "final_throughput",
-            "value": 125.0,
-        }
-    ]
-    adoptions = [
-        {
-            "adoption_id": "a1",
-            "operation_id": "op1",
-            "decision": "KEEP",
-            "validated": True,
-            "gain_pct": 25.0,
-            "measurement_ids": ["m1"],
-            "artifact_ids": ["p1"],
-            "subject": {"kind": "kernel", "name": "k1"},
-        }
-    ]
-    artifacts = [
-        {
-            "artifact_id": "p1",
-            "kind": "patch",
-            "path": "/tmp/k1.patch",
-        }
-    ]
+def test_the_key_that_says_records_are_missing_is_there_when_they_are_not(tmp_path):
+    """``available`` has to answer on both paths to be worth asking.
 
-    result = collect_v4_optimizations(
-        run,
-        operations,
-        measurements,
-        adoptions,
-        artifacts,
+    Distinguishing a session whose records never landed from one that adopted
+    nothing is what this section is for, and a consumer cannot make that call
+    against a key that only appears when the answer is no.
+    """
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="integration-1",
+        kernel_id="k007",
+        baseline_tput=100.0,
+        new_tput=130.0,
+        gain_pct=30.0,
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+
+    result = collect_recorded_optimizations(
+        "s1",
+        list(parts.get("operations") or []),
+        list(parts.get("measurements") or []),
+        list(parts.get("adoptions") or []),
+        list(parts.get("artifacts") or []),
+        [],
+        [],
         [],
     )
 
+    assert result["available"] is True
+    assert result["source_of_truth"] == "recorder"
+    assert "unavailable_reason" not in result
+
+
+def test_a_session_that_adopted_nothing_is_not_reported_as_a_gap(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps({"session_id": "quiet", "baseline_tput": 100.0}),
+        encoding="utf-8",
+    )
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+
+    result = exporter.build(tmp_path)
+
+    assert result["optimizations"]["available"] is False
+    assert not any(
+        "state.json carries" in warning for warning in result["warnings"]
+    )
+
+
+def _recorded_fixture():
+    """One kept kernel patch, one rejected kernel patch, one kept enablement."""
+    operations = [
+        {
+            "operation_id": "op-k001",
+            "kind": "kernel_optimization",
+            "name": "k001",
+            "agent": "kernel_agent",
+            "producer": "kernel-agent",
+            "phase": "KERNEL_AGENT",
+            "strategy": "forge",
+            "status": "succeeded",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "subject": {"subject_type": "kernel", "name": "k001"},
+            "measurement_refs": ["m-k001-after"],
+            "artifact_refs": ["art-k001"],
+            "attempts": [
+                {
+                    "attempt_id": "forge-1",
+                    "backend": "forge",
+                    "status": "succeeded",
+                    "started_at": "2026-01-01T00:10:00+00:00",
+                    "ended_at": "2026-01-01T00:20:00+00:00",
+                    "outputs": {"compile_passed": True, "correctness_passed": True},
+                }
+            ],
+        },
+        {
+            "operation_id": "op-k002",
+            "kind": "kernel_optimization",
+            "name": "k002",
+            "agent": "kernel_agent",
+            "producer": "kernel-agent",
+            "phase": "KERNEL_AGENT",
+            "strategy": "forge",
+            "status": "needs_review",
+            "started_at": "2026-01-01T02:00:00+00:00",
+            "ended_at": "2026-01-01T03:00:00+00:00",
+            "subject": {"subject_type": "kernel", "name": "k002"},
+            "measurement_refs": ["m-k002-after", "m-k002-gain"],
+            "gates": [
+                {
+                    "kind": "keep_threshold",
+                    "name": "keep_threshold",
+                    "status": "failed",
+                    "decision": "deny",
+                    "reason": "throughput delta +0.55% < keep_threshold 3.00%",
+                    "inputs": {"keep_threshold_pct": 3.0},
+                }
+            ],
+            "decisions": [
+                {
+                    "verdict": "REJECTED",
+                    "reason": "throughput delta +0.55% < keep_threshold 3.00%",
+                }
+            ],
+        },
+        {
+            "operation_id": "op-enable",
+            "kind": "integrate_patch",
+            "name": "integrate_patch",
+            "agent": "framework_agent",
+            "producer": "coordinator",
+            "phase": "KERNEL_AGENT",
+            "status": "succeeded",
+            "started_at": "2026-01-01T04:00:00+00:00",
+            "ended_at": "2026-01-01T05:00:00+00:00",
+            "subject": {"subject_type": "integrate_patch", "name": "prelude"},
+        },
+    ]
+    measurements = [
+        {"measurement_id": "m-k001-after", "name": "final_throughput", "value": 125.0},
+        {"measurement_id": "m-k002-after", "name": "final_throughput", "value": 100.55},
+        {"measurement_id": "m-k002-gain", "name": "e2e_gain_pct", "value": 0.55},
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k001",
+            "operation_id": "op-k001",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "attribution_eligible": True,
+            "gain_pct": 25.0,
+            "reason": "integrate_e2e_passed",
+            "adopted_at": "2026-01-01T01:00:00+00:00",
+            "measurement_ids": ["m-k001-after"],
+        },
+        {
+            "adoption_id": "ad-enable",
+            "operation_id": "op-enable",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "framework_agent",
+            "attribution_eligible": False,
+            "gain_pct": 0.4,
+            "reason": "enablement patch applied before baseline",
+            "adopted_at": "2026-01-01T05:00:00+00:00",
+        },
+    ]
+    artifacts = [
+        {"artifact_id": "art-k001", "kind": "patch", "path": "/tmp/k001.patch"},
+    ]
+    return operations, measurements, adoptions, artifacts
+
+
+def test_recorded_optimizations_keep_rejected_attempts_with_their_reason():
+    operations, measurements, adoptions, artifacts = _recorded_fixture()
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, artifacts, [], [], warnings
+    )
+
+    assert result["source_of_truth"] == "recorder"
+    rejected = next(row for row in result["attempts"] if row["name"] == "k002")
+    assert rejected["adopted"] is False
+    assert rejected["agent"] == "kernel_agent"
+    assert rejected["decision"] == "REJECTED"
+    assert rejected["local_gain_pct"] == 0.55
+    assert rejected["throughput_after"] == 100.55
+    assert rejected["keep_threshold_pct"] == 3.0
+    assert "keep_threshold 3.00%" in rejected["decision_reason"]
+
+
+def test_recorded_optimizations_bucket_attempts_by_recorded_agent():
+    operations, measurements, adoptions, artifacts = _recorded_fixture()
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, artifacts, [], [], []
+    )
+
+    by_agent = result["summary_by_agent"]
+    assert by_agent["kernel_agent"]["attempts"] == 2
+    assert by_agent["kernel_agent"]["keeps"] == 1
+    assert by_agent["kernel_agent"]["reverts"] == 1
+    assert by_agent["kernel_agent"]["attributable_gain_pct"] == 25.0
+    # The enablement patch is a real adoption that must never be sold as gain.
+    assert by_agent["framework_agent"]["keeps"] == 1
+    assert by_agent["framework_agent"]["non_attributable_keeps"] == 1
+    assert by_agent["framework_agent"]["attributable_gain_pct"] == 0.0
+    # Every attempt is owned by whoever recorded it, never inferred.
+    assert {row["agent"] for row in result["attempts"]} == {
+        "kernel_agent",
+        "framework_agent",
+    }
+
+
+def test_recorded_optimizations_exclude_ineligible_keeps_from_entries():
+    operations, measurements, adoptions, artifacts = _recorded_fixture()
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, artifacts, [], [], []
+    )
+
+    assert [entry["name"] for entry in result["entries"]] == ["k001"]
+    assert result["entries"][0]["source_method"] == "recorded"
+    assert result["validation"]["validated_total_gain_pct"] == 25.0
+    assert result["validation"]["attempt_count"] == 3
+    assert result["validation"]["non_attributable_keep_count"] == 1
+
+
+def test_entries_are_a_gain_ledger_that_points_back_at_its_attempt():
+    """``entries`` must not restate what its attempt already says.
+
+    Descriptive detail lives on the attempt and is reached through
+    ``adopted_attempt_id``. A field present in both places has to carry the
+    same value in both, so that reading either one gives the same answer.
+    """
+    operations, measurements, adoptions, artifacts = _recorded_fixture()
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, artifacts, [], [], []
+    )
+
     entry = result["entries"][0]
-    assert entry["source"] == "kernel_agent"
-    assert entry["backend"] == "forge"
-    assert entry["kernel_id"] == "k1"
-    assert entry["artifacts"] == [{"kind": "patch", "path": "/tmp/k1.patch"}]
+    attempt = next(
+        row
+        for row in result["attempts"]
+        if row["attempt_id"] == entry["adopted_attempt_id"]
+    )
+    for restated in (
+        "kernel_id",
+        "source_phase",
+        "keep_threshold_pct",
+        "decision_reason",
+        "artifacts",
+        "throughput_before",
+    ):
+        assert restated not in entry
+    for shared in ("name", "backend", "adoption_id", "throughput_after", "local_gain_pct"):
+        assert entry[shared] == attempt[shared]
+
+
+def test_attempt_gain_is_never_named_like_the_baseline_relative_one():
+    """The two gains are different numbers and must not share a field name."""
+    operations, measurements, adoptions, artifacts = _recorded_fixture()
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, artifacts, [], [], []
+    )
+
+    for attempt in result["attempts"]:
+        assert "gain_pct" not in attempt
+        assert "local_gain_pct" in attempt
+
+
+def test_recorded_optimizations_report_gain_against_the_session_baseline():
+    """Two adoptions from the gemma session, with its real measured numbers.
+
+    Each executor measures against whatever it started from, so the two local
+    gains (7.09% and 10.95%) cannot simply be added. Reported gain is measured
+    against the session baseline, which is itself a recorded measurement.
+    """
+    operations = [
+        {
+            "operation_id": "op-baseline",
+            "kind": "composite",
+            "name": "baseline",
+            "agent": "coordinator",
+            "measurement_refs": ["m-baseline"],
+        },
+        {
+            "operation_id": "op-gemm",
+            "kind": "kernel_optimization",
+            "name": "gemm_tune_vllm_moe_triton",
+            "agent": "kernel_agent",
+            "ended_at": "2026-08-08T06:56:21+00:00",
+            "subject": {"subject_type": "kernel", "name": "gemm_tune_vllm_moe_triton"},
+        },
+        {
+            "operation_id": "op-patch",
+            "kind": "integrate_patch",
+            "name": "integrate_patch",
+            "agent": "framework_agent",
+            "ended_at": "2026-08-09T04:22:15+00:00",
+        },
+    ]
+    measurements = [
+        {"measurement_id": "m-baseline", "name": "throughput", "value": 4726.9446478},
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-gemm",
+            "operation_id": "op-gemm",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "gain_pct": 7.0904327726706935,
+            # An earlier PRELUDE patch had already moved the workload off the
+            # baseline before this kernel started, which is why the kernel's
+            # own starting point is not 4726.94.
+            "throughput_before": 4744.5975753,
+            "throughput_after": 5081.0100767,
+            "adopted_at": "2026-08-08T06:56:21+00:00",
+        },
+        {
+            "adoption_id": "ad-patch",
+            "operation_id": "op-patch",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "framework_agent",
+            "gain_pct": 10.949641325767333,
+            "throughput_before": 5081.0100767,
+            "throughput_after": 5637.3624559,
+            "adopted_at": "2026-08-09T04:22:15+00:00",
+        },
+    ]
+
+    warnings: list[str] = []
+    result = collect_recorded_optimizations(
+        "gemma", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    first, second = result["entries"]
+    assert first["gain_method"] == "baseline_chain"
+    assert first["gain_pct"] == 7.116912
+    assert first["local_gain_pct"] == 7.090433
+    assert second["gain_pct"] == 11.769809
+    assert second["local_gain_pct"] == 10.949641
+    assert second["cumulative_gain_pct"] == 19.260175
+    # Per-agent totals add up to what the attempts claim, not to the session's
+    # end-to-end move; the difference is stated instead of being handed to the
+    # kernel that happened to run next.
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 7.116912
+    assert (
+        result["summary_by_agent"]["framework_agent"]["attributable_gain_pct"] == 11.769809
+    )
+    validation = result["validation"]
+    assert validation["validated_total_gain_pct"] == 19.260175
+    assert validation["attributed_total_gain_pct"] == 18.886722
+    assert validation["unattributed_gain_pct"] == 0.373453
+    assert validation["attribution_gap_pct"] == 0.373453
+    # The audit identity that has to survive rounding: what the session moved
+    # is what the attempts claim plus what nobody claims.
+    assert (
+        validation["attributed_total_gain_pct"] + validation["unattributed_gain_pct"]
+        == validation["validated_total_gain_pct"]
+    )
+    assert any("belongs to no attempt" in warning for warning in warnings)
+
+
+def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
+    """The 0.37pp that started the leaderboard argument, in isolation.
+
+    A patch moves the workload off the baseline and is never adopted. The
+    kernel that runs next must report what it itself added, not what it
+    inherited.
+    """
+    operations = [
+        {
+            "operation_id": "op-baseline",
+            "kind": "composite",
+            "name": "baseline",
+            "measurement_refs": ["m-baseline"],
+        },
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-baseline", "name": "throughput", "value": 1000.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "throughput_before": 1100.0,
+            "throughput_after": 1210.0,
+        }
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    entry = result["entries"][0]
+    # It started at 1100 and left at 1210, so it added 11pp of the baseline —
+    # not the 21pp it would inherit by being measured from the baseline.
+    assert entry["gain_pct"] == 11.0
+    assert entry["cumulative_gain_pct"] == 21.0
+    assert result["validation"]["unattributed_gain_pct"] == 10.0
+    assert any("belongs to no attempt" in warning for warning in warnings)
+
+
+def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
+    """A step with no finishing throughput used to be paid for twice.
+
+    Its own figure went into the total, and then the next step's head start —
+    which is that same figure — was booked again as drift. The percentage is
+    measured against where the step started, so the missing reading can be put
+    back and the chain carried on.
+    """
+    operations = [
+        {
+            "operation_id": "op-baseline",
+            "kind": "composite",
+            "name": "baseline",
+            "measurement_refs": ["m-baseline"],
+        },
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "operation_id": "op-gemm",
+            "kind": "gemm_tuning",
+            "name": "gemm",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+        {
+            "operation_id": "op-k2",
+            "kind": "kernel_optimization",
+            "name": "k2",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T03:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-baseline", "name": "throughput", "value": 1000.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "throughput_before": 1000.0,
+            "throughput_after": 1100.0,
+        },
+        # A GEMM adoption carries the speedup it was decided on and no
+        # throughput at all.
+        {
+            "adoption_id": "ad-gemm",
+            "operation_id": "op-gemm",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 5.0,
+        },
+        {
+            "adoption_id": "ad-k2",
+            "operation_id": "op-k2",
+            "decision": "KEEP",
+            "validated": True,
+            "throughput_before": 1155.0,
+            "throughput_after": 1250.0,
+        },
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    first, middle, last = result["entries"]
+    assert first["gain_pct"] == 10.0
+    # 5% of the 1100 it started from is 5.5 points of the 1000 baseline, not 5.
+    assert middle["gain_method"] == "local_gain_projected"
+    assert middle["gain_pct"] == 5.5
+    assert middle["chain_continuous"] is False
+    assert last["gain_pct"] == 9.5
+    # The session moved 1000 -> 1250. Booking the middle step's effect once
+    # gives exactly that; booking it again as the last step's drift gave 30.
+    assert last["cumulative_gain_pct"] == 25.0
+    assert result["validation"]["unattributed_gain_pct"] == 0.0
+    assert any("recorded no finishing throughput" in warning for warning in warnings)
+
+
+def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
+    """A total summed from the ledger can never be found to disagree with it.
+
+    The run promotes an end-to-end figure of its own when it validates. That
+    figure is the one the section reports, and the ledger's sum is kept beside
+    it so the two can be seen to part company.
+    """
+    operations = [
+        {
+            "operation_id": "op-baseline",
+            "kind": "composite",
+            "name": "baseline",
+            "measurement_refs": ["m-baseline"],
+        },
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "operation_id": "op-validated",
+            "kind": "session_validation",
+            "name": "cumulative_gain_validated",
+            "ended_at": "2026-01-01T01:05:00+00:00",
+            "outputs": {
+                "validated_at_stack_len": 1,
+                "source": "integrate_patch",
+                "measurement_basis": "e2e_rebench",
+                "validated_gain_pct": 14.0,
+            },
+        },
+    ]
+    measurements = [{"measurement_id": "m-baseline", "name": "throughput", "value": 1000.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "throughput_before": 1000.0,
+            "throughput_after": 1100.0,
+        }
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    validation = result["validation"]
+    assert validation["method"] == "recorded_session_validation"
+    assert validation["validated_total_gain_pct"] == 14.0
+    assert validation["ledger_total_gain_pct"] == 10.0
+    assert validation["reconciliation_gap_pct"] == 4.0
+    assert validation["validation_basis"] == "e2e_rebench"
+    assert validation["validation_source"] == "integrate_patch"
+    # The session validation is not an attempt and must not become a ledger row.
+    assert len(result["entries"]) == 1
+    assert any("but the run promoted" in warning for warning in warnings)
+
+
+def test_each_promotion_leaves_its_own_checkpoint(tmp_path):
+    """Two checkpoints that measure the same number are still two checkpoints.
+
+    Keying on the value would collapse them, which is the trap an earlier fix
+    already had to dig the measurement ids out of.
+    """
+    for stack_len, ts in ((1, "2026-01-01T01:00:00+00:00"), (2, "2026-01-01T02:00:00+00:00")):
+        instrument.record_session_validation(
+            tmp_path,
+            baseline_tput=1000.0,
+            validated_tput=1100.0,
+            validated_gain_pct=10.0,
+            stack_len=stack_len,
+            source="integrate_patch",
+            measurement_basis="e2e_rebench",
+            ts=ts,
+        )
+
+    operations = [
+        row
+        for row in assemble_parts(tmp_path).get("operations") or []
+        if row.get("kind") == "session_validation"
+    ]
+
+    assert len(operations) == 2
+    # The newest checkpoint is the one the export reports.
+    result = collect_recorded_optimizations("s1", operations, [], [], [], [], [], [])
+    assert result["validation"]["validated_at_stack_len"] == 2
+
+
+def test_a_session_with_no_promoted_figure_falls_back_to_its_own_sum():
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 5.0,
+        }
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, [], adoptions, [], [], [], warnings
+    )
+
+    validation = result["validation"]
+    assert validation["method"] == "ledger_sum"
+    assert validation["validated_total_gain_pct"] == 5.0
+    assert validation["reconciliation_gap_pct"] is None
+
+
+def test_a_keep_no_accuracy_gate_ruled_on_is_counted_as_such():
+    operations = [
+        {
+            "operation_id": "op-fa",
+            "kind": "framework_agent",
+            "name": "framework_agent",
+            "agent": "framework_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-fa",
+            "operation_id": "op-fa",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 3.0,
+            "validation_basis": "keep_verdict_unscored",
+        }
+    ]
+
+    result = collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], [])
+
+    assert result["attempts"][0]["validation_basis"] == "keep_verdict_unscored"
+    assert result["validation"]["unscored_keep_count"] == 1
+
+
+def test_both_sides_of_the_record_name_a_patch_author_the_same_way():
+    """The rule used to exist twice, and a copy that drifts moves gain.
+
+    The write side stamps an owner when the patch lands; the read side has to
+    name one for sessions recorded before it did. They answer with the same
+    function or they eventually answer differently.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder.instrument import _resolve_agent
+
+    cases = [
+        ({"framework_agent_authoring": True, "source_phase": "KERNEL_AGENT"}, "framework_agent"),
+        ({"provenance": "specialist:latency", "source_phase": "KERNEL_AGENT"}, "explore"),
+        ({"domain": "attention"}, "explore"),
+        ({"source_phase": "KERNEL_AGENT"}, "kernel_agent"),
+        ({}, "unattributed"),
+    ]
+    for evidence, expected in cases:
+        write_side = _resolve_agent("integrate_patch", result=evidence)
+        read_side = collect_recorded_optimizations(
+            "s1",
+            [
+                {
+                    "operation_id": "op-patch",
+                    "kind": "integrate_patch",
+                    "name": "integrate_patch",
+                    "outputs": evidence,
+                    "ended_at": "2026-01-01T01:00:00+00:00",
+                }
+            ],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )["attempts"][0]["agent"]
+
+        assert write_side == expected, evidence
+        assert read_side == expected, evidence
+
+
+def test_a_value_says_which_of_its_possible_sources_it_came_from():
+    """A stated verdict and an inferred status are different claims."""
+    operations = [
+        {
+            "operation_id": "op-a",
+            "kind": "kernel_optimization",
+            "name": "stated",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "operation_id": "op-b",
+            "kind": "kernel_optimization",
+            "name": "inferred",
+            "agent": "kernel_agent",
+            "status": "succeeded",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-a",
+            "operation_id": "op-a",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 4.0,
+            "throughput_before": 1000.0,
+            "throughput_after": 1040.0,
+        }
+    ]
+
+    attempts = collect_recorded_optimizations(
+        "s1", operations, [], adoptions, [], [], [], []
+    )["attempts"]
+    stated = next(row for row in attempts if row["name"] == "stated")
+    inferred = next(row for row in attempts if row["name"] == "inferred")
+
+    assert stated["decision_source"] == "adoption.decision"
+    assert stated["local_gain_source"] == "adoption.gain_pct"
+    assert stated["throughput_before_source"] == "adoption"
+    assert stated["throughput_after_source"] == "adoption"
+    assert inferred["decision_source"] == "operation.status"
+    assert inferred["local_gain_source"] == ""
+    assert inferred["throughput_before_source"] == ""
+    assert inferred["throughput_after_source"] == ""
+
+
+def test_an_adoption_whose_operation_was_never_recorded_is_reported():
+    """The ledger walks operations, so this adoption's gain simply vanishes."""
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+        },
+        {
+            "adoption_id": "ad-ghost",
+            "operation_id": "op-never-written",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 4.0,
+        },
+    ]
+    warnings: list[str] = []
+
+    collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], warnings)
+
+    assert any("never recorded" in warning and "ad-ghost" in warning for warning in warnings)
+
+
+def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_path):
+    """A singleton fragment is named for its producer, so two mean two claims.
+
+    Only the newest survives, and the loser does not merge into it: its whole
+    payload goes. Nothing downstream can see that it was ever written.
+    """
+    for producer, ts in (("coordinator", "2026-01-01T01:00:00+00:00"), ("kernel-agent", "2026-01-01T02:00:00+00:00")):
+        instrument.record_run_snapshot(
+            tmp_path,
+            payload={"run_id": "r1", "recorded_by": producer, "ts": ts},
+            producer=producer,
+        )
+    warnings: list[str] = []
+
+    assemble_parts(tmp_path, warnings=warnings)
+
+    assert any(
+        "more than one producer" in warning and "dropped whole" in warning
+        for warning in warnings
+    )
+
+
+def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_path):
+    """Merging partial updates is the point; disagreeing on a field is not.
+
+    Repeated updates from one producer merge into its own fragment long before
+    assembly, so two payloads for one id are two producers, and the later
+    timestamp decides the value with nothing said about the one it replaced.
+    """
+    for producer, decision in (("coordinator", "KEEP"), ("kernel-agent", "REVERT")):
+        instrument.record_adoption(
+            tmp_path,
+            adoption_id="ad-1",
+            operation_id="op-1",
+            decision=decision,
+            producer=producer,
+        )
+    warnings: list[str] = []
+
+    assemble_parts(tmp_path, warnings=warnings)
+
+    assert any(
+        "conflicting values" in warning and "ad-1.decision" in warning
+        for warning in warnings
+    )
+
+
+def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
+    """The mirror of an orphan adoption, and the one that moves a number.
+
+    The step is skipped by the gain walk, but the workload still moved, so the
+    next adopted step starts higher than the ledger expects and the difference
+    is booked as gain belonging to nobody. Unreported, that reads as ordinary
+    drift rather than as a record that never arrived.
+    """
+    operations = [
+        {
+            "operation_id": "op-base",
+            "kind": "baseline",
+            "measurement_refs": ["m-base"],
+        },
+        {
+            "operation_id": "op-lost",
+            "kind": "kernel_optimization",
+            "name": "k-lost",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "outputs": {"integrated": True, "decision": "KEEP"},
+        },
+        {
+            "operation_id": "op-next",
+            "kind": "kernel_optimization",
+            "name": "k-next",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-base", "name": "throughput", "value": 100.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-next",
+            "operation_id": "op-next",
+            "decision": "KEEP",
+            "validated": True,
+            "throughput_before": 110.0,
+            "throughput_after": 120.0,
+        },
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], warnings
+    )
+
+    validation = result["validation"]
+    assert validation["unclaimed_integration_count"] == 1
+    # The 10pp the lost step earned is sitting in the unattributed bucket.
+    assert validation["unattributed_gain_pct"] == 10.0
+    assert any(
+        "no adoption crediting it" in warning and "op-lost" in warning
+        for warning in warnings
+    )
+
+
+def test_a_threshold_says_which_of_its_four_homes_it_came_from():
+    """A bar the gate ruled against and one read off a config are not the same."""
+    operations = [
+        {
+            "operation_id": "op-gated",
+            "kind": "kernel_optimization",
+            "name": "gated",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "gates": [{"inputs": {"keep_threshold_pct": 3.0}}],
+            "outputs": {"keep_threshold_pct": 1.0},
+        },
+        {
+            "operation_id": "op-configured",
+            "kind": "kernel_optimization",
+            "name": "configured",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+            "outputs": {"keep_threshold_pct": 1.0},
+        },
+    ]
+
+    attempts = collect_recorded_optimizations(
+        "s1", operations, [], [], [], [], [], []
+    )["attempts"]
+    gated = next(row for row in attempts if row["name"] == "gated")
+    configured = next(row for row in attempts if row["name"] == "configured")
+
+    assert (gated["keep_threshold_pct"], gated["keep_threshold_source"]) == (3.0, "gate.inputs")
+    assert (configured["keep_threshold_pct"], configured["keep_threshold_source"]) == (1.0, "outputs")
+
+
+def test_two_names_for_one_reading_do_not_quietly_pick_one():
+    """Both names fill the same role, and they were taken by different producers."""
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+            "measurement_refs": ["m-final", "m-plain"],
+        },
+    ]
+    measurements = [
+        {
+            "measurement_id": "m-final",
+            "name": "final_throughput",
+            "value": 120.0,
+            "measured_at": "2026-01-01T00:30:00+00:00",
+        },
+        {
+            "measurement_id": "m-plain",
+            "name": "throughput",
+            "value": 118.0,
+            "measured_at": "2026-01-01T00:40:00+00:00",
+        },
+    ]
+    warnings: list[str] = []
+
+    attempts = collect_recorded_optimizations(
+        "s1", operations, measurements, [], [], [], [], warnings
+    )["attempts"]
+
+    assert attempts[0]["throughput_after"] == 120.0
+    assert attempts[0]["throughput_after_source"] == "measurement.final_throughput"
+    assert attempts[0]["alias_conflicts"] == ["throughput_after:final_throughput/throughput"]
+    assert any("the first read won" in warning for warning in warnings)
+
+
+def test_an_adoption_on_a_kind_the_ledger_ignores_is_reported():
+    """A kind missing from the attempt table is how a new optimizer goes uncounted."""
+    operations = [
+        {
+            "operation_id": "op-profile",
+            "kind": "composite",
+            "name": "profile",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-profile",
+            "operation_id": "op-profile",
+            "decision": "KEEP",
+            "validated": True,
+            "gain_pct": 3.0,
+        },
+    ]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", operations, [], adoptions, [], [], [], warnings
+    )
+
+    assert result["entries"] == []
+    assert any(
+        "does not count as attempts" in warning and "profile" in warning
+        for warning in warnings
+    )
+
+
+def test_adoption_throughput_outranks_overwritten_measurements():
+    """A retry on the same kernel overwrites the measurements it referenced."""
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "measurement_refs": ["m-final"],
+            "ended_at": "2026-01-01T00:00:00+00:00",
+        },
+    ]
+    # What the later retry left behind, not what the adoption was decided on.
+    measurements = [{"measurement_id": "m-final", "name": "final_throughput", "value": 5100.76}]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "gain_pct": 7.09,
+            "throughput_after": 5081.01,
+        }
+    ]
+
+    result = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], []
+    )
+
+    assert result["attempts"][0]["throughput_after"] == 5081.01
+
+
+def test_an_adoption_citing_overwritten_evidence_says_so():
+    """Archives predating per-occurrence ids cannot be repaired, only labelled.
+
+    The frozen values still stand, but the readings the adoption points at were
+    written over by a later re-measure. Presenting the two side by side without
+    a word is what made this look like the numbers had been edited after the
+    fact.
+    """
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "measurement_refs": ["m-before", "m-after"],
+        },
+    ]
+    measurements = [
+        {"measurement_id": "m-before", "name": "baseline_throughput", "value": 5081.01},
+        {"measurement_id": "m-after", "name": "final_throughput", "value": 5100.76},
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "measurement_ids": ["m-before", "m-after"],
+            "throughput_before": 4744.6,
+            "throughput_after": 5081.01,
+        }
+    ]
+
+    attempt = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], []
+    )["attempts"][0]
+
+    assert attempt["measurement_source"] == "adoption_pinned_stale"
+    assert attempt["throughput_after"] == 5081.01
+
+
+def test_intact_pinned_evidence_is_not_called_stale():
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "measurement_refs": ["m-before", "m-after"],
+        },
+    ]
+    measurements = [
+        {"measurement_id": "m-before", "name": "baseline_throughput", "value": 4744.6},
+        {"measurement_id": "m-after", "name": "final_throughput", "value": 5081.01},
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "measurement_ids": ["m-before", "m-after"],
+            "throughput_before": 4744.6,
+            "throughput_after": 5081.01,
+        }
+    ]
+
+    attempt = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], []
+    )["attempts"][0]
+
+    assert attempt["measurement_source"] == "adoption_pinned"
+
+
+def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
+    """Recorded ids are unreadable by necessity, so the ordinal is added here.
+
+    An id has to be reproducible from the record being written, since several
+    producers replay their records after a resume, which rules out numbering
+    them as they arrive. The plain ordinal a reader wants is therefore assigned
+    on the way out, where every reading is in hand at once.
+    """
+    operations = [
+        {
+            "operation_id": "op-k1",
+            "kind": "kernel_optimization",
+            "name": "k1",
+            "agent": "kernel_agent",
+            "measurement_refs": ["m-after-late", "m-before", "m-after-early"],
+        },
+    ]
+    measurements = [
+        {
+            "measurement_id": "m-after-late",
+            "name": "final_throughput",
+            "value": 5100.76,
+            "measured_at": "2026-01-01T18:00:00+00:00",
+        },
+        {
+            "measurement_id": "m-before",
+            "name": "baseline_throughput",
+            "value": 4744.6,
+            "measured_at": "2026-01-01T06:00:00+00:00",
+        },
+        {
+            "measurement_id": "m-after-early",
+            "name": "final_throughput",
+            "value": 5081.01,
+            "measured_at": "2026-01-01T06:00:00+00:00",
+        },
+    ]
+    adoptions = [
+        {
+            "adoption_id": "ad-k1",
+            "operation_id": "op-k1",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "measurement_ids": ["m-before", "m-after-early", "m-after-late"],
+            "throughput_before": 4744.6,
+            "throughput_after": 5081.01,
+        }
+    ]
+
+    attempt = collect_recorded_optimizations(
+        "s1", operations, measurements, adoptions, [], [], [], []
+    )["attempts"][0]
+    numbered = {row["value"]: row for row in attempt["measurements"]}
+
+    # The reading the decision was made on is the first of its name, even
+    # though the operation happens to reference the later one first.
+    assert numbered[5081.01]["occurrence"] == 0
+    assert numbered[5100.76]["occurrence"] == 1
+    assert numbered[5081.01]["occurrences_of_name"] == 2
+    # A name measured once is numbered too, rather than left to be guessed at.
+    assert numbered[4744.6]["occurrence"] == 0
+    assert numbered[4744.6]["occurrences_of_name"] == 1
 
