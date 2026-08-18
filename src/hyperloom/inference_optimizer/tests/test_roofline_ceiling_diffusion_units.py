@@ -222,3 +222,119 @@ def test_diffusion_compute_ceiling_declines_degenerate_input(over):
     )
     kw.update(over)
     assert rc.compute_diffusion_compute_img_per_sec(**kw) == 0.0
+
+
+# ---- state-level diffusion breakdown ----
+
+
+def _xdit_state(tmp_path: Path, model_dir: str, **envs):
+    """An xDiT run state whose baseline yaml carries the denoising geometry."""
+    import yaml
+    from types import SimpleNamespace
+
+    base = {"XDIT_NUM_STEPS": "25", "XDIT_HEIGHT": "1024", "XDIT_WIDTH": "1024", "TP": "1"}
+    base.update({k: str(v) for k, v in envs.items()})
+    cfg = tmp_path / "baseline.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"benchmark": {"model": model_dir, "framework": "xdit", "envs": base}}),
+        encoding="utf-8",
+    )
+    return SimpleNamespace(
+        last_baseline={"extras": {"materialized_config": str(cfg)}},
+        gpu_type="mi300x",
+        model_path=model_dir,
+        precision="bf16",
+        framework="xdit",
+        tp=0,
+        conc=0,
+        isl=0,
+        osl=0,
+        current_best={},
+        optimization_stack=[],
+    )
+
+
+def _flux_like(tmp_path: Path) -> str:
+    """A diffusers dir with DiT geometry, a VAE, and a weight shard."""
+    root = tmp_path / "flux"
+    (root / "transformer").mkdir(parents=True)
+    (root / "transformer" / "config.json").write_text(
+        json.dumps(
+            {
+                "num_layers": 2,
+                "num_single_layers": 4,
+                "num_attention_heads": 8,
+                "attention_head_dim": 64,
+                "in_channels": 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "vae").mkdir(parents=True)
+    (root / "vae" / "config.json").write_text(
+        json.dumps({"block_out_channels": [1, 2, 3, 4], "latent_channels": 16}), encoding="utf-8"
+    )
+    (root / "config.json").write_text(json.dumps({"num_hidden_layers": 6}), encoding="utf-8")
+    (root / "model.safetensors").write_bytes(b"\0" * (4 * 1024**2))
+    return str(root)
+
+
+def test_diffusion_step_count_and_resolution_come_from_the_baseline_envs(tmp_path):
+    st = _xdit_state(tmp_path, str(tmp_path / "m"))
+    assert rc._read_diffusion_num_steps(st) == 25
+    assert rc._read_diffusion_resolution(st) == (1024, 1024)
+
+
+def test_diffusion_geometry_accepts_the_custom_workload_aliases(tmp_path):
+    """An operator-supplied diffusion workload feeds the same ceiling."""
+    import yaml
+    from types import SimpleNamespace
+
+    cfg = tmp_path / "b.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "envs": {"CUSTOM_NUM_STEPS": "30", "CUSTOM_HEIGHT": "512", "CUSTOM_WIDTH": "768"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    st = SimpleNamespace(last_baseline={"extras": {"materialized_config": str(cfg)}})
+    assert rc._read_diffusion_num_steps(st) == 30
+    assert rc._read_diffusion_resolution(st) == (512, 768)
+
+
+def test_diffusion_breakdown_binds_on_the_slower_of_its_two_ceilings(tmp_path):
+    bd = rc.compute_roofline_breakdown_from_state(_xdit_state(tmp_path, _flux_like(tmp_path)))
+
+    assert bd.peak_tok_per_sec > 0
+    assert bd.mem_tok_per_sec > 0 and bd.cmp_tok_per_sec > 0
+    assert bd.peak_tok_per_sec == pytest.approx(min(bd.mem_tok_per_sec, bd.cmp_tok_per_sec))
+    assert bd.bound_kind in {"compute", "memory"}
+
+
+def test_diffusion_breakdown_needs_a_step_count(tmp_path):
+    """Without denoising steps there is no per-image work to bound."""
+    st = _xdit_state(tmp_path, _flux_like(tmp_path), XDIT_NUM_STEPS="0")
+    assert rc.compute_roofline_breakdown_from_state(st) == rc._EMPTY_BREAKDOWN
+
+
+def test_diffusion_breakdown_degrades_to_memory_only_without_dit_geometry(tmp_path):
+    """No transformer config: the full checkpoint still bounds the step read."""
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "config.json").write_text(json.dumps({"num_hidden_layers": 4}), encoding="utf-8")
+    (root / "model.safetensors").write_bytes(b"\0" * (2 * 1024**2))
+
+    bd = rc.compute_roofline_breakdown_from_state(_xdit_state(tmp_path, str(root)))
+    assert bd.mem_tok_per_sec > 0
+    assert bd.cmp_tok_per_sec == 0.0
+    assert bd.bound_kind == "memory"
+
+
+def test_diffusion_breakdown_is_empty_without_weights_or_geometry(tmp_path):
+    empty = tmp_path / "nothing"
+    empty.mkdir()
+    assert rc.compute_roofline_breakdown_from_state(_xdit_state(tmp_path, str(empty))) == rc._EMPTY_BREAKDOWN

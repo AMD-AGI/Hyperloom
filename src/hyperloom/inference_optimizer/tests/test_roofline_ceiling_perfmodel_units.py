@@ -331,3 +331,113 @@ def test_load_model_meta_declines_a_config_that_is_not_a_mapping(tmp_path):
     (d / "config.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
     (d / "model.safetensors").write_bytes(b"\0" * 16)
     assert rc.load_model_meta(d) is None
+
+
+# ---- state-level entry points ----
+
+
+def _state(tmp_path: Path, benchmark: dict, **attrs):
+    """A run state whose baseline provenance points at a materialized yaml."""
+    import yaml
+
+    cfg = tmp_path / "baseline.yaml"
+    cfg.write_text(yaml.safe_dump({"benchmark": benchmark}), encoding="utf-8")
+    from types import SimpleNamespace
+
+    base = dict(
+        last_baseline={"extras": {"materialized_config": str(cfg)}},
+        gpu_type="mi300x",
+        model_path="",
+        precision="",
+        framework="",
+        tp=0,
+        conc=0,
+        isl=0,
+        osl=0,
+        current_best={},
+        optimization_stack=[],
+    )
+    base.update(attrs)
+    return SimpleNamespace(**base)
+
+
+def _serving_benchmark(model_dir: Path, **envs) -> dict:
+    base = {"TP": "1", "CONC": "8", "ISL": "128", "OSL": "64"}
+    base.update({k: str(v) for k, v in envs.items()})
+    return {
+        "model": str(model_dir),
+        "framework": "sglang",
+        "envs": base,
+    }
+
+
+def test_runtime_workload_prefers_the_benchmark_envs_over_state(tmp_path):
+    """The yaml is the geometry of record; state attrs only fill its gaps."""
+    st = _state(tmp_path, _serving_benchmark(tmp_path / "m"), tp=8, conc=99, isl=1, osl=2)
+    rt = rc.resolve_runtime_workload(st)
+    assert (rt.tp, rt.concurrency, rt.isl, rt.osl) == (1, 8, 128, 64)
+    assert rt.gpu_type == "mi300x"
+    assert rt.framework == "sglang"
+
+
+def test_runtime_workload_falls_back_to_state_when_the_envs_are_silent(tmp_path):
+    st = _state(tmp_path, {"model": "/m", "envs": {}}, tp=4, conc=16, isl=512, osl=32)
+    rt = rc.resolve_runtime_workload(st)
+    assert (rt.tp, rt.concurrency, rt.isl, rt.osl) == (4, 16, 512, 32)
+
+
+def test_runtime_workload_defaults_concurrency_to_one(tmp_path):
+    """Every other geometry field may be unknown; a batch of zero cannot be."""
+    rt = rc.resolve_runtime_workload(_state(tmp_path, {"envs": {}}))
+    assert rt.concurrency == 1
+    assert rt.tp == 0
+
+
+def test_runtime_workload_survives_an_unreadable_baseline_yaml(tmp_path):
+    from types import SimpleNamespace
+
+    st = SimpleNamespace(last_baseline={"extras": {"materialized_config": str(tmp_path / "gone.yaml")}})
+    assert rc.resolve_runtime_workload(st).concurrency == 1
+
+
+def test_breakdown_from_state_reports_the_decode_ceiling(tmp_path):
+    model = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8 * 1024**2)
+    bd = rc.compute_roofline_breakdown_from_state(_state(tmp_path, _serving_benchmark(model)))
+
+    assert bd.peak_tok_per_sec > 0
+    assert bd.bound_kind in {"compute", "memory"}
+    # The roofline takes the slower side, so the peak is the lower projection.
+    assert bd.peak_tok_per_sec == pytest.approx(min(bd.mem_tok_per_sec, bd.cmp_tok_per_sec))
+
+
+def test_breakdown_from_state_is_empty_when_the_model_is_unreadable(tmp_path):
+    st = _state(tmp_path, _serving_benchmark(tmp_path / "absent"))
+    assert rc.compute_roofline_breakdown_from_state(st) == rc._EMPTY_BREAKDOWN
+
+
+def test_breakdown_from_state_routes_a_diffusion_run_to_the_image_ceiling(tmp_path):
+    """xDiT is measured in images/sec, so it never reaches the token ceiling."""
+    bench = {"model": str(tmp_path / "m"), "framework": "xdit", "envs": {"TP": "1"}}
+    bd = rc.compute_roofline_breakdown_from_state(_state(tmp_path, bench))
+    # No transformer config on disk, so the diffusion arm has nothing to model.
+    assert bd == rc._EMPTY_BREAKDOWN
+
+
+def test_peak_from_state_is_the_breakdown_peak(tmp_path):
+    model = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8 * 1024**2)
+    st = _state(tmp_path, _serving_benchmark(model))
+    assert rc.compute_peak_from_state(st) == pytest.approx(
+        rc.compute_roofline_breakdown_from_state(st).peak_tok_per_sec
+    )
+
+
+def test_select_peak_and_bound_takes_the_lower_side():
+    assert rc.select_peak_and_bound(100.0, 250.0) == (100.0, "memory")
+    assert rc.select_peak_and_bound(400.0, 250.0) == (250.0, "compute")
+
+
+@pytest.mark.parametrize("mem, cmp", [(0.0, 250.0), (100.0, 0.0), (0.0, 0.0)])
+def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cmp):
+    """A zero is 'unknown', not 'infinitely slow'; it must not win the min."""
+    peak, _kind = rc.select_peak_and_bound(mem, cmp)
+    assert peak == max(mem, cmp)
