@@ -57,6 +57,7 @@ from ..actions.executors._accuracy_gate import (
     accuracy_meets_floor,
 )
 from ..knowledge.agent_kb import ExploreAgentKB, FrameworkAgentKB
+from ..kernel.roofline_snapshot import build_recipe_roofline
 
 from .coordinator import (
     _AUDIT_ACTIONS,
@@ -2101,6 +2102,12 @@ class WritebackCollaborator:
             extras_payload = dict(workload_tags or {})
             if merged_kopts:
                 extras_payload["kernel_optimizations"] = merged_kopts
+            # Where the session landed against its ceiling is worth keeping even
+            # when nothing beat the incumbent, so the roofline rides extras
+            # outside the has_validated_win gate below.
+            roofline_payload = build_recipe_roofline(getattr(ss, "roofline_snapshots", None))
+            if roofline_payload:
+                extras_payload["roofline"] = roofline_payload
 
             overrides: dict[str, Any] = {
                 "what_worked": attrs["what_worked"],

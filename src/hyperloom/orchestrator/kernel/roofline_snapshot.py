@@ -476,6 +476,128 @@ def build_roofline_comparison_from_history(
     return out
 
 
+#: Snapshot keys carried verbatim into the recipe projection. Scalars only —
+#: nested shapes (top_kernel, provenance, PerfModel) are projected separately.
+_RECIPE_SNAPSHOT_KEYS: tuple[str, ...] = (
+    "ts",
+    "snapshot_id",
+    "throughput_unit",
+    "theoretical_peak_tok_per_sec",
+    "roofline_mem_ceiling_tok_per_sec",
+    "roofline_cmp_ceiling_tok_per_sec",
+    "roofline_bound_kind",
+    "achieved_tok_per_sec",
+    "within_roofline_pct",
+    "gap_to_roofline_pct",
+    "e2e_mean_ms",
+    "roofline_ideal_ms",
+    "compute_pct",
+    "idle_pct",
+    "comm_pct",
+    "top_bottleneck",
+)
+
+#: PerfModel scalars carried into the recipe projection.
+_RECIPE_PERFMODEL_KEYS: tuple[str, ...] = (
+    "bound_kind",
+    "hbm_bw_gbps",
+    "peak_achievable_tflops",
+    "decode_tok_per_s",
+    "prefill_tok_per_s",
+    "decode_mem_tok_per_s",
+    "decode_cmp_tok_per_s",
+)
+
+#: Per-op PerfModel fields carried into the recipe projection.
+_RECIPE_PERFMODEL_OP_KEYS: tuple[str, ...] = (
+    "name",
+    "flops",
+    "bytes_moved",
+    "ai",
+    "time_s",
+    "bound",
+    "pct_time",
+)
+
+#: Cap on projected per-op rows. The breakdown is one row per op class (single
+#: digits in practice); the cap only bounds recipe growth for a pathological model.
+MAX_RECIPE_PERFMODEL_OPS: int = 64
+
+
+def _project_perfmodel_breakdown(breakdown: Any) -> dict[str, Any]:
+    """Project a ``perfmodel_breakdown`` into its recipe-storable subset.
+
+    Args:
+        breakdown: The snapshot's ``perfmodel_breakdown`` value, which is absent
+            whenever the PerfModel could not resolve the model metadata.
+
+    Returns:
+        dict[str, Any]: The projected breakdown, or ``{}`` when there is nothing
+            usable to store.
+    """
+    if not isinstance(breakdown, dict) or not breakdown:
+        return {}
+    out: dict[str, Any] = {}
+    for key in _RECIPE_PERFMODEL_KEYS:
+        val = breakdown.get(key)
+        if val is None or val == "":
+            continue
+        out[key] = val
+    ops = [op for op in (breakdown.get("ops") or []) if isinstance(op, dict)]
+    projected_ops: list[dict[str, Any]] = []
+    for op in ops[:MAX_RECIPE_PERFMODEL_OPS]:
+        row = {key: op[key] for key in _RECIPE_PERFMODEL_OP_KEYS if op.get(key) is not None}
+        if row:
+            projected_ops.append(row)
+    if projected_ops:
+        out["ops"] = projected_ops
+    if len(ops) > MAX_RECIPE_PERFMODEL_OPS:
+        out["ops_truncated_from"] = len(ops)
+    return out
+
+
+def build_recipe_roofline(snapshots: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Project the latest roofline snapshot into the shape stored on a recipe.
+
+    Follows the ``latest = snapshots[-1]`` convention shared with
+    :meth:`SharedState.current_top_bottleneck`, so the recipe records where the
+    session finished rather than where it started; the per-snapshot history stays
+    in the session's ``state.json``.
+
+    Args:
+        snapshots: The append-only ``SharedState.roofline_snapshots`` history, or
+            ``None`` when the session never ran a roofline.
+
+    Returns:
+        dict[str, Any]: The projected roofline, or ``{}`` when no snapshot
+            carries anything usable — callers omit the key entirely rather than
+            storing an empty shell over a previously recorded roofline.
+    """
+    snaps = [snap for snap in (snapshots or []) if isinstance(snap, dict)]
+    if not snaps:
+        return {}
+    latest = snaps[-1]
+    out: dict[str, Any] = {}
+    for key in _RECIPE_SNAPSHOT_KEYS:
+        val = latest.get(key)
+        if val is None or val == "":
+            continue
+        out[key] = val
+    top_kernel = latest.get("top_kernel")
+    if isinstance(top_kernel, dict) and top_kernel:
+        out["top_kernel"] = dict(top_kernel)
+    provenance = latest.get("roofline_provenance")
+    if isinstance(provenance, dict) and provenance:
+        out["roofline_provenance"] = dict(provenance)
+    breakdown = _project_perfmodel_breakdown(latest.get("perfmodel_breakdown"))
+    if breakdown:
+        out["perfmodel_breakdown"] = breakdown
+    if not out:
+        return {}
+    out["snapshot_count"] = len(snaps)
+    return out
+
+
 def _fmt_delta(val: float | None) -> str:
     """Format a signed delta cell with one decimal place.
 
