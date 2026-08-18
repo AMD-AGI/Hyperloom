@@ -696,6 +696,36 @@ def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
         assert exc.value.rule == "state_field", field_name
 
 
+def test_gate_update_state_cannot_move_the_resume_boundary(gate):
+    # resumed_ts dates the current run leg: moving it hands the previous leg's
+    # CLOSE transition back the right to speak for this one.
+    assert "resumed_ts" in CORE_STATE_FIELDS
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {"resumed_ts": "2026-01-01T00:00:00+00:00"}},
+            ),
+        )
+    assert exc.value.rule == "state_field"
+
+
+def test_gate_update_state_cannot_move_a_session_end_time(gate):
+    # stop_ts is the timestamp half of stop_reason, written by the same setter:
+    # locking only the reason lets a model post-date the session's end.
+    assert "stop_ts" in CORE_STATE_FIELDS
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {"stop_ts": "2026-01-01T00:01:00+00:00"}},
+            ),
+        )
+    assert exc.value.rule == "state_field"
+
+
 def test_core_state_fields_synced_with_robustness_envelope():
     # gate.CORE_STATE_FIELDS and the robustness
     # envelope copy must stay byte-identical. This direct assertion never skips
