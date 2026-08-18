@@ -1639,7 +1639,13 @@ def _print_recipe_kb_queue_status() -> None:
 
 
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
-_INFERENCEX_REF_DEFAULT = "a4bb43afa7fd74c1356583ed29e51421be010f0f"
+# MUST stay in lockstep with INFERENCEX_REF in assets/install.sh. These are two
+# independent clone paths -- install.sh's ensure_inferencex, and _clone_inferencex
+# below when a session starts without $INFERENCEX_PATH -- and the synthetic path
+# sources benchmark_lib.sh from whichever checkout wins. Letting them drift puts
+# two different measurement harnesses in the same fleet under one Hyperloom
+# commit, with nothing in the logs saying which one ran.
+_INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 
 
 def _inferencex_checkout_ok(path: Path | str) -> bool:
