@@ -1241,14 +1241,38 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_env_gated_patch_proceeds_to_bench_on_enablement_round(tmp_path, monkeypatch):
-    """An undeclared env gate must not block an enablement round.
+async def test_env_gated_patch_proceeds_to_bench_when_the_proposal_arms_it(tmp_path, monkeypatch):
+    """An enablement round may arm its gate through the proposal instead of the manifest.
 
-    Enablement's success criterion is runnability, not per-lever attribution.
-    Refusing a patch because it reads an undeclared env variable forces the
-    specialist to rewrite env-type fixes as source patches, which is both harder
-    and wrong in kind.  When params["enablement"] is true the gate check is
-    demoted to an auditable problem entry and the bench proceeds.
+    Only the manifest feeds ``switch_env``, so an enablement fix that sets the gate
+    in its proposal is self-consistent even with no manifest: the env is on for the
+    bench. Refusing it would force env-shaped fixes to be rewritten as source
+    patches. The gate stays recorded as an auditable problem.
+    """
+    result_en, _, _, legs_en = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        switches=[],
+        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
+        extra_params={"enablement": True, "extra_envs": {"HL_UNDECLARED_CACHE": "1"}},
+    )
+    assert result_en.get("error_class") != "framework_switch_gates_undeclared", (
+        "an enablement gate armed by the proposal must not be refused"
+    )
+    assert legs_en, "enablement round must have attempted a bench"
+    problems = result_en.get("framework_switch_problems") or []
+    assert any("undeclared environment switch" in p for p in problems), (
+        f"the demoted gate must stay auditable in the result, got {problems!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_gated_patch_refused_when_nothing_arms_it(tmp_path, monkeypatch):
+    """An enablement gate armed by neither manifest nor proposal benches inert.
+
+    ``switch_env`` only turns on manifest entries, so letting this through spends a
+    leg reproducing the same failure and feeds the stall streak.
     """
     result_en, _, _, legs_en = await _run_rewrite_integrate(
         tmp_path,
@@ -1258,11 +1282,7 @@ async def test_env_gated_patch_proceeds_to_bench_on_enablement_round(tmp_path, m
         patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
         extra_params={"enablement": True},
     )
-    assert result_en.get("error_class") != "framework_switch_gates_undeclared", (
-        "enablement round must not be refused for an undeclared env gate"
-    )
-    assert legs_en, "enablement round must have attempted a bench"
-    problems = result_en.get("framework_switch_problems") or []
-    assert any("undeclared environment switch" in p for p in problems), (
-        f"the demoted gate must stay auditable in the result, got {problems!r}"
-    )
+    assert result_en["status"] == "reverted"
+    assert result_en["error_class"] == "framework_switch_gates_undeclared"
+    assert "HL_UNDECLARED_CACHE" in result_en["reason"]
+    assert not legs_en, "a gate nothing turns on must not spend a bench leg"
