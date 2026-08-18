@@ -2638,6 +2638,9 @@ class IntegratePatchExecutor:
         When an attempt runtime was provisioned, the stack action is recorded in
         the result (``enablement_kept_stack_action``) so it survives rearm. On
         REVERT / non-KEEP, the attempt runtime dir is GC'd.
+
+        Every verdict carries ``framework_switch_problems``, which is how a
+        switch-manifest defect demoted for enablement stays auditable.
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None

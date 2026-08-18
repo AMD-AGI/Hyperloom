@@ -1776,8 +1776,8 @@ class FrameworkPhase(PhaseHandler):
                 state.enablement.accepted_config_path = accepted_cfg
             effective = res.get("enablement_effective_config")
             if isinstance(effective, dict) and effective:
-                # Replaced, not merged: this is what the KEEP bench actually
-                # launched, so it already supersedes every prior advanced round.
+                # Replaced, not merged: what the KEEP bench launched already
+                # supersedes every advanced round that fed into it.
                 state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
@@ -1814,8 +1814,7 @@ class FrameworkPhase(PhaseHandler):
                 merged = dict(cfg.get("extra_envs") or {})
                 merged.update({str(k): str(v) for k, v in adv_envs.items()})
                 cfg["extra_envs"] = merged
-                # merge is left-to-right override, so a flag this round restates
-                # wins over the same flag from an earlier round.
+                # Folded by flag keeping the last value, so this round overrides an earlier one.
                 cfg["extra_server_args"] = _dedupe_extra_server_args(
                     merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
                 )

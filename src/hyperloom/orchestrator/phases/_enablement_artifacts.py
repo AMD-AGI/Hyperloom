@@ -37,8 +37,8 @@ def _copy(src: Path, dest: Path) -> None:
 def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
     """Archive one enablement round's patches, specialist result and launch config.
 
-    Rounds synthesised by the phase itself carry no specialist task id and no
-    deliverables, so they are skipped rather than all colliding on one directory.
+    Rounds the phase synthesises carry no task id and no deliverables, and are
+    skipped rather than colliding on a shared directory.
 
     Args:
         session_dir: The session root directory.

@@ -1249,11 +1249,8 @@ async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rearm_advanced_merges_args_by_flag_not_substring(monkeypatch):
-    """A flag that is a prefix of an accumulated one must not be swallowed.
-
-    A later round restating the same flag overrides it rather than duplicating.
-    """
+async def test_rearm_advanced_merges_args_by_flag_not_substring():
+    """A prefix flag survives, and a restated flag overrides instead of duplicating."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     for tid, args in (
         ("spec-1", "--enable-chunked-prefill --tp 4"),
