@@ -943,6 +943,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
         "_enqueue_internal_sweep_task": "phase_sweep",
         "_build_sweep_params_from_recipe": "phase_sweep",
+        "_record_session_budget_conc_sweep_skip": "phase_sweep",
+        "_record_terminal_conc_sweep_skip": "phase_sweep",
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",

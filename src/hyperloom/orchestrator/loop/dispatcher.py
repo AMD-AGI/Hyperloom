@@ -1548,6 +1548,18 @@ class DispatcherCollaborator:
                 "dispatcher: could not record time-budget denial for task=%s",
                 task.task_id,
             )
+        # A cancelled conc_sweep never writes last_conc_sweep on its own, so
+        # SWEEP would idle until the LLM emits skip_to_close and CI would read
+        # that as robustness_escalated. Stamp the skip here so the phase
+        # machine can close on conc_sweep_done.
+        if str(task.kind or "") == "conc_sweep":
+            try:
+                self._record_session_budget_conc_sweep_skip(denied=denied)
+            except Exception:  # noqa: BLE001 — a stamp miss must not abort the pump
+                log.exception(
+                    "dispatcher: could not record conc_sweep time-budget skip for task=%s",
+                    task.task_id,
+                )
         return True
 
     def _sequence_denial_for_request(
