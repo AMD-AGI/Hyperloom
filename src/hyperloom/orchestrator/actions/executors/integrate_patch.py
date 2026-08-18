@@ -2109,9 +2109,19 @@ class IntegratePatchExecutor:
                 f"manifest, otherwise the switch-off parity leg and per-lever "
                 f"attribution silently do not run"
             )
-            if not params.get("enablement"):
-                # Refuse before spending a leg: with the manifest absent nothing is
-                # turned on for the measurement and the parity leg never runs.
+            # Only the manifest feeds switch_env, so an enablement round may instead
+            # arm its gate through the proposal. One that is armed nowhere would
+            # bench inert and reproduce the same failure, so it is still refused.
+            armed_by_proposal = {g for g in undeclared_gates if g in proposal_extra_envs}
+            unarmed_gates = [g for g in undeclared_gates if g not in armed_by_proposal]
+            if not params.get("enablement") or unarmed_gates:
+                if unarmed_gates and params.get("enablement"):
+                    reason = (
+                        f"patch gates on environment switch(es) "
+                        f"{', '.join(unarmed_gates)} that nothing turns on: declare "
+                        f"them in the '{_switch_manifest.MANIFEST_KEY}' manifest or "
+                        f"set them in the proposal, otherwise the patch benches inert"
+                    )
                 log.warning("integrate_patch: %s", reason)
                 return {
                     "status": "reverted",
@@ -2125,9 +2135,7 @@ class IntegratePatchExecutor:
                     "framework_switch_problems": switch_problems + [reason],
                     "undeclared_switch_gates": undeclared_gates,
                 }
-            # Enablement is graded on runnability alone, so the lever guarantees
-            # this gate arms do not apply and must not block the boot attempt.
-            log.info("integrate_patch(enablement): %s — proceeding to bench", reason)
+            log.info("integrate_patch(enablement): %s — armed by the proposal, benching", reason)
             switch_problems.append(reason)
         if switch_manifest and not patch_paths:
             # A manifest without a patch describes switches that gate code which
