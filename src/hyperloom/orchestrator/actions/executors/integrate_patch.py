@@ -2639,8 +2639,9 @@ class IntegratePatchExecutor:
         the result (``enablement_kept_stack_action``) so it survives rearm. On
         REVERT / non-KEEP, the attempt runtime dir is GC'd.
 
-        Every verdict carries ``framework_switch_problems``, which is how a
-        switch-manifest defect demoted for enablement stays auditable.
+        Every verdict carries ``framework_switch_problems`` (auditable switch-gate
+        demotion record) and ``framework_root`` (the source tree patches were applied
+        against, needed to replay them on a fresh machine).
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
@@ -2746,6 +2747,7 @@ class IntegratePatchExecutor:
                         "extra_envs_applied": extra_envs_applied,
                         "extra_server_args_applied": extra_server_args_applied,
                         "framework_switch_problems": switch_problems,
+                        "framework_root": str(framework_root or ""),
                         "output_throughput": new_tput,
                         "enablement": True,
                         "advanced": True,
@@ -2785,6 +2787,7 @@ class IntegratePatchExecutor:
                     "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
                     "framework_switch_problems": switch_problems,
+                    "framework_root": str(framework_root or ""),
                     "output_throughput": new_tput,
                     "enablement": True,
                     "runnable": False,
@@ -2816,6 +2819,7 @@ class IntegratePatchExecutor:
             "extra_server_args_applied": extra_server_args_applied,
             "extra_envs_applied": extra_envs_applied,
             "framework_switch_problems": switch_problems,
+            "framework_root": str(framework_root or ""),
             "output_throughput": new_tput,
             "enablement": True,
             "runnable": True,
