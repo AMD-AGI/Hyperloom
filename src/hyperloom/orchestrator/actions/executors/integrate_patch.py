@@ -2102,11 +2102,6 @@ class IntegratePatchExecutor:
         )
         undeclared_gates = _switch_manifest.undeclared_switch_gates(patch_paths, switch_manifest)
         if undeclared_gates:
-            # Refuse rather than fall back to the unguarded path. An undeclared gate
-            # means nothing gets turned on for the measurement, no switch-off parity
-            # leg runs and no lever is registered — the deliverable contradicts its
-            # own manifest, and benching it would produce a verdict none of the
-            # guarantees back. Caught before spending a leg on it.
             reason = (
                 f"patch gates on undeclared environment switch(es) "
                 f"{', '.join(undeclared_gates)}: every gate a framework rewrite "
@@ -2114,21 +2109,34 @@ class IntegratePatchExecutor:
                 f"manifest, otherwise the switch-off parity leg and per-lever "
                 f"attribution silently do not run"
             )
-            log.warning("integrate_patch: %s", reason)
-            # Nothing has been applied or stashed at this point, so there is no
-            # tree state to unwind — the deliverable is refused as it arrives.
-            return {
-                "status": "reverted",
-                "error_class": "framework_switch_gates_undeclared",
-                "error": reason,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "config_changes_applied": {},
-                "reason": reason,
-                "framework_switch_problems": switch_problems + [reason],
-                "undeclared_switch_gates": undeclared_gates,
-            }
+            # Only the manifest feeds switch_env, so an enablement round may instead
+            # arm its gate through the proposal. One that is armed nowhere would
+            # bench inert and reproduce the same failure, so it is still refused.
+            is_enablement = bool(params.get("enablement"))
+            unarmed_gates = [g for g in undeclared_gates if g not in proposal_extra_envs]
+            if not is_enablement or unarmed_gates:
+                if is_enablement:
+                    reason = (
+                        f"patch gates on environment switch(es) "
+                        f"{', '.join(unarmed_gates)} that nothing turns on: declare "
+                        f"them in the '{_switch_manifest.MANIFEST_KEY}' manifest or "
+                        f"set them in the proposal, otherwise the patch benches inert"
+                    )
+                log.warning("integrate_patch: %s", reason)
+                return {
+                    "status": "reverted",
+                    "error_class": "framework_switch_gates_undeclared",
+                    "error": reason,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "config_changes_applied": {},
+                    "reason": reason,
+                    "framework_switch_problems": switch_problems + [reason],
+                    "undeclared_switch_gates": undeclared_gates,
+                }
+            log.info("integrate_patch(enablement): %s — armed by the proposal, benching", reason)
+            switch_problems.append(reason)
         if switch_manifest and not patch_paths:
             # A manifest without a patch describes switches that gate code which
             # was never delivered. Setting them would be a no-op, and registering
@@ -2638,9 +2646,14 @@ class IntegratePatchExecutor:
         When an attempt runtime was provisioned, the stack action is recorded in
         the result (``enablement_kept_stack_action``) so it survives rearm. On
         REVERT / non-KEEP, the attempt runtime dir is GC'd.
+
+        Every verdict carries ``framework_switch_problems`` (auditable switch-gate
+        demotion record) and ``framework_root`` (the source tree patches were applied
+        against, needed to replay them on a fresh machine).
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
+        switch_problems: list[str] = list(getattr(ctx, "_ip_switch_problems", None) or [])
 
         def _gc_on_revert() -> None:
             """GC the attempt runtime dir on a non-KEEP enablement outcome."""
@@ -2738,7 +2751,11 @@ class IntegratePatchExecutor:
                         "patches_applied": stacked_patches,
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": {},
+                        "config_changes_applied": config_changes_applied,
+                        "extra_envs_applied": extra_envs_applied,
+                        "extra_server_args_applied": extra_server_args_applied,
+                        "framework_switch_problems": switch_problems,
+                        "framework_root": str(framework_root or ""),
                         "output_throughput": new_tput,
                         "enablement": True,
                         "advanced": True,
@@ -2777,6 +2794,8 @@ class IntegratePatchExecutor:
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
+                    "framework_switch_problems": switch_problems,
+                    "framework_root": str(framework_root or ""),
                     "output_throughput": new_tput,
                     "enablement": True,
                     "runnable": False,
@@ -2807,6 +2826,8 @@ class IntegratePatchExecutor:
             "config_changes_applied": config_changes_applied,
             "extra_server_args_applied": extra_server_args_applied,
             "extra_envs_applied": extra_envs_applied,
+            "framework_switch_problems": switch_problems,
+            "framework_root": str(framework_root or ""),
             "output_throughput": new_tput,
             "enablement": True,
             "runnable": True,

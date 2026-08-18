@@ -18,8 +18,11 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.git_safety import safe_directory_args
 
 from . import machine_state as _phase_state
+from ._enablement_artifacts import snapshot_round, write_setting_script
 from ..bus.message_bus import Message
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_server_args import merge_server_args
+from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
@@ -1768,11 +1771,19 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
+            kept = list(state.enablement.kept_patches or [])
+            for p in res.get("patches_applied") or []:
+                sp = str(p)
+                if sp and sp not in kept:
+                    kept.append(sp)
+            state.enablement.kept_patches = kept
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
             effective = res.get("enablement_effective_config")
             if isinstance(effective, dict) and effective:
+                # Replaced, not merged: what the KEEP bench launched already
+                # supersedes every advanced round that fed into it.
                 state.enablement.accepted_config = dict(effective)
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
@@ -1801,6 +1812,20 @@ class FrameworkPhase(PhaseHandler):
             state.enablement.kept_patches = kept
             _stack_setup_commands()
             _stack_kept_runtime()
+            # Accumulated so a later kept round replays every advance, not just patches.
+            adv_envs = res.get("extra_envs_applied") or {}
+            adv_args = str(res.get("extra_server_args_applied") or "").strip()
+            if adv_envs or adv_args:
+                cfg = dict(state.enablement.accepted_config or {})
+                merged = dict(cfg.get("extra_envs") or {})
+                merged.update({str(k): str(v) for k, v in adv_envs.items()})
+                cfg["extra_envs"] = merged
+                # Folded by flag keeping the last value, so this round overrides an earlier one.
+                cfg["extra_server_args"] = _dedupe_extra_server_args(
+                    merge_server_args(str(cfg.get("extra_server_args") or ""), adv_args)
+                )
+                cfg.setdefault("args_mode", "append")
+                state.enablement.accepted_config = cfg
             new_log = str(res.get("enablement_launch_log") or "").strip()
             if new_log:
                 state.enablement.launch_log = new_log
@@ -1812,6 +1837,24 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
+        # Phase-synthesised rounds carry no framework_root; keep the last real one.
+        res_fw_root = str(res.get("framework_root") or "").strip()
+        if res_fw_root:
+            state.enablement.framework_root = res_fw_root
+        try:
+            snapshot_round(self.session_dir, res)
+            if status in ("kept", "advanced"):
+                write_setting_script(
+                    self.session_dir,
+                    state.enablement,
+                    framework=str(state.framework or os.environ.get("FRAMEWORK") or "sglang"),
+                    model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
+                    tp=int(state.tp or 0) or None,
+                    max_model_len=int(state.max_model_len or 0) or None,
+                    gpu_type=str(state.gpu_type or os.environ.get("GPU_TYPE") or "") or None,
+                )
+        except Exception:  # noqa: BLE001 — archiving must not break the rearm
+            log.warning("enablement: artifact write failed", exc_info=True)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:

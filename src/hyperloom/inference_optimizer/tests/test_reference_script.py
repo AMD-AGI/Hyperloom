@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -274,6 +276,128 @@ def test_render_carries_validated_rocm_envs():
     assert "export HIP_FORCE_DEV_KERNARG=1" in text
     assert "export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT6" in text
     assert "export NCCL_MIN_NCHANNELS=112" in text
+
+
+def test_render_model_path_is_exported():
+    text = render_reference_script(framework="sglang", server_args="", model="/models/M")
+    assert "export MODEL=/models/M" in text
+
+
+def test_render_bare_model_name_stays_a_comment():
+    """parse_reference_script records a basename; exporting it would break --model-path."""
+    text = render_reference_script(framework="sglang", server_args="", model="minimaxm3")
+    assert "export MODEL=" not in text
+    assert "# model: minimaxm3" in text
+
+
+def test_render_quotes_env_values():
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        envs={"HL_OPTS": "a b; rm -rf /"},
+        gpu_type="mi300x",
+    )
+    assert "export HL_OPTS='a b; rm -rf /'" in text
+
+
+def test_render_redacts_secret_shaped_envs():
+    """The script is archived and uploaded, so credentials are named but not written."""
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        envs={"HF_TOKEN": "hf_realsecret", "VLLM_ROCM_USE_AITER": "1"},
+    )
+    assert "hf_realsecret" not in text
+    assert "# export HF_TOKEN=<redacted; supply manually>" in text
+    assert "export VLLM_ROCM_USE_AITER=1" in text
+
+
+def test_render_no_model_no_export():
+    text = render_reference_script(framework="sglang", server_args="")
+    assert "export MODEL=" not in text
+
+
+def test_render_enablement_has_strict_mode():
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        setup_commands=["pip install vllm==0.24"],
+    )
+    assert "set -euo pipefail" in text
+    assert "pip install vllm==0.24" in text
+
+
+def test_render_patches_emit_apply_function():
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        patches=["patches/001_fix.patch"],
+        framework_root="/sgl-workspace/sglang",
+    )
+    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
+    assert "apply_patch patches/001_fix.patch" in text
+    assert "for lvl in 1 0 2" in text
+
+
+def test_render_enablement_script_is_valid_bash(tmp_path):
+    text = render_reference_script(
+        framework="sglang",
+        server_args="--tp 8",
+        envs={"VLLM_ROCM_USE_AITER": "1"},
+        model="/models/M",
+        setup_commands=["pip install aiter==0.1.4"],
+        patches=["patches/001.patch"],
+        framework_root="/sgl-workspace/sglang",
+        runtime="/session/enablement/stacks/sglang/s1/venv",
+    )
+    sh = tmp_path / "enablement_setting.sh"
+    sh.write_text(text, encoding="utf-8")
+    proc = subprocess.run(["bash", "-n", str(sh)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_render_runtime_note_emitted():
+    text = render_reference_script(
+        framework="vllm",
+        server_args="",
+        runtime="/session/enablement/stacks/vllm/spec-1/venv",
+    )
+    assert "isolated attempt venv" in text
+    assert "/session/enablement/stacks/vllm/spec-1/venv" in text
+
+
+def test_render_base_params_unchanged_without_enablement():
+    """No setup_commands/patches/framework_root → output identical to original."""
+    text = render_reference_script(
+        framework="vllm",
+        server_args="--block-size 128",
+        envs={"VLLM_ROCM_USE_AITER": "1"},
+        tp=8,
+        gpu_type="mi300x",
+    )
+    assert "set -euo pipefail" not in text
+    assert "apply_patch" not in text
+    assert "export TP=8" in text
+    assert "vllm serve $MODEL" in text
+    assert "VLLM_ROCM_USE_AITER" in text
+
+
+def test_render_round_trip_with_enablement_params(tmp_path):
+    """Inserting setup/patch lines does not confuse parse_reference_script."""
+    text = render_reference_script(
+        framework="sglang",
+        server_args="--tp 8",
+        envs={"VLLM_ROCM_USE_AITER": "1"},
+        model="/models/M",
+        setup_commands=["pip install vllm==0.24"],
+        patches=["patches/fix.patch"],
+        framework_root="/sgl-workspace/sglang",
+    )
+    sh = tmp_path / "enablement_setting.sh"
+    sh.write_text(text, encoding="utf-8")
+    r = parse_reference_script(str(sh), framework="sglang")
+    assert "--tp 8" in r.server_args
+    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
 
 
 # --- bootstrap._resolve_reference_recipe tests ---

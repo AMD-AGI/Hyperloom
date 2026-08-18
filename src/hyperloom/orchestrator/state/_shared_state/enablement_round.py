@@ -43,6 +43,9 @@ class EnablementRound:
     # Ordered, deduped patch paths from prior enablement rounds that made forward
     # progress; re-applied as a base before the next round's patch.
     kept_patches: list = field(default_factory=list)
+    # Framework source tree the kept patches were applied against. Persisted so a
+    # phase-synthesised round, which carries no framework_root, does not drop it.
+    framework_root: str = ""
     # Ordered, deduped allowlisted env-setup shell commands prior rounds ran;
     # re-run idempotently by integrate_patch before applying patches and booting.
     setup_commands: list = field(default_factory=list)

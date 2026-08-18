@@ -251,10 +251,13 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
         pass
     return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
 
-# Invariants every enablement patch must respect.
+# Invariants every enablement deliverable must respect.
 ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
-    "The patch MUST be a valid unified diff that applies cleanly "
-    "(`git apply --check` must pass) against the live source tree.",
+    "If the fix requires a source edit, the patch MUST be a valid unified diff "
+    "that applies cleanly (`git apply --check` must pass) against the live source "
+    "tree.  A serve-flag, env-var, or dependency-install fix requires no patch at "
+    "all — set ``patches_written: []`` and record the change in ``proposal_set`` "
+    "(for env/flag) or ``setup_commands`` (for installs).",
     "Only *source edits* must stay under the allowed source roots listed below; "
     "touching any other path with a code patch is a hard reject. (Environment "
     "setup via ENVIRONMENT SETUP below is separate and allowed.)",
@@ -263,9 +266,10 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "gate here is RUNNABILITY (server boots + minimal inference) or, for an "
     "eval-origin round, the real model output meeting the accuracy floor; not perf.",
     "Prefer the smallest bridging change that makes the combo run correctly — or, "
-    "when that is out of reach this round, the smallest change that ADVANCES past "
-    "the current failure (a deeper boot gap, or a real accuracy gain toward the "
-    "floor) (see PROGRESS DELIVERABLE below); do not refactor unrelated code.",
+    "when that is out of reach this round, the SMALLEST CHANGE (patch, serve flag, "
+    "env var, or install) that ADVANCES past the current failure (a deeper boot gap, "
+    "or a real accuracy gain toward the floor) (see PROGRESS DELIVERABLE below); "
+    "do not refactor unrelated code.",
     "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
@@ -299,14 +303,17 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
     "serial: clearing one boot failure usually reveals a deeper one. You do NOT "
     "have to reach full end-to-end runnability in this one budget window.",
-    "If you cannot make the combo fully run, author the SMALLEST patch that "
+    "If you cannot make the combo fully run, apply the SMALLEST CHANGE that "
     "ADVANCES the boot PAST THE CURRENT failure — clear THIS error even if a "
-    "new, different failure then appears. A patch that changes the failure "
-    "signature is KEPT and stacked as a base; the next round resumes from the "
-    "deeper failure. One step forward is strictly better than returning nothing.",
-    "Record that patch in ``patches_written`` (and any installs in "
-    "``setup_commands``), set ``empty=false``, and in ``summary`` state which "
-    "failure you cleared and what the next (deeper) failure now is.",
+    "new, different failure then appears. The change is KEPT and stacked as a "
+    "base; the next round resumes from the deeper failure. One step forward is "
+    "strictly better than returning nothing. The change may be a source patch, "
+    "a serve flag, an env var, or a dependency install — whichever is simplest.",
+    "Record the change: a source patch in ``patches_written``, serve-flag or "
+    "env-var changes in ``proposal_set`` (each entry as ``extra_server_args`` "
+    "or ``extra_envs``), dependency installs in ``setup_commands``. Set "
+    "``empty=false`` and in ``summary`` state which failure you cleared and "
+    "what the next (deeper) failure now is.",
     "Return ``empty=true`` ONLY when you cannot advance past the CURRENT failure "
     "by even one step — NOT merely because full runnability is out of reach this "
     "round.",
