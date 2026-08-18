@@ -56,8 +56,12 @@ CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
 # The cap is a ceiling, not a budget: headroom left unused is never billed,
 # while a reply cut off at the cap bills the whole call and yields nothing. It
 # is therefore sized for the largest review a batch could ever need rather than
-# the typical one. Use the env var of the same name to lower it for a model
-# whose own output limit is smaller, or to raise it further.
+# the typical one. The number is measured, not guessed: the three-proposal
+# batch that deadlocked session 100162 needed roughly 2.4k output tokens to
+# write out in full, so this leaves about 13x that — a batch would have to grow
+# by an order of magnitude before the cap is what binds. Use the env var of the
+# same name to lower it for a model whose own output limit is smaller, or to
+# raise it further.
 CRITIC_AGENT_MAX_COMPLETION_TOKENS = 32000
 # One retry at this multiple of the cap when a reply stops at the limit.
 CRITIC_AGENT_TRUNCATION_RETRY_FACTOR = 2
