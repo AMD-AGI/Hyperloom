@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.git_safety import safe_directory_args
 
 from . import machine_state as _phase_state
-from ._enablement_artifacts import snapshot_round
+from ._enablement_artifacts import snapshot_round, write_setting_script
 from ..bus.message_bus import Message
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import merge_server_args
@@ -1841,6 +1841,20 @@ class FrameworkPhase(PhaseHandler):
             snapshot_round(self.session_dir, res)
         except Exception:  # noqa: BLE001 — archiving must not break the rearm
             log.debug("enablement: artifact snapshot failed", exc_info=True)
+        if status in ("kept", "advanced"):
+            try:
+                write_setting_script(
+                    self.session_dir,
+                    state.enablement,
+                    res,
+                    framework=str(state.framework or os.environ.get("FRAMEWORK") or "sglang"),
+                    model=state.reference_model or os.environ.get("MODEL_PATH"),
+                    tp=int(state.tp or 0) or None,
+                    max_model_len=int(state.max_model_len or 0) or None,
+                    gpu_type=str(state.gpu_type or os.environ.get("GPU_TYPE") or "") or None,
+                )
+            except Exception:  # noqa: BLE001 — archiving must not break the rearm
+                log.debug("enablement: setting script write failed", exc_info=True)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:

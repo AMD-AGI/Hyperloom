@@ -264,3 +264,26 @@ def test_collect_enablement_kept_patches_relativized_and_log_bounded():
     assert out["human_review_count"] == 2
     assert out["stall_streak"] == 1
     assert len(out["launch_log_excerpt"]) == 2000
+
+
+
+def test_collect_enablement_setting_script_field(tmp_path):
+    script = tmp_path / "reports" / "enablement" / "enablement_setting.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    out = collect_enablement(
+        tmp_path,
+        _state(enablement_attempts=1),
+        [],
+    )
+    assert out.get("setting_script") == "reports/enablement/enablement_setting.sh"
+
+
+def test_collect_enablement_setting_script_absent_when_no_file(tmp_path):
+    out = collect_enablement(
+        tmp_path,
+        _state(enablement_attempts=1),
+        [],
+    )
+    assert "setting_script" not in out
