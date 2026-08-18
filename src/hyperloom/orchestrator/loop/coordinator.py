@@ -1160,6 +1160,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_policy_denied": "writeback",
         "_record_observation": "writeback",
         "_record_kernel_opt_partial": "writeback",
+        "_update_cumulative_gain_validated": "writeback",
         "_record_integrate_keep": "writeback",
         "_is_promotable_result": "writeback",
         "_record_intervention_for_task": "writeback",

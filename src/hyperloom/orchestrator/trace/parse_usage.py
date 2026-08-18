@@ -196,25 +196,109 @@ def parse_claude_stream_json_response(
     return None
 
 
+def _claude_result_output_tokens(result: dict[str, Any]) -> int | None:
+    """Read the authoritative output-token count off a ``result`` row.
+
+    ``modelUsage`` is preferred over ``usage``: it is the breakdown the CLI's
+    own ``total_cost_usd`` is computed from, and unlike ``usage`` it also
+    covers the responses produced by ``Task`` sub-agents, which a specialist
+    spawns whenever its tool palette includes them. ``usage`` remains the
+    fallback for CLI builds that report no per-model breakdown.
+
+    Args:
+        result: A decoded ``{"type": "result", ...}`` row.
+
+    Returns:
+        The session's output-token count, or ``None`` when neither shape
+        carried one.
+    """
+    per_model = result.get("modelUsage")
+    if isinstance(per_model, dict):
+        total: int | None = None
+        for entry in per_model.values():
+            if not isinstance(entry, dict):
+                continue
+            count = coerce_optional_int(entry.get("outputTokens"))
+            if count is not None:
+                total = count if total is None else total + count
+        if total is not None:
+            return total
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        return coerce_optional_int(usage.get("output_tokens"))
+    return None
+
+
+def _reattach_turn_output(
+    usages: list[dict[str, int | None]],
+    session_output: int | None,
+) -> list[dict[str, int | None]]:
+    """Swap placeholder per-turn ``output_tokens`` for the session's real count.
+
+    See :func:`parse_claude_stream_json_turn_usages` for why the per-response
+    counts cannot be trusted. When they do already reconcile with the ``result``
+    row they are left alone, so a CLI that reports a true per-response figure
+    keeps its finer attribution.
+
+    Args:
+        usages: De-duplicated per-response usages, in stream order (mutated).
+        session_output: The session's true output-token count, or ``None``
+            when the log carried no ``result`` row to read it from.
+
+    Returns:
+        The same list, with output counts either preserved or reattached.
+    """
+    if not usages:
+        return usages
+    observed = sum(usage["output_tokens"] or 0 for usage in usages)
+    if session_output is not None and observed == session_output:
+        return usages
+    for usage in usages[:-1]:
+        usage["output_tokens"] = None
+    usages[-1]["output_tokens"] = session_output
+    return usages
+
+
 def parse_claude_stream_json_turn_usages(
     log_path: str | Path,
 ) -> list[dict[str, int | None]]:
-    """Recover *per-assistant-turn* usage from a Claude CLI stream-json log.
+    """Recover *per-API-response* usage from a Claude CLI stream-json log.
 
     Unlike :func:`parse_claude_stream_json_usage` (which returns one cumulative
-    row), this returns the per-message usage on each
-    ``{"type":"assistant", "message": {..., "usage": {...}}}`` line, in order,
-    so a multi-turn specialist subprocess can be traced as one row per turn.
+    row), this returns one row per assistant response, in order, so a multi-turn
+    specialist subprocess can be traced as one row per turn.
 
-    Each assistant message carries its OWN (non-cumulative) usage, so the rows
-    sum to the session total. Lines without a usage block are skipped; the
-    terminal cumulative ``result`` row is ignored to avoid double counting.
+    Two properties of the CLI's output shape drive the parse:
+
+    * One API response is streamed as *several* ``{"type":"assistant"}`` lines,
+      one per content block (thinking / text / tool_use), each repeating the
+      same ``message.id`` and the same ``message.usage``. Rows are therefore
+      keyed by ``message.id`` and only a response's first line is kept;
+      appending every line would multiply the prompt and cache counters by the
+      response's block count.
+    * ``message.usage.output_tokens`` on those lines is what was known when the
+      response began streaming, not what it went on to produce, and understates
+      the turn by two orders of magnitude. The true figure exists only on the
+      terminal ``result`` row (see :func:`_claude_result_output_tokens`), so it
+      is reattached to the final turn — where the caller already attributes
+      whole-session latency. Earlier turns report ``None`` (not measured) in
+      preference to the placeholder.
+
+    Input and cache counters need no such repair and are kept as the responses
+    reported them; de-duplicated, they reconcile with the ``result`` row.
+
+    Assistant lines carrying no ``message.id`` cannot be de-duplicated safely,
+    so such a log yields ``[]`` and the caller falls back to the cumulative
+    ``result`` row rather than to per-turn rows of unknown multiplicity.
 
     Returns the normalized four-key dicts in stream order, or ``[]`` when the
     file is missing/truncated/carries no per-message usage.
     """
     path = Path(log_path)
     usages: list[dict[str, int | None]] = []
+    seen_ids: set[str] = set()
+    saw_message_id = False
+    session_output: int | None = None
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -225,19 +309,40 @@ def parse_claude_stream_json_turn_usages(
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if not isinstance(obj, dict) or obj.get("type") != "assistant":
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") == "result":
+                    recovered = _claude_result_output_tokens(obj)
+                    if recovered is not None:
+                        session_output = recovered
+                    continue
+                if obj.get("type") != "assistant":
                     continue
                 message = obj.get("message")
                 usage = message.get("usage") if isinstance(message, dict) else None
                 normalized = normalize_usage(usage if isinstance(usage, dict) else None)
-                if normalized is not None:
-                    usages.append(normalized)
+                if normalized is None:
+                    continue
+                message_id = message.get("id") if isinstance(message, dict) else None
+                if isinstance(message_id, str) and message_id:
+                    saw_message_id = True
+                    if message_id in seen_ids:
+                        continue
+                    seen_ids.add(message_id)
+                usages.append(normalized)
     except FileNotFoundError:
         return []
     except OSError as exc:
         log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return []
-    return usages
+    if len(usages) > 1 and not saw_message_id:
+        log.warning(
+            "parse_usage: stream-json log %s names no message ids; per-turn rows "
+            "cannot be de-duplicated, deferring to the cumulative result row",
+            path,
+        )
+        return []
+    return _reattach_turn_output(usages, session_output)
 
 
 def parse_claude_stream_json_tool_calls(

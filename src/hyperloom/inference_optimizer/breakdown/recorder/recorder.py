@@ -19,6 +19,10 @@ re-walk heterogeneous artifacts later. Each producer owns its own files:
 Writes are atomic (tmp + ``os.replace``) and filenames are unique per
 (section, producer), so this is safe across processes and on network
 filesystems (no shared-append dependency).
+
+Every write funnels through :meth:`Recorder._write`, which is where the write
+trace is emitted; ``HYPERLOOM_BREAKDOWN_TRACE=1`` turns it on (see
+:mod:`.trace`).
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ from typing import Any, Literal, Mapping
 
 from hyperloom.common.io import atomic_write_text
 from hyperloom.common.timeutil import now_iso
+
+from .trace import trace_enabled, trace_write
 
 SectionShape = Literal["item", "singleton"]
 
@@ -282,17 +288,25 @@ class Recorder:
         filename = f"{_slug(section)}__{self._producer}.json"
         target = self._dir / filename
         with self._lock:
+            previous: Mapping[str, Any] | None = None
             try:
                 current = json.loads(target.read_text(encoding="utf-8"))
                 current_payload = current.get("payload") if isinstance(current, dict) else None
-                merged = (
-                    _merge_mappings(current_payload, payload)
-                    if isinstance(current_payload, Mapping)
-                    else dict(payload)
-                )
+                if isinstance(current_payload, Mapping):
+                    previous = current_payload
+                    merged = _merge_mappings(current_payload, payload)
+                else:
+                    merged = dict(payload)
             except (OSError, ValueError, TypeError):
                 merged = dict(payload)
-            return self._write(section, "singleton", merged, filename=filename)
+            return self._write(
+                section,
+                "singleton",
+                merged,
+                filename=filename,
+                operation="upsert",
+                previous=previous,
+            )
 
     def record_item(
         self,
@@ -345,16 +359,25 @@ class Recorder:
         target = self._dir / filename
         merged: dict[str, Any] = {}
         with self._lock:
+            previous: Mapping[str, Any] | None = None
             try:
                 current = json.loads(target.read_text(encoding="utf-8"))
                 current_payload = current.get("payload") if isinstance(current, dict) else None
                 if isinstance(current_payload, Mapping):
+                    previous = current_payload
                     merged = _merge_mappings(current_payload, payload)
                 else:
                     merged = dict(payload)
             except (OSError, ValueError, TypeError):
                 merged = dict(payload)
-            return self._write(section, "item", merged, filename=filename)
+            return self._write(
+                section,
+                "item",
+                merged,
+                filename=filename,
+                operation="upsert",
+                previous=previous,
+            )
 
     @staticmethod
     def _check_shape(section: str, kind: str) -> None:
@@ -378,6 +401,8 @@ class Recorder:
         payload: Mapping[str, Any],
         *,
         filename: str,
+        operation: str = "write",
+        previous: Mapping[str, Any] | None = None,
     ) -> Path:
         """Atomically write one fragment record to ``filename`` in the spool dir.
 
@@ -385,11 +410,20 @@ class Recorder:
         producer) and writes it via a temp file plus ``os.replace`` so readers
         never observe a partial write.
 
+        Every write in this class funnels through here, so this is also where
+        the write trace is emitted (see :mod:`.trace`); it costs one level check
+        when switched off.
+
         Args:
             section (str): the breakdown section name.
             kind (str): the fragment kind (``singleton`` or ``item``).
             payload (Mapping[str, Any]): the record payload.
             filename (str): the destination filename within the spool directory.
+            operation (str): ``write`` when the fragment is replaced wholesale,
+                ``upsert`` when it is merged into what was already there.
+            previous (Mapping[str, Any] | None): the payload that was already on
+                disk, so the trace can report what this write changed. ``None``
+                when there was nothing to merge into.
 
         Returns:
             Path: the path of the written fragment.
@@ -408,8 +442,51 @@ class Recorder:
         }
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         target = self._dir / filename
-        atomic_write_text(target, data, make_parents=True)
+        # Whether the fragment already existed is only knowable before the
+        # write, and it is the difference between recording a new fact and
+        # replacing one, so it is resolved here rather than after.
+        traced = trace_enabled()
+        existed = target.exists() if traced else False
+        try:
+            atomic_write_text(target, data, make_parents=True)
+        except BaseException as exc:
+            if traced:
+                self._trace(
+                    record, target, payload, operation, previous, existed, len(data), exc
+                )
+            raise
+        if traced:
+            self._trace(
+                record, target, payload, operation, previous, existed, len(data), None
+            )
         return target
+
+    def _trace(
+        self,
+        record: Mapping[str, Any],
+        target: Path,
+        payload: Mapping[str, Any],
+        operation: str,
+        previous: Mapping[str, Any] | None,
+        existed: bool,
+        size: int,
+        error: BaseException | None,
+    ) -> None:
+        """Emit one write-trace line for a fragment this recorder just wrote."""
+        trace_write(
+            section=str(record.get("section") or ""),
+            kind=str(record.get("kind") or ""),
+            operation=operation,
+            target=target,
+            payload=payload if isinstance(payload, Mapping) else {},
+            producer=self._producer,
+            seq=int(record.get("seq") or 0),
+            ts=str(record.get("ts") or ""),
+            size=size,
+            existed=existed,
+            previous=previous,
+            error=error,
+        )
 
 
 _RECORDERS: dict[tuple[str, str], Recorder] = {}

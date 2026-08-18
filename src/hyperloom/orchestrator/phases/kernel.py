@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import machine_state as _phase_state
 from ..kernel import collective_recovery as _collective_recovery
+from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
@@ -1292,7 +1293,10 @@ class KernelPhase(PhaseHandler):
         )
 
         if self.shared_state.baseline_tput > 0:
-            self._update_cumulative_gain_validated(measured)
+            self._update_cumulative_gain_validated(
+                measured,
+                source="geak_e2e_promote",
+            )
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
         try:
@@ -1397,6 +1401,9 @@ class KernelPhase(PhaseHandler):
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
                         route_strategy="legacy_only",
+                        # Replaying must land on the reading it originally
+                        # recorded, not count itself as a fresh one.
+                        occurrence=e2e.get("occurrence"),
                     )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
@@ -1477,6 +1484,12 @@ class KernelPhase(PhaseHandler):
                     ),
                     result=evidence,
                     route_strategy="legacy_only",
+                    # This is a second look at a kernel that was already kept,
+                    # and ``evidence`` still carries the original integrate's
+                    # identity. Without a namespace of its own, the reading
+                    # that rejects the kernel would land on the reading that
+                    # adopted it.
+                    occurrence="revalidation",
                 )
             except Exception:  # noqa: BLE001
                 log.debug(
@@ -2363,7 +2376,10 @@ class KernelPhase(PhaseHandler):
         if kept:
             total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
             if baseline_tput > 0:
-                self._update_cumulative_gain_validated(running_tput)
+                self._update_cumulative_gain_validated(
+                    running_tput,
+                    source="forge_gemm_tuning_e2e",
+                )
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
@@ -3104,7 +3120,53 @@ class KernelPhase(PhaseHandler):
         )
         if not lifted:
             return
-        self._update_cumulative_gain_validated(new_tput)
+        ts = datetime.now(timezone.utc).isoformat()
+        self._update_cumulative_gain_validated(
+            new_tput,
+            source="collective_promote",
+            ts=ts,
+        )
+        total_gain = (new_tput - baseline_tput) / baseline_tput * 100.0
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_collective_promotion(
+                self.session_dir,
+                integration_id=integration_id,
+                kernel_id=str(collective_result.get("kernel_id") or ""),
+                baseline_tput=baseline_tput,
+                new_tput=new_tput,
+                gain_pct=incremental_gain,
+                patch_path=patch,
+                target_file=str(
+                    collective_result.get("source_file")
+                    or integrate_result.get("target_file")
+                    or ""
+                ),
+                collective_op=str(collective_result.get("collective_op") or ""),
+                world_size=collective_result.get("world_size"),
+                kernel_speedup=collective_result.get("kernel_speedup"),
+                configuration=envs,
+                ts=ts,
+            )
+            instrument.record_session_validation(
+                self.session_dir,
+                baseline_tput=baseline_tput,
+                validated_tput=new_tput,
+                validated_gain_pct=total_gain,
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                source="collective_promote",
+                measurement_basis="e2e_rebench",
+                ts=ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("record_collective_promotion failed", exc_info=True)
+            trace_recording_skipped(
+                "kernel_collective",
+                reason="caller raised before the recorder",
+                entity=integration_id,
+                error=exc,
+            )
 
     async def _run_forge_fusion(self) -> None:
         """Run autonomous kernel fusion during KERNEL entry."""
@@ -3303,7 +3365,10 @@ class KernelPhase(PhaseHandler):
             },
         )
         if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:
-            self._update_cumulative_gain_validated(new_tput)
+            self._update_cumulative_gain_validated(
+                new_tput,
+                source="fusion_promote",
+            )
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

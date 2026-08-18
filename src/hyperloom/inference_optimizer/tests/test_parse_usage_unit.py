@@ -113,20 +113,108 @@ def test_parse_turn_usages_missing(tmp_path):
     assert pu.parse_claude_stream_json_turn_usages(tmp_path / "no.log") == []
 
 
-def test_parse_turn_usages_per_message_in_order(tmp_path):
+def test_parse_turn_usages_one_row_per_response_in_order(tmp_path):
     log = tmp_path / "p.log"
     log.write_text(
-        '{"type": "assistant", "message": {"usage": {"input_tokens": 10, "output_tokens": 3}}}\n'
+        '{"type": "assistant", "message": {"id": "msg_1", "usage": {"input_tokens": 10, "output_tokens": 1}}}\n'
         "garbled\n"
-        '{"type": "assistant", "message": {"usage": {"input_tokens": 20, "output_tokens": 7}}}\n'
-        # The terminal cumulative result row is ignored here.
-        '{"type": "result", "usage": {"input_tokens": 30, "output_tokens": 10}}\n',
+        '{"type": "assistant", "message": {"id": "msg_2", "usage": {"input_tokens": 20, "output_tokens": 2}}}\n'
+        '{"type": "result", "usage": {"input_tokens": 30, "output_tokens": 500}}\n',
         encoding="utf-8",
     )
     usages = pu.parse_claude_stream_json_turn_usages(log)
     assert len(usages) == 2
-    assert usages[0]["input_tokens"] == 10 and usages[0]["output_tokens"] == 3
-    assert usages[1]["input_tokens"] == 20 and usages[1]["output_tokens"] == 7
+    assert usages[0]["input_tokens"] == 10 and usages[1]["input_tokens"] == 20
+    # The start-of-stream placeholders (1, 2) give way to the result row's 500,
+    # which lands on the final turn.
+    assert usages[0]["output_tokens"] is None
+    assert usages[1]["output_tokens"] == 500
+
+
+def test_parse_turn_usages_collapses_the_content_blocks_of_one_response(tmp_path):
+    """One API response streams as one line per content block, sharing a usage."""
+    block = (
+        '{{"type": "assistant", "message": {{"id": "msg_1", "content": [{{"type": "{kind}"}}], '
+        '"usage": {{"input_tokens": 10, "output_tokens": 1, '
+        '"cache_creation_input_tokens": 5, "cache_read_input_tokens": 7}}}}}}\n'
+    )
+    log = tmp_path / "p.log"
+    log.write_text(
+        block.format(kind="thinking")
+        + block.format(kind="text")
+        + block.format(kind="tool_use")
+        + '{"type": "result", "usage": {"output_tokens": 400}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert len(usages) == 1
+    assert usages[0]["input_tokens"] == 10
+    assert usages[0]["cache_creation_input_tokens"] == 5
+    assert usages[0]["cache_read_input_tokens"] == 7
+    assert usages[0]["output_tokens"] == 400
+
+
+def test_parse_turn_usages_prefers_model_usage_over_result_usage(tmp_path):
+    """``usage`` omits Task sub-agent output; ``modelUsage`` is what cost uses."""
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"id": "msg_1", "usage": {"output_tokens": 1}}}\n'
+        '{"type": "assistant", "message": {"id": "msg_2", "usage": {"output_tokens": 1}}}\n'
+        '{"type": "result", "usage": {"output_tokens": 300}, "modelUsage": {'
+        '"claude-opus-4-8": {"outputTokens": 400}, "claude-haiku-4": {"outputTokens": 50}}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert [u["output_tokens"] for u in usages] == [None, 450]
+
+
+def test_parse_turn_usages_falls_back_to_result_usage_without_model_usage(tmp_path):
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"id": "msg_1", "usage": {"output_tokens": 1}}}\n'
+        '{"type": "assistant", "message": {"id": "msg_2", "usage": {"output_tokens": 1}}}\n'
+        '{"type": "result", "usage": {"output_tokens": 300}, "modelUsage": {}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert [u["output_tokens"] for u in usages] == [None, 300]
+
+
+def test_parse_turn_usages_defers_to_cumulative_row_without_message_ids(tmp_path):
+    """Unidentifiable rows could be duplicates; the caller must use the total."""
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"usage": {"input_tokens": 10}}}\n'
+        '{"type": "assistant", "message": {"usage": {"input_tokens": 10}}}\n'
+        '{"type": "result", "usage": {"input_tokens": 10, "output_tokens": 9}}\n',
+        encoding="utf-8",
+    )
+    assert pu.parse_claude_stream_json_turn_usages(log) == []
+
+
+def test_parse_turn_usages_keeps_per_turn_output_that_reconciles(tmp_path):
+    """A CLI reporting true per-response output keeps its finer attribution."""
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"id": "msg_1", "usage": {"output_tokens": 4}}}\n'
+        '{"type": "assistant", "message": {"id": "msg_2", "usage": {"output_tokens": 6}}}\n'
+        '{"type": "result", "usage": {"output_tokens": 10}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert [u["output_tokens"] for u in usages] == [4, 6]
+
+
+def test_parse_turn_usages_drops_placeholder_output_without_a_result_row(tmp_path):
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"id": "msg_1", "usage": {"input_tokens": 10, "output_tokens": 1}}}\n'
+        '{"type": "assistant", "message": {"id": "msg_2", "usage": {"input_tokens": 20, "output_tokens": 2}}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert [u["input_tokens"] for u in usages] == [10, 20]
+    assert [u["output_tokens"] for u in usages] == [None, None]
 
 
 def test_parse_turn_usages_none_when_no_per_message_usage(tmp_path):
