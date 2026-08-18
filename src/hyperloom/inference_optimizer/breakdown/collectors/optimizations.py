@@ -1199,6 +1199,11 @@ def collect_recorded_optimizations(
     return {
         "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
         "source_of_truth": "recorder",
+        # Stated on both paths. Telling a session that recorded nothing apart
+        # from one that optimized nothing is the point of this section, and a
+        # consumer cannot make that call against a key that is only present
+        # when the answer is no.
+        "available": True,
         "attempts": attempts,
         "entries": entries,
         "backend_attempts": backend_attempts,

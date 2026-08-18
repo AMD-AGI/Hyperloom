@@ -176,6 +176,40 @@ def test_a_session_whose_records_never_arrived_says_so(tmp_path):
     assert "gemm_tuning" not in result
 
 
+def test_the_key_that_says_records_are_missing_is_there_when_they_are_not(tmp_path):
+    """``available`` has to answer on both paths to be worth asking.
+
+    Distinguishing a session whose records never landed from one that adopted
+    nothing is what this section is for, and a consumer cannot make that call
+    against a key that only appears when the answer is no.
+    """
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="integration-1",
+        kernel_id="k007",
+        baseline_tput=100.0,
+        new_tput=130.0,
+        gain_pct=30.0,
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+
+    result = collect_recorded_optimizations(
+        "s1",
+        list(parts.get("operations") or []),
+        list(parts.get("measurements") or []),
+        list(parts.get("adoptions") or []),
+        list(parts.get("artifacts") or []),
+        [],
+        [],
+        [],
+    )
+
+    assert result["available"] is True
+    assert result["source_of_truth"] == "recorder"
+    assert "unavailable_reason" not in result
+
+
 def test_a_session_that_adopted_nothing_is_not_reported_as_a_gap(tmp_path):
     (tmp_path / "state.json").write_text(
         json.dumps({"session_id": "quiet", "baseline_tput": 100.0}),
