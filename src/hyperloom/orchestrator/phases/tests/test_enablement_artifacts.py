@@ -137,7 +137,12 @@ def test_write_setting_script_produces_executable(tmp_path):
     assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
     assert "sglang.launch_server" in text
     assert "--tp 4" in text
-    assert (out.stat().st_mode & 0o755) == 0o755
+
+
+def test_write_setting_script_is_owner_only(tmp_path):
+    """The script exports accepted_config envs verbatim, so it stays owner-only."""
+    rel = write_setting_script(tmp_path, EnablementRound(), {}, "sglang")
+    assert (tmp_path / rel).stat().st_mode & 0o777 == 0o700
 
 
 def test_write_setting_script_copies_patches(tmp_path):
