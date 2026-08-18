@@ -131,6 +131,15 @@ class ClosePhase(PhaseHandler):
             )
             if dropped:
                 log.info("CLOSE: cancelled %d queued GEAK rebench task(s) before close sequence", len(dropped))
+                if _geak_rebench.finalize_geak_pending_after_rebench_cancel(
+                    self.shared_state,
+                    dropped,
+                    reason="close_sequence",
+                ):
+                    try:
+                        self.shared_state.save(self.session_dir)
+                    except Exception:  # noqa: BLE001
+                        log.exception("CLOSE: geak_pending finalize save failed")
         except Exception:  # noqa: BLE001
             log.exception("CLOSE: GEAK rebench drain failed (non-fatal)")
         await self._record_close_step("sequencer_started", status="running")

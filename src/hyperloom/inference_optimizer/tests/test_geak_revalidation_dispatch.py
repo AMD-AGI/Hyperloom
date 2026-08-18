@@ -284,6 +284,40 @@ async def test_geak_rebench_failure_clears_pending_when_placeholder_tracked(coor
 
 
 @pytest.mark.asyncio
+async def test_resume_revalidation_with_empty_pending_still_promotes(coordinator) -> None:
+    """Resume stack rebench with cleared geak_pending must still lift validated gain."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "geak_e2e", "tput": 116.0, "extra_server_args": "--foo"}
+    st.optimization_stack = [{"action": "geak_e2e", "tput": 116.0}]
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": "--foo", "env": ""}}
+    st.geak_pending = {}
+    st.resume_pending_revalidation = True
+
+    task = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="resume-reverify",
+    )
+
+    await c._promote_to_shared_state(
+        task.kind,
+        {
+            "output_throughput": 140.0,
+            "best_variant": {"fingerprint": "abc"},
+            "winners": [],
+        },
+        task=task,
+    )
+
+    assert st.cumulative_gain_validated == pytest.approx(40.0)
+    assert st.cumulative_gain_provenance == "geak_orch_harness_validated"
+    assert st.resume_pending_revalidation is False
+
+
+@pytest.mark.asyncio
 async def test_orphan_geak_rebench_success_does_not_promote(coordinator) -> None:
     c = coordinator
     st = c.shared_state
