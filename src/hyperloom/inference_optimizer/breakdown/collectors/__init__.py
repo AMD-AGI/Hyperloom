@@ -138,8 +138,7 @@ from .attribution import (
 )
 from .optimizations import (
     OPTIMIZATIONS_SCHEMA_VERSION as OPTIMIZATIONS_SCHEMA_VERSION,
-    collect_optimizations as collect_optimizations,
-    collect_v4_optimizations as collect_v4_optimizations,
+    collect_recorded_optimizations as collect_recorded_optimizations,
 )
 from .decision import (
     _TOKEN_IN_KEY as _TOKEN_IN_KEY,
@@ -210,7 +209,6 @@ __all__ = [
     "collect_token_usage",
     "collect_workload",
     "collect_model_info",
-    "collect_optimizations",
-    "collect_v4_optimizations",
+    "collect_recorded_optimizations",
     "session_elapsed_minutes",
 ]

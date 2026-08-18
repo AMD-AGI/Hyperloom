@@ -28,6 +28,7 @@ from typing import Any
 
 from hyperloom.common.env import env_bool
 
+from ._recorder_trace import trace_recording_skipped
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
@@ -634,7 +635,17 @@ def record_kernel_integrate_result(
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         sdir = getattr(state, "_session_dir", None)
-        if sdir and kernel_id:
+        if not sdir or not kernel_id:
+            # Checked before the recorder is reached, so the recorder's own
+            # guard never rules on it. On a KEEP this is the adoption that
+            # credits the integrate, and nothing downstream can tell its
+            # absence from a step that earned nothing.
+            trace_recording_skipped(
+                "kernel_e2e",
+                reason="no session_dir" if not sdir else "no kernel_id",
+                entity=kernel_id,
+            )
+        else:
             _dec = str(result.get("decision") or "").upper()
             instrument.record_kernel_e2e(
                 sdir,
@@ -647,14 +658,24 @@ def record_kernel_integrate_result(
                 target_file=target_file,
                 extra_server_args=extra_args,
                 result=result,
+                # The id recovered above, not the one on the result: a result
+                # that reached us without one still belongs to the pending
+                # integrate we matched it to, and that is the integrate whose
+                # readings must not be written over by a later one.
+                occurrence=integration_id or None,
                 validation_tier=(
                     str(result.get("validation_tier") or "integrate_e2e")
                     if _dec == "KEEP"
                     else ""
                 ),
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        trace_recording_skipped(
+            "kernel_e2e",
+            reason="caller raised before the recorder",
+            entity=kernel_id,
+            error=exc,
+        )
 
     if result.get("decision") == "KEEP":
         validation_tier = str(result.get("validation_tier") or "")
@@ -796,7 +817,13 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         instrument.record_kernel_invocations(sdir, result)
         # Record dispatch and per-backend attempts.
         _kid = str(result.get("kernel_id") or "")
-        if sdir and _kid:
+        if not sdir or not _kid:
+            trace_recording_skipped(
+                "kernel_dispatch",
+                reason="no session_dir" if not sdir else "no kernel_id",
+                entity=_kid,
+            )
+        else:
             _attempts = result.get("attempts")
             _attempts = _attempts if isinstance(_attempts, list) else []
             _backends = []
@@ -834,8 +861,13 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 orchestration_commit=str(getattr(state, "code_revision", "") or ""),
             )
             instrument.record_kernel_backend_result(sdir, result)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        trace_recording_skipped(
+            "kernel_dispatch",
+            reason="caller raised before the recorder",
+            entity=str(result.get("kernel_id") or ""),
+            error=exc,
+        )
     kernel_id = str(result.get("kernel_id") or "")
     if not kernel_id:
         # Metadata-less failure: preserve prior streaming-record KEEP.
@@ -1228,8 +1260,13 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
             payload={"task_id": str(entry.get("task_id") or "kernel_entry_gemm_tuning")},
             result=entry,
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        trace_recording_skipped(
+            "gemm_tuning",
+            reason="caller raised before the recorder",
+            entity=str(entry.get("task_id") or ""),
+            error=exc,
+        )
 
 
 def is_collective_candidate(candidate: dict[str, Any]) -> bool:

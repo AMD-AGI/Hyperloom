@@ -9,14 +9,20 @@ from typing import Any
 
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
+#: Below this the residue is float noise from re-serialized throughputs, well
+#: under any measurement's own repeatability.
+_NOISE_PP = 0.01
+
 
 @register_renderer("attribution")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the source-attribution section: gain split across sources.
 
-    Surfaces the per-source breakdown table, the collector's authoritative
-    attribution method label, and any assumption notes. Skipped when no
-    per-source split is available (single-source or unmined attribution).
+    The shares are taken against what the session actually moved, so a source
+    that claims half the gain reads as half. That denominator is larger than
+    the sum of the claims whenever the workload moved between adopted steps,
+    and the difference gets its own row: dropping it would leave shares that
+    silently fail to reach 100% with nothing to say why.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
@@ -27,58 +33,40 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """
     optimizations = breakdown.get("optimizations") or {}
     validation = optimizations.get("validation") or {}
-    a = validation or breakdown.get("attribution") or {}
-    notes = a.get("notes") or []
-    # Render ``attribution.method`` verbatim; never substitute a different label.
-    method_raw = a.get("method")
+    notes = validation.get("notes") or []
+    # Render ``validation.method`` verbatim; never substitute a different label.
+    method_raw = validation.get("method")
     method = str(method_raw) if isinstance(method_raw, str) else ""
-    if method in ("", "missing"):
-        method_display = "unknown attribution method"
-    else:
-        method_display = method
+    method_display = "unknown attribution method" if method in ("", "missing") else method
 
-    if validation:
-        total_v = validation.get("validated_total_gain_pct")
-        summary = optimizations.get("summary_by_source") or {}
-        canonical_rows = [
-            [source, bucket.get("total_gain_pct")]
-            for source, bucket in summary.items()
-            if isinstance(bucket, dict)
+    summary = optimizations.get("summary_by_source") or {}
+    claimed = [
+        [source, bucket.get("total_gain_pct")]
+        for source, bucket in summary.items()
+        if isinstance(bucket, dict)
+    ]
+    total_v = validation.get("validated_total_gain_pct")
+    unattributed = validation.get("unattributed_gain_pct")
+    if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
+        claimed.append(["unattributed (between adopted steps)", unattributed])
+
+    share_total = total_v
+    if not isinstance(share_total, (int, float)) or not share_total:
+        share_total = sum(
+            float(gain) for _source, gain in claimed if isinstance(gain, (int, float))
+        )
+    rows = [
+        [
+            source,
+            gain,
+            (
+                float(gain) / float(share_total) * 100.0
+                if isinstance(gain, (int, float)) and share_total
+                else None
+            ),
         ]
-        share_total = total_v
-        if not isinstance(share_total, (int, float)) or not share_total:
-            share_total = sum(
-                float(gain)
-                for _source, gain in canonical_rows
-                if isinstance(gain, (int, float))
-            )
-        rows = [
-            [
-                source,
-                gain,
-                (
-                    float(gain) / float(share_total) * 100.0
-                    if isinstance(gain, (int, float)) and share_total
-                    else None
-                ),
-            ]
-            for source, gain in canonical_rows
-        ]
-    else:
-        sb = a.get("source_breakdown") or {}
-        total_v = sb.get("validated_total_pct")
-        rows = [
-            ["explore", sb.get("explore_pct_of_total"), sb.get("explore_share_pct")],
-            [
-                "replay_warm_recipe",
-                sb.get("replay_warm_recipe_pct_of_total"),
-                sb.get("replay_warm_recipe_share_pct"),
-            ],
-            ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
-            ["params", sb.get("params_pct_of_total"), sb.get("params_share_pct")],
-            ["sweep", sb.get("sweep_pct_of_total"), sb.get("sweep_share_pct")],
-            ["geak", sb.get("geak_pct_of_total"), sb.get("geak_share_pct")],
-        ]
+        for source, gain in claimed
+    ]
 
     facts: list[str] = []
     if total_v is not None:
@@ -100,7 +88,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     decisions: list[Decision] = []
     for src, pct, _share in rows:
-        if pct and pct > 0:
+        # The unattributed row is a residue, not a contributor; crediting it as
+        # a decision would put "nobody" on the leaderboard.
+        if pct and pct > 0 and not src.startswith("unattributed"):
             decisions.append(
                 Decision(
                     kind="kept",
@@ -112,7 +102,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     # Only emit the table when some source is non-zero.
     md = md_table(["source", "pct_of_total", "share_pct"], rows) if has_any_split else ""
-    skipped = not has_any_split
     return RenderedSection(
         section_id="attribution",
         title="Source Attribution",
@@ -120,5 +109,5 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         markdown_block=md,
         decisions=decisions,
         warnings=[],
-        skipped=skipped,
+        skipped=not has_any_split,
     )

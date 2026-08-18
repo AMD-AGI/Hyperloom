@@ -20,12 +20,18 @@ Read side::
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, has_parts
 
     sections = assemble_parts(session_dir)   # {section: list | dict}
+
+Recording is best-effort by design, so a fact that never arrived leaves nothing
+behind to explain itself. Set ``HYPERLOOM_BREAKDOWN_TRACE=1`` to log every
+write, naming its call site and, when a write merges into an existing fragment,
+the fields whose values it changed (see :mod:`.trace`).
 """
 
 from __future__ import annotations
 
 from . import instrument
 from .assembler import assemble_parts, has_parts, parts_dir
+from .trace import TRACE, TRACE_ENV, enable_trace, trace_enabled
 from .instrument import (
     record_action_operation,
     record_adoption,
@@ -68,7 +74,10 @@ __all__ = [
     "SECTION_SHAPES",
     "Recorder",
     "SectionShape",
+    "TRACE",
+    "TRACE_ENV",
     "assemble_parts",
+    "enable_trace",
     "get_recorder",
     "has_parts",
     "instrument",
@@ -100,4 +109,5 @@ __all__ = [
     "record_trace_event",
     "snapshot_state_sections",
     "section_shape",
+    "trace_enabled",
 ]
