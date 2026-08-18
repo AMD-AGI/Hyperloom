@@ -687,6 +687,23 @@ async def test_rearm_kept_stores_accepted_config():
 
 
 @pytest.mark.asyncio
+async def test_rearm_kept_records_patches_in_stack():
+    """KEEP patches are added to kept_patches so a revalidation-rearmed round inherits them."""
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval")
+    fake.shared_state.enablement.kept_patches = ["/prior/advance.patch"]
+    fake._maybe_rearm_enablement(
+        {
+            "status": "kept",
+            "enablement": True,
+            "patches_applied": ["/this/round/fix.patch"],
+            "enablement_effective_config": {"extra_envs": {}},
+        }
+    )
+    assert "/prior/advance.patch" in fake.shared_state.enablement.kept_patches
+    assert "/this/round/fix.patch" in fake.shared_state.enablement.kept_patches
+
+
+@pytest.mark.asyncio
 async def test_rearm_ignores_non_enablement(monkeypatch):
     fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     fake._maybe_rearm_enablement({"status": "reverted"})
