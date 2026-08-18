@@ -2237,6 +2237,11 @@ class PreludePhase(PhaseHandler):
                 "hot_tput": float(hot_tput),
                 "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
                 "gain_pct": round(measured_gain, 3),
+                # The verdict this promotion rests on, so CLOSE can tell a
+                # champion that was checked from one that never was without
+                # having to reconstruct which lane promoted it. ``None`` means
+                # the config was not gated, not that it scored nothing.
+                "accuracy": outcome.get("replay_accuracy"),
                 "workspace": str(result.get("workspace") or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
                 # source_tier records the warm-recipe tier for breakdown attribution.

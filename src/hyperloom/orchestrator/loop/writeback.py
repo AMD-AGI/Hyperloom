@@ -129,10 +129,15 @@ class WritebackCollaborator:
 
         The recipe carries no accuracy of its own, so a config written here is
         indistinguishable from a safe one when a later session replays it. A
-        champion that touches a high-risk knob therefore has to point at a
-        recorded, passing accuracy verdict from this session; otherwise the
-        prior champion stays and this session contributes only its experience
-        entries.
+        champion that touches a high-risk knob therefore has to carry a passing
+        verdict from the lane that promoted it; otherwise the prior champion
+        stays and this session contributes only its experience entries.
+
+        The verdict is read from the top stack entry rather than reconstructed
+        per lane: every lane that can promote a config stamps it there, so a
+        champion promoted by warm replay is judged on the same evidence as one
+        promoted by explore. Reconstructing it lane by lane would silently
+        withhold writes for whichever lane was overlooked.
 
         A champion with no high-risk knob is unchanged: those cannot alter
         numerics, and gating them would stall the KB on eval-less setups.
@@ -159,21 +164,20 @@ class WritebackCollaborator:
 
         from ..actions.executors._accuracy_gate import accuracy_passed
 
-        champion_args = str(config.get("extra_server_args") or "").strip()
-        accepted = ((getattr(ss, "explore_search", {}) or {}).get("accepted")) or []
-        for row in accepted:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("extra_server_args") or "").strip() != champion_args:
-                continue
-            score = row.get("accuracy")
-            if isinstance(score, (int, float)) and accuracy_passed(baseline_accuracy, float(score)):
-                return True
+        stack = getattr(ss, "optimization_stack", []) or []
+        top = stack[-1] if stack and isinstance(stack[-1], dict) else {}
+        score = top.get("accuracy")
+        if score is None:
+            score = config.get("accuracy")
+        if isinstance(score, (int, float)) and accuracy_passed(baseline_accuracy, float(score)):
+            return True
 
         log.info(
             "recipe finalize: withholding best_config overwrite — the champion "
-            "carries a high-risk knob with no passing accuracy on record "
-            "(baseline=%.4f). Experience entries are still written.",
+            "carries a high-risk knob and the promotion that produced it "
+            "recorded accuracy=%r against a %.4f baseline. Experience entries "
+            "are still written.",
+            score,
             baseline_accuracy,
         )
         return False
@@ -2703,6 +2707,10 @@ class WritebackCollaborator:
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+                    # Carry the promoting lane's accuracy verdict onto the stack
+                    # so CLOSE reads one place instead of reconstructing which
+                    # lane promoted the champion. ``None`` means "not gated".
+                    "accuracy": (bv.get("accuracy") if isinstance(bv, dict) else None),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),

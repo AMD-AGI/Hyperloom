@@ -21,48 +21,72 @@ SAFE = {"extra_server_args": "--max-num-seqs 2048", "extra_envs": {}}
 BASELINE = 0.90
 
 
-def _collab(baseline_accuracy: float, accepted: list | None = None) -> WritebackCollaborator:
+def _collab(baseline_accuracy: float, stack: list | None = None) -> WritebackCollaborator:
     c = WritebackCollaborator.__new__(WritebackCollaborator)
     state = SharedState()
     state.baseline_accuracy = baseline_accuracy
-    state.explore_search = {"accepted": list(accepted or [])}
+    state.optimization_stack = list(stack or [])
     c.shared_state = state
     return c
 
 
-def _accepted(args: str, accuracy):
-    return {"extra_server_args": args, "accuracy": accuracy, "fingerprint": "ff" * 8}
+def _stack_entry(action: str, accuracy):
+    return {
+        "action": action,
+        "candidate_extra_server_args": RISKY["extra_server_args"],
+        "extra_envs": {},
+        "accuracy": accuracy,
+        "tput": 1000.0,
+    }
 
 
 class TestChampionAccuracyGate:
     def test_high_risk_champion_without_a_verdict_is_withheld(self):
         """The state that produced the 45 bad promotions: a high-risk config
         whose accuracy was never recorded."""
-        c = _collab(BASELINE, accepted=[_accepted(RISKY["extra_server_args"], None)])
+        c = _collab(BASELINE, stack=[_stack_entry("explore", None)])
         assert c._champion_accuracy_ok({"best_config": RISKY}) is False
 
     def test_high_risk_champion_with_a_collapsed_verdict_is_withheld(self):
-        c = _collab(BASELINE, accepted=[_accepted(RISKY["extra_server_args"], 0.20)])
+        c = _collab(BASELINE, stack=[_stack_entry("explore", 0.20)])
         assert c._champion_accuracy_ok({"best_config": RISKY}) is False
 
     def test_high_risk_champion_with_a_passing_verdict_is_written(self):
-        c = _collab(BASELINE, accepted=[_accepted(RISKY["extra_server_args"], 0.89)])
+        c = _collab(BASELINE, stack=[_stack_entry("explore", 0.89)])
         assert c._champion_accuracy_ok({"best_config": RISKY}) is True
+
+    def test_a_warm_replay_champion_is_judged_on_the_same_evidence(self):
+        """Reading the verdict off the stack rather than per lane is the point:
+        a champion promoted by warm replay carries no explore ledger row, and
+        reconstructing evidence lane by lane would withhold its write even
+        though the replay gate had verified it."""
+        c = _collab(BASELINE, stack=[_stack_entry("replay_warm_recipe", 0.89)])
+        assert c._champion_accuracy_ok({"best_config": RISKY}) is True
+
+    def test_only_the_promotion_that_produced_the_champion_counts(self):
+        """An earlier passing layer does not vouch for a later unverified one."""
+        c = _collab(
+            BASELINE,
+            stack=[_stack_entry("explore", 0.90), _stack_entry("explore", None)],
+        )
+        assert c._champion_accuracy_ok({"best_config": RISKY}) is False
 
     def test_a_champion_with_no_high_risk_knob_is_unaffected(self):
         """Those cannot change numerics; gating them would stall the KB."""
-        c = _collab(BASELINE, accepted=[])
+        c = _collab(BASELINE, stack=[])
         assert c._champion_accuracy_ok({"best_config": SAFE}) is True
 
     def test_without_a_baseline_there_is_no_verdict_to_demand(self):
         """Mirrors ``accuracy_passed``: a non-positive baseline skips the gate,
         so an eval-less setup is not locked out of the KB forever."""
-        c = _collab(0.0, accepted=[_accepted(RISKY["extra_server_args"], None)])
+        c = _collab(0.0, stack=[_stack_entry("explore", None)])
         assert c._champion_accuracy_ok({"best_config": RISKY}) is True
 
-    def test_a_verdict_for_a_different_config_does_not_count(self):
-        c = _collab(BASELINE, accepted=[_accepted("--some-other-flag", 0.90)])
-        assert c._champion_accuracy_ok({"best_config": RISKY}) is False
+    def test_a_verdict_carried_on_best_config_is_accepted(self):
+        """``_build_recipe_attrs_from_state`` copies an ``accuracy`` key off
+        ``current_best`` when one is present; honour it as evidence."""
+        c = _collab(BASELINE, stack=[])
+        assert c._champion_accuracy_ok({"best_config": {**RISKY, "accuracy": 0.89}}) is True
 
 
 class TestLedgerRecordsTheVerdict:
