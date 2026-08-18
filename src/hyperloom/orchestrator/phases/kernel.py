@@ -46,12 +46,6 @@ log = _logging.getLogger(__name__)
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
-# Idempotency key of the same-harness GEAK rebench enqueued by
-# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
-# ``geak_pending`` before the task row exists, so the phase guard already sees a
-# pending revalidation while the enqueue is in flight.
-_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
-
 
 def _collective_comm_share(state: Any) -> tuple[float | None, str]:
     """Return the communication share gating the lane, and its provenance.
@@ -814,15 +808,18 @@ class KernelPhase(PhaseHandler):
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
             # Reserve the pending slot BEFORE the task exists. The rebench runs
-            # as an ``explore`` task, a kind no later phase allows, so the phase
-            # boundary cancels it on sight; ``kernel_work_pending`` is what holds
-            # KERNEL open until the rebench lands. Publishing the reservation
-            # after enqueue left a window where the guard saw no revalidation id,
-            # let KERNEL exit, and the cancel swept the freshly queued task —
+            # as an ``explore`` task; phase-boundary cleanup spares
+            # ``geak_fallback`` rows so the rebench can finish after KERNEL
+            # winds down. ``kernel_work_pending`` still holds KERNEL open while
+            # a revalidation id is reserved. Publishing the reservation after
+            # enqueue left a window where the guard saw no revalidation id, let
+            # KERNEL exit, and the cancel swept the freshly queued task —
             # stranding a validated win as audit-only.
+            cycle = int(getattr(state, "macro_cycle", 0) or 0)
+            placeholder_key = _phase_state.geak_revalidate_idempotency_key(cycle)
             reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             reserved["status"] = "awaiting_rebench"
-            reserved.setdefault("revalidation_task_id", _GEAK_REVALIDATE_IDEMPOTENCY_KEY)
+            reserved.setdefault("revalidation_task_id", placeholder_key)
             reserved.pop("revalidation_error", None)
             state.geak_pending = reserved
             state.save(self.session_dir)
@@ -845,7 +842,7 @@ class KernelPhase(PhaseHandler):
 
             pending["status"] = "rebench_unavailable"
             # Drop the reservation placeholder so no stale id outlives the slot.
-            if pending.get("revalidation_task_id") == _GEAK_REVALIDATE_IDEMPOTENCY_KEY:
+            if pending.get("revalidation_task_id") == placeholder_key:
                 pending.pop("revalidation_task_id", None)
             pending["revalidation_error"] = str(
                 (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
