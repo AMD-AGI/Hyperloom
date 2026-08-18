@@ -12,12 +12,21 @@ part worth keeping.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+from hyperloom.orchestrator.kernel.roofline_ceiling import (
+    OpBreakdown,
+    PerfModelBreakdown,
+)
 from hyperloom.orchestrator.kernel.roofline_snapshot import (
     MAX_RECIPE_PERFMODEL_OPS,
+    _RECIPE_PERFMODEL_KEYS,
+    _RECIPE_PERFMODEL_OP_KEYS,
+    _RECIPE_SNAPSHOT_KEYS,
     build_recipe_roofline,
+    build_roofline_snapshot,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
@@ -30,6 +39,18 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
     MockTurn,
     ScriptedPlan,
+)
+
+#: Snapshot fields deliberately left out of the recipe projection. ``top_kernel``
+#: is nested and projected by hand; the other two are session-local — the report
+#: layer owns ``framework``, and ``kernel_roofline_path`` points into a session
+#: directory that no longer exists by the time a recipe is read.
+_SNAPSHOT_KEYS_NOT_IN_RECIPE = frozenset(
+    {
+        "framework",
+        "kernel_roofline_path",
+        "top_kernel",
+    }
 )
 
 _MODEL = "qwen3-30b-a3b"
@@ -161,13 +182,17 @@ def test_projection_carries_both_ceilings_and_the_per_op_breakdown() -> None:
 
 
 def test_projection_records_the_latest_snapshot() -> None:
-    """``snapshots[-1]`` wins, matching ``SharedState.current_top_bottleneck``."""
+    """``snapshots[-1]`` wins, matching ``SharedState.current_top_bottleneck``.
+
+    ``snapshot_id`` says which snapshot was projected; nothing describes the
+    writing session, whose history the recipe does not carry.
+    """
     first = _snapshot(snapshot_id=1, within_roofline_pct=2.08)
     second = _snapshot(snapshot_id=2, within_roofline_pct=41.5)
     out = build_recipe_roofline([first, second])
     assert out["snapshot_id"] == 2
     assert out["within_roofline_pct"] == 41.5
-    assert out["snapshot_count"] == 2
+    assert "snapshot_count" not in out
 
 
 def test_a_snapshot_without_a_perfmodel_still_projects() -> None:
@@ -189,6 +214,45 @@ def test_the_per_op_array_is_capped() -> None:
     pm = build_recipe_roofline([snap])["perfmodel_breakdown"]
     assert len(pm["ops"]) == MAX_RECIPE_PERFMODEL_OPS
     assert pm["ops_truncated_from"] == MAX_RECIPE_PERFMODEL_OPS + 10
+
+
+def test_ops_that_all_project_to_nothing_leave_no_truncation_marker() -> None:
+    """An over-cap op list that stores no rows must not claim it capped any.
+
+    ``ops_truncated_from`` reads as "there were N, we kept the cap"; without a
+    stored ``ops`` array there is nothing for it to qualify.
+    """
+    empty_ops = [{} for _ in range(MAX_RECIPE_PERFMODEL_OPS + 5)]
+    assert build_recipe_roofline([{"ts": "t", "perfmodel_breakdown": {"ops": empty_ops}}]) == {"ts": "t"}
+    # Scalars still project; only the op array and its marker drop out.
+    kept = build_recipe_roofline([_snapshot(perfmodel_breakdown={"bound_kind": "memory", "ops": empty_ops})])
+    assert kept["perfmodel_breakdown"] == {"bound_kind": "memory"}
+
+
+def test_every_snapshot_field_is_projected_or_deliberately_dropped() -> None:
+    """The allowlist must account for every field ``build_roofline_snapshot`` emits.
+
+    The snapshot builder populates all of its keys unconditionally, so its
+    output is the source of truth for what a new field would have to be
+    triaged into — rather than silently never reaching the recipe.
+    """
+    emitted = set(build_roofline_snapshot(snapshot_id=1, ts="2026-08-17T00:00:00+00:00", analysis_md_path="").keys())
+    assert emitted - set(_RECIPE_SNAPSHOT_KEYS) == _SNAPSHOT_KEYS_NOT_IN_RECIPE
+    assert set(_RECIPE_SNAPSHOT_KEYS) <= emitted, "allowlist names a field the snapshot no longer emits"
+
+
+def test_every_perfmodel_field_is_projected_or_deliberately_dropped() -> None:
+    """The PerfModel allowlists must track the breakdown dataclasses.
+
+    ``attach_perfmodel_breakdown`` serialises :class:`PerfModelBreakdown` and
+    :class:`OpBreakdown` field for field, so their fields are the source of
+    truth for what the snapshot can carry. ``ops`` is the nested array, handled
+    by ``_RECIPE_PERFMODEL_OP_KEYS`` instead.
+    """
+    pm_fields = {f.name for f in fields(PerfModelBreakdown)}
+    assert pm_fields - set(_RECIPE_PERFMODEL_KEYS) == {"ops"}
+    assert set(_RECIPE_PERFMODEL_KEYS) <= pm_fields
+    assert {f.name for f in fields(OpBreakdown)} == set(_RECIPE_PERFMODEL_OP_KEYS)
 
 
 def test_close_stores_the_roofline_without_a_validated_win(tmp_path: Path) -> None:

@@ -533,7 +533,9 @@ def _project_perfmodel_breakdown(breakdown: Any) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: The projected breakdown, or ``{}`` when there is nothing
-            usable to store.
+            usable to store. ``ops_truncated_from`` only rides alongside a
+            non-empty ``ops``, so the count never describes rows that were
+            dropped for being empty rather than for exceeding the cap.
     """
     if not isinstance(breakdown, dict) or not breakdown:
         return {}
@@ -551,8 +553,8 @@ def _project_perfmodel_breakdown(breakdown: Any) -> dict[str, Any]:
             projected_ops.append(row)
     if projected_ops:
         out["ops"] = projected_ops
-    if len(ops) > MAX_RECIPE_PERFMODEL_OPS:
-        out["ops_truncated_from"] = len(ops)
+        if len(ops) > MAX_RECIPE_PERFMODEL_OPS:
+            out["ops_truncated_from"] = len(ops)
     return out
 
 
@@ -562,7 +564,14 @@ def build_recipe_roofline(snapshots: list[dict[str, Any]] | None) -> dict[str, A
     Follows the ``latest = snapshots[-1]`` convention shared with
     :meth:`SharedState.current_top_bottleneck`, so the recipe records where the
     session finished rather than where it started; the per-snapshot history stays
-    in the session's ``state.json``.
+    in the session's ``state.json``. Every field describes that one snapshot —
+    nothing here counts or aggregates the writing session.
+
+    The sole caller is
+    :meth:`WritebackCollaborator.finalize_recipe_and_journal`
+    (``orchestrator/loop/writeback.py``), which stores the result under
+    ``extras["roofline"]``. Local mode only, and write-only: no reader consumes
+    the stored value yet.
 
     Args:
         snapshots: The append-only ``SharedState.roofline_snapshots`` history, or
@@ -592,9 +601,6 @@ def build_recipe_roofline(snapshots: list[dict[str, Any]] | None) -> dict[str, A
     breakdown = _project_perfmodel_breakdown(latest.get("perfmodel_breakdown"))
     if breakdown:
         out["perfmodel_breakdown"] = breakdown
-    if not out:
-        return {}
-    out["snapshot_count"] = len(snaps)
     return out
 
 
