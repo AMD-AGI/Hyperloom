@@ -409,7 +409,29 @@ class KernelAgentKB:
         if content is None:
             return {}
         node = content.knowledge.get(column)
-        return dict(node) if isinstance(node, Mapping) else {}
+        if not isinstance(node, Mapping):
+            return {}
+
+        blocked = {
+            "source_file",
+            "source_files",
+            "target_file",
+            "target_files",
+            "target_path",
+        }
+
+        def without_source_metadata(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {
+                    str(key): without_source_metadata(nested)
+                    for key, nested in value.items()
+                    if str(key) not in blocked
+                }
+            if isinstance(value, list):
+                return [without_source_metadata(item) for item in value]
+            return value
+
+        return without_source_metadata(node)
 
 
 __all__ = [

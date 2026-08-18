@@ -352,6 +352,53 @@ def provider_model_defaults(env: Mapping[str, str] | None = None) -> dict[str, s
     return {key: value for key, value in candidates.items() if value and not (source.get(key) or "").strip()}
 
 
+def resolve_forge_llm_model(
+    agent_backend: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    explicit: str | None = None,
+    default: str = "",
+) -> str:
+    """Resolve the Forge LLM model id for a chosen agent backend.
+
+    Shared by forge-fusion, forge rewrite (``forge_submit``), and forge-collective
+    so every Forge LLM surface honors the same precedence:
+
+    1. ``explicit`` (request ``llm_model``);
+    2. forge-specific env (``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``), the
+       forge counterpart of ``GEAK_CLAUDE_MODEL``;
+    3. orchestration-side ``CLAUDE_MODEL`` / ``CODEX_MODEL``;
+    4. ``default`` (callers that always need a concrete id pass their built-in
+       default; callers that defer to KernelForge omit it and skip ``--model``).
+
+    Args:
+        agent_backend: ``"claude"`` or ``"codex"`` (other values use the Claude
+            env ladder, matching KernelForge's Claude default for ``auto``).
+        env: Environment mapping to read; defaults to ``os.environ``.
+        explicit: Request-level model override, typically ``payload["llm_model"]``.
+        default: Fallback when no env model is set.
+
+    Returns:
+        The resolved model id, or ``default`` / ``""`` when nothing is configured.
+    """
+    source = env if env is not None else os.environ
+    explicit_model = (explicit or "").strip()
+    if explicit_model:
+        return explicit_model
+    backend = (agent_backend or "").strip().lower()
+    if backend == "codex":
+        return (
+            str(source.get("FORGE_CODEX_MODEL") or "").strip()
+            or str(source.get("CODEX_MODEL") or "").strip()
+            or default
+        )
+    return (
+        str(source.get("FORGE_CLAUDE_MODEL") or "").strip()
+        or str(source.get("CLAUDE_MODEL") or "").strip()
+        or default
+    )
+
+
 def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
     source = env if env is not None else os.environ
 
@@ -1382,6 +1429,7 @@ __all__ = [
     "openai_client_kwargs",
     "parse_custom_headers",
     "provider_model_defaults",
+    "resolve_forge_llm_model",
     "resolve_openai_client_config",
     "stream_chat_completion_text",
 ]

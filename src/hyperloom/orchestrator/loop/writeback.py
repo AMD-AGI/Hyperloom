@@ -1331,7 +1331,9 @@ class WritebackCollaborator:
             reason = None
         else:
             error_class = str(result_dict.get("error_class") or "") or None
-            reason = str(result_dict.get("reason") or "") or None
+            # A skip states its own cause under ``skip_reason``; without it the
+            # timeline shows a step that did nothing and never says why.
+            reason = str(result_dict.get("reason") or result_dict.get("skip_reason") or "") or None
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
@@ -1916,6 +1918,59 @@ class WritebackCollaborator:
             )
         except Exception:  # noqa: BLE001 - audit cannot break finalization
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
+
+    def ensure_recipe_finalized(
+        self,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        """Idempotently publish terminal Recipe state and persist its outcome."""
+        state = self.shared_state
+        prior = dict(getattr(state, "recipe_finalize_outcome", {}) or {})
+        prior_status = str(
+            getattr(state, "recipe_finalize_status", "")
+            or prior.get("status")
+            or ""
+        )
+        if prior_status in {"written", "skipped", "disabled"}:
+            return prior
+
+        attempts = int(getattr(state, "recipe_finalize_attempts", 0) or 0) + 1
+        state.recipe_finalize_attempts = attempts
+        state.recipe_finalize_status = "pending"
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — publication can still proceed
+            log.exception("Recipe finalize pending-state save failed")
+
+        try:
+            raw = self.finalize_recipe_and_journal(source=source) or {}
+            outcome = {
+                **dict(raw),
+                "source": source,
+                "attempt": attempts,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:  # noqa: BLE001 — persist retryable failure
+            log.exception("Recipe finalize raised")
+            outcome = {
+                "status": "error",
+                "reason": type(exc).__name__,
+                "source": source,
+                "attempt": attempts,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        raw_status = str(outcome.get("status") or "error")
+        state.recipe_finalize_status = (
+            "failed" if raw_status == "error" else raw_status
+        )
+        state.recipe_finalize_outcome = outcome
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — T4 can still retry in-process
+            log.exception("Recipe finalize outcome save failed")
+        return outcome
 
     def finalize_recipe_and_journal(
         self,

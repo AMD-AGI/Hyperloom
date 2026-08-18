@@ -33,6 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from . import _server_lifecycle as _lifecycle
@@ -95,6 +96,13 @@ _EVAL_FAILURE_MARKERS = (
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
+
+# The cold-start guard's two round directories. The warmup round is the only one
+# that measures accuracy (``RUN_EVAL=true``); the measured round is hot
+# throughput alone, so it carries no accuracy by construction.
+_WARMUP_ROUND_DIR = "warmup_round"
+_MEASURE_ROUND_DIR = "measure_round"
+_DOUBLE_RUN_ROUND_DIRS = (_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR)
 
 # Markers identifying a MoE quant scheme with no implementation for the
 # ``--moe-runner-backend`` in use: ``create_moe_runner`` falls through without
@@ -389,6 +397,34 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     if str(task_kind or "") != "baseline":
         return False
     return not (params or {}).get("quality_ref_exempt")
+
+
+def _is_double_run_accuracy_handoff(
+    result: dict[str, Any],
+    salvaged: dict[str, Any] | None,
+) -> bool:
+    """Whether accuracy came from the warmup round because that is the design.
+
+    The cold-start guard splits one baseline into a warmup round that measures
+    accuracy and a measured round that measures hot throughput only, then
+    decides on the measured round -- which by construction has no accuracy of
+    its own. Reading the warmup round's score there is the intended handoff,
+    not a recovery, and logging it as one makes every healthy double-run
+    baseline look like it survived a fault.
+
+    Args:
+        result (dict[str, Any]): The deciding round's result dict.
+        salvaged (dict[str, Any] | None): The salvage record, whose
+            ``source_file`` names the round the accuracy came from.
+
+    Returns:
+        bool: ``True`` only for measured-round decision + warmup-round source.
+    """
+    out_dir = str((result or {}).get("output_dir") or "")
+    if not out_dir or Path(out_dir).name != _MEASURE_ROUND_DIR:
+        return False
+    source = str((salvaged or {}).get("source_file") or "")
+    return _WARMUP_ROUND_DIR in Path(source).parts
 
 
 # Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
@@ -985,6 +1021,13 @@ def _verify_three_way_clean(
     return True, ""
 
 
+def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
+    """Return the active framework root for Explore/Framework Recipe patches."""
+    if not params.get("patches"):
+        return ""
+    return resolve_session_framework_root()
+
+
 def _apply_warm_patches(
     params: dict[str, Any],
     target_repo: str,
@@ -992,7 +1035,7 @@ def _apply_warm_patches(
     *,
     before_mutation: Any = None,
 ) -> list[dict[str, str]] | dict[str, Any]:
-    """Apply warm-replay code patches to the InferenceX checkout.
+    """Apply warm-replay code patches to the Session's active framework root.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
@@ -1872,7 +1915,7 @@ class BaselineExecutor:
         root = Path(out_dir)
         # Double-run: the failure markers may live in the sibling warmup round,
         # so climb to the shared task root to scan both rounds.
-        if root.name in ("warmup_round", "measure_round"):
+        if root.name in _DOUBLE_RUN_ROUND_DIRS:
             root = root.parent
         if not root.exists():
             return False
@@ -1933,7 +1976,7 @@ class BaselineExecutor:
         root = Path(out_dir)
         # Double-run: the failure markers may live in the sibling warmup round,
         # so climb to the shared task root to scan both rounds.
-        if root.name in ("warmup_round", "measure_round"):
+        if root.name in _DOUBLE_RUN_ROUND_DIRS:
             root = root.parent
         if not root.exists():
             return False, ""
@@ -2329,14 +2372,28 @@ class BaselineExecutor:
         # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
-            log.warning(
-                "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
-                "but salvaged a measured baseline accuracy=%.4f from a sibling "
-                "attempt (%s)",
-                acc_val,
-                salvaged.get("source_file", ""),
+            expected_handoff = _is_double_run_accuracy_handoff(result, salvaged)
+            acc_val = self._apply_salvaged_accuracy(
+                result,
+                salvaged,
+                shared_state,
+                expected_handoff=expected_handoff,
             )
+            if expected_handoff:
+                log.info(
+                    "baseline_executor: cold-start guard — reading accuracy=%.4f from "
+                    "the warmup round (%s), the only round that measures it",
+                    acc_val,
+                    salvaged.get("source_file", ""),
+                )
+            else:
+                log.warning(
+                    "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
+                    "but salvaged a measured baseline accuracy=%.4f from a sibling "
+                    "attempt (%s)",
+                    acc_val,
+                    salvaged.get("source_file", ""),
+                )
             # Floor 0.0 reproduces the non-enablement "any positive accuracy is
             # usable" rule; ``accuracy_meets_floor`` rejects zero either way.
             if accuracy_meets_floor(acc_val, floor if eval_enablement else 0.0):
@@ -2383,6 +2440,8 @@ class BaselineExecutor:
         result: dict[str, Any],
         salvaged: dict[str, Any],
         shared_state: Any,
+        *,
+        expected_handoff: bool = False,
     ) -> float:
         """Record a salvaged sibling accuracy, publishing it as the gate
         reference only when it can serve as one.
@@ -2398,6 +2457,11 @@ class BaselineExecutor:
             salvaged: The parsed eval dict from
                 :meth:`_salvage_sibling_baseline_accuracy`.
             shared_state: The live SharedState, or ``None``.
+            expected_handoff: Whether this read is the double-run design
+                (see :func:`_is_double_run_accuracy_handoff`) rather than a
+                recovery. The structured warning is for the recovery only;
+                raising it on every healthy double-run baseline leaves the
+                record claiming a fault the run never hit.
 
         Returns:
             float: The salvaged accuracy.
@@ -2409,8 +2473,9 @@ class BaselineExecutor:
         result["accuracy_task"] = salvaged.get("task", "gsm8k")
         result["accuracy_metric"] = salvaged.get("metric", "")
         result["accuracy_source"] = salvaged.get("source_file", "")
-        result.setdefault("nonfatal_warnings", [])
-        result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+        if not expected_handoff:
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             try:
                 shared_state.baseline_accuracy = acc_val
@@ -2551,7 +2616,10 @@ class BaselineExecutor:
 
         # Warm patches are prepared after config/runtime preflight, immediately
         # before the single final benchmark.
-        patch_target = effective_inferencex_path or ix_env
+        # Explore/Framework Recipe patches target the framework checkout, not
+        # the InferenceX benchmark harness. The Session's explicitly selected
+        # root is the sole authority, matching Kernel Recipe replay.
+        patch_target = _resolve_recipe_patch_target(params)
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""
@@ -2880,7 +2948,7 @@ class BaselineExecutor:
                     result["warm_patch_snapshot_manifest"] = patch_application.get(
                         "snapshot_manifest"
                     )
-                    result["warm_patch_canonical_target"] = ix_env
+                    result["warm_patch_canonical_target"] = patch_target
                     result["warm_kernel_apply_results"] = list(
                         params.get("warm_kernel_apply_results") or []
                     )
@@ -2950,7 +3018,7 @@ class BaselineExecutor:
                     warmup_result["warm_patch_snapshot_manifest"] = patch_application.get(
                         "snapshot_manifest"
                     )
-                    warmup_result["warm_patch_canonical_target"] = ix_env
+                    warmup_result["warm_patch_canonical_target"] = patch_target
                     warmup_result["warm_kernel_apply_results"] = list(
                         params.get("warm_kernel_apply_results") or []
                     )
@@ -3007,7 +3075,7 @@ class BaselineExecutor:
                 result["warm_patch_snapshot_manifest"] = patch_application.get(
                     "snapshot_manifest"
                 )
-                result["warm_patch_canonical_target"] = ix_env
+                result["warm_patch_canonical_target"] = patch_target
                 result["warm_kernel_apply_results"] = list(
                     params.get("warm_kernel_apply_results") or []
                 )

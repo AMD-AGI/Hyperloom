@@ -40,6 +40,7 @@ from hyperloom.common.llm_config import (
     openai_client_kwargs,
     parse_custom_headers,
     provider_model_defaults,
+    resolve_forge_llm_model,
 )
 
 _LEGACY_KEY = "_".join(("DEEPSEEK", "API", "KEY"))
@@ -480,6 +481,30 @@ def test_deepseek_compat_env_geak_model_follows_explicit_claude_model():
     updates = deepseek_compat_env({_LEGACY_KEY: "sk-legacy", "CLAUDE_MODEL": "claude-opus-5"})
     assert "CLAUDE_MODEL" not in updates
     assert updates["GEAK_CLAUDE_MODEL"] == "claude-opus-5"
+
+
+def test_resolve_forge_llm_model_prefers_forge_env_over_orchestration():
+    env = {
+        "CLAUDE_MODEL": "claude-orchestration",
+        "FORGE_CLAUDE_MODEL": "claude-forge-only",
+        "CODEX_MODEL": "gpt-orchestration",
+        "FORGE_CODEX_MODEL": "gpt-forge-only",
+    }
+    assert resolve_forge_llm_model("claude", env=env) == "claude-forge-only"
+    assert resolve_forge_llm_model("codex", env=env) == "gpt-forge-only"
+
+
+def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
+    assert resolve_forge_llm_model("claude", env={"CLAUDE_MODEL": "claude-orch"}) == "claude-orch"
+    assert resolve_forge_llm_model("codex", env={}, default="gpt-default") == "gpt-default"
+    assert (
+        resolve_forge_llm_model(
+            "claude",
+            env={"FORGE_CLAUDE_MODEL": "claude-forge-only"},
+            explicit="claude-payload",
+        )
+        == "claude-payload"
+    )
 
 
 def test_deepseek_compat_env_is_idempotent():

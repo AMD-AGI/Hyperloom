@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
     coerce_needs_gpu,
+    collapse_verdict_map,
     collapse_verdicts,
     format_exc_brief,
     serialize_verdict_advisory,
@@ -191,7 +192,12 @@ class IntentRouter:
         self.state.pending_proposals[msg.msg_id] = pending
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal; verdicts collapse by priority (approve > reject > needs_review).
+        """Apply a Critic ``review_verdict`` to its target proposal.
+
+        A ``verdict_map`` is held per entry, then collapsed on the proceedable
+        subset (``approve`` / ``advise``) so a genuine reject cannot discard
+        siblings that may still run. Those names are passed through as the
+        materialize filter.
 
         Args:
             source: The agent (Critic) emitting the verdict.
@@ -219,36 +225,19 @@ class IntentRouter:
             target=target,
         )
         authored = str(single_verdict or "").strip()
+        approved_variant_names: set[str] | None = None
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
-            # Per entry before the collapse below: a variant rejected on an
-            # advisory-only rule must not out-rank its siblings' advice. Each
-            # entry is read against the findings the payload states for the
-            # batch, which hold every reject in the set.
-            sub_verdicts = [
-                await self._record_verdict_hold(
-                    verdict_map_entry_held_to_its_rule(entry, intent.payload, action_name=pending.action_name),
-                    target=target,
-                    variant=str(name),
-                )
-                for name, entry in verdict_map.items()
-            ]
-            verdict = collapse_verdicts(sub_verdicts)
+            held_by_name = await self._held_verdict_map(
+                verdict_map,
+                target=target,
+                action_name=pending.action_name,
+                payload=intent.payload,
+            )
+            verdict, approved_variant_names = collapse_verdict_map(held_by_name)
             authored = collapse_verdicts(
                 str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
             )
-
-            # Defensive audit (log-only): record verdict_map collapse
-            # outcomes for traceability. Behaviour is unchanged.
-            try:
-                if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
-                    log.warning(
-                        "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
-                        target,
-                        verdict,
-                        sub_verdicts,
-                    )
-            except Exception:  # noqa: BLE001 - audit log must never affect flow
-                pass
+            self._log_mixed_verdict_map_collapse(target, verdict, held_by_name)
         await self._coord._handle_single_verdict(
             source=source,
             pending=pending,
@@ -256,7 +245,61 @@ class IntentRouter:
             authored_verdict=authored,
             reasoning=str(intent.payload.get("reasoning") or ""),
             advisory=serialize_verdict_advisory(intent.payload),
+            approved_variant_names=approved_variant_names,
         )
+
+    async def _held_verdict_map(
+        self,
+        verdict_map: dict[str, Any],
+        *,
+        target: str,
+        action_name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, str]:
+        """Hold each ``verdict_map`` entry to its cited rule.
+
+        Args:
+            verdict_map: Per-variant verdict entries from the Critic payload.
+            target: The target proposal msg_id, for the audit record.
+            action_name: The proposal's action, forwarded to the hold.
+            payload: The full verdict payload; batch-level findings live here.
+
+        Returns:
+            ``{variant_name: held_verdict}`` after any advisory-only downgrade.
+        """
+        held_by_name: dict[str, str] = {}
+        for name, entry in verdict_map.items():
+            held_by_name[str(name)] = await self._record_verdict_hold(
+                verdict_map_entry_held_to_its_rule(entry, payload, action_name=action_name),
+                target=target,
+                variant=str(name),
+            )
+        return held_by_name
+
+    def _log_mixed_verdict_map_collapse(
+        self,
+        target: str,
+        verdict: str,
+        held_by_name: dict[str, str],
+    ) -> None:
+        """Log when a mixed map still proceeds, for traceability.
+
+        Args:
+            target: The target proposal msg_id.
+            verdict: The collapsed summary after the proceedable-subset rule.
+            held_by_name: Per-variant held verdicts.
+        """
+        try:
+            sub_verdicts = list(held_by_name.values())
+            if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
+                log.warning(
+                    "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
+                    target,
+                    verdict,
+                    sub_verdicts,
+                )
+        except Exception:  # noqa: BLE001 - audit log must never affect flow
+            pass
 
     async def _record_verdict_hold(
         self,
@@ -317,8 +360,9 @@ class IntentRouter:
         reasoning: str,
         authored_verdict: str = "",
         advisory: dict[str, Any] | None = None,
+        approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Single-verdict handler (approve/advise materialises proposal as-is); mirrors integrate_patch/specialist verdicts onto specialist_patch_verdicts for PolicyGate.
+        """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
 
         Args:
             source: The agent emitting the verdict.
@@ -333,6 +377,9 @@ class IntentRouter:
                 ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
                 the rebroadcast payload so the full Critic context reaches the
                 orchestration inbox and downstream consumers.
+            approved_variant_names: When a ``verdict_map`` named proceedable
+                variants, restrict an explore grid to those names; ``None``
+                keeps the full proposal.
         """
         pending.decided = True
         pending.verdict = verdict
@@ -398,7 +445,10 @@ class IntentRouter:
         # Both `approve` and `advise` mean "dispatch may proceed"; treat them
         # identically for materialization.
         if verdict in ("approve", "advise"):
-            await self._materialize_approved_proposal(pending)
+            await self._materialize_approved_proposal(
+                pending,
+                approved_variant_names=approved_variant_names,
+            )
         elif verdict == "reject" and pending.action_name == "framework_agent":
             # Record the critic_denied row so the framework_agent pump advances.
             await self._coord._record_framework_agent_critic_denied(

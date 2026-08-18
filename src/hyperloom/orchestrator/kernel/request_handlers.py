@@ -4084,27 +4084,24 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
     return active
 
 
-def _resolve_forge_fusion_agent(
+def _resolve_forge_agent(
     payload: Mapping[str, Any],
     *,
     env: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
-    """Resolve the forge-fusion agent backend and model as one decision.
+    """Resolve the Forge agent backend and model as one decision.
 
-    The canonical provider-shape predicates decide the default backend:
-    OpenAI-only uses Codex, while Anthropic-only and dual-configured deployments
-    use Claude, the established default for this agentic role. A valid explicit
+    Shared by forge-fusion and forge-collective (rewrite uses the same model
+    ladder via :func:`llm_config.resolve_forge_llm_model`). The canonical
+    provider-shape predicates decide the default backend: OpenAI-only uses
+    Codex, while Anthropic-only and dual-configured deployments use Claude, the
+    established default for this agentic role. A valid explicit
     ``agent_backend`` or ``llm_model`` in the request wins. With no configured
     provider, the request fails instead of silently spawning an unauthenticated
     Claude process.
 
-    Model id precedence (after the backend is chosen):
-
-    1. request ``llm_model``;
-    2. forge-specific env (``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``), the
-       forge counterpart of ``GEAK_CLAUDE_MODEL``;
-    3. orchestration-side ``CLAUDE_MODEL`` / ``CODEX_MODEL``;
-    4. the built-in defaults.
+    Model id precedence (after the backend is chosen) is owned by
+    :func:`llm_config.resolve_forge_llm_model`.
 
     Args:
         payload: Kernel request payload.
@@ -4123,7 +4120,7 @@ def _resolve_forge_fusion_agent(
     has_openai = llm_config.has_openai_side(source)
     has_anthropic = llm_config.has_anthropic_side(source)
     if not has_openai and not has_anthropic:
-        raise RuntimeError("no LLM provider is configured for forge-fusion")
+        raise RuntimeError("no LLM provider is configured for forge")
 
     explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
     if explicit_backend and explicit_backend not in {"claude", "codex"}:
@@ -4139,21 +4136,13 @@ def _resolve_forge_fusion_agent(
         # Dual-configured deployments retain this agentic role's Claude default.
         agent_backend = "claude"
 
-    explicit_model = str(payload.get("llm_model") or "").strip()
-    if explicit_model:
-        llm_model = explicit_model
-    elif agent_backend == "codex":
-        llm_model = (
-            str(source.get("FORGE_CODEX_MODEL") or "").strip()
-            or str(source.get("CODEX_MODEL") or "").strip()
-            or DEFAULT_CODEX_MODEL
-        )
-    else:
-        llm_model = (
-            str(source.get("FORGE_CLAUDE_MODEL") or "").strip()
-            or str(source.get("CLAUDE_MODEL") or "").strip()
-            or DEFAULT_CLAUDE_MODEL
-        )
+    default_model = DEFAULT_CODEX_MODEL if agent_backend == "codex" else DEFAULT_CLAUDE_MODEL
+    llm_model = llm_config.resolve_forge_llm_model(
+        agent_backend,
+        env=source,
+        explicit=str(payload.get("llm_model") or ""),
+        default=default_model,
+    )
     return agent_backend, llm_model
 
 
@@ -4265,7 +4254,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
     try:
-        agent_backend, llm_model = _resolve_forge_fusion_agent(payload)
+        agent_backend, llm_model = _resolve_forge_agent(payload)
     except (RuntimeError, ValueError) as exc:
         return {
             "status": "failed",
@@ -4757,6 +4746,15 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     )
     workspace.mkdir(parents=True, exist_ok=True)
 
+    try:
+        agent_backend, llm_model = _resolve_forge_agent(payload)
+    except (RuntimeError, ValueError) as exc:
+        return _collective_revert_result(
+            "llm_provider_unconfigured" if isinstance(exc, RuntimeError) else "invalid_agent_backend",
+            str(exc),
+            analysis_key=collective_analysis_key(state),
+        )
+
     input_payload = {
         "candidate": candidate,
         "source_file": source_file,
@@ -4769,7 +4767,8 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
         or os.environ.get("FORGE_COLLECTIVE_AGENT_TIMEOUT"),
         "gpu_target": str(payload.get("gpu_target") or getattr(state, "gpu_type", "") or ""),
         "max_hours": max_hours,
-        "llm_model": payload.get("llm_model") or os.environ.get("CLAUDE_MODEL"),
+        "agent_backend": agent_backend,
+        "llm_model": llm_model,
         "target_functions": [source_function],
         "source_files": collective_sources,
         "operator_name": source_function,

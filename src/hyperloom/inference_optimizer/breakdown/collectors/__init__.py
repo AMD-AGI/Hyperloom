@@ -58,6 +58,7 @@ from .sessions import (
     _collect_recovery as _collect_recovery,
     collect_session as collect_session,
     collect_session_meta as collect_session_meta,
+    session_elapsed_minutes as session_elapsed_minutes,
     collect_workload as collect_workload,
     collect_model_info as collect_model_info,
     collect_baseline as collect_baseline,
@@ -209,4 +210,5 @@ __all__ = [
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",
+    "session_elapsed_minutes",
 ]

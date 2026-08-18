@@ -117,7 +117,7 @@ class ClosePhase(PhaseHandler):
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """CLOSE sequencer (fixed order): post-opt roofline → report → session_breakdown → langfuse flush → artifact_package → fact_finalize → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous (0, 1, 2, 2.5, 2.6, 4, 5) for historical reasons.
+        """CLOSE sequencer (fixed order): post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons.
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -141,6 +141,43 @@ class ClosePhase(PhaseHandler):
             await self._maybe_run_close_post_opt_roofline()
         except Exception as exc:  # noqa: BLE001
             log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
+
+        # ---------------- Fact finalize (Recipe KB commit) -------------------
+        # Publish before report/breakdown/Langfuse so the terminal outcome and
+        # audit row are captured by the session's final telemetry.
+        try:
+            outcome = self.ensure_recipe_finalized(source="close") or {}
+            kb_status = str(outcome.get("status") or "done")
+            close_status = (
+                "failed"
+                if kb_status == "error"
+                else "skipped"
+                if kb_status in {"disabled", "skipped"}
+                else "done"
+            )
+            detail = " ".join(
+                f"{key}={outcome[key]}"
+                for key in (
+                    "status",
+                    "reason",
+                    "backend",
+                    "canonical_id",
+                    "session_id",
+                )
+                if outcome.get(key) not in (None, "")
+            )
+            await self._record_close_step(
+                "fact_finalize",
+                status=close_status,
+                detail=detail,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("CLOSE step 0.5 (fact_finalize) failed")
+            await self._record_close_step(
+                "fact_finalize",
+                status="failed",
+                detail=repr(exc)[:240],
+            )
 
         # Report.
         try:
@@ -282,43 +319,6 @@ class ClosePhase(PhaseHandler):
             log.exception("CLOSE step 2.6 (artifact_package) failed")
             await self._record_close_step(
                 "artifact_package",
-                status="failed",
-                detail=repr(exc)[:240],
-            )
-
-        # ---------------- Fact finalize (Recipe KB commit) -------------------
-        # Writes update_recipe + finalises the local journal (final_throughput /
-        # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
-        try:
-            outcome = self.finalize_recipe_and_journal() or {}
-            kb_status = str(outcome.get("status") or "done")
-            close_status = (
-                "failed"
-                if kb_status == "error"
-                else "skipped"
-                if kb_status in {"disabled", "skipped"}
-                else "done"
-            )
-            detail = " ".join(
-                f"{key}={outcome[key]}"
-                for key in (
-                    "status",
-                    "reason",
-                    "backend",
-                    "canonical_id",
-                    "session_id",
-                )
-                if outcome.get(key) not in (None, "")
-            )
-            await self._record_close_step(
-                "fact_finalize",
-                status=close_status,
-                detail=detail,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("CLOSE step 4 (fact_finalize) failed")
-            await self._record_close_step(
-                "fact_finalize",
                 status="failed",
                 detail=repr(exc)[:240],
             )
