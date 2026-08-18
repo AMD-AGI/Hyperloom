@@ -61,6 +61,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     # ── reports/ ──────────────────────────────────────────────────────
+    "reports/enablement/**",
     "reports/final.json",
     "reports/final.md",
     "reports/optimization_journal.json",
