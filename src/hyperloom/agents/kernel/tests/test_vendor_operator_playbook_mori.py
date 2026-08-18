@@ -158,12 +158,82 @@ def test_match_vendor_operator_playbook_ignores_unrelated_kernels():
     assert match_vendor_operator_playbook(mori_other) is None
 
 
+def test_match_vendor_operator_playbook_matches_via_trace_launcher_file_when_graph_captured():
+    """A CUDA/HIP-graph-captured launch is reconstructed by TraceLens as a
+    "Synthetic Op" (e.g. ``vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16
+    (Synthetic Op)`` or ``hipGraphLaunch->EpCombineIntraNodeKernel_bf16_nop2p
+    (Synthetic Op)``) with no surviving module chain, so ``library``,
+    ``source_file``, and ``kernel_repo`` all resolve empty -- this is the
+    actual shape produced end to end for a real DeepSeek-V2 EP+DP vLLM
+    serving trace, not a hypothetical. The only field that still carries the
+    mori identity marker is ``trace_launcher_file``, the Python frame that
+    first launched the op (``.../site-packages/mori/jit/hip_driver.py``).
+    """
+    dispatch_candidate = {
+        "name": "vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16 (Synthetic Op)",
+        "device_kernel_name": "EpDispatchIntraNodeKernel_bf16",
+        "operation": "",
+        "library": "",
+        "source_file": "",
+        "kernel_repo": "",
+        "trace_launcher_file": "/usr/local/lib/python3.12/dist-packages/mori/jit/hip_driver.py",
+    }
+    combine_candidate = {
+        "name": "hipGraphLaunch->EpCombineIntraNodeKernel_bf16_nop2p (Synthetic Op)",
+        "device_kernel_name": "EpCombineIntraNodeKernel_bf16_nop2p",
+        "operation": "",
+        "library": "",
+        "source_file": "",
+        "kernel_repo": "",
+        "trace_launcher_file": "/usr/local/lib/python3.12/dist-packages/mori/jit/hip_driver.py",
+    }
+
+    dispatch_match = match_vendor_operator_playbook(dispatch_candidate)
+    combine_match = match_vendor_operator_playbook(combine_candidate)
+
+    assert dispatch_match is not None
+    assert dispatch_match["id"] == "mori_ep_dispatch_combine"
+    assert dispatch_match["role"] == "dispatch"
+    assert combine_match is not None
+    assert combine_match["id"] == "mori_ep_dispatch_combine"
+    assert combine_match["role"] == "combine"
+
+
 # --- 2. classify_patchability + _finalize_candidates -------------------------
 
 
 def test_classify_patchability_routes_mori_dispatch_and_combine():
     dispatch_ok, dispatch_reason = tla.classify_patchability(_mori_dispatch_candidate())
     combine_ok, combine_reason = tla.classify_patchability(_mori_combine_candidate())
+
+    assert (dispatch_ok, dispatch_reason) == (True, "")
+    assert (combine_ok, combine_reason) == (True, "")
+
+
+def test_classify_patchability_routes_graph_captured_mori_synthetic_ops():
+    """Same as ``test_classify_patchability_routes_mori_dispatch_and_combine``
+    but for the real, graph-captured candidate shape (empty library/
+    source_file/kernel_repo, mori identity only in ``trace_launcher_file``)
+    -- without the ``_candidate_haystack`` fix this fell through to
+    ``"source file not resolved"`` instead of routing to the playbook.
+    """
+    dispatch_candidate = {
+        "name": "vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16 (Synthetic Op)",
+        "library": "",
+        "source_file": "",
+        "kernel_repo": "",
+        "trace_launcher_file": "/usr/local/lib/python3.12/dist-packages/mori/jit/hip_driver.py",
+    }
+    combine_candidate = {
+        "name": "hipGraphLaunch->EpCombineIntraNodeKernel_bf16_nop2p (Synthetic Op)",
+        "library": "",
+        "source_file": "",
+        "kernel_repo": "",
+        "trace_launcher_file": "/usr/local/lib/python3.12/dist-packages/mori/jit/hip_driver.py",
+    }
+
+    dispatch_ok, dispatch_reason = tla.classify_patchability(dispatch_candidate)
+    combine_ok, combine_reason = tla.classify_patchability(combine_candidate)
 
     assert (dispatch_ok, dispatch_reason) == (True, "")
     assert (combine_ok, combine_reason) == (True, "")
