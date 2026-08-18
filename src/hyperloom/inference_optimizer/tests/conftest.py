@@ -361,17 +361,6 @@ def suppression_window_s() -> float:
     return StallConfig().stall_timeout_s
 
 
-def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
-    """Put the executors in multi-node mode with a no-op per-round server restart."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
-
-    async def _no_restart(*_args, **_kwargs) -> None:
-        return None
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
-    monkeypatch.setattr(mnl, "restart_server_for_round", _no_restart)
-
-
 class _RayDoubleActorClass:
     """The ``@ray.remote`` class: ``.options(...)`` then ``.remote()`` for a handle."""
 
