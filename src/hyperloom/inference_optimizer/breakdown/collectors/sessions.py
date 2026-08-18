@@ -1494,6 +1494,9 @@ def collect_enablement(
     accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
     if accepted_cfg:
         out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
+    setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
+    if setting_script_path.is_file():
+        out["setting_script"] = str(_rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh")
     accepted_config = _eg(state, "accepted_config")
     if isinstance(accepted_config, dict) and accepted_config:
         out["accepted_config"] = {

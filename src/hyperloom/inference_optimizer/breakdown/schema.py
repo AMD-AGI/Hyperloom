@@ -2465,6 +2465,8 @@ class EnablementBreakdown(TypedDict, total=False):
         accepted_config: Server args / envs that bench also launched with, which
             the YAML does not carry; the revalidation replays them on top.
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
+        setting_script: Session-relative path to the generated
+            ``enablement_setting.sh`` artifact, when it was produced.
     """
 
     mode: str
@@ -2505,6 +2507,7 @@ class EnablementBreakdown(TypedDict, total=False):
     accepted_config_path: str
     accepted_config: dict[str, Any]
     eval_contract_fingerprint: str
+    setting_script: str
 
 
 # ---------------------------------------------------------------------------

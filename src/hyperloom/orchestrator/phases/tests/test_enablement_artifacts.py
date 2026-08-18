@@ -12,7 +12,9 @@ import pytest
 from hyperloom.orchestrator.phases._enablement_artifacts import (
     _FILE_SIZE_LIMIT,
     snapshot_round,
+    write_setting_script,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
 def _res(**kw):
@@ -111,3 +113,59 @@ def test_round_without_a_specialist_is_skipped(tmp_path):
     """Phase-synthesised rounds carry no task id and would all collide."""
     snapshot_round(tmp_path, {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
     assert not (tmp_path / "reports" / "enablement").exists()
+
+
+def test_write_setting_script_produces_executable(tmp_path):
+    en = EnablementRound()
+    en.setup_commands = ["pip install vllm==0.24"]
+    en.accepted_config = {"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "extra_server_args": "--tp 4"}
+
+    patch_src = tmp_path / "runs" / "specialist" / "s1" / "001.patch"
+    patch_src.parent.mkdir(parents=True)
+    patch_src.write_text("diff --git a/f b/f\n", encoding="utf-8")
+    en.kept_patches = [str(patch_src)]
+
+    rel = write_setting_script(tmp_path, en, {"framework_root": "/sgl-workspace/sglang"}, "sglang")
+    out = tmp_path / rel
+    assert out.exists()
+    text = out.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in text
+    assert "pip install vllm==0.24" in text
+    assert "export VLLM_ROCM_USE_AITER=1" in text
+    assert "apply_patch" in text
+    assert "patches/001.patch" in text
+    assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
+    assert "sglang.launch_server" in text
+    assert "--tp 4" in text
+    assert (out.stat().st_mode & 0o755) == 0o755
+
+
+def test_write_setting_script_copies_patches(tmp_path):
+    en = EnablementRound()
+    patch_src = tmp_path / "fix.patch"
+    patch_src.write_text("diff\n", encoding="utf-8")
+    en.kept_patches = [str(patch_src)]
+
+    write_setting_script(tmp_path, en, {}, "sglang")
+    assert (tmp_path / "reports" / "enablement" / "patches" / "fix.patch").is_file()
+
+
+def test_write_setting_script_runtime_note(tmp_path):
+    en = EnablementRound()
+    en.active_runtime = {"venv_root": "/session/enablement/stacks/sglang/s1/venv"}
+
+    write_setting_script(tmp_path, en, {}, "sglang")
+    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
+    assert "isolated attempt venv" in text
+
+
+def test_write_setting_script_minimal_no_enablement_params(tmp_path):
+    """Without patches/setup, a basic launch line is still emitted."""
+    en = EnablementRound()
+    en.accepted_config = {"extra_server_args": "--block-size 128", "extra_envs": {}}
+
+    write_setting_script(tmp_path, en, {}, "vllm", model="/models/M", tp=8)
+    text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
+    assert "vllm serve $MODEL" in text
+    assert "export MODEL=/models/M" in text
+    assert "export TP=8" in text

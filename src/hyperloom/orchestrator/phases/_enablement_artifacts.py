@@ -10,14 +10,19 @@ archive and the fix cannot be replayed by a later session.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import atomic_write_json, atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import (
+    enablement_dir,
     enablement_round_dir,
     runs_dir,
 )
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 # A patch is a few KB; anything this large is a stray build output and would
 # eat into the archive's per-session budget.
@@ -93,4 +98,85 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
         _copy(Path(accepted_config), round_dir / "launch_config.yaml")
 
 
-__all__ = ["snapshot_round"]
+def write_setting_script(
+    session_dir: str | Path,
+    enablement: "EnablementRound",
+    res: dict[str, Any],
+    framework: str,
+    *,
+    model: str | None = None,
+    tp: int | None = None,
+    max_model_len: int | None = None,
+    gpu_type: str | None = None,
+) -> str:
+    """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state.
+
+    The script is idempotently rewritten on every ``kept`` or ``advanced``
+    verdict, so it always reflects the latest cumulative fix.  Patches are
+    copied alongside the script under ``reports/enablement/patches/`` and
+    referenced by name, making the directory self-contained.
+
+    Args:
+        session_dir: The session root directory.
+        enablement: The current ``EnablementRound`` state object.
+        res: The ``integrate_patch`` result for the current round.
+        framework: Framework identifier for the server entrypoint.
+        model: Model path emitted as ``export MODEL=``.
+        tp: Tensor-parallel degree.
+        max_model_len: Context length cap.
+        gpu_type: GPU type string.
+
+    Returns:
+        Session-relative path of the written script (empty string on error).
+    """
+    from hyperloom.inference_optimizer.reference_script import render_reference_script
+
+    patches_dest = enablement_dir(Path(session_dir)) / "patches"
+    patches_dest.mkdir(parents=True, exist_ok=True)
+
+    all_patches: list[str] = list(enablement.kept_patches or [])
+    script_patches: list[str] = []
+    for patch_str in all_patches:
+        src = Path(patch_str)
+        if src.is_file():
+            dest = patches_dest / src.name
+            _copy(src, dest)
+            script_patches.append(f"patches/{src.name}")
+        else:
+            script_patches.append(patch_str)
+
+    accepted_cfg = dict(enablement.accepted_config or {})
+    extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}
+    extra_server_args = str(accepted_cfg.get("extra_server_args") or "").strip()
+
+    framework_root = str(res.get("framework_root") or "").strip()
+
+    runtime_path = ""
+    active = enablement.active_runtime or {}
+    if isinstance(active, dict):
+        runtime_path = str(active.get("venv_root") or "").strip()
+
+    text = render_reference_script(
+        framework=framework,
+        server_args=extra_server_args,
+        envs=extra_envs,
+        model=model,
+        tp=tp,
+        max_model_len=max_model_len,
+        gpu_type=gpu_type,
+        setup_commands=list(enablement.setup_commands or []) or None,
+        patches=script_patches or None,
+        framework_root=framework_root or None,
+        runtime=runtime_path or None,
+    )
+
+    out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"
+    atomic_write_text(out, text)
+    os.chmod(out, 0o755)
+    try:
+        return str(out.relative_to(session_dir))
+    except ValueError:
+        return str(out)
+
+
+__all__ = ["snapshot_round", "write_setting_script"]
