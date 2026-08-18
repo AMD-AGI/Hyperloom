@@ -1837,21 +1837,24 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
+        # Phase-synthesised rounds carry no framework_root; keep the last real one.
+        res_fw_root = str(res.get("framework_root") or "").strip()
+        if res_fw_root:
+            state.enablement.framework_root = res_fw_root
         try:
             snapshot_round(self.session_dir, res)
             if status in ("kept", "advanced"):
                 write_setting_script(
                     self.session_dir,
                     state.enablement,
-                    res,
                     framework=str(state.framework or os.environ.get("FRAMEWORK") or "sglang"),
-                    model=state.reference_model or os.environ.get("MODEL_PATH"),
+                    model=os.environ.get("MODEL_PATH") or state.model_path or state.reference_model,
                     tp=int(state.tp or 0) or None,
                     max_model_len=int(state.max_model_len or 0) or None,
                     gpu_type=str(state.gpu_type or os.environ.get("GPU_TYPE") or "") or None,
                 )
         except Exception:  # noqa: BLE001 — archiving must not break the rearm
-            log.debug("enablement: artifact write failed", exc_info=True)
+            log.warning("enablement: artifact write failed", exc_info=True)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:
