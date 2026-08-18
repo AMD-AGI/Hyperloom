@@ -24,10 +24,12 @@ version_number = "1.0.0b1"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "generic",
+    "flavor": "hyperloom",
     "header_title": f"Hyperloom {version_number}",
     "header_link": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/",
     "version_list_link": False,
+    "use_repository_button": True,
+    "use_issues_button": True,
     "nav_secondary_items": {
         "GitHub": "https://github.com/AMD-AGI/Hyperloom",
         "Community": False,
