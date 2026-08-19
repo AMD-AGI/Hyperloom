@@ -1472,6 +1472,7 @@ class ExplorePhase(PhaseHandler):
         if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
             return
         from ..actions.executors._multi_node_env import is_multi_node
+        from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 
         if not is_multi_node() or not proposals:
             return
@@ -1479,37 +1480,17 @@ class ExplorePhase(PhaseHandler):
         for i, p in enumerate(proposals[: self._MN_AUTO_EXPLORE_GRID_CAP]):
             if not isinstance(p, dict):
                 continue
-            args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
-            envs_raw = p.get("extra_envs")
-            envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
-            controls: dict[str, Any] = {}
-            for key in ("remove_args", "unset_envs"):
-                raw = p.get(key)
-                if isinstance(raw, str):
-                    vals = [raw.strip()] if raw.strip() else []
-                elif isinstance(raw, (list, tuple, set)):
-                    vals = [str(v).strip() for v in raw if str(v).strip()]
-                else:
-                    vals = []
-                if vals:
-                    controls[key] = vals
-            mode = str(p.get("args_mode") or "append").strip().lower()
-            if mode == "replace":
-                controls["args_mode"] = "replace"
-            # Drop entries with neither a server-arg nor an env override —
-            # nothing for the restart to apply (e.g. research-only items)
-            # unless the entry removes inherited args/envs.
-            if not args and not envs and not controls:
+            fields = normalize_proposal(p)
+            if not is_executable(fields):
                 continue
-            name = str(p.get("name") or "").strip() or (f"{domain or 'specialist'}-{task.task_id[:8]}-{i}")
             grid.append(
                 {
-                    "name": name,
-                    "extra_args": args,
-                    "extra_envs": envs,
-                    **controls,
+                    "name": fields["name"] or f"{domain or 'specialist'}-{task.task_id[:8]}-{i}",
+                    "extra_args": fields["extra_args"],
+                    "extra_envs": fields["extra_envs"],
+                    **controls_of(fields),
                     "provenance": f"specialist:{domain}" if domain else "specialist",
-                    "note": str(p.get("reason") or "")[:200],
+                    "note": fields["reason"][:200],
                 }
             )
         if not grid:

@@ -59,7 +59,8 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._canonical_fingerprint import workload_signature
+from ._proposal_identity import effective_fingerprint
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -173,7 +174,7 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 
 
 def _variant_control_fields(variant: Any) -> dict[str, Any]:
-    """Return non-default remove/unset/replace controls for ledger rows."""
+    """Return non-default remove/unset/replace controls for identity and ledger rows."""
     remove_args = to_str_list(getattr(variant, "remove_args", []))
     unset_envs = to_str_list(getattr(variant, "unset_envs", []))
     args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
@@ -994,23 +995,13 @@ class ExploreExecutor:
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
-            identity_controls = _variant_control_fields(gv)
-            identity_remove_args = list(
-                dict.fromkeys(base_remove_args + to_str_list(identity_controls.get("remove_args")))
-            )
-            identity_unset_envs = list(
-                dict.fromkeys(base_unset_envs + to_str_list(identity_controls.get("unset_envs")))
-            )
-            if identity_remove_args:
-                identity_controls["remove_args"] = identity_remove_args
-            if identity_unset_envs:
-                identity_controls["unset_envs"] = identity_unset_envs
-            if base_args_mode == "replace":
-                identity_controls["args_mode"] = "replace"
-            fp = canonical_fingerprint(
+            fp = effective_fingerprint(
                 gv.extra_server_args,
                 gv.extra_envs,
-                **identity_controls,
+                controls=_variant_control_fields(gv),
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+                base_args_mode=base_args_mode,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in unique_in_round:

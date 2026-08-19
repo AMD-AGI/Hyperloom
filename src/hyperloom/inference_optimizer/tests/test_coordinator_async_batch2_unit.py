@@ -1288,7 +1288,7 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
         assert token in out
 
 
-def test_research_scout_seed_block_keeps_all_rounds(coord: Coordinator) -> None:
+def test_research_scout_seed_block_keeps_findings_and_questions_only(coord: Coordinator) -> None:
     from hyperloom.orchestrator.knowledge import research_hints
 
     research_hints.append_hints(
@@ -1332,11 +1332,14 @@ def test_research_scout_seed_block_keeps_all_rounds(coord: Coordinator) -> None:
 
     assert "hint one" in block
     assert "hint two" in block
-    assert '"name": "first"' in block
-    assert '"name": "second"' in block
     assert "question one" in block
     assert "question two" in block
     assert "ignore-me" not in block
+    # Proposals moved to the shared untested-proposal queue, which also drops
+    # the ones already benched; rendering them here as well would double them.
+    assert "Untested executable proposals" not in block
+    assert '"name": "first"' not in block
+    assert '"name": "second"' not in block
 
 
 @pytest.mark.asyncio
