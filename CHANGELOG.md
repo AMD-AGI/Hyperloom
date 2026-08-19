@@ -9,12 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **GEAK same-harness revalidation dispatch.** KERNEL-phase GEAK wins now enqueue
   per-macro-cycle rebench tasks that survive non-`CLOSE` phase boundaries, skip
-  duplicate dispatch while a rebench is already queued or running, and are
-  cancelled before the CLOSE sequencer so post-opt roofline is not starved.
-  Orphan rebench completions no longer promote when they are not tracked in
-  ``geak_pending.revalidation_task_id``; resume revalidations with an empty
-  pending slot still reconcile validated gain. CLOSE entry finalizes dangling
-  ``geak_pending`` after cancelling queued rebench tasks.
+  duplicate dispatch while a rebench is already queued or running, and are kept
+  out of `CLOSE` so post-opt roofline is not starved. A rebench result that is
+  not tracked in ``geak_pending.revalidation_task_id`` no longer promotes, drops
+  the candidate, or replays through the GEAK harness; resume revalidations with
+  an empty pending slot still reconcile validated gain. `CLOSE` entry settles a
+  ``geak_pending`` slot that can no longer land, whether the rebench was
+  cancelled by the phase boundary or by the close sequencer.
 
 ## [v1.0.0b2] - 2026-08-19
 Current packaged version (`pyproject.toml`). See

@@ -83,23 +83,6 @@ def geak_rebench_should_apply_result(
     return geak_rebench_tracks_pending_task(pending_tid, task, macro_cycle=macro_cycle)
 
 
-def finalize_geak_pending_after_rebench_cancel(state: Any, cancelled_task_ids: list[str], *, reason: str) -> bool:
-    """Mark ``geak_pending`` terminal when CLOSE (or similar) cancels queued rebench."""
-    if not cancelled_task_ids:
-        return False
-    pending = getattr(state, "geak_pending", None) or {}
-    if not isinstance(pending, dict):
-        return False
-    if str(pending.get("status") or "").strip().lower() != "awaiting_rebench":
-        return False
-    state.geak_pending = {
-        "status": "rebench_cancelled",
-        "revalidation_error": str(reason)[:500],
-    }
-    state.resume_pending_revalidation = False
-    return True
-
-
 async def find_inflight_geak_rebench_task(tasks: TaskRegistry) -> Task | None:
     """Return the oldest queued/running GEAK same-harness rebench, if any."""
     queued_fn = getattr(tasks, "queued", None)
@@ -124,15 +107,38 @@ async def cancel_queued_geak_rebench_tasks(tasks: TaskRegistry, *, reason: str) 
     return cancelled
 
 
+async def settle_dangling_geak_pending(tasks: TaskRegistry, state: Any, *, reason: str) -> bool:
+    """Settle ``geak_pending`` once no rebench can still land.
+
+    Driven by state rather than by what a caller just cancelled: the phase
+    boundary into CLOSE already cancels the queued rebench, so the CLOSE
+    sequencer finds nothing left to cancel yet still has to close the slot. A
+    rebench still queued or running is left alone so its result can arrive.
+    """
+    pending = getattr(state, "geak_pending", None) or {}
+    if not isinstance(pending, dict):
+        return False
+    if str(pending.get("status") or "").strip().lower() != "awaiting_rebench":
+        return False
+    if await find_inflight_geak_rebench_task(tasks) is not None:
+        return False
+    state.geak_pending = {
+        "status": "rebench_cancelled",
+        "revalidation_error": str(reason)[:500],
+    }
+    state.resume_pending_revalidation = False
+    return True
+
+
 __all__ = [
     "LEGACY_GEAK_REVALIDATE_PLACEHOLDER",
     "cancel_queued_geak_rebench_tasks",
     "find_inflight_geak_rebench_task",
-    "finalize_geak_pending_after_rebench_cancel",
     "geak_rebench_should_apply_result",
     "geak_rebench_tracks_pending_task",
     "geak_revalidate_idempotency_key",
     "geak_revalidation_placeholder_keys",
     "is_geak_same_harness_rebench_task",
+    "settle_dangling_geak_pending",
     "spare_geak_rebench_on_phase_transition",
 ]

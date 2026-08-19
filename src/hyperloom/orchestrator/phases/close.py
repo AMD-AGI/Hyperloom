@@ -168,6 +168,9 @@ class ClosePhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
+        # The phase boundary into CLOSE already cancels the queued rebench, so
+        # this drain is the belt-and-braces path (direct CLOSE entry / resume);
+        # settling the pending slot is unconditional either way.
         try:
             dropped = await _geak_rebench.cancel_queued_geak_rebench_tasks(
                 self.tasks,
@@ -175,15 +178,16 @@ class ClosePhase(PhaseHandler):
             )
             if dropped:
                 log.info("CLOSE: cancelled %d queued GEAK rebench task(s) before close sequence", len(dropped))
-                if _geak_rebench.finalize_geak_pending_after_rebench_cancel(
-                    self.shared_state,
-                    dropped,
-                    reason="close_sequence",
-                ):
-                    try:
-                        self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
-                        log.exception("CLOSE: geak_pending finalize save failed")
+            if await _geak_rebench.settle_dangling_geak_pending(
+                self.tasks,
+                self.shared_state,
+                reason="close_sequence",
+            ):
+                log.info("CLOSE: settled a GEAK revalidation slot that can no longer land")
+                try:
+                    self.shared_state.save(self.session_dir)
+                except Exception:  # noqa: BLE001
+                    log.exception("CLOSE: geak_pending settle save failed")
         except Exception:  # noqa: BLE001
             log.exception("CLOSE: GEAK rebench drain failed (non-fatal)")
         await self._record_close_step("sequencer_started", status="running")

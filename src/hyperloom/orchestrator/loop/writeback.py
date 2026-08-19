@@ -3755,6 +3755,15 @@ class WritebackCollaborator:
                             log.exception("geak no_promote: observation emit failed")
                         self.shared_state.geak_pending = {}
                         self.shared_state.resume_pending_revalidation = False
+                elif not applies:
+                    # 2a would write the stack entry on success and clear the
+                    # genuinely tracked slot on failure, so an orphan must not
+                    # reach it either.
+                    log.warning(
+                        "geak 2b: ignoring inconclusive result from untracked rebench task %s (pending=%s)",
+                        task.task_id,
+                        pending_tid or "<unset>",
+                    )
                 else:
                     # 2b inconclusive -> GEAK harness replay (2a), which
                     # clears the pending flag on success. Best-effort.
