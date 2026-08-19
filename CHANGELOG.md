@@ -52,11 +52,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `run_fusion` is no longer registered in `KERNEL_REQUEST_HANDLERS`. It is
   invoked directly by `KernelPhase`, so no request ever carried that kind.
 
+- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
+  `--max-iters` this repository put on every `forge-loop` and
+  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
+  are bounded by `--max-hours`, and the flag had already been documented there
+  as accepted-and-ignored. The compiled/ASM fellow cap those variables fed was
+  therefore a no-op that logged a cap it never applied. `--max-hours` and the
+  hard-kill timeout remain the only budget controls, exactly as before.
+
 - The `KERNEL_OPT_BACKENDS` environment variable is gone. No production code
   read it; `KERNEL_OPT_BACKEND_ORDER` is the sole backend switch, and only an
   exact `forge` opts out of the default GEAK phase.
 
 ### Changed
+
+- **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
+  KernelForge renamed the option to match the spelling the rest of its CLI
+  already used, and `forge-fuse` rejects an unknown option outright rather than
+  ignoring it, so every fusion run was exiting 2 before it started and
+  surfacing as a missing `fusion_manifest.json`. The `llm_model` key in the
+  wrapper's own input JSON is unchanged.
 
 - The default Magpie benchmark dependency is upgraded from v0.1.0 to v0.2.0.
   Both the installer and runtime preflight remain pinned to the immutable

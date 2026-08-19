@@ -660,7 +660,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         driver=str(driver),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
@@ -717,7 +716,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--driver": str(driver),
         "--workspace": str(workspace),
         "--snr-threshold": "30.0",
-        "--max-iters": "8",
         "--max-hours": "1.0",
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
@@ -740,7 +738,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # that tolerates it drops it silently, and one that does not aborts the child
     # before the campaign starts. Either way the value never reaches the loop, so
     # the argv must not imply otherwise. Shapes travel in the invocation spec.
-    for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct"):
+    for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct", "--max-iters"):
         assert unsupported not in command, unsupported
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
@@ -825,7 +823,6 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         driver=str(workspace / "driver.py"),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="b",
         gpu_target="gfx950",
@@ -967,7 +964,6 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             driver=str(driver),
             workspace=str(workspace),
             snr_threshold=30.0,
-            max_iters=1,
             max_hours=1.0,
             branch=f"forge/test/{index}",
             gpu_target="gfx950",
@@ -1060,7 +1056,6 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         driver=str(driver),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
@@ -1992,7 +1987,6 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             driver=str(driver),
             workspace=str(workspace),
             snr_threshold=30.0,
-            max_iters=8,
             max_hours=1.0,
             branch="forge/session/kernel",
             gpu_target="gfx950",
@@ -3263,7 +3257,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         snr_threshold=30.0,
         gpu_target="gfx950",
         gpu_type="mi355x",
-        max_iters=8,
         max_hours=2.0,
         branch="forge/session/fused-gemm",
         framework="vllm",
@@ -3289,7 +3282,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
         "--gpu-type": "mi355x",
-        "--max-iters": "8",
         "--framework": "vllm",
         "--git-branch": "forge/session/fused-gemm",
         "--result-json": str(result_json),
@@ -3299,6 +3291,9 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
+    # The campaign is time-driven; forge-rewrite-by-flydsl no longer declares an
+    # iteration cap and would only report ours as an ignored option.
+    assert "--max-iters" not in command
     # The rewrite producer files its port under the same identity scheme, so it
     # needs the card as much as the loop does.
     assert captured["popen_kwargs"]["env"]["GPU_TYPE"] == "mi355x"
@@ -3379,7 +3374,6 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         snr_threshold=30.0,
         gpu_target="gfx942",
         gpu_type="mi300x",
-        max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
         framework="",
@@ -3433,7 +3427,6 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
         snr_threshold=30.0,
         gpu_target="gfx942",
         gpu_type="mi300x",
-        max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
         framework="",
