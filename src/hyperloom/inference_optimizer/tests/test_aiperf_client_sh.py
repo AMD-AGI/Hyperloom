@@ -56,6 +56,7 @@ printf '%s\n' "$@" > "$art/aiperf_args.txt"
   echo "AIPERF_DATASET_CONFIGURATION_TIMEOUT=${AIPERF_DATASET_CONFIGURATION_TIMEOUT:-UNSET}"
   echo "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=${AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT:-UNSET}"
   echo "AIPERF_DATASET_MMAP_CACHE_DIR=${AIPERF_DATASET_MMAP_CACHE_DIR:-UNSET}"
+  echo "AIPERF_UI_REALTIME_METRICS_ENABLED=${AIPERF_UI_REALTIME_METRICS_ENABLED:-UNSET}"
 } > "${AGENTX_TEST_MARKER}"
 exit "${FAKE_RC:-0}"
 """
@@ -199,15 +200,24 @@ def test_failed_request_threshold_is_passed(tmp_path):
 # going missing, which no individual assertion would notice.
 _UPSTREAM_FLAGS = (
     ("--scenario", "inferencex-agentx-mvp"),
+    ("--url", "http://localhost:8199"),
     ("--endpoint", "/v1/chat/completions"),
     ("--endpoint-type", "chat"),
+    ("--model", "m"),  # probed from /v1/models, not $MODEL
+    ("--tokenizer", "/m"),
+    ("--public-dataset", "semianalysis_cc_traces_weka_062126_256k"),
     ("--num-dataset-entries", "393"),
+    ("--concurrency", "2"),
     ("--benchmark-duration", "3600"),
     ("--random-seed", "42"),
     ("--trajectory-start-min-ratio", "0.25"),
     ("--trajectory-start-max-ratio", "0.75"),
     ("--warmup-requests-per-lane", "10"),
     ("--warmup-grace-period", "1800"),
+    # Not scenario-locked, so nothing downstream would notice its removal: a
+    # trace carrying a 20-minute recorded idle gap would replay it in full and,
+    # against a fixed duration window, silently cost measured requests.
+    ("--trace-idle-gap-cap-seconds", "300"),
     ("--failed-request-threshold", "0.10"),
     ("--stats-interval", "30"),
     ("--slice-duration", "1.0"),
@@ -296,6 +306,53 @@ def test_missing_framework_fail_loud(tmp_path):
     r = _run(bench, bind, res, tmp_path, FRAMEWORK="")
     assert r.returncode == 2
     assert not (res / "inferencex_result.json").exists()
+
+
+# --- smoke escape hatch ---------------------------------------------------------
+
+
+def test_default_run_is_not_flagged_unsafe(tmp_path):
+    """The canonical 3600s run must stay submittable."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "--unsafe-override" not in _aiperf_args(res)
+
+
+def test_short_duration_opts_into_unsafe_override(tmp_path):
+    """A sub-900s duration must be runnable as a smoke, not a startup abort.
+
+    The scenario enforces a 900s floor, so without the flag ``AGENTX_DURATION``
+    below it aborts before the first request and this path cannot be smoke
+    tested at all. Upstream opts in below the floor; the scenario then stamps
+    ``submission_valid`` false, which ``benchmark_result.py`` rejects -- so the
+    escape hatch cannot be mistaken for a leaderboard measurement.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_DURATION="120")
+    assert r.returncode == 0, r.stderr
+    argv = _aiperf_args(res).splitlines()
+    assert "--unsafe-override" in argv
+    assert argv[argv.index("--benchmark-duration") + 1] == "120"
+
+
+def test_unsafe_override_can_be_forced_at_full_duration(tmp_path):
+    """The operator escape hatch works independently of the duration."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_UNSAFE_OVERRIDE="true")
+    assert r.returncode == 0, r.stderr
+    assert "--unsafe-override" in _aiperf_args(res)
+
+
+def test_realtime_metrics_survive_the_scrub(tmp_path):
+    """Without this env the rolling stats block is skipped and
+    ``--stats-interval`` is inert -- a 60-minute window emits nothing until it
+    ends, so a merely slow run looks identical to a wedged one."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AIPERF_UI_REALTIME_METRICS_ENABLED="false")
+    assert r.returncode == 0, r.stderr
+    marker = (tmp_path / "marker.txt").read_text()
+    assert "AIPERF_UI_REALTIME_METRICS_ENABLED=true" in marker
 
 
 # --- PROFILE=1 self-bracketing ------------------------------------------------

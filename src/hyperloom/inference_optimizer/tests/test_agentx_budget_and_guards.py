@@ -214,3 +214,68 @@ def test_resume_tolerates_sessions_predating_the_field(monkeypatch):
     _off(monkeypatch)
     assert agentx_state_is_stale(_St("", 0)) == ""
 
+
+# --- submission verdict gate --------------------------------------------------
+
+
+def _measurement(**over):
+    # Serving shape: positive throughput plus at least one completed request.
+    base = {"output_throughput": 100.0, "completed_requests": 42}
+    base.update(over)
+    return base
+
+
+def _valid(result):
+    from hyperloom.orchestrator.actions.executors.benchmark_result import (
+        is_valid_measurement,
+    )
+
+    return is_valid_measurement(result)
+
+
+def test_verdict_gate_rejects_a_failed_submission(monkeypatch):
+    """A scenario-rejected run is not comparable and must not reach KEEP."""
+    _on(monkeypatch)
+    assert _valid(_measurement(submission_valid=False)) is False
+
+
+def test_verdict_gate_rejects_an_unknown_verdict(monkeypatch):
+    """None means no scenario, or an aiperf too old to stamp one.
+
+    ``map_aiperf`` writes the key unconditionally, so an unknown verdict still
+    arrives as a present key. Treating unknown as valid is exactly how an
+    incomparable run reaches the leaderboard-comparable set.
+    """
+    _on(monkeypatch)
+    assert _valid(_measurement(submission_valid=None)) is False
+
+
+def test_verdict_gate_accepts_a_valid_submission(monkeypatch):
+    _on(monkeypatch)
+    assert _valid(_measurement(submission_valid=True)) is True
+
+
+def test_verdict_gate_is_inert_on_the_synthetic_path(monkeypatch):
+    """``is_valid_measurement`` is hot for every synthetic measurement too.
+
+    The synthetic harness runs an InferenceX revision this repo re-pins from
+    time to time. Were a future upstream to stamp the key into a synthetic
+    ``inferencex_result.json``, a presence-only check would silently invalidate
+    every synthetic measurement session-wide while throughput still looked
+    healthy. Gating on the mode removes that coupling.
+    """
+    _off(monkeypatch)
+    assert _valid(_measurement(submission_valid=False)) is True
+    assert _valid(_measurement(submission_valid=None)) is True
+
+
+def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
+    """A scriptable framework skips the aiperf switch entirely.
+
+    ``apply_agentx_switch`` returns early for scriptable frameworks, so their
+    results legitimately carry no verdict even with AgentX on. Keying on
+    absence rather than presence would reap them.
+    """
+    _on(monkeypatch)
+    assert _valid(_measurement()) is True
+

@@ -926,8 +926,9 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     violated a scenario invariant (or was cancelled, or exceeded the
     context-overflow limit) still produces plausible throughput -- on whatever
     subset survived -- so throughput alone cannot tell it apart from a clean
-    run. Only AgentX results carry ``submission_valid``; synthetic ones are
-    unaffected.
+    run. The verdict is consulted only under ``HYPERLOOM_AGENTX``, and only when
+    the result actually carries one, so neither the synthetic path nor a
+    scriptable run is affected.
 
     Args:
         result (dict[str, Any] | None): The measurement dict to check.
@@ -940,11 +941,27 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
-    if "submission_valid" in result and result.get("submission_valid") is not True:
+    # Gated on BOTH the mode and the key's presence, and each half earns its
+    # keep. Mode: this helper is hot for every synthetic measurement too, and
+    # the InferenceX revision the synthetic harness runs is not frozen -- were a
+    # future upstream to stamp the key into a synthetic inferencex_result.json,
+    # a presence-only check would silently invalidate every synthetic
+    # measurement session-wide while throughput still looked healthy. Presence:
+    # under AgentX a scriptable framework skips the aiperf switch entirely
+    # (apply_agentx_switch returns early), so its result legitimately carries no
+    # verdict and must stay selectable.
+    from ._workload_envs import agentx_enabled
+
+    if (
+        agentx_enabled()
+        and "submission_valid" in result
+        and result.get("submission_valid") is not True
+    ):
         # False = the scenario rejected it. None = the verdict is unknown (no
-        # scenario, or an aiperf too old to stamp one). Neither is comparable,
-        # and treating "unknown" as valid is exactly how an incomparable run
-        # would reach the leaderboard-comparable set.
+        # scenario, or an aiperf too old to stamp one); map_aiperf writes the
+        # key unconditionally, so None still arrives as a present key. Neither
+        # is comparable, and treating "unknown" as valid is exactly how an
+        # incomparable run would reach the leaderboard-comparable set.
         return False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable,

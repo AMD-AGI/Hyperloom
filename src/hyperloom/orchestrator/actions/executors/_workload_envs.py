@@ -130,8 +130,13 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
+    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
+    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
+    # documents it as a supported knob; without forwarding it only works when
+    # the benchmark process happens to inherit the full parent environment,
+    # which is exactly the kind of silent difference this path exists to remove.
     for key, value in os.environ.items():
-        if key.startswith("AGENTX_") or key == "AIPERF_BIN":
+        if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
 
 
