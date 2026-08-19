@@ -2882,7 +2882,46 @@ def _resolve_vllm_aiter_routing(
         )
 
         flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+
+    _warn_if_moe_routing_is_coarser_than_the_log(server_log, flags)
     return flags
+
+
+def _warn_if_moe_routing_is_coarser_than_the_log(
+    server_log: str, flags: dict[str, bool]
+) -> None:
+    """Say so when one log shows both MoE backends and routing picks one.
+
+    The decision above is a substring scan: seeing an aiter fused-MoE marker
+    anywhere routes the whole run to the aiter tuner family, and
+    ``vllm_moe_triton`` then never runs. A run can dispatch both -- aiter CK over
+    part of the token range and vLLM's Triton path over the rest -- and forge's
+    own parser records exactly that as ``impl="mixed"``. Whichever way the single
+    flag falls, the range served by the other backend is left untuned.
+
+    Reported rather than acted on here: changing this routing changes which
+    tuners run for every aiter-served vLLM model, which is a bigger step than
+    the tuner-side addition that already covers the CK half. Forge adds
+    ``fmoe_ck`` from the same evidence, so the gap this warns about is the
+    Triton half.
+    """
+    if not flags.get("aiter_fused_moe"):
+        return
+    try:
+        from forge_gemm_tune.evidence import parse_log_file
+    except ImportError:
+        return
+    try:
+        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
+    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
+        return
+    if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
+        log.warning(
+            "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
+            "(impl=%s, stages=%s); routing sends the whole run to the aiter "
+            "tuner family, so the token range Triton serves goes untuned",
+            server_log, moe.get("impl"), moe.get("stages_seen"),
+        )
 
 
 def _vllm_block_fp8_profile_capture_required(
