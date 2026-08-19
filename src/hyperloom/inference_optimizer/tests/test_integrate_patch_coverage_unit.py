@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -238,6 +239,159 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
+def _capture_bench(captured: dict, result: dict, gate: dict):
+    """A ``_bench_patch`` stub that records the kwargs it was handed."""
+
+    async def _b(self, **kwargs):
+        captured.update(kwargs)
+        return result, gate
+
+    return _b
+
+
+@pytest.mark.asyncio
+async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
+    """The patch bench is handed the session budget, as the other arms are.
+
+    Its declared cap answers "how long before this counts as hung", not "how much
+    budget is left", so without the session deadline a patch benched near the end
+    of a run outlives the run itself.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        baseline_runtime_sec = 600.0
+
+        def get_specialist_patch_verdict(self, tid):
+            return "approve"
+
+        def grid_session_deadline_sec(self, **_kwargs):
+            return 4242.0
+
+    captured: dict[str, Any] = {}
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _capture_bench(captured, {"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert captured["session_deadline_sec"] == 4242.0
+    # The expected runtime, not the backstop cap: admitting on the backstop
+    # abandons the tail of the budget.
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_bench_budget_is_unbounded_without_a_session(tmp_path, monkeypatch):
+    """No session context means no deadline, not a deadline of zero."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    captured: dict[str, Any] = {}
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _capture_bench(captured, {"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+            },
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert captured["session_deadline_sec"] is None
+    assert captured["variant_expected_sec"] is None
+
+
+@pytest.mark.asyncio
+async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, monkeypatch):
+    session = tmp_path / "s"
+    session.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_grid(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
+    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *a, **k: config_path)
+
+    await IntegratePatchExecutor(session_dir=session)._bench_patch(
+        params={"config_path": str(config_path)},
+        output_root=tmp_path / "out",
+        extra_server_args_applied="",
+        extra_envs_applied={},
+        specialist_task_id="spec",
+        session_deadline_sec=4242.0,
+        variant_expected_sec=600.0,
+    )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_switch_off_parity_leg_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
+    """The parity leg is a second full bench, so it needs the same bound."""
+    session = tmp_path / "s"
+    session.mkdir()
+    captured: dict[str, Any] = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        return ({"output_throughput": 100.0, "status": "succeeded"}, {"accuracy_pass": None})
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(ex, "_bench_patch", _capture)
+
+    await ex._switch_off_parity(
+        params={},
+        output_root=tmp_path,
+        specialist_task_id="spec",
+        switch_manifest=[{"switch": "HYPERLOOM_REWRITE_X"}],
+        base_tput=100.0,
+        session_deadline_sec=4242.0,
+        variant_expected_sec=600.0,
+    )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
 @pytest.mark.asyncio
 async def test_keep_path(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -306,6 +460,72 @@ async def test_confirmation_rebench_floor_stays_below_keep_threshold(tmp_path, m
     )
 
     assert captured["stable_threshold_pct"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_stack_rebench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
+    """The confirmation round must not outlive the run it is confirming for."""
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    async def _measure(**kwargs):
+        captured.update(kwargs)
+        return StackRebenchResult(tput=None, workspace=None)
+
+    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: config_path)
+    monkeypatch.setattr(ip, "measure_stack_rebench", _measure)
+
+    await IntegratePatchExecutor(session_dir=tmp_path)._confirm_stack_rebench(
+        params={"config_path": str(config_path)},
+        output_root=tmp_path / "output",
+        extra_server_args_applied="",
+        extra_envs_applied={},
+        specialist_task_id="spec",
+        base_tput=100.0,
+        session_deadline_sec=4242.0,
+        variant_expected_sec=600.0,
+    )
+
+    assert captured["session_deadline_sec"] == 4242.0
+    assert captured["variant_expected_sec"] == 600.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
+async def test_rebench_the_run_stopped_is_not_reported_as_a_failed_measurement(tmp_path, error_class):
+    """Not measuring a variant is not evidence that the variant is unstable."""
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
+    from hyperloom.orchestrator.actions.executors import _stack_rebench as sr
+
+    skipped = VariantResult(
+        name="v",
+        extra_server_args="",
+        extra_envs={},
+        status="skipped",
+        error="the run stopped this round before it measured anything",
+        error_class=error_class,
+    )
+
+    async def _fake_run_grid(**_kwargs):
+        return [skipped]
+
+    with patch.object(sr, "run_grid", new=_fake_run_grid):
+        result = await sr.measure_stack_rebench(
+            config_path=tmp_path / "base.yaml",
+            base_extra_args="",
+            variant=GridVariant("v"),
+            base_tput=100.0,
+            stable_threshold_pct=0.5,
+            output_slot=tmp_path / "slot",
+            variant_timeout_sec=600,
+        )
+
+    assert result.error_class == error_class
+    assert result.warnings == [f"stack_rebench_skipped:{error_class}"]
+    assert not any("stack_rebench_failed" in w for w in result.warnings)
 
 
 @pytest.mark.asyncio
@@ -990,3 +1210,117 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
     # in the stash. This is the regression the fix guards against.
     assert scratch.exists(), "user auto-stash was not restored after artifact_install_failed"
     assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypatch):
+    """A cancel unwinds the gate, so the tree it mutated must not outlive it.
+
+    The dispatcher cancels in-flight actions when the run is shutting down or
+    the session wall-clock budget is spent. ``CancelledError`` is not an
+    ``Exception``, so the gate's own revert handlers never see it: the patch
+    would stay in the framework tree, the operator's auto-stash would stay
+    unpopped, and the session would run its CLOSE phase against a tree carrying
+    an ungraded patch.
+
+    The cancel is re-raised rather than graded as a REVERT: SubAgentRunner
+    records a cancelled executor as ``cancelled``, and work the run stopped is
+    not work that failed.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    async def _cancel(self, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _cancel)
+    ex = IntegratePatchExecutor(session_dir=session)
+    with pytest.raises(asyncio.CancelledError):
+        await ex(
+            _make_ctx(
+                "t",
+                {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+            )
+        )
+
+    assert (repo / "src.py").read_text(encoding="utf-8").endswith("return 1\n"), (
+        "the cancelled candidate was left applied in the framework tree"
+    )
+    assert scratch.exists(), "user auto-stash was not restored after the cancel"
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n"
+    stash_list = subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert stash_list.stdout.strip() == "", "the auto-stash was left on the stack"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, monkeypatch):
+    """The apply stage stashes and mutates the tree, then awaits, same as the gate.
+
+    Each of its failure verdicts writes a KB record before the stash restore that
+    returns it, and a cancel arrives at whatever await the action happens to be
+    at -- a spent wall-clock budget is what makes it arrive at an arbitrary one.
+    Only the gate was guarded, so this window left the operator's uncommitted
+    work in ``git stash`` for the rest of the session.
+    """
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    def _fake_resolve(*args, **kwargs):
+        spec = ip._ArtifactSpec(
+            source=tmp_path / "tuned.json",
+            target=repo / "tuned.json",
+            rel_target="tuned.json",
+            kind="config_json",
+        )
+        return [spec], []
+
+    async def _cancel(self, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ip, "_resolve_artifact_specs", _fake_resolve)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_apply_artifacts",
+        lambda self, specs, *, backup_root: ([], [{"artifact": "tuned.json", "error": "disk full"}]),
+    )
+    monkeypatch.setattr(IntegratePatchExecutor, "_maybe_write_framework_kb_record", _cancel)
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    with pytest.raises(asyncio.CancelledError):
+        await ex(
+            _make_ctx(
+                "t",
+                {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+            )
+        )
+
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n", (
+        "the user's uncommitted work was left in the stash"
+    )
+    stash_list = subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert stash_list.stdout.strip() == "", "the auto-stash was left on the stack"
+    assert (repo / "src.py").read_text(encoding="utf-8").endswith("return 1\n"), (
+        "the ungraded candidate was left applied in the framework tree"
+    )

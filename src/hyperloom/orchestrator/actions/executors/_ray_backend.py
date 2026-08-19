@@ -184,12 +184,15 @@ def _run_subprocess_worker(
     soft_deadline_sec: float | None,
     server_log_path: str | None,
     server_already_ready: bool,
+    session_remaining_sec: float | None = None,
 ) -> tuple[int, str, str]:
     """Ray worker body: run the subprocess under session-kill semantics.
 
     Executes on a Ray worker where ``*_VISIBLE_DEVICES`` are already set by Ray.
     Reuses :func:`run_with_session_kill` so kill/soft-deadline behaviour matches
-    the local path exactly.
+    the local path exactly -- including the session reaper, which is the only
+    defence that attributes running out of time to the run rather than to the
+    variant that happened to be in flight.
 
     Args:
         cmd: The command to execute.
@@ -199,12 +202,18 @@ def _run_subprocess_worker(
         soft_deadline_sec: Overtime soft deadline.
         server_log_path: Path to the server log for watchdog markers.
         server_already_ready: Start the soft clock from spawn (warm reuse).
+        session_remaining_sec: Seconds left on the session budget when the
+            submitter made the call. A duration rather than the in-process
+            absolute deadline because this body runs in a Ray worker, whose
+            ``time.monotonic()`` origin is its own; it is re-anchored here onto
+            this process's clock.
 
     Returns:
         ``(returncode, stdout, stderr)``.
     """
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         run_with_session_kill,
+        session_remaining_to_deadline_sec,
     )
 
     worker_env = _merge_worker_env(env)
@@ -216,6 +225,7 @@ def _run_subprocess_worker(
         soft_deadline_sec=soft_deadline_sec,
         server_log_path=server_log_path,
         server_already_ready=server_already_ready,
+        session_deadline_sec=session_remaining_to_deadline_sec(session_remaining_sec),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 

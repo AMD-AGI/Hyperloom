@@ -189,6 +189,22 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
+def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
+    """A map entry naming a method its collaborator never defined is a crash at first call, not at import.
+
+    A field run lost every EXPLORE variant-failure record to exactly that: the
+    entry was there, the method was not, and ``__getattr__`` raised only once
+    the reap loop reached for it.
+    """
+    unresolved = []
+    for name in Coordinator._DELEGATED:
+        try:
+            getattr(coord, name)
+        except AttributeError as exc:
+            unresolved.append(f"{name}: {exc}")
+    assert unresolved == []
+
+
 # -- _context_inbox_reader --------------------------------------------------
 def test_context_inbox_reader_empty(coord: Coordinator) -> None:
     out = coord._context_inbox_reader()
@@ -265,7 +281,7 @@ def test_reset_orchestration_conversation_swallows_hook_error(coord: Coordinator
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(coord: Coordinator) -> None:
+async def test_resume_consistency_marks_unvalidated_keeps(coord: Coordinator) -> None:
     coord._resumed_from["is_resume"] = True
     coord.shared_state.optimization_stack = [
         {
@@ -284,18 +300,48 @@ async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(co
         },
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 1
-    coord.shared_state.current_best = {"extra_server_args": "--stale 1", "extra_envs": {}}
+    coord.shared_state.current_best = {"extra_server_args": "--a 1 --b 2", "extra_envs": {"A": "1", "B": "2"}}
 
     report = await coord._resume_consistency_pass()
 
     warning_kinds = {w["kind"] for w in report["warnings"]}
     assert "resume_unvalidated_keeps" in warning_kinds
-    assert "resume_inconsistent_current_best" in warning_kinds
     assert coord.shared_state.resume_pending_revalidation is True
-    assert coord.shared_state.current_best["extra_server_args"] == "--a 1 --b 2"
-    assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}
-    assert "rebuilt_current_best_config_from_stack" in report["fixes"]
     assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_leaves_current_best_alone(coord: Coordinator) -> None:
+    """Resume must not rewrite the config; a stack replay loses ablated envs."""
+    coord._resumed_from["is_resume"] = True
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "v1",
+            "candidate_extra_server_args": "--a 1",
+            "extra_envs": {"OLD": "1"},
+            "tput": 110.0,
+        },
+        {
+            "action": "explore",
+            "variant_name": "v2",
+            "candidate_extra_server_args": "--b 2",
+            "extra_envs": {"NEW": "1"},
+            "unset_envs": ["OLD"],
+            "tput": 120.0,
+        },
+    ]
+    coord.shared_state.cumulative_gain_validated_stack_len = 2
+    coord.shared_state.current_best = {"extra_server_args": "--b 2", "extra_envs": {"NEW": "1"}}
+
+    report = await coord._resume_consistency_pass()
+
+    assert coord.shared_state.current_best["extra_envs"] == {"NEW": "1"}
+    assert coord.shared_state.current_best["extra_server_args"] == "--b 2"
+    assert not any(
+        isinstance(w, dict) and w.get("kind") == "resume_inconsistent_current_best" for w in report["warnings"]
+    )
+    assert "rebuilt_current_best_config_from_stack" not in report["fixes"]
 
 
 @pytest.mark.asyncio
@@ -308,7 +354,9 @@ async def test_resume_restores_promoted_inferencex_checkout(
     active.mkdir()
     coord._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    # setenv, not delenv: delenv of an absent name arms no undo, so the value
+    # the resume pass exports below would leak into every later test.
+    monkeypatch.setenv("INFERENCEX_PATH", "")
 
     await coord._resume_consistency_pass()
 
@@ -431,6 +479,44 @@ async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordina
     cleared = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "cleared_stale_pending_integrate")
     assert cleared["task_id"] == "ti-stale"
     assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable event log must not be treated as 'no KEEP exists'."""
+    coord._resumed_from["is_resume"] = True
+    sentinel = {
+        "task_id": "ti-unreadable",
+        "framework_source_root": "/tmp/framework",
+        "patches": ["/tmp/p.diff"],
+    }
+    coord.shared_state.pending_integrate = dict(sentinel)
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("database disk image is malformed")
+
+    monkeypatch.setattr(coord.bus, "tail", _boom)
+
+    rolled_back: list[dict] = []
+    monkeypatch.setattr(
+        coord.writeback,
+        "_resume_rollback_pending_integrate",
+        lambda pending: rolled_back.append(pending) or {"reversed": [], "failed": []},
+    )
+
+    report = await coord._resume_consistency_pass()
+
+    assert rolled_back == []
+    assert coord.shared_state.pending_integrate == sentinel
+    warning = next(w for w in report["warnings"] if w.get("kind") == "pending_integrate_scan_failed")
+    assert warning["task_id"] == "ti-unreadable"
+    assert not any(
+        isinstance(f, dict) and f.get("kind") in {"rolled_back_pending_integrate", "cleared_stale_pending_integrate"}
+        for f in report["fixes"]
+    )
 
 
 @pytest.mark.asyncio
@@ -688,6 +774,14 @@ async def test_resume_consistency_enqueues_stack_rebench_for_unvalidated(coord: 
         }
     ]
     coord.shared_state.cumulative_gain_validated_stack_len = 0
+    # The lift writes both together, so a stack always has a config behind it.
+    coord.shared_state.current_best = {
+        "action": "explore",
+        "variant_name": "v1",
+        "tput": 110.0,
+        "extra_server_args": "--a 1",
+        "extra_envs": {"A": "1"},
+    }
 
     report = await coord._resume_consistency_pass()
 

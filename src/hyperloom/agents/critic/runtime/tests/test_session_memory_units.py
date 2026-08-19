@@ -69,23 +69,15 @@ def test_merge_context_fills_from_memory(sm):
     assert "workload" in result.explicit_keys
 
 
-def test_append_decision_and_event_write_jsonl(sm):
+def test_append_decision_writes_jsonl(sm):
     sm.append_decision("s1", {"verdict": "approve"})
-    sm.append_event("s1", {"kind": "note", "text": "hi"})
     decision = json.loads(sm._decisions_path("s1").read_text("utf-8").splitlines()[0])
-    event = json.loads(sm._events_path("s1").read_text("utf-8").splitlines()[0])
     assert decision["decision_review"]["verdict"] == "approve"
-    assert event["kind"] == "note"
 
 
 def test_append_decision_rejects_non_dict(sm):
     with pytest.raises(SessionMemoryError):
         sm.append_decision("s1", "nope")  # type: ignore[arg-type]
-
-
-def test_append_event_rejects_non_dict(sm):
-    with pytest.raises(SessionMemoryError):
-        sm.append_event("s1", "nope")  # type: ignore[arg-type]
 
 
 def test_get_cached_priors_absent_and_malformed(sm):
@@ -147,13 +139,3 @@ def test_read_json_corrupt_raises(sm):
         sm.load_context("s1")
 
 
-def test_event_jsonl_records_are_parseable(sm):
-    sm._ensure_session_dir("s1")
-    path = sm._events_path("s1")
-    path.write_text('{"kind": "a"}\n\n   \n', encoding="utf-8")
-    rows = [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]
-    assert [e["kind"] for e in rows] == ["a"]
-
-    path.write_text('{"kind": "a"}\n{bad json}\n', encoding="utf-8")
-    with pytest.raises(json.JSONDecodeError):
-        [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]

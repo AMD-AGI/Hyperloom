@@ -112,7 +112,7 @@ echo $! > "$PID_FILE"
 
 `setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
 written above is the **setsid wrapper** PID, which exits immediately — the
-robustness monitor reads `$PID_FILE` and would misfire a spurious `--resume` if
+robustness monitor reads `$PID_FILE` and would misfire a spurious resume if
 it kept the dead wrapper PID. After launch, reconcile `$PID_FILE` to the **real**
 optimizer PID, which the CLI records as `.pid` in the launch-info JSON.
 
@@ -143,15 +143,15 @@ test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 
 ## Resume Existing Session
 
-For monitored runs, prefer explicit same-session resume:
-`--resume --resume-from "$SESSION_DIR"`. Bare `--resume` auto-picks the latest
-`$USER_DATA_PATH/<model>/<UTC_ts>/` and is only acceptable for manual recovery
-when that is the intended session. Keep `$USER_DATA_PATH` at the workspace root
-so `runtime/kernel-agent.env.sh` resolves. The selected session must contain
+`--resume-from "$SESSION_DIR"` is the only way to resume; the CLI never
+chooses a session for you. Take `$SESSION_DIR` from the launch-info JSON or
+the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir under
+`$USER_DATA_PATH/<model>/`. Keep `$USER_DATA_PATH` at the workspace root
+so `runtime/kernel-agent.env.sh` resolves. The named session must contain
 `manifest.json` and `state.json`.
 
 Reuse the launch template with these diffs: drop `--model`, add
-`--resume --resume-from "$SESSION_DIR"`, and set
+`--resume-from "$SESSION_DIR"`, and set
 `RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"`. Set `$FRAMEWORK` when resuming a
 non-default session.
 
@@ -160,9 +160,9 @@ non-default session.
 For runs longer than 5 minutes, start the monitor in its own `setsid nohup`
 process. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
 else `.session_dir` from `$LAUNCH_INFO_FILE`. Its only allowed relaunch is the
-same session via `optimize --resume --resume-from "$SESSION_DIR"` after the
+same session via `optimize --resume-from "$SESSION_DIR"` after the
 optimizer process disappears without a terminal marker; it must not start a
-fresh run or auto-pick the latest session.
+fresh run.
 
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"

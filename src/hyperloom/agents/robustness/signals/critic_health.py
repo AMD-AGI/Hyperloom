@@ -1,21 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic-health signals (E1 / E2 / E4 / E5).
+"""Critic-health signals.
 
 Critic is the reviewer and no one reviews the reviewer; these detectors catch the
 session silently losing its decision gate:
 
-* **E1 ``critic_kb_outage``** — ``judge_bundle.json`` marks
+* **``critic_kb_outage``** — ``judge_bundle.json`` marks
   ``kb_read_skipped_reason="kb_unreachable"`` for ``min_outage_judges`` consecutive turns.
-* **E2 ``critic_unavailable_streak``** — ``review_verdict`` events with
+* **``critic_unavailable_streak``** — ``review_verdict`` events with
   ``source="critic_unavailable"`` for ``min_unavailable_verdicts`` consecutive verdicts.
-* **E4 ``critic_prune_stuck``** — ``critic-workdir/`` count past ``max_workdir_count`` (pruner broken).
-* **E5 ``critic_runtime_stuck``** — runtime-cli timeout pattern in server logs
+* **``critic_prune_stuck``** — ``critic-workdir/`` count past ``max_workdir_count`` (pruner broken).
+* **``critic_runtime_stuck``** — runtime-cli timeout pattern in server logs
   (reuses :data:`local_log_errors`), collapsed into one critic-attributed symptom.
-
-E3 ("critic full-approve drift") is out of scope: it needs critic-agent runtime
-invariants Robustness cannot see from coordinator_events.
 """
 
 from __future__ import annotations
@@ -35,15 +32,15 @@ class CriticHealthConfig:
     Threshold defaults are permissive; escalate only when an outage persists.
     """
 
-    # E1 — KB unreachable across N+ consecutive recent turns.
+    # KB unreachable across N+ consecutive recent turns.
     min_outage_judges: int = 3
-    # E2 — critic_unavailable verdicts across N+ consecutive recent items.
+    # critic_unavailable verdicts across N+ consecutive recent items.
     min_unavailable_verdicts: int = 3
-    # E4 — ``critic-workdir/`` count above this is a leak (2x the backend keep count).
+    # ``critic-workdir/`` count above this is a leak (2x the backend keep count).
     max_workdir_count: int = 100
-    # E5 — log-pattern marker that the runtime-cli timed out.
+    # Log-pattern marker that the runtime-cli timed out.
     runtime_stuck_pattern_marker: str = "runtime.cli"
-    # E5 needs log lines with the marker AND a ``timed out`` substring to fire.
+    # Needs log lines with the marker AND a ``timed out`` substring to fire.
     min_runtime_stuck_hits: int = 1
 
 
@@ -53,7 +50,7 @@ def evaluate_critic_health_signals(
     *,
     config: CriticHealthConfig | None = None,
 ) -> list[Symptom]:
-    """Run the E1/E2/E4/E5 critic-health rules and aggregate their symptoms.
+    """Run the critic-health rules and aggregate their symptoms.
 
     Args:
         ctx (ReactorContext): Reactor context for the current tick.
@@ -76,7 +73,7 @@ def evaluate_critic_health_signals(
 
 
 # ---------------------------------------------------------------------------
-# E1 — KB outage streak
+# KB outage streak
 # ---------------------------------------------------------------------------
 
 
@@ -84,7 +81,7 @@ def _kb_outage_symptoms(
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """E1: fire ``critic_kb_outage`` for a streak of KB-unreachable judges.
+    """Fire ``critic_kb_outage`` for a streak of KB-unreachable judges.
 
     Args:
         data (SourceData): Collected source data including
@@ -143,7 +140,7 @@ def _kb_outage_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# E2 — critic_unavailable verdict streak
+# critic_unavailable verdict streak
 # ---------------------------------------------------------------------------
 
 
@@ -221,7 +218,7 @@ def _unavailable_streak_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# E4 — workdir prune stuck
+# workdir prune stuck
 # ---------------------------------------------------------------------------
 
 
@@ -229,7 +226,7 @@ def _prune_stuck_symptoms(
     data: SourceData,
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
-    """E4: fire ``critic_prune_stuck`` when the workdir count leaks past cap.
+    """Fire ``critic_prune_stuck`` when the workdir count leaks past cap.
 
     Args:
         data (SourceData): Collected source data including
@@ -271,7 +268,7 @@ def _prune_stuck_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# E5 — runtime-cli timeout
+# runtime-cli timeout
 # ---------------------------------------------------------------------------
 
 

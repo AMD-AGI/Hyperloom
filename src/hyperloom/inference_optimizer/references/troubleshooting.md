@@ -101,5 +101,5 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   `=== Recent policy denials ===` block, then change something substantive (a new
   `params.grid` variant, a different `benchmark_script`, or a sibling action
   family). Do not hand-edit `state.json`.
-- `stop_reason=time_exhausted`: resume same session (`--resume`); do not start
-  fresh.
+- `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not
+  start fresh.

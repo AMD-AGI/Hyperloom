@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Detect same-fingerprint action retries (B1 / same_payload_loop).
+"""Detect same-fingerprint action retries (``same_payload_loop``).
 
 Hashes the action-defining subset of each ``delegated_result`` payload
 (from coordinator_events + inbox) and fires ``same_payload_loop`` when a

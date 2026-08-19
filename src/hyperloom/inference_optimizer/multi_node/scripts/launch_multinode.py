@@ -60,8 +60,9 @@ def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
 
 # sglang PD bootstrap (KV transfer rendezvous) port; override via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
-# Max seconds to wait for ray.nodes() to surface every expected pod.
-_NODES_DISCOVERY_TIMEOUT_SEC = 120
+# Max seconds to wait for ray.nodes() to surface every expected pod; raise it
+# when pods queue behind a busy scheduler or a cold image pull.
+_NODES_DISCOVERY_TIMEOUT_SEC = int(os.environ.get("RAY_NODES_DISCOVERY_TIMEOUT_SEC", "120"))
 # rank-0 /health probe budget (cold MoE can exceed it; --no-wait-health to bypass).
 _HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get("SGLANG_HEALTH_PROBE_TIMEOUT_SEC", "1800"))
 

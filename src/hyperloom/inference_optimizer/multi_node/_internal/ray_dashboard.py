@@ -64,20 +64,6 @@ class RayDashboardError(RuntimeError):
         self.endpoint = endpoint
 
 
-def ray_gcs_address(head_pod_ip: str) -> str:
-    """Ray driver address for ``ray.init(address=...)`` (GCS on head, default port).
-
-    Args:
-        head_pod_ip (str): The head pod IP or host.
-
-    Returns:
-        str: ``<host>:6379`` for a non-empty input, otherwise an empty string.
-    """
-    ip = (head_pod_ip or "").strip()
-    if not ip:
-        return ""
-    return f"{ip}:6379"
-
 
 def dashboard_url(head_pod_ip: str) -> str:
     """Build the Ray Dashboard base URL for a given head pod IP.

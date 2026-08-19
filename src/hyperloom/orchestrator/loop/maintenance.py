@@ -13,6 +13,49 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 
+async def run_lease_and_db_reclaim(
+    host: Any,
+    summary: dict[str, Any],
+    *,
+    reason: str,
+) -> None:
+    """Reap expired serving/GPU leases, reclaim orphaned running tasks, prune the DB.
+
+    Shared by the periodic maintenance tick and the cycle soft-restart. The
+    task reclaim is the R6 watchdog: a running task whose execution lease
+    expired is failed so a dead worker never wedges a lane indefinitely. Every
+    step is individually best-effort — maintenance never aborts the run loop.
+
+    Args:
+        host: Anything exposing the Coordinator's ``locks``,
+            ``gpu_specialist_pool``, ``tasks``, ``db`` and ``cursors``.
+        summary: Mutated in place with the per-step counts.
+        reason: Reclaim reason recorded on the tasks and used as the log prefix.
+    """
+    try:
+        reaped = await host.locks.reap_expired()
+        summary["leases_reaped"] = len(reaped or [])
+    except Exception:  # noqa: BLE001
+        log.exception("%s: serving-lease reap failed", reason)
+    try:
+        summary["gpu_leases_reaped"] = await host.gpu_specialist_pool.reap_expired()
+    except Exception:  # noqa: BLE001
+        log.exception("%s: gpu-lease reap failed", reason)
+    try:
+        reclaimed = await host.tasks.reclaim_expired_running(reason=reason)
+        summary["running_tasks_reclaimed"] = len(reclaimed)
+    except Exception:  # noqa: BLE001
+        log.exception("%s: running-task reclaim failed", reason)
+    try:
+        from ..bus import db_maintenance as _db_maint
+
+        res = await _db_maint.run_db_retention(host.db, host.cursors)
+        summary["events_pruned"] = res.events_deleted
+        summary["tasks_pruned"] = res.tasks_deleted
+    except Exception:  # noqa: BLE001
+        log.exception("%s: DB retention failed", reason)
+
+
 class MaintenanceCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 
@@ -48,32 +91,7 @@ class MaintenanceCollaborator:
         if every <= 0 or tick <= 0 or (tick % every) != 0:
             return None
         summary: dict[str, Any] = {"tick": tick}
-        try:
-            reaped = await self.locks.reap_expired()
-            summary["leases_reaped"] = len(reaped or [])
-        except Exception:  # noqa: BLE001 — maintenance never aborts the run loop
-            log.exception("maintenance: serving-lease reap failed")
-        try:
-            summary["gpu_leases_reaped"] = await self.gpu_specialist_pool.reap_expired()
-        except Exception:  # noqa: BLE001
-            log.exception("maintenance: gpu-lease reap failed")
-        # R6 watchdog/self-heal: reclaim orphaned running tasks whose execution
-        # lease has expired so a dead worker never wedges a lane indefinitely.
-        try:
-            reclaimed = await self.tasks.reclaim_expired_running(
-                reason="maintenance_watchdog",
-            )
-            summary["running_tasks_reclaimed"] = len(reclaimed)
-        except Exception:  # noqa: BLE001
-            log.exception("maintenance: running-task reclaim failed")
-        try:
-            from ..bus import db_maintenance as _db_maint
-
-            res = await _db_maint.run_db_retention(self.db, self.cursors)
-            summary["events_pruned"] = res.events_deleted
-            summary["tasks_pruned"] = res.tasks_deleted
-        except Exception:  # noqa: BLE001
-            log.exception("maintenance: DB retention failed")
+        await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
         try:
             disk = self._maybe_prune_runs_for_disk()
             if disk is not None:

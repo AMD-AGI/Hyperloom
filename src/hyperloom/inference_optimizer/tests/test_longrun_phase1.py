@@ -22,7 +22,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def _sweep_state(
     *,
     macro_cycle: int = 0,
-    cumulative_gain: float = 5.0,
+    validated_gain: float = 5.0,
     gain_at_cycle_start: float = 0.0,
     no_gain_streak: int = 0,
     max_minutes: int = 96 * 60,
@@ -35,7 +35,7 @@ def _sweep_state(
         start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
         max_minutes=max_minutes,
         macro_cycle=macro_cycle,
-        cumulative_gain_validated=cumulative_gain,
+        cumulative_gain_validated=validated_gain,
         gain_at_cycle_start=gain_at_cycle_start,
         no_gain_cycle_streak=no_gain_streak,
     )
@@ -46,8 +46,8 @@ def _sweep_state(
 
 # compute_next_phase SWEEP back-edge
 def test_sweep_reloops_to_explore_when_budget_and_leverage():
-    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
-    nxt = ps.compute_next_phase(st, max_hours=96.0)
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
+    nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_EXPLORE
@@ -57,10 +57,10 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage():
 
 
 def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
-    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     st.last_sweep = {}
     st.last_conc_sweep = {"status": "failed"}
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "conc_sweep_failed"
     assert evidence.get("conc_sweep_status") == "failed"
@@ -71,11 +71,11 @@ def test_sweep_closes_when_globally_converged():
     # No gain this cycle + streak at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
         macro_cycle=2,
-        cumulative_gain=5.0,
+        validated_gain=5.0,
         gain_at_cycle_start=5.0,
         no_gain_streak=2,
     )
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "global_converged"
     assert evidence["terminal"] is True
@@ -85,10 +85,59 @@ def test_sweep_closes_when_globally_converged():
 def test_sweep_closes_when_insufficient_remaining():
     # Long run (48h) but only ~10min remain → below the reloop floor.
     st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=48.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "sweep_done"
     assert evidence["reloop_blocked"] == "insufficient_remaining"
+
+
+def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
+    """LLM skip_to_close after a refused conc_sweep must not become robustness_escalated."""
+    st = _sweep_state(max_minutes=180, started_hours_ago=166 / 60.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "skip_reason": "session_time_budget",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_done"
+    assert evidence.get("conc_sweep_status") == "skipped"
+
+
+def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
+    """skip_to_close remains a robustness abort when SWEEP has nothing to close on."""
+    st = _sweep_state(max_minutes=180, started_hours_ago=1.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {}
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, _evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "robustness_escalated"
+
+
+def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
+    """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "skip_reason": "session_time_budget",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_EXPLORE
+    assert reason == "cycle_reloop"
+    assert evidence["loopback"] is True
 
 
 def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
@@ -97,7 +146,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     st = _sweep_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
-        cumulative_gain=5.0,
+        validated_gain=5.0,
         gain_at_cycle_start=0.0,
     )
     reloop, ev = ps.should_reloop_to_explore(st)
@@ -105,7 +154,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     assert ev["reloop"] is True
     assert ev["next_cycle"] == 1
 
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_EXPLORE
     assert reason == "cycle_reloop"
     assert evidence["loopback"] is True
@@ -119,7 +168,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
     assert reloop is False
     assert ev["reloop_blocked"] == "insufficient_remaining"
 
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "sweep_done"
     assert "loopback" not in evidence
@@ -343,6 +392,38 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
+async def test_skip_to_close_is_consumed_when_sweep_already_settled(
+    cyclic_coordinator,
+    monkeypatch,
+):
+    """A suppressed skip_to_close must not leak into the next phase."""
+    c = cyclic_coordinator
+    st = c.shared_state
+    now = datetime.now(timezone.utc)
+    st.phase = ps.PHASE_SWEEP
+    st.start_ts = (now - timedelta(minutes=166)).isoformat()
+    st.max_minutes = 180
+    st.macro_cycle = 0
+    st.last_sweep = {}
+    st.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "skip_reason": "session_time_budget",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_CLOSE
+    assert st.pending_escalate_hint == ""
+    assert st.last_consumed_escalate_hint == ps.ESCALATE_HINT_SKIP_TO_CLOSE
+
+
+@pytest.mark.asyncio
 async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
@@ -399,7 +480,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
 # Regression — short-run path now uses macro-loop while budget remains.
 def test_regression_short_run_sweep_evidence_carries_loopback():
     st = _sweep_state(max_minutes=12 * 60)
-    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    target, reason, evidence = ps.compute_next_phase(st)
     assert (target, reason) == (ps.PHASE_EXPLORE, "cycle_reloop")
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1

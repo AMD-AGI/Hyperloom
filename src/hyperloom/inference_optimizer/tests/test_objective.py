@@ -56,29 +56,29 @@ def _backends_silent() -> dict[str, object]:
 # TargetGainObjective
 def test_target_gain_basic_progress():
     obj = TargetGainObjective(target_gain_pct=10.0)
-    s = SharedState(baseline_tput=1000.0, cumulative_gain=0.0)
+    s = SharedState(baseline_tput=1000.0, cumulative_gain_validated=0.0)
     assert obj.kind() == "gain_pct"
     assert obj.progress(s) == 0.0
     assert not obj.reached(s)
 
-    s.cumulative_gain = 5.0
+    s.cumulative_gain_validated = 5.0
     assert obj.progress(s) == 0.5
     assert not obj.reached(s)
 
-    s.cumulative_gain = 12.0
+    s.cumulative_gain_validated = 12.0
     assert obj.progress(s) == 1.0
     assert obj.reached(s)
 
 
 def test_target_gain_gap_pct_counts_down_to_zero():
     obj = TargetGainObjective(target_gain_pct=15.0)
-    s = SharedState(baseline_tput=1000.0, cumulative_gain=0.0)
+    s = SharedState(baseline_tput=1000.0, cumulative_gain_validated=0.0)
     assert obj.gap_pct(s) == pytest.approx(15.0)
 
-    s.cumulative_gain = 9.89
+    s.cumulative_gain_validated = 9.89
     assert obj.gap_pct(s) == pytest.approx(5.11)
 
-    s.cumulative_gain = 20.0
+    s.cumulative_gain_validated = 20.0
     assert obj.gap_pct(s) == 0.0
 
 
@@ -162,7 +162,7 @@ def test_target_baseline_missing_report_rejected(tmp_path):
 # TimeOnlyObjective
 def test_time_only_never_reached():
     obj = TimeOnlyObjective()
-    s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0}, cumulative_gain=99.0)
+    s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0}, cumulative_gain_validated=99.0)
     assert obj.kind() == "time_only"
     assert obj.progress(s) == 0.0
     assert not obj.reached(s)
@@ -236,7 +236,7 @@ async def test_run_stops_on_objective_reached(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.baseline_tput = 1000.0
-        c.shared_state.cumulative_gain = 50.0
+        c.shared_state.cumulative_gain_validated = 50.0
         c.shared_state.save(session_dir)
         reason = await c.run(
             objective=TargetGainObjective(target_gain_pct=10.0),
@@ -245,6 +245,31 @@ async def test_run_stops_on_objective_reached(session_dir):
         assert reason == "target_reached"
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_stop_on_a_gain_no_rebench_confirmed(session_dir):
+    """A current_best ahead of the last stack rebench is not evidence of the target."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.baseline_tput = 1000.0
+        c.shared_state.current_best = {"action": "explore", "tput": 1500.0}
+        c.shared_state.cumulative_gain_validated = 2.0
+        c.shared_state.save(session_dir)
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_ticks=3,
+        )
+        assert reason == "max_ticks"
+    finally:
+        await c.stop()
+
+
+def test_target_tput_reads_the_shared_grading_anchor():
+    """A current_best carrying only ``output_throughput`` still counts as measured."""
+    obj = TargetTputObjective(target_tput_per_gpu=900.0)
+    s = SharedState(baseline_tput=750.0, current_best={"output_throughput": 950.0})
+    assert obj.reached(s)
 
 
 @pytest.mark.asyncio
@@ -342,8 +367,9 @@ async def test_run_closing_phase_skips_reactor(session_dir):
             closing_grace_sec=5.0,
             tick_interval_sec=0.0,
         )
-        assert spy.calls >= 1
         assert calls_at_closing, "expected closing phase to be entered"
+        # A spent bound cancels phase-enter and skips reactors on the tick
+        # that trips CLOSE. CLOSE itself must still not add LLM turns.
         assert spy.calls == calls_at_closing[0]
     finally:
         await c.stop()

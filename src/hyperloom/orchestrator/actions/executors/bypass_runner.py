@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.env_safety import build_benchmark_env
 
 from . import bypass_analysis
 from . import bypass_engine
@@ -837,19 +837,17 @@ def _server_env(
     profile_dir: str | None,
     bench_envs: dict | None = None,
 ) -> dict[str, str]:
-    """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
-    env = scrub_benchmark_process_env(os.environ.copy())
-    # GPU pin: the materializer writes ROCR_VISIBLE_DEVICES into benchmark.envs
-    # (reconciled against TP). Inject it so the server binds the same cards
-    # Magpie would; missing on single-GPU pods (harmless).
-    rocr = str((bench_envs or {}).get("ROCR_VISIBLE_DEVICES") or "").strip()
-    if rocr:
-        env["ROCR_VISIBLE_DEVICES"] = rocr
-    if profile and profile_dir:
-        env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
-        env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
-        env["ATOM_TORCH_PROFILER_DIR"] = profile_dir
-    return env
+    """Build the server subprocess env from the materialized benchmark envs.
+
+    The whole mapping is exported, so an env-only candidate is a real experiment
+    rather than a rerun of the baseline.
+    """
+    profiler_dirs = (
+        dict.fromkeys(("VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR", "ATOM_TORCH_PROFILER_DIR"), profile_dir)
+        if profile and profile_dir
+        else None
+    )
+    return build_benchmark_env(bench_envs, profiler_dirs)
 
 
 def _launch_server(cmd: list[str], env: dict[str, str], server_log: Path) -> subprocess.Popen:
@@ -904,7 +902,7 @@ def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str)
             capture_output=True,
             text=True,
             timeout=timeout_s,
-            env=scrub_benchmark_process_env(os.environ.copy()),
+            env=build_benchmark_env(),
         )
     except subprocess.TimeoutExpired:
         _append_log(workspace, tag, "", f"{tag} timed out after {timeout_s}s")

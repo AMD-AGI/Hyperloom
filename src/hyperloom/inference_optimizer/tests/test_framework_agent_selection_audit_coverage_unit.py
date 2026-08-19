@@ -18,7 +18,6 @@ import pytest
 from hyperloom.orchestrator.loop import coordinator as coord_mod
 from hyperloom.orchestrator.framework import client as fa_client_mod
 from hyperloom.orchestrator.framework import paths as fp_mod
-from hyperloom.orchestrator.framework import artifacts as fpa_mod
 from hyperloom.orchestrator.knowledge import kb_writeback as kb_mod
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import framework_agent as fpr_mod
@@ -603,17 +602,6 @@ async def test_phase_audit_request_optional_fields(monkeypatch, tmp_path) -> Non
     assert req["primus_cortex_url"] == "http://cortex/v1"
     assert req["model"] == "my-model"
     assert req["diff_url"] == "http://x/d"
-
-
-# --------------------------------------------------------------------------
-# framework_agent_artifacts.write_semantic_audit error path
-# --------------------------------------------------------------------------
-def test_write_semantic_audit_error_returns_none(tmp_path) -> None:
-    # Pass a FILE as the session dir so the runs_dir mkdir fails -> exception path.
-    file_path = tmp_path / "not_a_dir"
-    file_path.write_text("x")
-    out = fpa_mod.write_semantic_audit(file_path, candidate_id="c1", verdict={"semantic_status": "x"})
-    assert out is None
 
 
 # --------------------------------------------------------------------------

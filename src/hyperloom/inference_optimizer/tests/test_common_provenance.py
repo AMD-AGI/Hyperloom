@@ -280,3 +280,49 @@ def test_code_revision_falls_back_when_git_absent(monkeypatch):
 
     monkeypatch.setattr(_prov.subprocess, "run", _boom)
     assert _prov.detect_code_revision({"HYPERLOOM_CODE_REVISION": "envrev"}, probe=True) == "envrev"
+
+
+# --- isolated framework venv ------------------------------------------------
+
+
+def _installed(venv_root, name: str, version: str):
+    """A distribution installed under ``venv_root`` and nowhere this process looks."""
+    site = venv_root / "lib" / "python3.12" / "site-packages"
+    info = site / f"{name}-{version}.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n"
+    )
+    return venv_root
+
+
+def test_a_framework_in_its_own_venv_is_still_versioned(tmp_path):
+    """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel
+    pins its own torch. The orchestrator's interpreter cannot see that venv, so
+    without following ``VLLM_VENV_ROOT`` every bare-metal vLLM report recorded
+    the framework it actually served with as "unknown"."""
+    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=True)
+    assert fp["vllm"] == "0.27.1+rocm723"
+
+
+def test_an_operator_pin_still_wins_over_the_venv(tmp_path):
+    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint(
+        {"VLLM_VENV_ROOT": str(root), "VLLM_VERSION": "0.28.0-rc1"}, probe=True
+    )
+    assert fp["vllm"] == "0.28.0-rc1"
+
+
+def test_a_venv_root_that_is_not_there_is_not_a_failure(tmp_path):
+    fp = _prov.detect_stack_fingerprint(
+        {"VLLM_VENV_ROOT": str(tmp_path / "gone")}, probe=True
+    )
+    assert fp["vllm"] == "unknown"
+
+
+def test_the_venv_is_not_scanned_under_probe_false(tmp_path):
+    """probe=False is the hermetic contract: env only, no filesystem."""
+    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=False)
+    assert fp["vllm"] == "unknown"

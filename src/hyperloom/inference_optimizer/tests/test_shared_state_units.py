@@ -122,8 +122,8 @@ class TestGridSessionDeadline:
         s.max_minutes = 60.0
         monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 10.0)
         monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 1000.0)
-        # 10 min remaining, 120s reserve -> now + (600 - 120).
-        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 480.0)
+        # 10 min remaining, 72s closing reserve -> now + (600 - 72).
+        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 528.0)
 
     def test_deadline_is_now_when_under_reserve(self, monkeypatch):
         import hyperloom.orchestrator.state.shared_state as ss_mod
@@ -132,7 +132,7 @@ class TestGridSessionDeadline:
         s.max_minutes = 60.0
         monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 1.0)
         monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 500.0)
-        # 60s remaining < 120s reserve -> deadline == now (already exhausted).
+        # 60s remaining < 72s closing reserve -> deadline == now (already exhausted).
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
 
 
@@ -190,14 +190,12 @@ class TestProfileWorkloadContext:
             framework="vllm",
             precision="fp8",
             current_best={
-                "engine": "forge",
                 "extra_server_args": " --attention-backend AITER ",
                 "extra_envs": {"B": 2, "A": 1},
             },
         )
 
         assert state.profile_workload_context()["serving_config"] == {
-            "engine": "forge",
             "extra_server_args": "--attention-backend AITER",
             "extra_envs": {"A": "1", "B": "2"},
         }
@@ -305,14 +303,14 @@ class TestApplyChanges:
     def test_core_field_dropped_when_allow_core_false(self):
         # A non-privileged (allow_core=False) changes dict must not write a core field.
         s = SharedState()
-        before = s.cumulative_gain  # cumulative_gain is a core field
+        before = s.cumulative_gain_validated  # cumulative_gain_validated is a core field
         applied = s.apply_changes(
-            {"current_action": "baseline", "cumulative_gain": 999.0},
+            {"current_action": "baseline", "cumulative_gain_validated": 999.0},
             allow_core=False,
         )
         assert applied == {"current_action": "baseline"}
         assert s.current_action == "baseline"
-        assert s.cumulative_gain == before  # core write dropped
+        assert s.cumulative_gain_validated == before  # core write dropped
 
     def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
         # stop_reason is a core field, so a changes dict that carries both must
@@ -331,9 +329,9 @@ class TestApplyChanges:
 
     def test_core_field_written_when_allow_core_true(self):
         s = SharedState()
-        applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)
-        assert applied == {"cumulative_gain": 999.0}
-        assert s.cumulative_gain == 999.0
+        applied = s.apply_changes({"cumulative_gain_validated": 999.0}, allow_core=True)
+        assert applied == {"cumulative_gain_validated": 999.0}
+        assert s.cumulative_gain_validated == 999.0
 
 
 class TestKernelPatchIdentity:
