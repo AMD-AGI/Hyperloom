@@ -425,6 +425,22 @@ class TaskRegistry:
                 (json.dumps(history), task_id),
             )
 
+    async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
+        """Return the task registered under ``idempotency_key``, or None.
+
+        Args:
+            idempotency_key: The UNIQUE key to look up.
+
+        Returns:
+            Task | None: The matching task in any state, or ``None`` when the
+            key has never been used.
+        """
+        row = await self.db.fetchone(
+            "SELECT * FROM tasks WHERE idempotency_key=?",
+            (idempotency_key,),
+        )
+        return None if row is None else Task.from_row(row)
+
     async def queued(self) -> list[Task]:
         """Return all queued tasks ordered oldest-first.
 

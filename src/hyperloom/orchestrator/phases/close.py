@@ -161,6 +161,52 @@ class ClosePhase(PhaseHandler):
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
+    async def _drain_geak_rebench_for_close(self) -> None:
+        """Stop any GEAK 2b rebench and close its pending slot before CLOSE runs.
+
+        CLOSE only writes reports, so a rebench cannot contribute a headline any
+        more and a running one would hold the GPU lane against the post-opt
+        roofline. The phase boundary already cancelled the queued case; running
+        work and the pending slot are settled here.
+        """
+        try:
+            dropped = await _geak_rebench.cancel_geak_rebench_tasks(
+                self.tasks,
+                reason="close_sequence",
+                include_running=True,
+            )
+            if dropped:
+                log.info("CLOSE: cancelled %d in-flight GEAK rebench task(s)", len(dropped))
+            settled = await _geak_rebench.settle_dangling_geak_pending(
+                self.tasks,
+                self.shared_state,
+                reason="close_sequence",
+            )
+            if not (dropped or settled):
+                return
+            if settled:
+                log.info("CLOSE: settled a GEAK revalidation slot that can no longer land")
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception("CLOSE: geak_pending settle save failed")
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "geak_rebench_close_drain",
+                    "cancelled_task_ids": dropped,
+                    "pending_settled": bool(settled),
+                },
+            )
+        except Exception:  # noqa: BLE001 — close must proceed even if this fails
+            log.exception("CLOSE: GEAK rebench drain failed (non-fatal)")
+            await self._record_close_step(
+                "geak_rebench_drain",
+                status="failed",
+                detail="see log; geak_pending may remain awaiting_rebench",
+            )
+
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE sequencer (fixed order): post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons.
 
@@ -168,28 +214,7 @@ class ClosePhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
-        # The phase boundary into CLOSE already cancels the queued rebench, so
-        # this drain is the belt-and-braces path (direct CLOSE entry / resume);
-        # settling the pending slot is unconditional either way.
-        try:
-            dropped = await _geak_rebench.cancel_queued_geak_rebench_tasks(
-                self.tasks,
-                reason="close_sequence",
-            )
-            if dropped:
-                log.info("CLOSE: cancelled %d queued GEAK rebench task(s) before close sequence", len(dropped))
-            if await _geak_rebench.settle_dangling_geak_pending(
-                self.tasks,
-                self.shared_state,
-                reason="close_sequence",
-            ):
-                log.info("CLOSE: settled a GEAK revalidation slot that can no longer land")
-                try:
-                    self.shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
-                    log.exception("CLOSE: geak_pending settle save failed")
-        except Exception:  # noqa: BLE001
-            log.exception("CLOSE: GEAK rebench drain failed (non-fatal)")
+        await self._drain_geak_rebench_for_close()
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
