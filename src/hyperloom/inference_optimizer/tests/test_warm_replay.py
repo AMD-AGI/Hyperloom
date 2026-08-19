@@ -1441,6 +1441,51 @@ async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
     assert coord.shared_state.auto_roofline_pending_task_id
 
 
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_dropped_when_it_would_cost_the_optimization_phases(
+    tmp_path,
+):
+    """A roofline is worth an hour only if the session can still use what it finds.
+
+    The Qwen3.5-397B shape: 51 minutes of baseline, then an 81-minute TraceLens
+    arm that left FRAMEWORK_AGENT 46 minutes against its 108-minute threshold.
+    """
+    coord = _make_coord(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 600.0
+    state.max_minutes = 180
+    state.baseline_runtime_sec = 2705.7
+    state.phase_elapsed_totals = {"PRELUDE": 3090.0}
+    state.phase_history = [{"to_phase": "PRELUDE", "evidence": {}}]
+    state.session_budget_usable_sec = lambda: 7700.0
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
+
+    assert coord.tasks.calls == []
+    assert not coord.shared_state.auto_roofline_pending_task_id
+    dropped = state.phase_history[-1]["evidence"]["budget_dropped_arms"]
+    assert dropped[0]["arm"] == "initial_analysis"
+    assert dropped[0]["expected_cost_sec"] == pytest.approx(2705.7)
+
+
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_runs_when_the_budget_covers_it(tmp_path):
+    """Same wiring, ordinary session: the arm is not dropped just because the guard exists."""
+    coord = _make_coord(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 600.0
+    state.max_minutes = 180
+    state.baseline_runtime_sec = 300.0
+    state.phase_elapsed_totals = {"PRELUDE": 320.0}
+    state.phase_history = [{"to_phase": "PRELUDE", "evidence": {}}]
+    state.session_budget_usable_sec = lambda: 10_300.0
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
+
+    assert len(coord.tasks.calls) == 1
+    assert coord.shared_state.auto_roofline_pending_task_id
+
+
 def test_prelude_bootstrap_runs_on_positive_baseline(tmp_path):
     coord = _make_coord(tmp_path)
     assert coord._should_run_prelude_bootstrap(600.0) is True

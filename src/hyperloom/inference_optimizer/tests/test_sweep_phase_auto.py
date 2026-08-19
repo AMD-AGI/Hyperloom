@@ -48,6 +48,11 @@ class _BareState:
     conc_sweep_total_budget_sec: int = 60
     conc_sweep_variant_timeout_sec: int = 30
     save_count: int = 0
+    stop_reason: str = ""
+    usable_sec: float | None = None
+
+    def session_budget_usable_sec(self, *, reserve_sec=None) -> float | None:
+        return self.usable_sec
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
@@ -945,6 +950,34 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
     assert coord.shared_state.last_conc_sweep["status"] == "skipped"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "no_validated_gain_since_last_conc_sweep"
     assert coord.shared_state.save_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_sweep(coord):
+    """A conc_sweep the clock cannot pay for must not be enqueued, or SWEEP idles."""
+    coord.shared_state.usable_sec = 14 * 60.0
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    assert coord.tasks._tasks == {}
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_conc_sweep_skipped"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["was_skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_still_enqueues_when_the_session_budget_fits(coord):
+    """The session-budget skip must not fire when the catalogue cost still fits."""
+    coord.shared_state.usable_sec = 60 * 60.0
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
+    assert coord.shared_state.last_conc_sweep == {}
 
 
 @pytest.mark.asyncio

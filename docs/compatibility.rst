@@ -73,7 +73,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version               | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+============================+===============+=============+=============================+
-| 1.0.0b1           | `TraceLens 0.1.0`_        | Hardware-agnostic      | No dependency              | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.0.0b2           | `TraceLens 0.1.0`_        | Hardware-agnostic      | No dependency              | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
@@ -134,10 +134,10 @@ The following inference frameworks are supported:
 Container images
 ----------------
 
-Pick the image that matches your environment. Public Docker Hub refs
-(``rocm/hyperloom:<tag>``) are used on your own GPU machine. If your
-deployment uses a private registry mirror, set the registry prefix
-accordingly.
+Pick the image that matches your environment. Public Docker Hub refs are used
+on your own GPU machine: ``rocm/hyperloom:<tag>`` for SGLang and the official
+upstream ``vllm/vllm-openai-rocm:<tag>`` for vLLM. If your deployment uses a
+private registry mirror, set the registry prefix accordingly.
 
 .. list-table::
    :header-rows: 1
@@ -149,11 +149,16 @@ accordingly.
      - MI300X / MI325X
    * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x``
      - MI355X
-   * - ``rocm/hyperloom:vllm-v0.27.1-rocm7.2.3``
+   * - ``vllm/vllm-openai-rocm:v0.27.1``
      - MI300X / MI325X / MI355X
 
+The vLLM image entrypoint is ``vllm serve``, so override it (for example
+``--entrypoint tail``) when starting a long-running Hyperloom container.
+
 Browse all available tags at
-`hub.docker.com/r/rocm/hyperloom/tags <https://hub.docker.com/r/rocm/hyperloom/tags>`_.
+`hub.docker.com/r/rocm/hyperloom/tags <https://hub.docker.com/r/rocm/hyperloom/tags>`_
+and
+`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_.
 
 Bare-metal recommended environment
 -----------------------------------
@@ -185,8 +190,8 @@ Hyperloom does not install ROCm or torch itself.
      - Installs ``vllm==0.27.1+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
 Bare-metal ROCm patch levels differ per framework, and each one matches its
-``rocm/hyperloom`` image. The vLLM stack installs the ``rocm723`` variant (ROCm
-7.2.3), matching ``rocm/hyperloom:vllm-v0.27.1-rocm7.2.3``; the SGLang stack
+container image. The vLLM stack installs the ``rocm723`` variant (ROCm
+7.2.3), matching ``vllm/vllm-openai-rocm:v0.27.1``; the SGLang stack
 installs from the ROCm 7.2.0 AMD wheel index, matching the two
 ``sglang-v0.5.17-rocm7.2.0`` images. ``docker`` mode is still the preferred
 route for a pre-validated stack, since the images also pin the surrounding

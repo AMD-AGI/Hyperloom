@@ -14,6 +14,7 @@ import types as _types
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -34,9 +35,19 @@ def coord(build_coord):
     phase delegates to (launch-probe enqueue, rearm capture, build lifecycle).
     """
     build_coord._rearm_calls = []
-    build_coord._enqueue_build_launch_probe = _types.MethodType(
-        Coordinator._enqueue_build_launch_probe, build_coord
-    )
+    for name in (
+        "_enqueue_build_launch_probe",
+        "_route_succeeded_build",
+        "_build_routing_record",
+        "_note_build_routed",
+        "_build_probe_was_cancelled",
+        "_open_row_past_spent_generations",
+        "_time_budget_denial_for_action",
+    ):
+        setattr(build_coord, name, _types.MethodType(getattr(Coordinator, name), build_coord))
+    # The real wall-clock gate, on the real catalogue: with no budget set it
+    # admits everything, so a test that wants a denial sets one.
+    build_coord.action_registry = ACTION_CATALOGUE
 
     def _maybe_rearm_enablement(res):
         build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
@@ -362,26 +373,51 @@ async def _enqueue_and_transition(coord, action, state):
     return task_id
 
 
+async def _verified_build(coord, root, *, gap_id, framework="vllm", ref="v1", runtime_env=None):
+    """A succeeded ``targeted_build`` row whose result.json carries a usable runtime."""
+    root.mkdir(parents=True, exist_ok=True)
+    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),), runtime_env=runtime_env or {})
+    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
+    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
+    action = TargetedBuildAction(
+        gap_id=gap_id,
+        framework=framework,
+        component="aiter",
+        capability="fp4_moe",
+        ref=ref,
+        attempt_root=str(root),
+    )
+    return await _enqueue_and_transition(coord, action, "succeeded")
+
+
+async def _queued_probes(coord):
+    """The launch-probe rows currently waiting to be dispatched."""
+    return [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+
+
+def _spend_the_budget(coord, *, minutes=60):
+    """Leave the session with no wall-clock budget for a probe to run in."""
+    coord.shared_state.max_minutes = minutes
+    coord.shared_state.elapsed_minutes = lambda **_kw: float(minutes)
+
+
+def _restore_the_budget(coord):
+    """Give the session a budget a probe fits in again, as a resume would."""
+    coord.shared_state.max_minutes = 600
+    coord.shared_state.elapsed_minutes = lambda **_kw: 0.0
+
+
 @pytest.mark.asyncio
 async def test_route_succeeded_row_enqueues_launch_probe(coord, tmp_path):
     """A succeeded build must enqueue an integrate_patch launch probe, not call rearm directly."""
-    root = tmp_path / "attempt_s"
-    root.mkdir(parents=True, exist_ok=True)
-
-    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),), runtime_env={"X": "1"})
-    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
-    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
-
-    action = TargetedBuildAction(gap_id="g2", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
-    await _enqueue_and_transition(coord, action, "succeeded")
+    await _verified_build(coord, tmp_path / "attempt_s", gap_id="g2", runtime_env={"X": "1"})
 
     await Coordinator._maybe_route_build_outcomes(coord)
 
     # Must NOT directly rearm with "kept" — KEEP comes from the probe.
     assert not any(r.get("status") == "kept" for r in coord._rearm_calls)
     # Must have queued a launch-probe task.
-    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    probes = await _queued_probes(coord)
     assert len(probes) == 1
     probe_params = probes[0].params
     assert probe_params.get("enablement_launch_only") is True
@@ -393,21 +429,18 @@ async def test_route_succeeded_row_enqueues_launch_probe(coord, tmp_path):
 @pytest.mark.asyncio
 async def test_route_succeeded_row_probe_carries_config_path(coord, tmp_path):
     """Launch probe inherits baseline_config_path from shared state."""
-    root = tmp_path / "attempt_cfg"
-    root.mkdir(parents=True, exist_ok=True)
-
-    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),))
-    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
-    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
-
     coord.shared_state.baseline_config_path = "/cfg/bench.yaml"
-    action = TargetedBuildAction(gap_id="g3", framework="sglang", component="aiter",
-                                 capability="fp4_moe", ref="v2", attempt_root=str(root))
-    await _enqueue_and_transition(coord, action, "succeeded")
+    await _verified_build(
+        coord,
+        tmp_path / "attempt_cfg",
+        gap_id="g3",
+        framework="sglang",
+        ref="v2",
+    )
 
     await Coordinator._maybe_route_build_outcomes(coord)
 
-    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    probes = await _queued_probes(coord)
     assert len(probes) == 1
     assert probes[0].params.get("config_path") == "/cfg/bench.yaml"
 
@@ -456,22 +489,73 @@ async def test_route_succeeded_empty_runtime_override_calls_reverted(coord, tmp_
 @pytest.mark.asyncio
 async def test_route_succeeded_probe_idempotent(coord, tmp_path):
     """Calling _maybe_route_build_outcomes twice for the same row only enqueues one probe."""
-    root = tmp_path / "attempt_idem"
-    root.mkdir(parents=True, exist_ok=True)
-
-    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),))
-    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
-    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
-
-    action = TargetedBuildAction(gap_id="g6", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
-    await _enqueue_and_transition(coord, action, "succeeded")
+    await _verified_build(coord, tmp_path / "attempt_idem", gap_id="g6")
 
     await Coordinator._maybe_route_build_outcomes(coord)
     await Coordinator._maybe_route_build_outcomes(coord)
 
-    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    probes = await _queued_probes(coord)
     assert len(probes) == 1  # idempotent
+
+
+@pytest.mark.asyncio
+async def test_a_launch_probe_the_budget_cannot_fit_is_not_enqueued(coord, tmp_path):
+    """A probe opened into a spent budget is cancelled at dispatch and lost.
+
+    The probe is what declares KEEP for a build, and the queue scan drops a
+    queued row the wall-clock budget can no longer fit. Opening one anyway spends
+    the build's one routing pass on a row that will never run, so the build stays
+    verified and unlaunched with nothing left to notice it.
+    """
+    build_tid = await _verified_build(coord, tmp_path / "attempt_broke", gap_id="g_budget")
+    _spend_the_budget(coord)
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    assert await _queued_probes(coord) == []
+    # Nothing was routed, so the build is still owed a probe.
+    assert Coordinator._build_routing_record(coord, build_tid) is None
+    assert coord._rearm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_build_whose_probe_the_run_cancelled_is_still_unprobed(coord, tmp_path):
+    """A cancelled probe is no evidence about the build, so the build gets another.
+
+    The gate above narrows the window but cannot close it: a probe that fits when
+    it is opened can still be dropped before it is dispatched, and a probe row
+    cancelled that way owns this build's idempotency key for the rest of the
+    session. Both halves have to hold -- the build is routed again, and the key it
+    is routed on is a fresh generation rather than the cancelled row.
+    """
+    build_tid = await _verified_build(coord, tmp_path / "attempt_again", gap_id="g_again")
+    await Coordinator._maybe_route_build_outcomes(coord)
+    first = (await _queued_probes(coord))[0]
+    await coord.tasks.transition(first.task_id, "cancelled", evidence={"reason": "time_budget"})
+    _restore_the_budget(coord)
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    probes = await _queued_probes(coord)
+    assert [p.task_id for p in probes] != [], "the build was left accounted for by a probe that never ran"
+    assert first.task_id not in {p.task_id for p in probes}, "the window resolved to the cancelled row"
+    record = Coordinator._build_routing_record(coord, build_tid) or {}
+    assert record.get("probe_task_id") == probes[0].task_id
+    assert int(record.get("probe_generation") or 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_build_whose_probe_ran_and_failed_is_not_probed_again(coord, tmp_path):
+    """A probe that ran said something about the build; only a cancel says nothing."""
+    await _verified_build(coord, tmp_path / "attempt_failed", gap_id="g_failed")
+    await Coordinator._maybe_route_build_outcomes(coord)
+    probe = (await _queued_probes(coord))[0]
+    await coord.tasks.transition(probe.task_id, "running")
+    await coord.tasks.transition(probe.task_id, "failed")
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    assert await _queued_probes(coord) == []
 
 
 @pytest.mark.asyncio

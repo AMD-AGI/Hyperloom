@@ -220,6 +220,214 @@ def test_exit_normal_prelude_blocked_while_warm_replay_in_flight():
     assert out is not None and out[0] == "prelude_done"
 
 
+def _prelude_state(
+    *,
+    max_minutes: int = 180,
+    spent_sec: float = 0.0,
+    usable_sec: float | None = None,
+    baseline_tput: float = 0.0,
+    baseline_runtime_sec: float = 0.0,
+    baseline_post_ready_runtime_sec: float = 0.0,
+    baseline_warm_runtime_sec: float = 0.0,
+    baseline_measure_round_dropped: bool = False,
+    baseline_double_run: bool = False,
+) -> SimpleNamespace:
+    """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
+    return SimpleNamespace(
+        phase="PRELUDE",
+        max_minutes=max_minutes,
+        phase_elapsed_totals={"PRELUDE": spent_sec},
+        phase_started_unix=0.0,
+        baseline_tput=baseline_tput,
+        baseline_runtime_sec=baseline_runtime_sec,
+        baseline_post_ready_runtime_sec=baseline_post_ready_runtime_sec,
+        baseline_warm_runtime_sec=baseline_warm_runtime_sec,
+        baseline_measure_round_dropped=baseline_measure_round_dropped,
+        baseline_double_run=baseline_double_run,
+        session_budget_usable_sec=lambda: usable_sec,
+    )
+
+
+def test_prelude_can_afford_an_arm_the_budget_still_covers():
+    """The normal case must be untouched: a cheap arm early in a session runs."""
+    state = _prelude_state(spent_sec=600.0, usable_sec=10_000.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=300.0)
+    assert affordable is True
+    # Half of 180 minutes is held for the optimization phases; the rest is PRELUDE's.
+    assert evidence["affordable_sec"] == pytest.approx(4600.0)
+
+
+def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
+    """The Qwen3.5-397B shape: 51 minutes of baseline, then a roofline that costs another 45+."""
+    state = _prelude_state(spent_sec=3090.0, usable_sec=7700.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
+    assert affordable is False
+    assert evidence["bound"] == "optimization_reserve"
+    # 7700s left, 5400s of it spoken for, so the arm may cost at most 2300s.
+    assert evidence["affordable_sec"] == pytest.approx(2300.0)
+
+
+def test_a_resumed_prelude_is_not_charged_for_what_the_earlier_leg_spent():
+    """Banked phase spend and the session clock answer to different origins.
+
+    A resume that reanchors the budget restarts the session clock while the
+    phase ledger keeps every second the earlier leg banked. A bound read off
+    the ledger therefore declared preparation overspent on a session that had
+    its whole budget ahead of it, and the measured half of the baseline was
+    refused on every resumed run. Only the clock decides.
+    """
+    state = _prelude_state(spent_sec=10_000.0, usable_sec=10_000.0)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)
+    assert affordable is True
+    assert evidence["affordable_sec"] == pytest.approx(4600.0)
+
+
+def test_prelude_budget_policy_is_inert_without_a_clock():
+    """An unbounded run has no budget to protect, so nothing is refused."""
+    state = _prelude_state(max_minutes=0, usable_sec=None)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=99_999.0)
+    assert affordable is True
+    assert evidence["reason"] == "unbounded_budget"
+
+
+def test_time_exhausted_during_prelude_finally_has_a_producer():
+    """The reason was in the vocabulary and in the report glossary with no code path to it."""
+    state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0)
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    next_phase, reason, evidence = out
+    assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
+    assert evidence["terminal"] is True
+    assert phase_state.is_valid_stop_reason(reason)
+
+
+def test_a_landed_baseline_outranks_the_exhausted_clock():
+    """With a baseline in hand the run has something to optimize; the later phases judge for themselves."""
+    state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7)
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    assert out[1] == "prelude_done"
+
+
+def test_prelude_exit_states_whether_one_optimization_round_still_fits():
+    """The plain statement neither field session ever got: preparation spent the run."""
+    state = _prelude_state(baseline_tput=1074.7, baseline_runtime_sec=2705.7, usable_sec=2796.0)
+    out = phase_state.exit_normal_prelude(state)
+    assert out is not None
+    evidence = out[1]
+    assert evidence["fits_one_optimization_round"] is True
+    assert evidence["affordable_rounds"] == pytest.approx(1.03, abs=0.01)
+
+    state.session_budget_usable_sec = lambda: 1200.0
+    evidence = phase_state.exit_normal_prelude(state)[1]
+    assert evidence["fits_one_optimization_round"] is False
+
+
+# The workload the cold-anchor cases below are priced against: a 900s cold round
+# whose last 550s was the benchmark, so the boot took 350s, and a 400s hot pass.
+# One further measured variant therefore costs 750s -- its own boot and a
+# benchmark on a populated JIT cache -- while a double-run round costs the whole
+# measured cold pass plus a second benchmark, 1300s. Together they are what a
+# session must afford before measuring another baseline is worth doing.
+_COLD_ANCHOR_WORKLOAD = {
+    "baseline_tput": 1074.7,
+    "baseline_runtime_sec": 900.0,
+    "baseline_post_ready_runtime_sec": 550.0,
+    "baseline_warm_runtime_sec": 400.0,
+    "baseline_double_run": True,
+}
+_RETRY_COST_SEC = 1300.0 + 750.0
+
+
+class TestAColdAnchorIsNotAFinishedPrelude:
+    """What happens to a session whose baseline could only keep its cold figure.
+
+    The figure exists, so every rule that asks only whether a baseline landed
+    reads preparation as done. It is not: the number carries the boot, the first
+    request's compile and the graph capture, so every variant measured against it
+    reads as an improvement over a baseline that was never the baseline.
+
+    Two outcomes are correct and the budget picks between them -- measure another
+    baseline, or stop and say why -- and neither is "optimize against it".
+    """
+
+    def test_a_dropped_hot_pass_does_not_finish_the_phase(self):
+        state = _prelude_state(
+            **_COLD_ANCHOR_WORKLOAD,
+            baseline_measure_round_dropped=True,
+            usable_sec=_RETRY_COST_SEC + 60.0,
+        )
+
+        assert phase_state.exit_normal_prelude(state) is None
+
+        state.baseline_measure_round_dropped = False
+        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+
+    def test_a_session_that_cannot_afford_another_baseline_closes(self):
+        """2050s buys a round and a variant to read against it; 1200s buys neither."""
+        state = _prelude_state(
+            **_COLD_ANCHOR_WORKLOAD,
+            baseline_measure_round_dropped=True,
+            usable_sec=1200.0,
+        )
+
+        out = phase_state.compute_next_phase(state, kernel_enabled=True)
+
+        assert out is not None
+        next_phase, reason, evidence = out
+        assert (next_phase, reason) == ("CLOSE", "prelude_cold_anchor_low_budget")
+        assert evidence["terminal"] is True
+        assert evidence["baseline_anchor"] == "cold"
+        assert evidence["retry_round_sec"] == pytest.approx(1300.0)
+        assert phase_state.is_valid_stop_reason(reason)
+        assert phase_state.is_valid_phase_exit_reason(reason)
+
+    def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
+        """The marker outlives the shortfall, so it must not decide on its own.
+
+        A resume reanchors the session clock while the marker from the earlier leg
+        persists. Closing on the marker would end every resumed run before it
+        began, and no later baseline could clear the marker because none would
+        run. So the phase stays open with nothing to advance it but a new
+        baseline.
+        """
+        state = _prelude_state(
+            **_COLD_ANCHOR_WORKLOAD,
+            baseline_measure_round_dropped=True,
+            usable_sec=_RETRY_COST_SEC + 60.0,
+        )
+
+        assert phase_state.exit_cold_anchor_prelude(state) is None
+        assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+
+    def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
+        """A cold figure by configuration is consistent with what follows it.
+
+        A session that never asked for a hot pass measures everything the same
+        way, so its comparisons hold. Only a pass that was *dropped* leaves a
+        denominator out of step with the numerators.
+        """
+        state = _prelude_state(
+            baseline_tput=1074.7,
+            baseline_runtime_sec=900.0,
+            baseline_post_ready_runtime_sec=550.0,
+            usable_sec=1200.0,
+        )
+
+        assert phase_state.exit_cold_anchor_prelude(state) is None
+        assert phase_state.exit_normal_prelude(state)[0] == "prelude_done"
+
+    def test_a_session_with_no_clock_is_not_closed_for_a_budget_it_does_not_have(self):
+        """An unbounded run cannot fail an affordability test, so it retries."""
+        state = _prelude_state(
+            **_COLD_ANCHOR_WORKLOAD,
+            baseline_measure_round_dropped=True,
+            usable_sec=None,
+        )
+
+        assert phase_state.exit_cold_anchor_prelude(state) is None
+
+
 def test_exit_terminal_prelude_after_three_baseline_failures():
     state = SimpleNamespace(baseline_failure_streak=2)
     assert phase_state.exit_terminal_prelude(state) is None

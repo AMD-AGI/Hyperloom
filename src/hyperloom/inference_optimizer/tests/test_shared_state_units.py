@@ -122,8 +122,8 @@ class TestGridSessionDeadline:
         s.max_minutes = 60.0
         monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 10.0)
         monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 1000.0)
-        # 10 min remaining, 120s reserve -> now + (600 - 120).
-        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 480.0)
+        # 10 min remaining, 72s closing reserve -> now + (600 - 72).
+        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 528.0)
 
     def test_deadline_is_now_when_under_reserve(self, monkeypatch):
         import hyperloom.orchestrator.state.shared_state as ss_mod
@@ -132,7 +132,7 @@ class TestGridSessionDeadline:
         s.max_minutes = 60.0
         monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 1.0)
         monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 500.0)
-        # 60s remaining < 120s reserve -> deadline == now (already exhausted).
+        # 60s remaining < 72s closing reserve -> deadline == now (already exhausted).
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
 
 

@@ -2091,6 +2091,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Resolve robustness backend choice + runtime root, mirroring critic.
     robustness_choice = _resolve_robustness_choice(args)
     robustness_agent_root: Path | None = None
+    # T0 anchor writes warm_start_* via its own SharedState load; reload before
+    # persisting launch-shape fields so seed/resume memory cannot clobber them.
+    state = SharedState.load_or_init(session_dir)
     robustness_options = resolve_robustness_options(args, state)
     state.robustness_options = robustness_options
     # Persist before the Coordinator reads SharedState off disk, or the launch

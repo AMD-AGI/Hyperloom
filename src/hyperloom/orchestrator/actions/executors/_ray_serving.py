@@ -14,15 +14,46 @@ from typing import Any
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 
+from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+
 log = logging.getLogger(__name__)
 
-# Ray-side sentinel returncodes. -912 is also used by
-# ``_subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE``.
-_ACTOR_TIMEOUT_RC: int = -912
+# Ray-side sentinel returncodes, allocated out of the same space as
+# ``_subprocess_kill``'s -- read the note there before claiming a new one. Both
+# of these leave ``_grid_runner._run_magpie`` through the very return channel
+# that carries ``AGENTX_PREFLIGHT_RETURNCODE``, so an overlap would have an
+# actor timeout recorded as a failed AgentX preflight.
+_ACTOR_TIMEOUT_RC: int = -916
 _RAY_ACTOR_DIED_RC: int = -913
 
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
+
+# How often the submitter of a round looks up from ``ray.wait`` to see whether
+# the action it belongs to has been cancelled. Short enough that the hop through
+# Ray costs the cancel almost nothing on top of what stopping the round costs
+# anyway, long enough not to spin.
+_CANCEL_POLL_SEC: float = 0.25
+
+# How long the submitter waits for a cancelled round to come back on its own
+# before killing the actor out from under it. The round in the actor stops itself
+# exactly the way a local child does, so this is that cost plus the poll the
+# answer is seen at -- derived, not picked, because a grace even slightly short of
+# the reap expires every single time and throws away the sentinel the round was
+# about to hand back. The kill is what a wedged actor gets, not what a working one
+# gets for being ordinary.
+CANCEL_ROUND_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + _CANCEL_POLL_SEC
+
+# How long releasing a lease waits for the actor to reap its served process
+# before killing the actor anyway. Sized on what that reap costs -- SIGTERM, the
+# grace, SIGKILL -- and deliberately short: teardown often runs inside the
+# closing window, which is reserved for the report, not for waiting on a server.
+CLOSE_STOP_TIMEOUT_SEC: float = 10.0
+
+# Method slots the serving actor runs at once: the round, plus room for the
+# cancel that has to reach it. A single-slot actor would queue the cancel behind
+# the very round it is meant to stop.
+_SERVING_ACTOR_CONCURRENCY: int = 2
 
 _VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = (
     "ROCR_VISIBLE_DEVICES",
@@ -218,6 +249,11 @@ def _serving_actor_body() -> Any:
 
         def __init__(self) -> None:
             self._mgr = ManagedServerProcess()
+            # The cancel scope of the round currently in flight, if any. The
+            # dispatcher's scope is a ContextVar in the submitter's process and
+            # cannot cross into this one, so the actor keeps its own and
+            # :meth:`cancel_round` is the wire between them.
+            self._round_scope: Any = None
 
         def start(
             self,
@@ -274,24 +310,64 @@ def _serving_actor_body() -> Any:
             soft_deadline_sec=None,
             server_log_path=None,
             server_already_ready=False,
+            session_remaining_sec=None,
         ):
-            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
+            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``.
+
+            ``session_remaining_sec`` is a duration, not the submitter's absolute
+            session deadline: this actor is a separate process with its own
+            ``time.monotonic()`` origin, so only a duration survives the trip.
+
+            The round runs under a cancel scope published in this process, which
+            is what gives :meth:`cancel_round` something to raise: the reaper
+            inside ``run_with_session_kill`` then stops the tree and names the
+            stop exactly as it does on the local path.
+            """
             import subprocess as _sp  # noqa: PLC0415
 
+            from ..cancel_channel import CancelScope, use_cancel_scope  # noqa: PLC0415
             from ._ray_backend import _run_subprocess_worker  # noqa: PLC0415
 
+            scope = CancelScope()
+            self._round_scope = scope
             try:
-                return _run_subprocess_worker(
-                    cmd=cmd,
-                    env=env,
-                    cwd=cwd,
-                    timeout_s=timeout,
-                    soft_deadline_sec=soft_deadline_sec,
-                    server_log_path=server_log_path,
-                    server_already_ready=server_already_ready,
-                )
+                with use_cancel_scope(scope):
+                    return _run_subprocess_worker(
+                        cmd=cmd,
+                        env=env,
+                        cwd=cwd,
+                        timeout_s=timeout,
+                        soft_deadline_sec=soft_deadline_sec,
+                        server_log_path=server_log_path,
+                        server_already_ready=server_already_ready,
+                        session_remaining_sec=session_remaining_sec,
+                    )
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
+            finally:
+                self._round_scope = None
+
+        def cancel_round(self, reason: str) -> bool:
+            """Ask the round in flight to stop itself; return whether there was one.
+
+            Runs in a second method slot (see ``_SERVING_ACTOR_CONCURRENCY``) so
+            it is not queued behind the round it is cancelling. Returns as soon
+            as the flag is raised: the round is what decides how to stop, and the
+            submitter waits for it to come back.
+
+            Args:
+                reason: Short cause from the canceller, carried into the stopped
+                    round's message.
+
+            Returns:
+                ``True`` when a round was asked to stop, ``False`` when the actor
+                was idle -- which the submitter reads as "nothing to wait for".
+            """
+            scope = self._round_scope
+            if scope is None:
+                return False
+            scope.cancel(reason=reason)
+            return True
 
         def is_alive(self) -> bool:
             """Return whether the serving process is still up.
@@ -332,10 +408,19 @@ def _serving_actor_body() -> Any:
 
 
 def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
-    """Create a ServingActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
+    """Create a ServingActor handle holding ``num_gpus`` (+ optional ``serving_slot``).
+
+    Given more than one method slot so ``cancel_round`` can reach a round that is
+    already running; with the default single slot it would wait for the round to
+    finish, which is the one thing a cancel cannot do.
+    """
     actor_cls: Any = _serving_actor_body()
     resources = {"serving_slot": 1} if serving_slot else None
-    return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
+    return actor_cls.options(
+        num_gpus=num_gpus,
+        resources=resources,
+        max_concurrency=_SERVING_ACTOR_CONCURRENCY,
+    ).remote()
 
 
 def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
@@ -389,31 +474,86 @@ class ServingLease:
         soft_deadline_sec: float | None = None,
         server_log_path: str | None = None,
         server_already_ready: bool = False,
+        session_remaining_sec: float | None = None,
     ) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``.
 
         Drop-in for ``run_with_session_kill``; re-raises ``subprocess.TimeoutExpired``
         on hard timeout. Cluster-ensure failures and Ray worker errors degrade to
         a benchmark failure (rc=1) rather than crashing the session.
-        """
-        import subprocess as _sp  # noqa: PLC0415
 
-        import ray  # noqa: PLC0415
+        The cancel scope published by the dispatcher is watched for as long as
+        the round is in flight, the same as on the local path -- the difference
+        is that the round is in another process, so the scope cannot be read
+        there and the cancel is forwarded to the actor instead.
+
+        Args:
+            cmd: The benchmark command to run inside the actor.
+            env: Caller env for the subprocess.
+            cwd: Working directory for the subprocess.
+            timeout: Hard timeout in seconds.
+            soft_deadline_sec: Overtime soft deadline.
+            server_log_path: Path to the server log for the watchdogs.
+            server_already_ready: Warm reuse round (soft clock from spawn).
+            session_remaining_sec: Seconds left on the session budget, as
+                produced by ``session_deadline_to_remaining_sec``. The absolute
+                deadline the local path uses cannot cross into the actor: it is
+                a ``time.monotonic()`` instant, and the actor's clock has its own
+                origin. The actor re-anchors this duration onto its own clock.
+
+        Returns:
+            ``(returncode, stdout, stderr)`` from the round.
+        """
+        from ..cancel_channel import cancel_scope_listener  # noqa: PLC0415
 
         try:
             self.ensure()
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
-        ref = self._actor.run_blocking.remote(
-            cmd,
-            env=env,
-            cwd=cwd,
-            timeout=timeout,
-            soft_deadline_sec=soft_deadline_sec,
-            server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-        )
+        # Registered before the round is submitted, so a cancel that arrives
+        # while Ray is still scheduling it is one this call is counted as able
+        # to hear -- the same window the local path opens around its spawn.
+        with cancel_scope_listener() as cancel_scope:
+            ref = self._actor.run_blocking.remote(
+                cmd,
+                env=env,
+                cwd=cwd,
+                timeout=timeout,
+                soft_deadline_sec=soft_deadline_sec,
+                server_log_path=server_log_path,
+                server_already_ready=server_already_ready,
+                session_remaining_sec=session_remaining_sec,
+            )
+            return self._collect_round(ref, cmd=cmd, timeout=timeout, cancel_scope=cancel_scope)
+
+    def _collect_round(
+        self,
+        ref: Any,
+        *,
+        cmd: list[str],
+        timeout: int | float | None,
+        cancel_scope: Any,
+    ) -> tuple[int, str, str]:
+        """Wait for a submitted round, forwarding a cancel to the actor if one comes.
+
+        Args:
+            ref: The ``ObjectRef`` for the round in flight.
+            cmd: The round's command, for the ``TimeoutExpired`` it may raise.
+            timeout: The round's hard timeout, for the same reason.
+            cancel_scope: The scope to watch, or ``None`` when the caller is not
+                running under one, in which case this is a plain blocking wait.
+
+        Returns:
+            ``(returncode, stdout, stderr)`` from the round.
+
+        Raises:
+            subprocess.TimeoutExpired: When the actor reports a hard timeout.
+        """
+        import subprocess as _sp  # noqa: PLC0415
+
+        import ray  # noqa: PLC0415
+
         # Resolve Ray's exception classes defensively. Real ray always exposes
         # both, but this is a failure hot-path: a partial test double or a future
         # ray rename must never turn a benchmark failure into an AttributeError
@@ -423,7 +563,10 @@ class ServingLease:
         _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
         _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
         try:
-            rc, out, err = ray.get(ref)
+            if cancel_scope is None:
+                rc, out, err = ray.get(ref)
+            else:
+                rc, out, err = self._await_or_cancel(ref, cancel_scope=cancel_scope)
         except _actor_err as exc:  # type: ignore[misc]
             # The actor (worker) itself died — e.g. its server OOM-killed the
             # worker, or raylet reaped it. Drop the dead handle so the NEXT round
@@ -450,8 +593,106 @@ class ServingLease:
             raise _sp.TimeoutExpired(cmd, timeout or 0, output=out or None, stderr=err or None)
         return rc, out, err
 
+    def _await_or_cancel(self, ref: Any, *, cancel_scope: Any) -> tuple[int, str, str]:
+        """Block on a round, asking the actor to stop it if the scope is cancelled.
+
+        The round attributes its own stop, exactly as the local path does, so
+        the sentinel this returns is the actor's whenever the actor answers.
+        Only a wedged actor -- one that has not come back within
+        ``CANCEL_ROUND_GRACE_SEC`` of being asked -- is killed, and only then
+        does the submitter attribute the stop on its behalf, because otherwise
+        an unattributed failure is what the ledger would read.
+
+        Args:
+            ref: The ``ObjectRef`` for the round in flight.
+            cancel_scope: The scope this call is listening on.
+
+        Returns:
+            ``(returncode, stdout, stderr)`` from the round, or an
+            ``ORCHESTRATOR_CANCELLED_RETURNCODE`` triple when the actor had to
+            be killed.
+        """
+        import ray  # noqa: PLC0415
+
+        from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE  # noqa: PLC0415
+
+        asked_at: float | None = None
+        while True:
+            ready, _ = ray.wait([ref], num_returns=1, timeout=_CANCEL_POLL_SEC)
+            if ready:
+                return ray.get(ref)
+            if asked_at is None:
+                if not cancel_scope.cancelled:
+                    continue
+                reason = cancel_scope.reason or "orchestrator_cancelled"
+                asked_at = time.monotonic()
+                log.warning(
+                    "ServingLease: asking the actor to stop the round in flight (%s)",
+                    reason,
+                )
+                if not self._ask_actor_to_cancel(reason):
+                    # The actor never took the round, or cannot be reached to be
+                    # told about it. Either way nothing in there will stop on its
+                    # own, so go straight to the kill.
+                    asked_at -= CANCEL_ROUND_GRACE_SEC
+            elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
+                log.warning(
+                    "ServingLease: the actor did not return its cancelled round within %.0fs; "
+                    "killing it to release the lease",
+                    CANCEL_ROUND_GRACE_SEC,
+                )
+                # Straight to the kill: an actor that has not answered is not
+                # going to answer a graceful stop either, and waiting for one
+                # would spend the rest of the window the caller is owed.
+                self._kill_actor()
+                return (
+                    ORCHESTRATOR_CANCELLED_RETURNCODE,
+                    "",
+                    "the orchestrator cancelled this action; its Ray actor was killed after "
+                    f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
+                )
+
+    def _ask_actor_to_cancel(self, reason: str) -> bool:
+        """Tell the actor to stop the round it is running. Never raises.
+
+        Args:
+            reason: Short cause, carried into the stopped round's message.
+
+        Returns:
+            ``True`` when the actor confirmed it had a round to stop.
+        """
+        import ray  # noqa: PLC0415
+
+        actor = self._actor
+        if actor is None:
+            return False
+        try:
+            return bool(ray.get(actor.cancel_round.remote(reason), timeout=_LEASE_PROBE_TIMEOUT_SEC))
+        except Exception as exc:  # noqa: BLE001 — an unreachable actor gets killed instead
+            log.warning("ServingLease: could not reach the actor to cancel its round: %r", exc)
+            return False
+
     def close(self) -> None:
-        """Kill the actor, releasing the GPU lease. Idempotent, never raises."""
+        """Release the GPU lease: stop the server, then kill the actor. Idempotent.
+
+        The stop comes first because ``ray.kill`` skips ``__ray_terminate__``,
+        so the actor's own reaper never runs on that path; the served process is
+        deliberately in its own POSIX session, which is exactly what a
+        process-group teardown does not reach. Never raises, and the kill still
+        happens when the stop does not.
+        """
+        if self._actor is None:
+            return
+        try:
+            import ray  # noqa: PLC0415
+
+            ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC)
+        except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
+            log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
+        self._kill_actor()
+
+    def _kill_actor(self) -> None:
+        """Kill the actor handle without waiting for it. Idempotent, never raises."""
         if self._actor is None:
             return
         try:

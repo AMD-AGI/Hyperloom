@@ -91,6 +91,55 @@ def test_sweep_closes_when_insufficient_remaining():
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
+def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
+    """LLM skip_to_close after a refused conc_sweep must not become robustness_escalated."""
+    st = _sweep_state(max_minutes=180, started_hours_ago=166 / 60.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "skip_reason": "session_time_budget",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st, max_hours=3.0)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_done"
+    assert evidence.get("conc_sweep_status") == "skipped"
+
+
+def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
+    """skip_to_close remains a robustness abort when SWEEP has nothing to close on."""
+    st = _sweep_state(max_minutes=180, started_hours_ago=1.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {}
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st, max_hours=3.0)
+    assert nxt is not None
+    target, reason, _evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "robustness_escalated"
+
+
+def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
+    """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
+    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "skip_reason": "session_time_budget",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st, max_hours=96.0)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_EXPLORE
+    assert reason == "cycle_reloop"
+    assert evidence["loopback"] is True
+
+
 def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     # 12h bounded run: macro-loop is available even though budget accounting
     # stays in short-run charge-back mode.
@@ -340,6 +389,38 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     loopback_row = next(r for r in reversed(st.phase_history) if r.get("to_phase"))
     assert loopback_row["to_phase"] == "FRAMEWORK_AGENT"
     assert loopback_row["cycle"] == 1
+
+
+@pytest.mark.asyncio
+async def test_skip_to_close_is_consumed_when_sweep_already_settled(
+    cyclic_coordinator,
+    monkeypatch,
+):
+    """A suppressed skip_to_close must not leak into the next phase."""
+    c = cyclic_coordinator
+    st = c.shared_state
+    now = datetime.now(timezone.utc)
+    st.phase = ps.PHASE_SWEEP
+    st.start_ts = (now - timedelta(minutes=166)).isoformat()
+    st.max_minutes = 180
+    st.macro_cycle = 0
+    st.last_sweep = {}
+    st.last_conc_sweep = {
+        "status": "skipped",
+        "was_skipped": True,
+        "skip_reason": "session_time_budget",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_CLOSE
+    assert st.pending_escalate_hint == ""
+    assert st.last_consumed_escalate_hint == ps.ESCALATE_HINT_SKIP_TO_CLOSE
 
 
 @pytest.mark.asyncio

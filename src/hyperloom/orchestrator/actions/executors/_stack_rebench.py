@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..stop_attribution import stopped_by_the_run_class
 from ._grid_runner import GridVariant, run_grid
 
 
@@ -37,6 +38,11 @@ class StackRebenchResult:
     workspace: str | None
     warnings: list[str] = field(default_factory=list)
     stable_floor: float = 0.0
+    # Set to the ledger class from :mod:`..stop_attribution` when the run itself
+    # stopped the round, empty otherwise. Lets a caller tell "the confirmation
+    # did not happen" apart from "the confirmation failed": :attr:`stable` is
+    # ``False`` for both, and only one of them is evidence about the variant.
+    error_class: str = ""
 
     @property
     def stable(self) -> bool:
@@ -64,6 +70,8 @@ async def measure_stack_rebench(
     soft_deadline_sec: float | None = None,
     server_already_ready: bool = False,
     serving_lease: Any = None,
+    session_deadline_sec: float | None = None,
+    variant_expected_sec: float | None = None,
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor.
 
@@ -76,6 +84,12 @@ async def measure_stack_rebench(
     execution, §12 T1) routes the round through the caller's held Ray lease so
     the rebench shares the same lease as the warmup/decision rounds it reuses
     the hot server from; ``None`` keeps the local path.
+
+    ``session_deadline_sec`` bounds the rebench by the session wall-clock, so a
+    confirmation round cannot outlive the run it is confirming for.
+    A rebench dropped for lack of budget is reported as its own warning rather
+    than as a failed measurement: not measuring a variant is not evidence that
+    the variant is unstable, and the caller grades on the distinction.
     """
     output_slot.mkdir(parents=True, exist_ok=True)
     results = await run_grid(
@@ -95,21 +109,33 @@ async def measure_stack_rebench(
         soft_deadline_sec=soft_deadline_sec,
         server_already_ready=server_already_ready,
         serving_lease=serving_lease,
+        session_deadline_sec=session_deadline_sec,
+        variant_expected_sec=variant_expected_sec,
     )
     rb = results[0] if results else None
     tput: float | None = None
     workspace: str | None = None
     warnings: list[str] = []
+    error_class = ""
     if rb is not None and rb.status == "succeeded":
         tput = rb.output_throughput
         workspace = rb.workspace
         warnings = list(rb.nonfatal_warnings)
+    elif rb is not None and stopped_by_the_run_class(getattr(rb, "error_class", "")) is not None:
+        error_class = rb.error_class
+        warnings.append(f"stack_rebench_skipped:{error_class}")
     elif rb is not None:
         warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
     else:
         warnings.append("stack_rebench_no_result")
     stable_floor = base_tput * (1.0 + stable_threshold_pct / 100.0)
-    return StackRebenchResult(tput=tput, workspace=workspace, warnings=warnings, stable_floor=stable_floor)
+    return StackRebenchResult(
+        tput=tput,
+        workspace=workspace,
+        warnings=warnings,
+        stable_floor=stable_floor,
+        error_class=error_class,
+    )
 
 
 __all__ = ["DEFAULT_STACK_STABLE_PCT", "StackRebenchResult", "measure_stack_rebench"]

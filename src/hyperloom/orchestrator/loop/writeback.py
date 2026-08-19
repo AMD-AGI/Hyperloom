@@ -27,6 +27,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -743,6 +744,84 @@ class WritebackCollaborator:
             state.enablement.baseline_eval_evidence = evidence[:4000]
             state.enablement.launch_log = evidence
 
+    def _reopen_revalidation_window(self) -> None:
+        """Leave an enablement revalidation window open for a round the run stopped.
+
+        A round the run stopped measured nothing, so it says nothing about whether
+        the KEEP'd patch still revalidates. The window therefore stays open --
+        only an eval-origin KEEP ever opens one, and closing it here would strand
+        a patch nothing revalidated -- and the stall streak is not charged,
+        because reaching the ``enablement_stalled`` cap on the evidence of a clock
+        is exactly what the baseline failure streak already exempts this round
+        from.
+
+        The generation advances for the same reason opening a window does: the
+        next enqueue's idempotency key must not resolve to the row the run
+        stopped. The tracked id goes with it, since the row it names is spent and
+        the next enqueue records its own.
+
+        Two callers reach the same round by different routes: the writeback, when
+        the reaped row's result is routed, and the resume recovery, when the row
+        was cancelled at dispatch and so produced no result to route at all.
+        """
+        state = self.shared_state
+        state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
+        state.enablement.revalidation_task_id = ""
+        state.enablement.inflight_task_id = ""
+
+    def _record_revalidation_not_promoted(
+        self,
+        *,
+        task: Task,
+        result_payload: dict[str, Any],
+        err_class: str,
+        stopped_by_the_run: bool,
+    ) -> None:
+        """Close out an enablement revalidation baseline that did not promote.
+
+        A genuine failure -- boot, OOM, timeout, eval -- is a no-progress round:
+        it closes the revalidation window, reopens the authoring loop, and counts
+        toward the ``enablement_stalled`` cap so repeated KEEP-then-fail cycles
+        terminate.
+
+        A round the run stopped is none of those things; what it gets instead, and
+        why, is :meth:`_reopen_revalidation_window`.
+
+        Args:
+            task: The revalidation baseline task that came back unpromotable.
+            result_payload: Its result, read for the launch/traceback text.
+            err_class: Its ``error_class``, for the log line.
+            stopped_by_the_run: Whether the run stopped the round rather than the
+                round saying anything about the baseline.
+        """
+        state = self.shared_state
+        if stopped_by_the_run:
+            self._reopen_revalidation_window()
+        else:
+            state.enablement.revalidation_task_id = ""
+            state.enablement.validation_pending = False
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+            try:
+                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
+            except ImportError:
+                _max_stall = 5
+            if state.enablement.stall_streak >= _max_stall and not state.stop_reason:
+                state.set_stop_reason("enablement_stalled")
+            else:
+                state.enablement.inflight_task_id = ""
+        launch_log = _extract_enablement_launch_log(result_payload)
+        if launch_log:
+            state.enablement.launch_log = launch_log
+        log.warning(
+            "enablement revalidation task %s %s (error_class=%s); stall_streak=%d pending=%s rearm=%s",
+            task.task_id,
+            "was stopped by the run" if stopped_by_the_run else "failed",
+            err_class,
+            int(state.enablement.stall_streak or 0),
+            bool(state.enablement.validation_pending),
+            not bool(state.stop_reason),
+        )
+
     async def _handle_unpromotable_result(
         self,
         task: Task,
@@ -873,6 +952,13 @@ class WritebackCollaborator:
         # Only arm/streak while no baseline has succeeded yet (tput <= 0).
         if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
             err_class = result_payload.get("error_class", "")
+            # A round the run itself stopped -- the session budget reaped it, or
+            # the orchestrator cancelled the action -- measured nothing, so it
+            # says nothing about whether this baseline boots. Charging it to the
+            # streaks would let three stops the run chose end the session as
+            # ``baseline_failed``, blaming the model for the clock. The executor
+            # already refuses to grade such a round; the ledger has to agree.
+            stopped_by_the_run = stopped_by_the_run_class(err_class) is not None
             # While a serial enablement is actively engaged, baseline boots
             # re-fail on purpose (each round clears a deeper gap), so the
             # ``baseline_failed`` fast-fail must NOT fire here; the
@@ -890,29 +976,11 @@ class WritebackCollaborator:
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
             if is_revalidation and bool(getattr(self.shared_state.enablement, "validation_pending", False)):
-                self.shared_state.enablement.validation_pending = False
-                self.shared_state.enablement.revalidation_task_id = ""
-                self.shared_state.enablement.stall_streak = (
-                    int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
-                )
-                try:
-                    from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
-                except ImportError:
-                    _max_stall = 5
-                if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
-                    self.shared_state.set_stop_reason("enablement_stalled")
-                else:
-                    self.shared_state.enablement.inflight_task_id = ""
-                launch_log = _extract_enablement_launch_log(result_payload)
-                if launch_log:
-                    self.shared_state.enablement.launch_log = launch_log
-                log.warning(
-                    "enablement revalidation task %s failed (error_class=%s); "
-                    "stall_streak=%d rearm=%s",
-                    task.task_id,
-                    err_class,
-                    self.shared_state.enablement.stall_streak,
-                    not bool(self.shared_state.stop_reason),
+                self._record_revalidation_not_promoted(
+                    task=task,
+                    result_payload=result_payload,
+                    err_class=err_class,
+                    stopped_by_the_run=stopped_by_the_run,
                 )
                 any_changed = True
             from ..actions.executors._accuracy_gate import eval_enablement_allowed  # noqa: PLC0415
@@ -928,7 +996,15 @@ class WritebackCollaborator:
             )
             if eval_failed:
                 self._persist_eval_failure(result_payload)
-            if err_class == "fast_exit_arg_error":
+            if stopped_by_the_run:
+                log.warning(
+                    "baseline %s was stopped by the run (%s); the failure streak stays at %d "
+                    "because nothing about the baseline was measured",
+                    task.task_id,
+                    err_class,
+                    self.shared_state.baseline_failure_streak,
+                )
+            elif err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
@@ -939,7 +1015,8 @@ class WritebackCollaborator:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
-            self.shared_state.baseline_total_failures += 1
+            if not stopped_by_the_run:
+                self.shared_state.baseline_total_failures += 1
             if (
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
@@ -2828,10 +2905,31 @@ class WritebackCollaborator:
         # revalidation is exempt: the enablement patch changed the stack, so the
         # prior anchor no longer describes anything reproducible.
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
+        # A hot pass measured against a recorded COLD anchor is a correction, not
+        # a regression, so it lands even when the number is lower. The two are not
+        # comparable -- that is what the cold marker says -- and a cold figure can
+        # read higher than the hot one that replaces it whenever the "cold" pass
+        # was not really cold: weights in page cache and a JIT cache a prior run
+        # populated leave it paying none of the startup its depressed reputation
+        # assumes. Without this the session cannot escape the marker. PRELUDE
+        # refuses to finish while it is set, the retry that would clear it is
+        # rejected for measuring lower, and the run re-measures whole baseline
+        # rounds until the clock kills it.
+        hot_pass_ran = result.get("measure_round_runtime_sec")
+        corrects_a_cold_anchor = (
+            bool(getattr(self.shared_state, "baseline_measure_round_dropped", False))
+            and isinstance(hot_pass_ran, (int, float))
+            and hot_pass_ran > 0
+        )
         anchor_accepted = bool(
             isinstance(tput, (int, float))
             and tput > 0
-            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation)
+            and (
+                prior_anchor <= 0.0
+                or float(tput) > prior_anchor
+                or is_revalidation
+                or corrects_a_cold_anchor
+            )
         )
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
@@ -2935,6 +3033,30 @@ class WritebackCollaborator:
                 changed = True
             elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
                 self.shared_state.baseline_warm_runtime_sec = 0.0
+                changed = True
+            # Whether this baseline had to keep its cold figure because the budget
+            # could not fund a hot pass and a variant to use it. Carried on the
+            # session because the decision it drives is the session's: PRELUDE
+            # routes to CLOSE rather than optimizing against a denominator that
+            # was never the baseline. Cleared by a baseline that does land a hot
+            # figure, so a resumed session with a fresh clock is not held to the
+            # earlier leg's shortfall.
+            measure_round_dropped = bool(result.get("measure_round_dropped"))
+            if measure_round_dropped != bool(
+                getattr(self.shared_state, "baseline_measure_round_dropped", False)
+            ):
+                self.shared_state.baseline_measure_round_dropped = measure_round_dropped
+                changed = True
+            # Promote the cold round's boot/benchmark split. Cleared the same way
+            # the warm figure is when a later baseline does not carry one, so a
+            # stale split can never be subtracted from a fresh total and reported
+            # as this workload's boot.
+            post_ready_raw = result.get("post_ready_runtime_sec")
+            if isinstance(post_ready_raw, (int, float)) and post_ready_raw > 0:
+                self.shared_state.baseline_post_ready_runtime_sec = float(post_ready_raw)
+                changed = True
+            elif float(getattr(self.shared_state, "baseline_post_ready_runtime_sec", 0.0) or 0.0) != 0.0:
+                self.shared_state.baseline_post_ready_runtime_sec = 0.0
                 changed = True
         # current_best.tput follows the same hot baseline contract so the
         # gain numerator and denominator stay aligned. Once the stack carries a
@@ -4253,8 +4375,9 @@ class WritebackCollaborator:
         # restart, so restore both Recipe and Kernel trees before continuing.
         await self._resume_recover_pending_warm_replay(report)
         # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set
-        # but the tracked revalidation task is already terminal, clear the pending
-        # flag and rearm the stall counter so a fresh revalidation can be enqueued.
+        # but the tracked revalidation task is already terminal, unstick the window
+        # so a fresh revalidation can be enqueued -- closed and charged to the
+        # stall counter, or reopened uncharged when the run cancelled the row.
         await self._resume_recover_pending_revalidation(report)
         # (2) Orphaned KEEPs: replay integrate_patch KEEPs
         # that crashed before the append landed; surface ambiguous ones loudly.
@@ -4673,12 +4796,20 @@ class WritebackCollaborator:
         report["fixes"].append(summary)
 
     async def _resume_recover_pending_revalidation(self, report: dict[str, Any]) -> None:
-        """Clear stale enablement_validation_pending when the tracked revalidation task is terminal.
+        """Unstick enablement_validation_pending when the tracked revalidation task is terminal.
 
         If the coordinator died while a revalidation baseline was running, the
         task row may already be in a terminal state on resume.  Without this
         recovery the pending flag stays set indefinitely and the next
         revalidation cannot be enqueued (tracked_tid is still the old row).
+
+        Which recovery depends on how the row ended, not on this being the resume
+        path. A row the run cancelled -- which is what the queue scan does to a
+        revalidation the wall-clock budget can no longer fit -- measured nothing
+        and produced no result to route, so it is no evidence about the baseline
+        and gets :meth:`_reopen_revalidation_window`, the same verdict the
+        writeback reaches for the same round. Anything else ended having had its
+        chance: the window closes and the round is charged to the stall streak.
         """
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -4689,25 +4820,38 @@ class WritebackCollaborator:
         try:
             from ..state.task_registry import TERMINAL_STATES, TaskNotFound
 
+            row_state = ""
             try:
                 row = await self.tasks.get(tracked_tid)
-                is_terminal = row.state in TERMINAL_STATES
+                row_state = str(getattr(row, "state", "") or "")
+                is_terminal = row_state in TERMINAL_STATES
             except TaskNotFound:
                 is_terminal = True
-            if is_terminal:
-                state.enablement.validation_pending = False
-                state.enablement.revalidation_task_id = ""
-                state.enablement.stall_streak = (
-                    int(state.enablement.stall_streak or 0) + 1
-                )
-                state.enablement.inflight_task_id = ""
+            if not is_terminal:
+                return
+            if row_state == "cancelled":
+                self._reopen_revalidation_window()
                 report["fixes"].append(
-                    {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
+                    {"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid}
                 )
                 log.info(
-                    "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                    "resume: revalidation task %s was cancelled by the run; window left open "
+                    "at generation %d without charging the stall streak",
                     tracked_tid,
+                    int(state.enablement.revalidation_generation or 0),
                 )
+                return
+            state.enablement.validation_pending = False
+            state.enablement.revalidation_task_id = ""
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+            state.enablement.inflight_task_id = ""
+            report["fixes"].append(
+                {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
+            )
+            log.info(
+                "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                tracked_tid,
+            )
         except Exception:  # noqa: BLE001 — best-effort
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 

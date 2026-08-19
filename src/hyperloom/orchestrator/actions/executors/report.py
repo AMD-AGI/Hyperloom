@@ -377,7 +377,18 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
     "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
-    "time_exhausted_during_prelude": "The wall-clock budget was exhausted while still in PRELUDE, before optimization began.",
+    "time_exhausted_during_prelude": (
+        "The session's wall-clock budget ran out during preparation, before optimization began. Whatever PRELUDE "
+        "was doing when the clock reached zero — measuring the baseline, bringing up the framework agent, taking "
+        "the roofline — is where the time went; the phase record shows which arms ran and what each cost."
+    ),
+    "prelude_cold_anchor_low_budget": (
+        "The baseline's hot pass was skipped because the clock could not cover it together with one variant to "
+        "measure against it, so the only figure available is the cold pass's — depressed by the server boot, the "
+        "first request's kernel compile and the graph capture. Optimizing against it would report every variant as "
+        "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
+        "marked. Resume with more budget to measure a comparable baseline."
+    ),
     # Recipe KB knowledge-plane bootstrap failures.
     "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
     "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",

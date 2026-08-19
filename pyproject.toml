@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.0.0b1"
+version = "1.0.0b2"
 description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -189,6 +189,11 @@ hyperloom = [
 # former agent skill file was replaced by docs/conceptual/kernel-execution-path.md.
 "hyperloom.agents.kernel" = [
     "scripts/*.sh",
+]
+# Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
+# read at runtime by classify_patchability()/forge_submit.py, so it must ship.
+"hyperloom.agents.kernel.tools" = [
+    "vendor_operator_playbooks.json",
 ]
 # ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
 # and raises FileNotFoundError when they are absent from the install.

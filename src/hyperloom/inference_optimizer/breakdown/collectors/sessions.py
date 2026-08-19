@@ -1631,6 +1631,9 @@ def collect_enablement(
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_kept_patches:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
+    framework_root = str(_eg(state, "framework_root", "") or "")
+    if framework_root:
+        out["framework_root"] = framework_root
     if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
         out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
     candidate_refs = _eg(state, "candidate_refs")
@@ -1651,6 +1654,9 @@ def collect_enablement(
     accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
     if accepted_cfg:
         out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
+    setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
+    if setting_script_path.is_file():
+        out["setting_script"] = str(_rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh")
     accepted_config = _eg(state, "accepted_config")
     if isinstance(accepted_config, dict) and accepted_config:
         out["accepted_config"] = {

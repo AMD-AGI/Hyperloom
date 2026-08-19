@@ -555,6 +555,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # leg's CLOSE transition back the right to speak for this one.
         "resumed_ts",
         "max_minutes",
+        # Sizes the closing reserve, so it decides how much of ``max_minutes``
+        # is still usable: locking the budget without locking this one leaves
+        # the same forgery one field over -- a large value spends the session
+        # outright, a zero one erases the window the CLOSE report needs.
+        "closing_grace_sec",
         # fact-layer KEEP ledger; Coordinator is the sole writer.
         "optimization_stack",
         "gain_per_stack_entry",
@@ -1535,7 +1540,19 @@ class PolicyGate:
         self,
         payload: dict[str, Any],
     ) -> None:
-        """Deny a baseline proposal when an enablement round is in flight or the anchor is established."""
+        """Deny a baseline proposal when an enablement round is in flight or the anchor is established.
+
+        "Established" is the whole rule: a repeat baseline is refused because it
+        re-measures a reference the run already has. A cold anchor is the case
+        where it does not. The session kept a warmup's figure because the clock
+        could not fund the hot pass that would have made it comparable, and
+        marked it as such; PRELUDE will not finish while the mark is set, because
+        every variant read against a depressed denominator reads as an
+        improvement over a baseline that never existed. Refusing the round that
+        would clear the mark leaves the phase with no way forward and no way out,
+        which is the state a session resumed on a fresh clock arrives in --
+        exactly the one the mark exists to make recoverable.
+        """
         ss = getattr(self, "shared_state", None)
         if ss is None:
             return
@@ -1550,6 +1567,12 @@ class PolicyGate:
                     "before re-running baseline."
                 ),
             )
+        # Checked after the authoring round, which is a reason to wait whatever
+        # the anchor says: a specialist rewriting the framework underneath a
+        # baseline would have this round measuring a stack that changes as it
+        # runs.
+        if bool(getattr(ss, "baseline_measure_round_dropped", False)):
+            return
         anchor = getattr(ss, "baseline_tput", 0.0)
         if not isinstance(anchor, (int, float)) or anchor <= 0:
             return

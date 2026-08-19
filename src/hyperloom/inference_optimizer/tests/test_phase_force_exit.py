@@ -112,14 +112,72 @@ def test_force_exit_is_blind_to_session_length(max_minutes):
 
 
 def test_force_exit_unlimited_run_never_fires():
-    """max_minutes=0 -> unlimited; the phase keeps its flat per-window slice."""
+    """max_minutes=0 -> unlimited; gate cannot fire on session_remaining."""
     state = _make_explore_state(
         max_minutes=0,
         started_hours_ago=100.0,
         phase_started_hours_ago=100.0,
     )
-    fired, _evidence = phase_state.should_force_exit_explore(state)
+    fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is False
+    # Without max_minutes nothing is computable.
+    assert "session_remaining_seconds" not in evidence
+    assert "hours_remaining_gate" not in evidence
+
+
+def test_force_exit_hours_leavebehind_cannot_cover_the_session():
+    """IR-6's 3h default on a 3h session must not skip EXPLORE at first tick.
+
+    Remaining starts at max_hours, so remaining <= 3h is true as soon as any
+    time has been spent. CI's 3h smoke (and the 3h example) would otherwise
+    leave EXPLORE with 0 grids.
+    """
+    state = _make_explore_state(
+        max_minutes=180,
+        started_hours_ago=0.0,
+        phase_started_hours_ago=0.0,
+    )
+    fired, evidence = phase_state.should_force_exit_explore(
+        state,
+        hours_remaining_threshold=3.0,
+        budget_pct_threshold=0.20,
+    )
+    assert fired is False
+    assert "session_remaining" not in evidence["fired_reasons"]
+    assert evidence["hours_remaining_gate"] == "disabled_leavebehind_covers_session"
+
+
+def test_force_exit_hours_leavebehind_disabled_after_prelude_on_three_hour_session():
+    """CI shape: ~67 min spent before EXPLORE on a 3h budget."""
+    state = _make_explore_state(
+        max_minutes=180,
+        started_hours_ago=1.12,
+        phase_started_hours_ago=0.0,
+    )
+    fired, evidence = phase_state.should_force_exit_explore(
+        state,
+        hours_remaining_threshold=3.0,
+        budget_pct_threshold=0.20,
+    )
+    assert fired is False
+    assert "session_remaining" not in evidence["fired_reasons"]
+    assert evidence["hours_remaining_gate"] == "disabled_leavebehind_covers_session"
+
+
+def test_force_exit_explicit_hours_leavebehind_still_fires_on_short_session():
+    """An operator-set leave-behind smaller than the session still fires."""
+    state = _make_explore_state(
+        max_minutes=180,
+        started_hours_ago=2.96,
+        phase_started_hours_ago=0.01,
+    )
+    fired, evidence = phase_state.should_force_exit_explore(
+        state,
+        hours_remaining_threshold=0.05,
+        budget_pct_threshold=0.0,
+    )
+    assert fired is True
+    assert "session_remaining" in evidence["fired_reasons"]
 
 
 def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
