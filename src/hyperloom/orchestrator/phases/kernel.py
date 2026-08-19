@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import machine_state as _phase_state
 from ..kernel import collective_recovery as _collective_recovery
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     KIND_GEMM_TUNING,
@@ -2289,6 +2290,16 @@ class KernelPhase(PhaseHandler):
                 )
                 reverted.append({**cand, "reason": repr(exc)})
                 continue
+
+            stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
+            if stopped is not None:
+                # Recording the rest would report a clock as a verdict on them.
+                log.info(
+                    "gemm E2E: %s left unmeasured — %s",
+                    tuner_name,
+                    stopped.interrupted,
+                )
+                break
 
             decision = str(integrate_result.get("decision") or "").upper()
             new_tput = float(integrate_result.get("new_tput") or 0.0)

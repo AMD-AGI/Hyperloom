@@ -42,6 +42,7 @@ from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CODEX_MODEL,
 )
 
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
 from ..trace.parse_usage import (
@@ -7559,6 +7560,22 @@ async def integrate_handler(
         rebaseline_error_class = (
             str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
         ) or "bench_exception"
+        stopped = stopped_by_the_run_class(rebaseline_error_class)
+        if stopped is not None:
+            # Nothing was measured, so the patch has no verdict to answer for.
+            return {
+                "status": "stopped",
+                "error_class": stopped.error_class,
+                "error": stopped.interrupted,
+                "ends_the_batch": stopped.ends_the_batch,
+                "decision": "NEEDS_REVIEW",
+                "rebaseline_detail": bench_result,
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": payload.get("target_file") or payload.get("source_file"),
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+            }
         return {
             "status": "failed",
             "error_class": rebaseline_error_class,

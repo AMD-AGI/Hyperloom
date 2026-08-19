@@ -2013,6 +2013,72 @@ class TestForgeGemmRuntimeConfigMerge:
         )
 
     @pytest.mark.asyncio
+    async def test_a_stopped_run_leaves_its_tuners_unjudged(self, tmp_path, monkeypatch):
+        """A clock that ran out is not a verdict on the tuners it interrupted."""
+        coord = _coord(
+            tmp_path,
+            baseline_tput=100.0,
+            baseline_runtime_sec=10.0,
+            framework="sglang",
+            current_best={"action": "warm_replay", "tput": 110.0},
+        )
+        phase = KernelPhase(coord)
+        first = tmp_path / "fmoe.csv"
+        second = tmp_path / "dense.csv"
+        first.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        second.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            calls.append(payload)
+            return {
+                "status": "stopped",
+                "error_class": "session_time_exhausted",
+                "decision": "NEEDS_REVIEW",
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setattr(
+            phase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _env_var, env_value: env_value,
+        )
+
+        result = {
+            "backend": "forge",
+            "precision": "bf16",
+            "workspace": str(tmp_path / "gemm"),
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "fmoe_ck",
+                    "improved_shapes": 2,
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": str(first),
+                    "best_micro_speedup": 1.2,
+                },
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(second),
+                    "best_micro_speedup": 1.1,
+                },
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        # The stop ends the batch, so the second tuner is never launched.
+        assert len(calls) == 1
+        e2e = result["e2e_results"]
+        assert e2e["kept"] == []
+        assert e2e["reverted"] == []
+        assert coord.shared_state.optimization_stack == []
+
+    @pytest.mark.asyncio
     async def test_stacks_keeps_and_reverts(self, tmp_path, monkeypatch):
         coord = _coord(
             tmp_path,
