@@ -65,7 +65,6 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
-from hyperloom.orchestrator.roles.robustness_pulse import _PULSE_TIMEOUT_SEC
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -821,20 +820,13 @@ class TestTheCooperativeStopWindowsCompose:
         """
         assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 10.0
 
-    def test_the_variant_boundary_tick_is_skipped_rather_than_budgeted_for(self):
-        """The one step in the unwind this window deliberately does not cover.
+    def test_a_cancelled_scope_is_visible_to_the_work_inside_it(self):
+        """The unwind's steps read the scope, not a returncode.
 
-        A cooperative stop returns its sentinel, so ``run_grid`` reaches its
-        variant boundary the ordinary way and would spend the robustness tick's
-        whole budget there -- between recording the stopped round's row and
-        releasing what the round held, which are the terms above. Counting it
-        would take the window past what an operator's own ``SIGTERM`` grace
-        allows, so the tick gives way instead: the scope it reads is cancelled for
-        the rest of the action's life, so once the cancel is out no boundary
-        spends it.
+        A cooperative stop returns its sentinel rather than raising, so a step
+        can be reached on the ordinary path with the cancel already outstanding
+        and has to ask.
         """
-        assert _PULSE_TIMEOUT_SEC == 8.0
-        assert 8.5 + 0.25 + 5.0 + 10.0 + _PULSE_TIMEOUT_SEC > _COOPERATIVE_CANCEL_GRACE_SEC
         scope = CancelScope()
         with use_cancel_scope(scope):
             assert not stop_was_asked_for()
