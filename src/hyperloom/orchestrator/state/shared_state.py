@@ -3258,6 +3258,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
+                # Vendor-playbook fields (mori's dispatch+combine is the first
+                # case -- see _vendor_operator_playbooks.py). Without these,
+                # effective_hot_kernel_gpu_pct()/effective_hot_kernel_min_gpu_pct()
+                # silently degrade to bare gpu_pct/min_gpu_pct for every caller
+                # that gates off this projection (untried_hot_reusable_kernels()
+                # is the only one -- _batch_kernel_candidates() reads full
+                # candidate dicts off candidates_path instead), losing both the
+                # aggregate gate's intended pass (PR #1191 review finding #3)
+                # and the playbook's own min_gpu_pct_floor enforcement.
+                "patch_strategy": entry.get("patch_strategy") or "",
+                "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
+                "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),
+                "vendor_playbook_min_gpu_pct_floor": entry.get("vendor_playbook_min_gpu_pct_floor"),
             }
             summary.append(summary_entry)
             if any(
