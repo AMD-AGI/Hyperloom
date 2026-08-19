@@ -474,11 +474,14 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     two legs to whichever phase the session stopped in.
 
     Only a previous leg that stopped for a recorded reason, or crashed
-    repeatedly, re-anchors the wall-clock budget. After a clean stop
-    ``start_ts`` is deliberately kept, so ``--max-hours`` still counts from the
-    original session start and the earlier legs' wall-clock stays spent. The
-    phase clock moves on either branch: the two answer different questions, and
-    neither answer includes time nothing was running.
+    repeatedly, re-anchors the wall-clock budget. That also clears
+    ``deadline_unix`` so ``Coordinator.run`` can stamp a new one from the
+    reset ``start_ts``; keeping the spent stamp would make ``--force-resume``
+    after ``time_exhausted`` stop immediately. After a clean stop ``start_ts``
+    and the stamp are deliberately kept, so ``--max-hours`` still counts from
+    the original session start and the earlier legs' wall-clock stays spent.
+    The phase clock moves on either branch: the two answer different
+    questions, and neither answer includes time nothing was running.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
@@ -501,6 +504,10 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
         state.crash_count = 0
         # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
         state.start_ts = state.resumed_ts
+        # The stamp is the loop's budget. Leaving a spent one in place after
+        # resetting start_ts would make this leg look already exhausted.
+        state.deadline_unix = 0.0
+        state.teardown_timings_sec = {}
     return state.resumed_ts
 
 
