@@ -968,14 +968,25 @@ def test_tolerance_not_fooled_by_outer_catchall_sentinel(tmp_path):
 
 
 def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
-    """Integration: the real a4bb43af benchmark_lib.sh (if present) must get its
-    run_lm_eval taught the flag, with the sentinel landing inside that function.
+    """Integration against a real benchmark_lib.sh, when one is checked in.
 
-    Skips silently when the fixture is not checked in, so the suite stays
-    hermetic; the logic is already covered by the multi-catch-all stub above."""
+    The fixture it names has never been in the tree, so this has always skipped
+    -- and because its docstring claimed the stub above covered it, the gap read
+    as intentional. The stub covers the *shape*; it cannot tell you whether the
+    file upstream actually pins still has that shape, which is the question a
+    pin bump raises and the one whose wrong answer makes install.sh die().
+
+    That question is now answered by ``test_inferencex_anchor_contract`` --
+    hermetically via a recorded ``magpie_patch`` entry, and against the real
+    pinned file when the repo is reachable. This case stays as a convenience for
+    dropping a local copy in to debug against, and says what it is.
+    """
     fixture = Path(__file__).parent / "fixtures" / "benchmark_lib_a4bb43af.sh"
     if not fixture.is_file():
-        pytest.skip("real pinned benchmark_lib.sh fixture not present")
+        pytest.skip(
+            "no local benchmark_lib.sh fixture; the pinned file is verified by "
+            "test_inferencex_anchor_contract (magpie_patch)"
+        )
     lib = tmp_path / "benchmark_lib.sh"
     lib.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
 
