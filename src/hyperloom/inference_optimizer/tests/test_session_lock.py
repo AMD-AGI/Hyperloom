@@ -60,6 +60,51 @@ def test_release_allows_reacquire(tmp_path):
     second.release()
 
 
+def test_pod_history_path_under_runtime(tmp_path):
+    """The ownership ledger lives at ``<session_dir>/runtime/pod_history.jsonl``."""
+    assert session_paths.pod_history_path(tmp_path) == tmp_path / "runtime" / "pod_history.jsonl"
+
+
+def test_acquire_appends_pod_history(tmp_path):
+    """Each acquisition appends one ledger line, so the owner chain survives.
+
+    ``optimizer.lock`` is truncated by every acquirer, so a session whose sandbox
+    is rebuilt mid-run would otherwise keep no record of the earlier pods."""
+    import json
+
+    first = SessionLock(tmp_path)
+    first.acquire()
+    first.release()
+    second = SessionLock(tmp_path)
+    second.acquire()
+    second.release()
+
+    lines = session_paths.pod_history_path(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2, lines
+    for line in lines:
+        record = json.loads(line)
+        assert record["pid"] == os.getpid()
+        assert record["hostname"]
+        assert record["acquired_at"]
+
+
+def test_pod_history_failure_does_not_break_acquire(tmp_path):
+    """The ledger is observational: a write failure must not fail the acquire.
+
+    The ledger path is pre-created as a directory so the append raises
+    ``IsADirectoryError``; the lock must still be acquired and readable."""
+    ledger = session_paths.pod_history_path(tmp_path)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.mkdir()
+
+    lock = SessionLock(tmp_path)
+    lock.acquire()  # must not raise
+    try:
+        assert session_lock.read_owner(tmp_path) is not None
+    finally:
+        lock.release()
+
+
 @pytest.mark.skipif(
     session_lock.fcntl is None,
     reason="flock-based mutual exclusion requires POSIX fcntl",
