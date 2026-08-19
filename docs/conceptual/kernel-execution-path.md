@@ -59,9 +59,24 @@ it directly, so no request ever carries that kind.
 ## KERNEL phase entry: Coordinator-direct calls
 
 When the Coordinator enters the KERNEL phase (`phases/kernel.py::_on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
-it calls the handlers directly in Python — not through the REQUEST bus:
+it calls the handlers directly in Python — not through the REQUEST bus. Which
+calls it makes depends on the backend: the entry hook branches before any lane
+runs.
 
 ```python
+# 1. HYPERLOOM_COLLECTIVE_ONLY wins over everything: reprofile, collective, done.
+if collective_only:
+    await self._maybe_reprofile_for_kernel()
+    await self._maybe_run_collective_before_kernel_opt()
+    return
+
+# 2. GEAK branch — the documented default. One whole-pipeline e2e run, then
+#    the phase winds down to SWEEP. Nothing below this line executes.
+if geak_enabled:                      # geak_selected(): order is not exactly `forge`
+    await self._run_geak_kernel_phase(from_phase=from_phase)
+    return
+
+# 3. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge.
 result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
 # then the two Coordinator-owned lanes, each behind its own gate; both first
 # resume a pending integration from the previous entry before starting anew:
@@ -70,6 +85,10 @@ await self._maybe_run_collective_before_kernel_opt()
 # then, if candidates remain:
 result = await run_optimization_handler({...}, session_dir=session_dir)
 ```
+
+GEMM tuning is itself gated by `_gemm_tuning_required_before_kernel_opt()`; when
+it is not required the forge branch reprofiles and goes straight to the fusion
+and collective lanes.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the
@@ -82,6 +101,22 @@ The collective lane (`_maybe_run_collective_before_kernel_opt` →
 analysis key. `HYPERLOOM_SKIP_COLLECTIVE` disables it;
 `HYPERLOOM_COLLECTIVE_ONLY` inverts the entry so the lane runs alone and the
 phase then hints `skip_to_sweep`.
+
+The fusion lane (`_maybe_run_forge_fusion_before_kernel_opt` →
+`run_fusion_handler`, integrated by `_integrate_fusion`) gates on
+`_fusion_required_before_kernel_opt()`: `HYPERLOOM_SKIP_FUSION` not truthy, a
+framework in `{sglang, vllm, vllm-aiter}`, a `last_profile_trace` to discover
+from, and no `last_fusion` whose status is already `ok` / `complete` / `kept`
+(idempotent re-entry). It is forge-only — under the default `geak` backend
+`_on_enter_kernel` returns before the lane is reached, and unlike collective
+there is no `..._ONLY` escape hatch that reaches it while GEAK owns the phase.
+
+A fusion result is written to the `last_fusion` SharedState field and posted as
+a `run_fusion_done` response with `source="kernel_entry_auto"`. A result that is
+`kept` and `requires_e2e_validation` is handed to `integrate_handler`, which
+applies the fused-kernel source patch, sets the fusion env flags on the
+re-baseline server, and KEEPs only when measured e2e throughput clears the
+threshold.
 
 ## Where the former Iron Rules are enforced
 
@@ -102,13 +137,23 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 GEAK owns the KERNEL phase by default and decides kernel strategy internally.
 The per-kernel Forge backend is an opt-in:
 
-- **Default**: `KERNEL_OPT_BACKEND_ORDER=geak` (every launcher exports this default).
+- **Default**: `geak`. It is the code default whenever
+  `KERNEL_OPT_BACKEND_ORDER` is unset (`_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
+  `orchestrator/kernel/request_handlers.py`), so no launcher has to set it. The
+  bare-metal installer additionally exports `${KERNEL_OPT_BACKEND_ORDER:-geak}`
+  and persists it into `.env`, and the Slurm launchers export the same
+  `:-geak` fallback into the job / container environment. `.env.template`
+  ships the line commented out.
 - **Forge (per-kernel)**: set `KERNEL_OPT_BACKEND_ORDER=forge` exactly. Any
   other value (including `--backends` CLI flags, payload `backends` hints, or
   `GEMM_TUNING_BACKEND`) does not enable Forge.
 
-GEAK GEMM tuning uses `run_gemm_tuning_handler`, which also defaults to GEAK
-unless `KERNEL_OPT_BACKEND_ORDER=forge` is set.
+`run_gemm_tuning_handler` also defaults to GEAK unless
+`KERNEL_OPT_BACKEND_ORDER=forge` is set. That default applies to an
+LLM-issued `run_gemm_tuning` REQUEST, which is dispatched inline whatever the
+backend. The KERNEL-**entry** GEMM tuning is a different matter: under the
+default `geak` backend it never fires at all, because `_on_enter_kernel` hands
+the phase to `_run_geak_kernel_phase` and returns before reaching it.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
@@ -167,7 +212,8 @@ Required env vars:
 | `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK and TraceLens both run Claude Code |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
 | `TRACELENS_ROOT` | `install.sh` (operator may override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
-| `KERNEL_OPT_BACKEND_ORDER` | launcher (default `geak`) | Set to `forge` to enable per-kernel Forge |
+| `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
+| `FORGE_PATH` | operator | KernelForge checkout root; required whenever forge is enabled. `forge_submit.py` resolves the `kernel_agents` package from it and locates the vendor-playbook task bundles under it |
 
 Optional:
 
@@ -177,6 +223,14 @@ Optional:
 | `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
 | `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 60); wins over the LLM-authored payload value |
+
+Fusion lane:
+
+| Variable | Purpose |
+|---|---|
+| `HYPERLOOM_SKIP_FUSION` | Truthy disables the fusion lane before any other gate is evaluated |
+| `FORGE_FUSION_TIMEOUT` | Wrapper timeout in seconds (default 7200 = 2h); a payload `timeout` / `timeout_sec` wins over it |
+| `FORGE_FUSION_MAX_TURNS` | Agent turn cap for one fusion run (default 100); a payload `max_turns` wins over it |
 
 Collective lane:
 
