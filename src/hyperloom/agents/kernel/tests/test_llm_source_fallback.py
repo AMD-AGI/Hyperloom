@@ -537,8 +537,10 @@ def test_openai_provider_adapter_uses_the_sanctioned_client_contract(monkeypatch
 
 def test_message_text_accepts_sdk_text_shapes():
     """Claude SDK string, text, and content-block forms must all be readable."""
-    assert lsf._message_text("direct") == ["direct"]
-    assert lsf._message_text(types.SimpleNamespace(text="attribute")) == ["attribute"]
+    from hyperloom.common.claude_oneshot import message_text
+
+    assert message_text("direct") == ["direct"]
+    assert message_text(types.SimpleNamespace(text="attribute")) == ["attribute"]
     message = types.SimpleNamespace(
         content=[
             {"text": "dict"},
@@ -546,7 +548,7 @@ def test_message_text_accepts_sdk_text_shapes():
             {"other": "ignored"},
         ]
     )
-    assert lsf._message_text(message) == ["dict", "object"]
+    assert message_text(message) == ["dict", "object"]
 
 
 def test_claude_provider_rejects_incomplete_sdk(monkeypatch):

@@ -219,14 +219,10 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
             "max_model_len": 4096,
         }
     )
-    # +1% rule met (150 vs 100): current_best re-lifted to profile.
-    assert s.current_best["action"] == "profile"
-    assert s.current_best["tput"] == 150.0
-    assert s.current_best["engine"] == "sglang"
-    assert s.current_best["extra_server_args"] == "--attention-backend aiter"
-    assert s.current_best["extra_envs"] == {
-        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
-    }
+    # A profiler-on measurement never moves current_best, however high it reads.
+    assert s.current_best["action"] == "explore"
+    assert s.current_best["tput"] == 100.0
+    assert s.cumulative_gain_validated == 0.0
     # Audit row.
     assert s.last_profile["decision"] == "promoted"
     assert s.last_profile["status"] == "succeeded"
@@ -457,6 +453,31 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
 
 @pytest.mark.asyncio
+async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
+    """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
+    from hyperloom.orchestrator.state.optimization_journal import (
+        OUTCOME_NO_PROMOTE,
+        derive_journal_outcome,
+    )
+
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "explore", "tput": 200.0, "extra_server_args": "", "extra_envs": {}}
+
+    result = {
+        "status": "kept",
+        "output_throughput": 140.0,
+        "specialist_task_id": "spec-1",
+        "delta_pct": 40.0,
+    }
+    await coord._promote_to_shared_state("integrate_patch", result, task=_task("integrate_patch", task_id="t1"))
+
+    assert s.current_best["tput"] == 200.0
+    assert derive_journal_outcome("integrate_patch", result, promotable=True) == OUTCOME_NO_PROMOTE
+
+
+@pytest.mark.asyncio
 async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
     session_dir,
 ):
@@ -599,7 +620,6 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir)
     assert entry["baseline_enablement"] is True
     assert entry["attribution_eligible"] is False
     assert s.gain_per_stack_entry == [None]
-    assert s.cumulative_gain == 0.0
     assert s.cumulative_gain_validated == 0.0
     assert s.pending_integrate == {}
 
@@ -855,10 +875,18 @@ def test_outbox_dead_letters_missing_patch_without_blocking_close(
 
 
 @pytest.mark.asyncio
-async def test_resume_reconciles_state_before_draining_kb_outbox(
+async def test_resume_settles_state_before_draining_kb_outbox(
     session_dir,
     monkeypatch,
 ):
+    """The outbox drains after the recovery pass, from the durable config.
+
+    Resume no longer rebuilds ``current_best`` from an ``optimization_stack``
+    replay: the lift writes both together, so the replay could only ever
+    reintroduce an env a later ablation removed. What still has to hold is the
+    ordering — recovery settles and saves, and only then does the outbox stage
+    whatever ``current_best`` durably holds.
+    """
     coord = _coord(session_dir)
     coord._resumed_from = {"is_resume": True}
     coord.shared_state.optimization_stack = [
@@ -871,8 +899,8 @@ async def test_resume_reconciles_state_before_draining_kb_outbox(
         }
     ]
     coord.shared_state.current_best = {
-        "extra_server_args": "--stale",
-        "extra_envs": {"STALE_ENV": "1"},
+        "extra_server_args": "--new",
+        "extra_envs": {"NEW_ENV": "1"},
         "tput": 120.0,
     }
     coord.shared_state.cumulative_gain_validated_stack_len = 1
@@ -935,7 +963,7 @@ async def test_promote_framework_agent_kept_without_a_candidate_key_is_skipped_l
     undecorated key is falsy, so ``_lift_to_current_best``'s guard now skips the
     append instead.
 
-    Only the append: current_best and cumulative_gain are set unconditionally
+    Only the append: current_best is set unconditionally
     further down, so the win still counts — it just is not recorded as a step
     anything can later reconcile, dedupe or replay. Pinned because that split is
     easy to misread in either direction, and because a KEEP that leaves no trace
@@ -1200,6 +1228,152 @@ def test_lift_applies_unset_envs_before_new_envs(session_dir):
         "KEEP": "new",
         "RESTORE": "new",
     }
+
+
+def test_lift_is_the_only_writer_so_an_ablated_env_stays_gone(session_dir):
+    """A later winner that drops an inherited env must not see it come back."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "adds-env", "extra_server_args": "--flag-a 1", "extra_envs": {"SGLANG_OLD": "1"}},
+    )
+    coord._lift_to_current_best(
+        "explore",
+        1200.0,
+        {
+            "name": "drops-env",
+            "extra_server_args": "--flag-a 1",
+            "extra_envs": {"SGLANG_NEW": "1"},
+            "unset_envs": ["SGLANG_OLD"],
+        },
+    )
+
+    assert s.current_best["extra_envs"] == {"SGLANG_NEW": "1"}
+    assert [e["variant_name"] for e in s.optimization_stack] == ["adds-env", "drops-env"]
+
+
+def test_lift_refuses_a_winner_that_does_not_beat_the_anchor(session_dir):
+    """A measurement below current_best must leave config and stack untouched."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    coord._lift_to_current_best(
+        "explore",
+        1500.0,
+        {"name": "good", "extra_server_args": "--flag-a 1", "extra_envs": {"A": "1"}},
+    )
+
+    lifted = coord._lift_to_current_best(
+        "gemm_tuning",
+        1100.0,
+        {"name": "worse", "extra_server_args": "--flag-b 2", "extra_envs": {"B": "2"}},
+    )
+
+    assert lifted is False
+    assert s.current_best["tput"] == 1500.0
+    assert s.current_best["extra_envs"] == {"A": "1"}
+    assert [e["variant_name"] for e in s.optimization_stack] == ["good"]
+
+
+def test_lift_keeps_entry_extra_off_current_best(session_dir):
+    """Artifact and provenance handles belong to the stack entry, not the config."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    coord._lift_to_current_best(
+        "gemm_tuning",
+        1200.0,
+        {"name": "geak_a8w8", "extra_server_args": "", "extra_envs": {"AITER_CONFIG": "/tuned.csv"}},
+        entry_extra={"tuned_file": "/tuned.csv", "backend": "geak", "empty": "", "absent": None},
+    )
+
+    entry = s.optimization_stack[-1]
+    assert entry["tuned_file"] == "/tuned.csv"
+    assert entry["backend"] == "geak"
+    assert "empty" not in entry
+    assert "absent" not in entry
+    assert "tuned_file" not in s.current_best
+    assert "backend" not in s.current_best
+
+
+def test_env_spec_reports_the_config_current_best_was_measured_on(session_dir):
+    """The GEAK handoff must describe current_best, ablations included."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "v1", "extra_server_args": "--flag-a 1", "extra_envs": {"OLD": "1"}},
+    )
+    coord._lift_to_current_best(
+        "explore",
+        1200.0,
+        {
+            "name": "v2",
+            "extra_server_args": "--flag-a 1",
+            "extra_envs": {"NEW": "1"},
+            "unset_envs": ["OLD"],
+            "final_overlay": "/overlay/build",
+        },
+    )
+
+    spec = coord.build_env_spec()
+
+    assert spec["config"]["extra_envs"] == {"NEW": "1"}
+    assert spec["config"]["extra_server_args"] == "--flag-a 1"
+    assert spec["overlay_pythonpath"] == "/overlay/build"
+
+
+def test_env_spec_routes_a_flag_stored_under_extra_envs_back_into_args(session_dir):
+    """A ``-``-prefixed env key is a server arg; exporting it would drop it."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    coord._lift_to_current_best(
+        "integrate_patch",
+        1200.0,
+        {
+            "name": "patch-1",
+            "extra_server_args": "--flag-a 1",
+            "extra_envs": {"REAL_ENV": "1", "--compilation-config": "3"},
+        },
+    )
+
+    spec = coord.build_env_spec()
+
+    assert spec["config"]["extra_envs"] == {"REAL_ENV": "1"}
+    args = spec["config"]["extra_server_args"].split()
+    assert args[args.index("--compilation-config") + 1] == "3"
+    assert "--flag-a" in args
+
+
+def test_lift_carries_the_active_overlay_forward(session_dir):
+    """An authored-kernel overlay outlives the KEEP that built it."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    coord._lift_to_current_best(
+        "geak_e2e",
+        1200.0,
+        {"name": "geak", "extra_server_args": "", "extra_envs": {}, "final_overlay": "/overlay/build"},
+    )
+    assert s.current_best["final_overlay"] == "/overlay/build"
+    assert s.optimization_stack[-1]["final_overlay"] == "/overlay/build"
+
+    coord._lift_to_current_best(
+        "explore",
+        1300.0,
+        {"name": "flags-only", "extra_server_args": "--flag-a 1", "extra_envs": {}},
+    )
+    assert s.current_best["final_overlay"] == "/overlay/build"
 
 
 @pytest.mark.asyncio

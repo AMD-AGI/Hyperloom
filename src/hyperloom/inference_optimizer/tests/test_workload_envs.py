@@ -116,6 +116,25 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert envs["SGLANG_REMOVE_ME"] == "override"
 
 
+def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch):
+    """Unsetting TP/CONC would retarget the benchmark, not toggle a knob."""
+    _clear_env(monkeypatch)
+    src = tmp_path / "base.yaml"
+    _write(src, envs={"TP": 1, "CONC": 64, "SGLANG_TUNING_KNOB": "1"})
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        unset_envs=["TP", "CONC", "RUN_EVAL", "SGLANG_TUNING_KNOB"],
+    )
+    envs = bench["envs"]
+
+    assert "TP" in envs
+    assert "CONC" in envs
+    assert "RUN_EVAL" in envs
+    # A plain tuning knob is still removable; only the pins are protected.
+    assert "SGLANG_TUNING_KNOB" not in envs
+
+
 def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch):
     # PD-disaggregated: force lm_eval string prompts so the sglang_router's
     # /v1/completions (StringOrArray) does not 422 on token-id prompts.

@@ -203,17 +203,6 @@ class SessionMemory:
         """
         return self.session_dir(session_id) / "decisions.jsonl"
 
-    def _events_path(self, session_id: str) -> Path:
-        """Return the path to the session's ``events.jsonl``.
-
-        Args:
-            session_id (str): The opaque session identifier.
-
-        Returns:
-            Path: Path to the append-only audit-trail log for the session.
-        """
-        return self.session_dir(session_id) / "events.jsonl"
-
     def _priors_cache_path(self, session_id: str) -> Path:
         """Return the path to the session's ``kb_priors_cache.json``.
 
@@ -360,30 +349,6 @@ class SessionMemory:
             "decision_review": decision_review,
         }
         _common_append_jsonl(self._decisions_path(session_id), record, ensure_ascii=False)
-
-    # ------------------------------------------------------------------
-    # Events (free-form audit trail)
-    # ------------------------------------------------------------------
-    def append_event(self, session_id: str, event: dict[str, Any]) -> None:
-        """Append a free-form audit event to the session's events log.
-
-        The event is timestamped (``ts``) and written as one JSONL line.
-
-        Args:
-            session_id (str): The opaque session identifier.
-            event (dict[str, Any]): The event payload to persist.
-
-        Raises:
-            SessionMemoryError: If ``event`` is not a dict.
-        """
-        if not isinstance(event, dict):
-            raise SessionMemoryError("event must be a dict")
-        self._ensure_session_dir(session_id)
-        _common_append_jsonl(
-            self._events_path(session_id),
-            {"ts": now_iso(timespec="microseconds"), **event},
-            ensure_ascii=False,
-        )
 
     # ------------------------------------------------------------------
     # KB priors cache (per-scope+topic)

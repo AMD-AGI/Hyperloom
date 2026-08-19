@@ -991,10 +991,7 @@ def snapshot_state_sections(
 
     for name, fn in (
         ("session", _snapshot_session),
-        ("workload", _snapshot_workload),
-        ("final", _snapshot_final),
         ("explore_search", _snapshot_explore_search),
-        ("sweep", _snapshot_sweep),
         ("optimization_stack", _snapshot_optimization_stack),
         ("roofline", _snapshot_roofline),
     ):
@@ -1071,7 +1068,6 @@ def _snapshot_v4_run(rec, st: Any) -> None:
                 "baseline_throughput": to_float(getattr(st, "baseline_tput", None)),
                 "baseline_accuracy": to_float(getattr(st, "baseline_accuracy", None)),
                 "current_best": current_best,
-                "cumulative_gain_pct": to_float(getattr(st, "cumulative_gain", None)),
                 "cumulative_gain_validated_pct": to_float(
                     getattr(st, "cumulative_gain_validated", None)
                 ),
@@ -1119,82 +1115,6 @@ def _snapshot_session(rec, st: Any) -> None:
     )
 
 
-def _snapshot_workload(rec, st: Any) -> None:
-    """Snapshot the ``workload`` singleton from ``st``.
-
-    A no-op when neither a framework nor a model is set.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    framework = str(getattr(st, "framework", "") or "")
-    model = str(getattr(st, "model_name", "") or getattr(st, "model_path", "") or "")
-    if not framework and not model:
-        return
-    rec.record_singleton(
-        "workload",
-        {
-            "framework": framework,
-            "model_name": str(getattr(st, "model_name", "") or ""),
-            "model_path": str(getattr(st, "model_path", "") or ""),
-            "model_class": str(getattr(st, "model_class", "") or ""),
-            "gpu_type": str(getattr(st, "gpu_type", "") or ""),
-            "tp": int(getattr(st, "tp", 0) or 0),
-            "ep": int(getattr(st, "ep", 0) or 0),
-            "precision": str(getattr(st, "precision", "") or ""),
-            "conc": int(getattr(st, "conc", 0) or 0),
-            "isl": int(getattr(st, "isl", 0) or 0),
-            "osl": int(getattr(st, "osl", 0) or 0),
-            "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
-        },
-    )
-
-
-def _snapshot_final(rec, st: Any) -> None:
-    """Snapshot the ``final`` singleton (current best + cumulative gains) from ``st``.
-
-    A no-op when there is neither a current best nor an optimization stack.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    cb = getattr(st, "current_best", None) or {}
-    stack = getattr(st, "optimization_stack", None) or []
-    if not cb and not stack:
-        return
-    from ... import framework_registry
-
-    framework = str(getattr(st, "framework", "") or "")
-    tput = to_float(cb.get("tput"))
-    # Latency is the primary result for scriptable/diffusion (xDiT) image models
-    # (throughput_tok_s_per_gpu is only ``1 / latency`` there and misleading as a
-    # headline). Emit e2el/ttft alongside the throughput-unit + primary-metric
-    # markers so consumers pick the right result field per framework. e2el falls
-    # back to the tput-derived per-image latency when no measured value exists.
-    e2el = to_float(cb.get("e2el_mean_ms"))
-    if e2el is None and framework_registry.is_scriptable(framework) and tput is not None and tput > 0:
-        derived = framework_registry.primary_metric_value(framework, tput)
-        e2el = round(float(derived), 4) if derived is not None and derived > 0 else None
-    rec.record_singleton(
-        "final",
-        {
-            "current_best_action": str(cb.get("action") or ""),
-            "throughput_tok_s_per_gpu": tput,
-            "throughput_unit": framework_registry.throughput_unit(framework),
-            "primary_metric": framework_registry.primary_metric_name(framework),
-            "e2el_mean_ms": e2el,
-            "ttft_mean_ms": to_float(cb.get("ttft_mean_ms")),
-            "cumulative_gain_pct_validated": to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
-            "cumulative_gain_pct_per_round_sum": to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
-            "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),
-            "stack_len": len(stack),
-            "extra_server_args": str(cb.get("extra_server_args") or ""),
-            "extra_envs": dict(cb.get("extra_envs") or {}),
-        },
-    )
-
 
 def _snapshot_explore_search(rec, st: Any) -> None:
     """Snapshot the ``explore_search`` singleton from ``st`` (no-op when empty).
@@ -1215,19 +1135,6 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
     search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
-
-
-def _snapshot_sweep(rec, st: Any) -> None:
-    """Snapshot the ``sweep`` singleton from ``st.last_sweep`` (no-op when empty).
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    last_sweep = dict(getattr(st, "last_sweep", None) or {})
-    if not last_sweep:
-        return
-    rec.record_singleton("sweep", last_sweep)
 
 
 def _snapshot_optimization_stack(rec, st: Any) -> None:

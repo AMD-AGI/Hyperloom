@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -83,15 +84,37 @@ def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
     assert paths.workspace_root() == tmp_path
 
 
+def test_relative_user_data_path_resolves_identically_from_every_cwd(tmp_path, monkeypatch):
+    """A relative $USER_DATA_PATH must not follow each subprocess's cwd.
+
+    Absolutising on read is not enough — every process would re-expand the
+    relative value against its own cwd — so the CLI rewrites the env var itself.
+    """
+    from hyperloom.inference_optimizer import cli
+
+    (tmp_path / "nested").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, "relws")
+    with pytest.raises(SystemExit):
+        cli.main([])  # no subcommand; the boundary normalises before parsing
+    ws = paths.workspace_root()
+    assert ws == Path.cwd() / "relws"
+    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+
+    monkeypatch.chdir(tmp_path / "nested")
+    assert paths.workspace_root() == ws
+    assert paths.session_dir() == sd
+
+
 def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     """Default: per-model/per-launch subdir + pin propagation."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(model_name="/path/models/DeepSeek-R1-0528")
-    # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>/
+    # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>-<rand8>/
     assert sd.parent.parent == tmp_path
     assert sd.parent.name == "DeepSeek-R1-0528"
-    # Timestamp shape: YYYYMMDDTHHMMSSZ
-    assert len(sd.name) == 16 and sd.name.endswith("Z") and "T" in sd.name
+    # Name shape: YYYYMMDDTHHMMSSZ-<8 hex>
+    assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", sd.name), sd.name
     import os as _os
 
     assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd)
@@ -102,6 +125,20 @@ def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     for sub in paths._WORKSPACE_SKELETON:
         assert (tmp_path / sub).is_dir()
         assert not (sd / sub).exists()
+
+
+def test_make_session_dir_same_second_launches_get_distinct_dirs(tmp_path, monkeypatch):
+    """Two launches of one model inside the same UTC second must not share a dir.
+
+    ``session_dir.name`` is also the de-facto session id (KB fact writes,
+    per-session sinks), so a shared dir merges two runs' identity as well.
+    """
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    monkeypatch.setattr(paths, "utc_now_compact", lambda: "20260814T073026Z")
+    first = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+    second = paths.make_session_dir(model_name="DeepSeek-R1-0528")
+    assert first != second
+    assert first.name[:16] == second.name[:16] == "20260814T073026Z"
 
 
 def test_make_session_dir_sanitises_model_basename(tmp_path, monkeypatch):
@@ -130,79 +167,6 @@ def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
 
     assert _os.environ[paths.ENV_CURRENT_SESSION_DIR] == str(sd2)
     assert paths.session_dir() == sd2
-
-
-def test_find_latest_per_session_dir_returns_none_on_empty(
-    tmp_path,
-    monkeypatch,
-):
-    """No per-session subdir under workspace_root -> None."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    assert paths.find_latest_per_session_dir() is None
-    assert paths.find_latest_per_session_dir(model_name="DSR1") is None
-
-
-def test_find_latest_per_session_dir_picks_lex_latest_ts(
-    tmp_path,
-    monkeypatch,
-):
-    """Lex-sort on the YYYYMMDDTHHMMSSZ name picks the latest ts (robust to mtime touches)."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    (tmp_path / "MyModel").mkdir()
-    (tmp_path / "MyModel" / "20260101T000000Z").mkdir()
-    (tmp_path / "MyModel" / "20260520T120000Z").mkdir()
-    (tmp_path / "MyModel" / "20260315T080000Z").mkdir()
-    picked = paths.find_latest_per_session_dir(model_name="MyModel")
-    assert picked is not None
-    assert picked.name == "20260520T120000Z"
-
-
-def test_find_latest_per_session_dir_no_model_scans_all(
-    tmp_path,
-    monkeypatch,
-):
-    """No model_name -> scan all model_basename subdirs for the latest ts across the workspace."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    (tmp_path / "Qwen-7B").mkdir()
-    (tmp_path / "Qwen-7B" / "20260101T000000Z").mkdir()
-    (tmp_path / "DSR1").mkdir()
-    (tmp_path / "DSR1" / "20260520T120000Z").mkdir()
-    picked = paths.find_latest_per_session_dir()
-    assert picked is not None
-    assert picked.name == "20260520T120000Z"
-    assert picked.parent.name == "DSR1"
-
-
-def test_find_latest_per_session_dir_skips_workspace_shared(
-    tmp_path,
-    monkeypatch,
-):
-    """workspace-shared subdirs (runtime/, logs/) must not be mistaken for model_basename subdirs."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    (tmp_path / "runtime").mkdir()
-    (tmp_path / "runtime" / "20260520T120000Z").mkdir()  # decoy
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "MyModel").mkdir()
-    (tmp_path / "MyModel" / "20260518T100000Z").mkdir()
-    picked = paths.find_latest_per_session_dir()
-    assert picked is not None
-    assert picked.parent.name == "MyModel"
-    assert "runtime" not in str(picked)
-
-
-def test_find_latest_per_session_dir_ignores_non_ts_dirs(
-    tmp_path,
-    monkeypatch,
-):
-    """Only YYYYMMDDTHHMMSSZ-shaped dir names count as ts subdirs."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    (tmp_path / "MyModel").mkdir()
-    (tmp_path / "MyModel" / "scratch").mkdir()  # ignored
-    (tmp_path / "MyModel" / "backup-2026").mkdir()  # ignored
-    (tmp_path / "MyModel" / "20260520T120000Z").mkdir()  # picked
-    picked = paths.find_latest_per_session_dir(model_name="MyModel")
-    assert picked is not None
-    assert picked.name == "20260520T120000Z"
 
 
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):

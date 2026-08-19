@@ -190,14 +190,12 @@ class TestProfileWorkloadContext:
             framework="vllm",
             precision="fp8",
             current_best={
-                "engine": "forge",
                 "extra_server_args": " --attention-backend AITER ",
                 "extra_envs": {"B": 2, "A": 1},
             },
         )
 
         assert state.profile_workload_context()["serving_config"] == {
-            "engine": "forge",
             "extra_server_args": "--attention-backend AITER",
             "extra_envs": {"A": "1", "B": "2"},
         }
@@ -305,14 +303,14 @@ class TestApplyChanges:
     def test_core_field_dropped_when_allow_core_false(self):
         # A non-privileged (allow_core=False) changes dict must not write a core field.
         s = SharedState()
-        before = s.cumulative_gain  # cumulative_gain is a core field
+        before = s.cumulative_gain_validated  # cumulative_gain_validated is a core field
         applied = s.apply_changes(
-            {"current_action": "baseline", "cumulative_gain": 999.0},
+            {"current_action": "baseline", "cumulative_gain_validated": 999.0},
             allow_core=False,
         )
         assert applied == {"current_action": "baseline"}
         assert s.current_action == "baseline"
-        assert s.cumulative_gain == before  # core write dropped
+        assert s.cumulative_gain_validated == before  # core write dropped
 
     def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
         # stop_reason is a core field, so a changes dict that carries both must
@@ -331,9 +329,9 @@ class TestApplyChanges:
 
     def test_core_field_written_when_allow_core_true(self):
         s = SharedState()
-        applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)
-        assert applied == {"cumulative_gain": 999.0}
-        assert s.cumulative_gain == 999.0
+        applied = s.apply_changes({"cumulative_gain_validated": 999.0}, allow_core=True)
+        assert applied == {"cumulative_gain_validated": 999.0}
+        assert s.cumulative_gain_validated == 999.0
 
 
 class TestKernelPatchIdentity:

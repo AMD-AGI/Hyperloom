@@ -187,7 +187,8 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
             ),
         )
 
-        assert c.shared_state.last_gemm_tuning["status"] == "ok"
+        # The E2E validator rewrites the stored result to its measured outcome.
+        assert c.shared_state.last_gemm_tuning["status"] == "complete"
         assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.2
         assert c.shared_state.gemm_tuning_attempts
         assert "last_gemm_tuning=" in c.shared_state.to_prompt_summary()
@@ -233,8 +234,11 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         }
         c.shared_state.continue_kernel_after_gemm = False
         calls: list[dict] = []
+        tuned = session_dir / "tuned.csv"
+        tuned.write_text("M,N,K,kernelId\n16,512,7168,3\n", encoding="utf-8")
 
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         async def fake_handler(payload, *, session_dir):
             calls.append(dict(payload))
@@ -242,25 +246,32 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
                 "status": "complete",
                 "decision": "KEEP",
                 "best_speedup": 1.28,
-                "tuned_file": "/tmp/tuned.csv",
+                "tuned_file": str(tuned),
             }
+
+        async def fake_integrate(payload, *, session_dir):
+            return {"decision": "KEEP", "new_tput": 900.0, "gain_pct": 12.5}
 
         monkeypatch.setattr(
             kernel_request_handlers,
             "run_gemm_tuning_handler",
             fake_handler,
         )
+        monkeypatch.setattr(kernel_request_handlers, "integrate_handler", fake_integrate)
+        monkeypatch.setattr(
+            KernelPhase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _self, _env_var, env_value: env_value,
+        )
 
         await c._on_enter_kernel(from_phase="EXPLORE")
 
         assert calls
-        assert c.shared_state.last_gemm_tuning["status"] == "complete"
-        assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.28
         assert c.shared_state.gemm_tuning_attempts
         assert c.shared_state.current_best["action"] == "gemm_tuning"
-        assert c.shared_state.current_best["tput"] == 1024.0
-        assert c.shared_state.cumulative_gain == pytest.approx(28.0)
-        assert c.shared_state.cumulative_gain_validated == pytest.approx(28.0)
+        # The measured rebench, not baseline_tput * best_speedup (1024.0).
+        assert c.shared_state.current_best["tput"] == 900.0
+        assert c.shared_state.cumulative_gain_validated == pytest.approx(12.5)
         assert c.shared_state.optimization_stack[-1]["action"] == "gemm_tuning"
         assert c._gemm_tuning_required_before_kernel_opt() is False
     finally:

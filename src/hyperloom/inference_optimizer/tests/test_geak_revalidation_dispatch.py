@@ -506,7 +506,6 @@ async def test_resume_revalidation_with_empty_pending_still_promotes(coordinator
     )
 
     assert st.cumulative_gain_validated == pytest.approx(40.0)
-    assert st.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert st.resume_pending_revalidation is False
 
 

@@ -634,29 +634,10 @@ def _synthesize_via_llm(
 
 
 def _iter_message_text(message) -> Iterable[str]:
-    """Best-effort text extraction from a claude_agent_sdk message.
+    """Yield the non-empty text fragments of a claude_agent_sdk message."""
+    from hyperloom.common.claude_oneshot import message_text
 
-    Accepts a plain string, ``.text``, or a ``.content`` list of blocks each
-    with ``.text`` (SDK message shape varies across versions).
-
-    Args:
-        message: An SDK message object or string.
-
-    Yields:
-        Each non-empty text fragment found on the message.
-    """
-    if isinstance(message, str):
-        yield message
-        return
-    text = getattr(message, "text", None)
-    if isinstance(text, str):
-        yield text
-    content = getattr(message, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            block_text = getattr(block, "text", None)
-            if isinstance(block_text, str):
-                yield block_text
+    yield from (fragment for fragment in message_text(message) if fragment)
 
 
 def synthesize_findings(

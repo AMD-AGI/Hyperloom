@@ -1000,9 +1000,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_gemm_tuning_result": "phase_kernel",
         "_sync_profile_state_after_gemm_roofline": "phase_kernel",
         "_journal_gemm_tuning_keep": "phase_kernel",
-        "_promote_gemm_tuning_keep": "phase_kernel",
         "_replace_latest_gemm_tuning_attempt": "phase_kernel",
-        "_validate_forge_gemm_tuning_e2e": "phase_kernel",
+        "_gemm_e2e_candidates": "phase_kernel",
+        "_validate_gemm_tuning_e2e": "phase_kernel",
         "_should_continue_kernel_after_gemm": "phase_kernel",
         "_run_kernel_opt_after_gemm": "phase_kernel",
         "_current_tput_from_validated_gain": "phase_kernel",
@@ -1149,7 +1149,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_kb_best_config_overrides_for_keep": "proposals",
         "_kb_amend_recipe": "proposals",
         "_inject_explore_runtime_params": "proposals",
-        "_decaying_keep_threshold_pct": "proposals",
         "_materialize_approved_proposal": "proposals",
         "_record_proposal_task_map": "proposals",
         "_registry_lanes_ttl": "dispatcher",
@@ -1176,7 +1175,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_policy_denied": "writeback",
         "_record_observation": "writeback",
         "_record_kernel_opt_partial": "writeback",
-        "_update_cumulative_gain_validated": "writeback",
         "_record_integrate_keep": "writeback",
         "_is_promotable_result": "writeback",
         "_record_intervention_for_task": "writeback",
@@ -1197,11 +1195,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "ensure_recipe_finalized": "writeback",
         "finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
+        "_update_cumulative_gain_validated": "writeback",
         "_promote_to_shared_state": "writeback",
         "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
         "replay_for_resume": "writeback",
-        "_materialize_stack_config_for_resume": "writeback",
+        "_current_best_launch_config": "writeback",
         "build_env_spec": "writeback",
         "_resume_consistency_pass": "writeback",
         "_resume_reenter_kernel_if_needed": "writeback",
@@ -1865,11 +1864,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             # attempt, including stop-check exits that never enter PHASE_CLOSE.
             await self._recipe_kb_t4_hook()
             log.info(
-                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f cumulative_gain=%.2f%% max_minutes=%.0f",
+                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
+                "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
                 tick_n,
                 stop_reason or "unknown",
                 self.shared_state.baseline_tput,
-                self.shared_state.cumulative_gain,
+                self.shared_state.cumulative_gain_validated,
                 max_minutes_value,
             )
             # Best-effort cleanup of installed signal handlers.

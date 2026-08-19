@@ -42,6 +42,7 @@ from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CODEX_MODEL,
 )
 
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
 from ..trace.parse_usage import (
@@ -54,6 +55,8 @@ from ._recorder_trace import trace_recording_skipped
 # Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
+    _entry_by_kernel_id as _entry_by_kernel_id,
+    index_attempts_by_kernel_id as index_attempts_by_kernel_id,
     _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
     kernel_patch_key as kernel_patch_key,
     find_rejected_kernel_patch as find_rejected_kernel_patch,
@@ -1395,7 +1398,7 @@ def _fill_integrate_defaults_from_state(
 
     kernel_id = str(resolved.get("kernel_id") or "")
     if kernel_id:
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        attempt = _entry_by_kernel_id(state, kernel_id) or {}
         if not resolved.get("task_group_key"):
             task_group_key = str(attempt.get("task_group_key") or "")
             if task_group_key:
@@ -1549,7 +1552,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
     if kernel_id:
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        attempt = _entry_by_kernel_id(state, kernel_id) or {}
         _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
         if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
             resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
@@ -4084,8 +4087,6 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
         return {}
     if str(current_best.get("action") or "") != "fusion":
         return {}
-    if str(current_best.get("engine") or "") != "forge_fusion":
-        return {}
     envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
     if not isinstance(envs, dict):
         return {}
@@ -5891,8 +5892,8 @@ def _batch_kernel_candidates(
 
     # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
-    attempts_by_kid: dict[str, dict] = {}
     attempts_by_task: dict[str, dict] = {}
+    attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
         resolve_hot_kernel_min_gpu_pct,
@@ -5907,8 +5908,8 @@ def _batch_kernel_candidates(
 
             state = SharedState.load_or_init(session_dir)
             rejected_kernel_ids = set(state.rejected_kernel_ids or [])
-            attempts_by_kid = dict(state.kernel_opt_attempts or {})
             attempts_by_task = dict(state.kernel_opt_task_attempts or {})
+            attempts_by_kid = index_attempts_by_kernel_id(attempts_by_task)
             in_flight = _in_flight_kernel_ids(session_dir)
         except Exception:
             log.exception(
@@ -6003,10 +6004,7 @@ def _batch_kernel_candidates(
         recorded_ledger = next(
             (
                 (ledger_id, entry)
-                for ledger_id, entry in {
-                    **attempts_by_kid,
-                    **attempts_by_task,
-                }.items()
+                for ledger_id, entry in attempts_by_task.items()
                 if isinstance(entry, dict)
                 and (
                     (
@@ -6020,9 +6018,9 @@ def _batch_kernel_candidates(
                     )
                     or (
                         not group_key
-                        and ledger_id in member_ids
                         and group_id
                         and str(entry.get("task_group_id") or "") == group_id
+                        and str(entry.get("current_kernel_id") or "") in member_ids
                     )
                 )
             ),
@@ -7562,6 +7560,21 @@ async def integrate_handler(
         rebaseline_error_class = (
             str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
         ) or "bench_exception"
+        stopped = stopped_by_the_run_class(rebaseline_error_class)
+        if stopped is not None:
+            # Nothing was measured, so the patch has no verdict to answer for.
+            return {
+                "status": "failed",
+                "error_class": stopped.error_class,
+                "error": stopped.interrupted,
+                "decision": "NEEDS_REVIEW",
+                "rebaseline_detail": bench_result,
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": payload.get("target_file") or payload.get("source_file"),
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+            }
         return {
             "status": "failed",
             "error_class": rebaseline_error_class,

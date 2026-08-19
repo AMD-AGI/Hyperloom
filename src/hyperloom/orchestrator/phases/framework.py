@@ -644,17 +644,6 @@ class FrameworkPhase(PhaseHandler):
             candidate["_audit"] = audit
         except Exception:  # noqa: BLE001 — caching is best-effort
             pass
-        # Persist the verdict next to decision.json.
-        try:
-            from ..framework.artifacts import write_semantic_audit
-
-            write_semantic_audit(
-                self.session_dir,
-                candidate_id=self._framework_candidate_key(candidate),
-                verdict=audit,
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: write_semantic_audit failed", exc_info=True)
         log.info(
             "FRAMEWORK: audit candidate=%s status=%s appl=%s next=%s",
             self._framework_candidate_key(candidate),
@@ -733,26 +722,6 @@ class FrameworkPhase(PhaseHandler):
                 "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             }
         )
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=False,
-                provenance="audit",
-                reason="; ".join(str(r) for r in ((audit or {}).get("risks") or [])) or semantic,
-                extra={
-                    "semantic_status": semantic,
-                    "applicability": (audit or {}).get("applicability"),
-                    "confidence": (audit or {}).get("confidence"),
-                    "evidence": (audit or {}).get("evidence") or [],
-                },
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: audit-skip decision.json write failed", exc_info=True)
         if status == "already_present":
             try:
                 from ..knowledge.kb_writeback import OUTCOME_ALREADY_PRESENT, write_framework_record
@@ -2716,7 +2685,7 @@ class FrameworkPhase(PhaseHandler):
         if not model:
             return None
         state = self.shared_state
-        best = getattr(state, "best_throughput", None) or getattr(state, "baseline_throughput", None)
+        best = resolve_grading_anchor_tput(state)
         cap = 60
         listed = candidates[:cap]
         candidate_rows: list[str] = []
@@ -3526,9 +3495,9 @@ class FrameworkPhase(PhaseHandler):
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
         """Enqueue a single ``framework_agent`` task for ``candidate``.
 
-        Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework_agent`` task whose
-        lanes and lease TTL come from the action catalogue. On enqueue failure,
+        Builds the task params (candidate, batch id, baseline throughput, KEEP
+        threshold, framework) and creates an idempotent ``framework_agent`` task
+        whose lanes and lease TTL come from the action catalogue. On enqueue failure,
         records an ``enqueue_failed`` progress row so the pump skips the
         candidate next tick instead of spinning.
 
@@ -3541,6 +3510,8 @@ class FrameworkPhase(PhaseHandler):
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
             "base_tput": resolve_grading_anchor_tput(state),
+            # Same decaying bar the explore and integrate_patch dispatch paths inject.
+            "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
@@ -3890,22 +3861,6 @@ class FrameworkPhase(PhaseHandler):
             for k, v in extra.items():
                 row.setdefault(str(k), v)
         progress.append(row)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=str(batch_id or ""),
-                status=str(status or ""),
-                kept=bool(kept),
-                provenance=str(provenance or ""),
-                reason=str(rationale or ""),
-                gain_pct=gain_pct,
-                extra=extra if isinstance(extra, dict) else None,
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: stamp decision.json write failed", exc_info=True)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive

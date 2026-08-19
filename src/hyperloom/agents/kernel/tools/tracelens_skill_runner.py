@@ -437,26 +437,9 @@ def _should_use_codex_runner() -> bool:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
-    """Yield text fragments from an SDK message.
+    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
 
-    Handles both content blocks exposing a ``.text`` attribute or ``"text"``
-    dict key, plus a top-level ``.result`` string.
-
-    Args:
-        message (Any): An SDK message object.
-
-    Yields:
-        str: Each non-empty text fragment found on the message.
-    """
-    for block in list(getattr(message, "content", None) or []):
-        text = getattr(block, "text", None)
-        if isinstance(text, str) and text:
-            yield text
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-            yield block["text"]
-    result_text = getattr(message, "result", None)
-    if isinstance(result_text, str) and result_text:
-        yield result_text
+    yield from (t for t in message_text(message) if t)
 
 
 async def _run_tracelens_skill_codex(

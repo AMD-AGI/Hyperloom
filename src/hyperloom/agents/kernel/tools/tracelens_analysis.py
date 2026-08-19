@@ -131,8 +131,8 @@ except ImportError:  # pragma: no cover - standalone invocation
 
 log = logging.getLogger(__name__)
 
-# Artifact name kept local so the standalone-script path does not need the
-# shared contract module just to know where the file goes.
+# Duplicated from kernel_source_contract.SOURCE_RESOLUTION_FILENAME: the
+# standalone-script path cannot import hyperloom.common. Keep the two in sync.
 _SOURCE_RESOLUTION_NAME = "kernel_source_resolution.json"
 
 

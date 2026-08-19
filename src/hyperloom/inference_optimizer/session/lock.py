@@ -4,7 +4,7 @@
 """Single-optimizer session lock.
 
 A long ``python -m hyperloom.inference_optimizer.cli optimize`` run is guarded by a robustness monitor
-that re-launches the optimizer via ``--resume`` if it judges the process dead.
+that re-launches the optimizer via ``--resume-from`` if it judges the process dead.
 During the slow serving cold-start that liveness check can misfire and spawn a
 **second** optimizer on the same ``session_dir``; the two then contend for the
 shared ``coordinator.db`` leases and both write ``state.json``, corrupting the
@@ -125,7 +125,7 @@ class SessionLock:
     """Exclusive, crash-safe, single-optimizer-per-session lock.
 
     Acquire once at optimizer startup (both fresh ``optimize`` and
-    ``--resume``); hold for the whole run. Use as a context manager or call
+    ``--resume-from``); hold for the whole run. Use as a context manager or call
     :meth:`acquire` / :meth:`release` explicitly.
     """
 

@@ -61,11 +61,6 @@ class SourceData:
     produced each tick; ``degraded_reason`` is set on fallback.
     """
 
-    session_pods: list[dict[str, Any]] = field(default_factory=list)
-    session_metrics: dict[str, Any] = field(default_factory=dict)
-    session_events: list[dict[str, Any]] = field(default_factory=list)
-    session_summary: dict[str, Any] = field(default_factory=dict)
-    cluster_faults: list[dict[str, Any]] = field(default_factory=list)
     local_gpu: dict[str, Any] = field(default_factory=dict)
     local_processes: list[dict[str, Any]] = field(default_factory=list)
     # ``False`` when the process probe could not answer (``ps`` missing, timed
@@ -88,7 +83,7 @@ class SourceData:
     # ``local_kernel_breakdown`` ``{tier_pcts, total_kernels, total_gpu_pct, mtime}``.
     local_manifest: dict[str, Any] = field(default_factory=dict)
     local_kernel_breakdown: dict[str, Any] = field(default_factory=dict)
-    # Critic health: ``recent_judges`` + ``workdir_count`` (subdirs under critic-workdir/, E4).
+    # Critic health: ``recent_judges`` + ``workdir_count`` (subdirs under critic-workdir/).
     local_critic_health: dict[str, Any] = field(default_factory=dict)
     # State-integrity slots: ``state_json``, ``wal`` {wal_bytes, db_bytes, db_path},
     # ``leases`` (pid liveness), ``agents`` {<role>: {inbox_bytes, outbox_bytes}},
