@@ -356,3 +356,147 @@ async def test_orphan_geak_rebench_success_does_not_promote(coordinator) -> None
     assert st.current_best["tput"] == 100.0
     assert st.geak_pending["revalidation_task_id"] == tracked.task_id
     assert not any(e.get("action") == "geak_e2e" for e in st.optimization_stack)
+
+
+@pytest.mark.asyncio
+async def test_orphan_geak_rebench_inconclusive_does_not_run_2a(coordinator) -> None:
+    """An untracked rebench must not trigger the GEAK-harness 2a fallback.
+
+    A successful 2a writes the stack entry; a failed 2a clears the pending slot
+    of the genuinely tracked rebench. Both bypass the orphan gate.
+    """
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "baseline", "tput": 100.0, "extra_server_args": ""}
+    st.kernel_optimizer = "geak"
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--foo", "env": ""},
+        "accepted_kernels": ["k1"],
+    }
+    tracked = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="tracked-rebench",
+    )
+    orphan = await c.tasks.create(
+        kind="explore",
+        # Fingerprint mismatch below makes the 2b decision inconclusive.
+        params=_geak_rebench_params(expected_cfg_hash="expected-hash"),
+        idempotency_key=gr.geak_revalidate_idempotency_key(1),
+        task_id="orphan-rebench",
+    )
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": tracked.task_id}
+
+    fallback_calls: list[str] = []
+
+    async def _record_fallback(*, reason: str) -> dict:
+        fallback_calls.append(reason)
+        return {"validated": False, "reason": "should not run"}
+
+    c._validate_geak_via_geak_harness = _record_fallback  # type: ignore[assignment]
+
+    await c._promote_to_shared_state(
+        orphan.kind,
+        {
+            "output_throughput": 150.0,
+            "best_variant": {"fingerprint": "mismatched-hash"},
+            "winners": [],
+        },
+        task=orphan,
+    )
+
+    assert fallback_calls == []
+    assert st.geak_pending["revalidation_task_id"] == tracked.task_id
+    assert st.geak_result.get("revalidation_status") != "fallback_failed"
+
+
+@pytest.mark.asyncio
+async def test_close_entry_settles_pending_after_phase_boundary_cancel(coordinator) -> None:
+    """CLOSE must settle a dangling ``awaiting_rebench`` slot.
+
+    The SWEEP->CLOSE transition already cancels the queued rebench, so the CLOSE
+    sequencer finds nothing left to cancel and must still settle the slot.
+    """
+    c = coordinator
+    st = c.shared_state
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": "--foo", "env": ""}}
+
+    rebench = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="cancelled-by-phase-boundary",
+    )
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": rebench.task_id}
+    st.resume_pending_revalidation = True
+
+    cancelled = await c.tasks.cancel_queued_not_allowed(
+        allowed_kinds=ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_CLOSE],
+        reason="phase_transition:SWEEP->CLOSE",
+        spare_queued=lambda _tid, kind, params: gr.spare_geak_rebench_on_phase_transition(
+            target_phase=ps.PHASE_CLOSE,
+            kind=kind,
+            params=params,
+        ),
+    )
+    assert rebench.task_id in cancelled
+
+    settled = await gr.settle_dangling_geak_pending(c.tasks, st, reason="close_sequence")
+
+    assert settled is True
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert st.resume_pending_revalidation is False
+
+
+@pytest.mark.asyncio
+async def test_advance_into_close_settles_pending_end_to_end(coordinator) -> None:
+    """Real entry order: the transition cancels the rebench, CLOSE settles the slot."""
+    c = coordinator
+    st = c.shared_state
+    st.phase = ps.PHASE_EXPLORE
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": "--foo", "env": ""}}
+    st.set_stop_reason("target_reached")
+
+    rebench = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="rebench-into-close",
+    )
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": rebench.task_id}
+    st.resume_pending_revalidation = True
+
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_CLOSE
+    assert (await c.tasks.get(rebench.task_id)).state == "cancelled"
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert st.resume_pending_revalidation is False
+
+
+@pytest.mark.asyncio
+async def test_close_entry_leaves_running_rebench_pending(coordinator) -> None:
+    """A rebench already running survives CLOSE cancellation, so keep waiting."""
+    c = coordinator
+    st = c.shared_state
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok"}
+
+    rebench = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="running-rebench",
+    )
+    await c.tasks.transition(rebench.task_id, "running")
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": rebench.task_id}
+
+    settled = await gr.settle_dangling_geak_pending(c.tasks, st, reason="close_sequence")
+
+    assert settled is False
+    assert st.geak_pending["status"] == "awaiting_rebench"
