@@ -460,7 +460,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
         report_task = Task(
             task_id="rpt-1",
             kind="report",
-            state="running",
+            state="queued",
             params={},
             idempotency_key="internal-report-close",
             requires_lanes=[],
@@ -468,7 +468,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
         bd_task = Task(
             task_id="bd-1",
             kind="session_breakdown",
-            state="running",
+            state="queued",
             params={},
             idempotency_key="internal-breakdown-close",
             requires_lanes=[],
@@ -532,7 +532,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
         report_task = Task(
             task_id="rpt-1",
             kind="report",
-            state="running",
+            state="queued",
             params={},
             idempotency_key="internal-report-close",
             requires_lanes=[],
@@ -540,7 +540,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
         bd_task = Task(
             task_id="bd-1",
             kind="session_breakdown",
-            state="running",
+            state="queued",
             params={},
             idempotency_key="internal-breakdown-close",
             requires_lanes=[],
@@ -597,7 +597,7 @@ async def test_on_enter_close_emits_report_error_for_exception(
         report_task = Task(
             task_id="rpt-1",
             kind="report",
-            state="running",
+            state="queued",
             params={},
             idempotency_key="internal-report-close",
             requires_lanes=[],
@@ -605,7 +605,7 @@ async def test_on_enter_close_emits_report_error_for_exception(
         bd_task = Task(
             task_id="bd-1",
             kind="session_breakdown",
-            state="running",
+            state="queued",
             params={},
             idempotency_key="internal-breakdown-close",
             requires_lanes=[],

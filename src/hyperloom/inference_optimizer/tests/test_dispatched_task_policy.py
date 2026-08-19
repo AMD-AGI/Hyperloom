@@ -818,3 +818,61 @@ def test_enablement_round_in_flight_allows_after_cleared(tmp_path, monkeypatch):
         payload={"action_name": "baseline", "params": {}},
     )
     gate.validate_intent("orchestration", intent)
+
+
+class TestAColdAnchorIsNotAnEstablishedOne:
+    """The rule refuses a reference the run already has, and this is not one.
+
+    A session that could not afford its hot pass keeps the warmup's cold figure
+    and marks it. PRELUDE will not finish while the mark is set, so the only way
+    on is another baseline -- and that is the round this rule would refuse,
+    leaving the phase with no way forward and no way out. The state arises on
+    resume, which is the whole point of keeping the figure recoverable.
+    """
+
+    def _a_baseline_is_proposed(self, gate):
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={"action_name": "baseline", "params": {}},
+            ),
+        )
+
+    def test_a_marked_cold_anchor_does_not_refuse_the_round_that_would_fix_it(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        gate, _ = _gate(tmp_path, monkeypatch)
+        gate.shared_state.baseline_tput = 1000.0
+        gate.shared_state.baseline_measure_round_dropped = True
+
+        self._a_baseline_is_proposed(gate)
+
+    def test_an_established_anchor_still_refuses_a_repeat(self, tmp_path, monkeypatch):
+        gate, _ = _gate(tmp_path, monkeypatch)
+        gate.shared_state.baseline_tput = 1000.0
+        gate.shared_state.baseline_measure_round_dropped = False
+
+        with pytest.raises(PolicyDenied) as exc_info:
+            self._a_baseline_is_proposed(gate)
+
+        assert exc_info.value.rule == "baseline_phase_singleton"
+
+    def test_an_authoring_round_in_flight_still_wins(self, tmp_path, monkeypatch):
+        """The exemption is about which reference exists, not about what may run.
+
+        A specialist rewriting the framework underneath a baseline is a reason to
+        wait whatever the anchor says; letting the cold mark through here would
+        launch a round against a stack that is being changed as it runs.
+        """
+        gate, _ = _gate(tmp_path, monkeypatch)
+        gate.shared_state.baseline_tput = 1000.0
+        gate.shared_state.baseline_measure_round_dropped = True
+        gate.shared_state.enablement.inflight_task_id = "spec-abc"
+
+        with pytest.raises(PolicyDenied) as exc_info:
+            self._a_baseline_is_proposed(gate)
+
+        assert exc_info.value.rule == "enablement_round_in_flight"

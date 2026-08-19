@@ -8,11 +8,23 @@ import asyncio
 import hashlib
 import json
 import os
+from collections.abc import Collection
+from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
+)
+from ..actions.cancel_channel import CancelScope, use_cancel_scope
+from ..actions.executors._ray_serving import (
+    CANCEL_ROUND_GRACE_SEC,
+    CLOSE_STOP_TIMEOUT_SEC,
+)
+from ..actions.executors._subprocess_kill import (
+    COOPERATIVE_REAP_BUDGET_SEC,
+    STOP_GATE_POLL_SECONDS,
+    TERM_GRACE_SECONDS,
 )
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -31,7 +43,13 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task
-from .coordinator_helpers import coerce_needs_gpu
+from .coordinator_helpers import (
+    TIME_BUDGET_EXEMPT_ACTIONS,
+    action_fits_time_budget,
+    coerce_needs_gpu,
+    expected_action_cost_minutes,
+    measured_baseline_runtime_sec,
+)
 
 from .coordinator import (
     _format_inbox_event,
@@ -39,6 +57,70 @@ from .coordinator import (
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# How long a cancel waits for work that is listening on its cancel scope to stop
+# itself, composed from the two things an action still has to do after it is
+# asked:
+#
+# * stop the round in flight -- locally that is
+#   :data:`COOPERATIVE_REAP_BUDGET_SEC`, through a Ray actor it is
+#   :data:`CANCEL_ROUND_GRACE_SEC`, and whichever path this action took, only the
+#   longer of the two bounds it;
+# * release what the round held -- the driver-side teardown of the server it left
+#   behind (:data:`TERM_GRACE_SECONDS`) and then the release of the Ray lease it
+#   ran in (:data:`CLOSE_STOP_TIMEOUT_SEC`). A sequence, not alternatives: the
+#   server is reaped BEFORE the lease is dropped so that no GPU process outlives
+#   it (§4.2), and on the Ray path a single unwind pays both -- in the explore
+#   executor the per-variant ``finally`` tears the server down and the enclosing
+#   one then closes the round's lease; the baseline executor does the same two
+#   calls in one ``finally``.
+#
+# Derived rather than picked, because these three windows only mean anything
+# together. Each was plausible on its own at ten, eight and five seconds, and
+# composed they said the dispatcher gives up a good five seconds before the work
+# it is waiting for can finish -- so the honest sentinel the round was about to
+# return was discarded for a hard ``CancelledError`` every time, which is exactly
+# what the cooperative channel exists to avoid. Taking the longer of the two
+# release terms instead of both reproduced that shortfall exactly, on the path
+# that pays the most: the teardown a Ray round owes is not an alternative to
+# closing its lease, it is what it does first.
+#
+# The enumeration above has to stay exhaustive, so a serial step the unwind takes
+# and this sum does not name has to be removed from the unwind instead. One is:
+# ``run_grid`` fires a robustness tick at each variant boundary, and a cooperative
+# stop reaches that boundary the ordinary way, so the tick would sit between
+# recording the round's row and releasing what the round held -- eight more
+# seconds, spent observing the reap this cancel just ordered. It is skipped
+# whenever the scope is already cancelled rather than budgeted for, because the
+# rows the grid has already built are what a window short by those eight seconds
+# throws away, and they are worth more than one tick.
+#
+# Past this window the coroutine is cancelled anyway, and the window is only ever
+# spent when work is still unwinding: the wait ends the moment the last victim is
+# done, so covering the teardown term costs a round that stops promptly nothing.
+# What the budget case pays for it is five more seconds before the run crosses its
+# deadline, because this wait runs inside the reserve the admission gate holds
+# back. It does not come out of the closing phase, whose grace window is measured
+# from the moment it starts, and five seconds of overshoot is cheaper than the
+# attributed sentinel a hard cancel destroys.
+_COOPERATIVE_CANCEL_GRACE_SEC: float = (
+    max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + TERM_GRACE_SECONDS + CLOSE_STOP_TIMEOUT_SEC
+)
+
+# How long a cancel waits for anything to start listening before deciding
+# nothing will. Work that is already blocking is listening before the cancel is
+# raised; the window is for the gap between an action starting and reaching the
+# call that watches the scope, so it is the poll that call checks the scope at
+# rather than anything about how long the work takes.
+_CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
+
+
+class _InflightAction(NamedTuple):
+    """A running action's handle: what it is, its task, and how to ask it to stop."""
+
+    kind: str
+    atask: asyncio.Task[Any]
+    scope: CancelScope
 
 
 class DispatcherCollaborator:
@@ -49,6 +131,13 @@ class DispatcherCollaborator:
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
+        # Handles on the actions currently running, ``task_id -> _InflightAction``.
+        # Kept on the collaborator and not only in the pump's frame: an action
+        # whose handle lives in a frame can only be stopped by the frame that is
+        # already blocked awaiting it, which is precisely the situation shutdown
+        # and an exhausted wall-clock budget have to break. Entries remove
+        # themselves in :meth:`_run_dispatched_with_gpu_release`.
+        self._inflight_actions: dict[str, _InflightAction] = {}
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
@@ -116,24 +205,148 @@ class DispatcherCollaborator:
             return False
         return remaining is not None and remaining <= 0.0
 
-    async def _pump_dispatcher_once(self) -> None:
-        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
-        newly-fittable tasks while in-flight tasks run.
+    async def cancel_inflight_actions(
+        self,
+        *,
+        reason: str,
+        exempt: frozenset[str] = frozenset(),
+        only_task_ids: Collection[str] | None = None,
+    ) -> list[str]:
+        """Stop the running dispatched actions and wait for them to unwind.
 
-        Re-scans the queue whenever an in-flight task completes
-        (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
-        the moment its lane frees. The pump still fully drains all currently
-        dispatchable work before returning. Each GPU lease is bound to its
-        task_id and released by the runner.
+        The last of the wall-clock defences, and the only one that reaches work
+        already under way: admission refuses what cannot fit, the timeout clamp
+        bounds what does, and the subprocess reaper stops the child trees that
+        were handed a session deadline.
 
-        Budget guard: once the phase's cyclic budget is spent
-        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
-        phase-scoped variants — drain in-flight, then return so the tick can
-        advance the phase.
+        Cancelling the action's task is not by itself enough to stop it. Every
+        benchmark executor spends its time inside ``asyncio.to_thread``, and a
+        thread that has started cannot be cancelled: the ``await`` raises here
+        while the subprocess runs on, so the lanes and the GPU lease would be
+        released, and the database closed, under a benchmark still holding the
+        card. So the cancel goes out on the action's :class:`CancelScope` first
+        -- the channel the blocking side polls -- and work that is listening on
+        it is given :data:`_COOPERATIVE_CANCEL_GRACE_SEC` to stop itself and
+        return through its own ``finally`` blocks. Whatever is still running
+        after that is cancelled the old way, which is no worse than not having
+        asked.
+
+        Every scope is cancelled before the first await, so a caller that is
+        itself being cancelled still leaves no action running unattended: the
+        work that can hear the channel stops on it even if this coroutine never
+        reaches the wait.
+
+        Args:
+            reason: Short cause, logged, used as evidence, and carried to the
+                blocking side so it can attribute its own stop.
+            exempt: Action kinds to leave running -- the closing actions, when
+                the trigger is a budget that already reserved time for them.
+            only_task_ids: Restrict the cancel to these ids, for a caller that
+                owns part of the registry rather than all of it. ``None`` reaches
+                every action that is not exempt, which is what a shutdown or a
+                spent budget needs.
+
+        Returns:
+            list[str]: Task ids that were stopped (empty when nothing ran).
         """
-        # Dead-holder self-heal (runs every tick, before scanning the queue):
-        # detect a crashed worker's dead PID so its leased lanes free and the
-        # stuck task fails (retry-eligible) this same tick.
+        victims = [
+            (task_id, entry)
+            for task_id, entry in self._inflight_actions.items()
+            if entry.kind not in exempt
+            and not entry.atask.done()
+            and (only_task_ids is None or task_id in only_task_ids)
+        ]
+        if not victims:
+            return []
+        log.warning(
+            "dispatcher: cancelling %d in-flight action(s) [%s]: %s",
+            len(victims),
+            reason,
+            ", ".join(f"{entry.kind}/{task_id[:12]}" for task_id, entry in victims),
+        )
+        for _task_id, entry in victims:
+            entry.scope.cancel(reason=reason)
+        try:
+            await self._wait_for_cooperative_stop(victims)
+        finally:
+            for _task_id, entry in victims:
+                if not entry.atask.done():
+                    entry.atask.cancel()
+        await asyncio.gather(*(entry.atask for _task_id, entry in victims), return_exceptions=True)
+        return [task_id for task_id, _entry in victims]
+
+    async def _wait_for_cooperative_stop(self, victims: list[tuple[str, _InflightAction]]) -> None:
+        """Give already-cancelled work the chance to stop itself and return.
+
+        Only work watching its scope can be waited for: waiting on the rest
+        would trade a thread that outlives the cancel for a shutdown that blocks
+        on one, and the second is the worse failure. So the wait ends at
+        whichever comes first -- every victim unwound, the grace spent, or the
+        notice window closing with nothing listening.
+
+        Args:
+            victims: The ``(task_id, handle)`` pairs whose scopes were just
+                cancelled.
+        """
+        loop = asyncio.get_running_loop()
+        notice_deadline = loop.time() + _CANCEL_NOTICE_SEC
+        grace_deadline = loop.time() + _COOPERATIVE_CANCEL_GRACE_SEC
+        listening = False
+        while True:
+            alive = [entry.atask for _task_id, entry in victims if not entry.atask.done()]
+            if not alive:
+                return
+            listening = listening or any(entry.scope.has_listeners for _task_id, entry in victims)
+            now = loop.time()
+            deadline = grace_deadline if listening else notice_deadline
+            if now >= deadline:
+                return
+            await asyncio.wait(alive, timeout=deadline - now, return_when=asyncio.FIRST_COMPLETED)
+
+    async def _cancel_inflight_that_outlived_the_session(self) -> bool:
+        """Stop in-flight actions the session can no longer wait for.
+
+        Two causes, both of which mean no result is coming: the process was
+        asked to shut down, or the wall-clock budget is spent. The budget case
+        spares :data:`TIME_BUDGET_EXEMPT_ACTIONS` because the closing reserve
+        this gate trips on exists precisely so those actions can run.
+
+        Returns:
+            bool: ``True`` when the pump must not start anything new. Only a
+            shutdown says that; a spent budget does not, because the queue scan
+            is what cancels the rows it can no longer fit, and the closing
+            actions it exempts still have their reserve to run in.
+        """
+        stop_event = getattr(self, "_stop", None)
+        if stop_event is not None and stop_event.is_set():
+            await self.cancel_inflight_actions(reason="shutdown_requested")
+            return True
+        usable_sec = self.shared_state.session_budget_usable_sec()
+        if usable_sec is not None and usable_sec <= 0.0:
+            await self.cancel_inflight_actions(
+                reason="session_time_exhausted",
+                exempt=TIME_BUDGET_EXEMPT_ACTIONS,
+            )
+        return False
+
+    async def _reclaim_stale_dispatch_state(self) -> None:
+        """Free rows and leases a previous tick left stuck, before scanning the queue.
+
+        Runs every tick and is idempotent. Four independent claims a crashed or
+        vanished worker can leave behind, each reclaimed on its own so one
+        failure does not hide the next -- and every one of them best-effort,
+        because a self-heal that raises would stop the pump it exists to keep
+        running:
+
+        * a running row whose holder PID is dead, so its lanes free and the task
+          fails while it is still retry-eligible, this same tick;
+        * the failure that reclaim implies, charged once;
+        * the lane leases that holder still held;
+        * a running row past its TTL, covering a recycled holder PID or a
+          missing holder record, which the dead-PID check cannot see;
+        * an ``integrate_patch`` row cancelled at dispatch whose critic verdict
+          was restored afterwards by a resume.
+        """
         dead_tasks: list[str] = []
         try:
             dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
@@ -154,8 +367,6 @@ class DispatcherCollaborator:
             await self.locks.reap_dead_holders()
         except Exception:  # noqa: BLE001
             log.exception("dispatcher: dead-holder lease reap failed")
-        # TTL-expiry self-heal (runs every tick): covers tasks whose holder PID
-        # was recycled or whose holder record is missing. Idempotent.
         try:
             expired_tasks = await self.tasks.reclaim_expired_running(reason="pump_watchdog")
             if expired_tasks:
@@ -170,43 +381,76 @@ class DispatcherCollaborator:
             await self._reconcile_cancelled_policy_denied_integrate_tasks()
         except Exception:  # noqa: BLE001 — reconcile must not abort the pump
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
+
+    async def _pump_dispatcher_once(self) -> None:
+        """Dispatch queued tasks respecting per-lane capacity, re-scanning for
+        newly-fittable tasks while in-flight tasks run.
+
+        Re-scans the queue whenever an in-flight task completes
+        (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
+        the moment its lane frees. The pump still fully drains all currently
+        dispatchable work before returning. Each GPU lease is bound to its
+        task_id and released by the runner.
+
+        Budget guard: once the phase's cyclic budget is spent
+        (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
+        phase-scoped variants — drain in-flight, then return so the tick can
+        advance the phase.
+        """
+        await self._reclaim_stale_dispatch_state()
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set, so a
         # fast task reaped before its queued->running transition is visible is
         # not re-dispatched. A task is dispatched at most once per pump.
         dispatched_ids: set[str] = set()
-        while True:
-            # Budget guard: stop launching NEW phase-scoped variants once the
-            # phase's cyclic budget is spent; drain in-flight then return.
-            if not self._dispatch_paused_for_phase_budget():
-                spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
-                dispatched_ids.update(t.task_id for t, _, _ in spawned)
-                inflight.extend(spawned)
-            if not inflight:
-                return
-            done, _pending = await asyncio.wait(
-                [atask for _, atask, _ in inflight],
-                timeout=self._dispatcher_poll_sec,
-                return_when=asyncio.FIRST_COMPLETED,
+        try:
+            while True:
+                # Wall-clock guard: a spent session budget (or a shutdown
+                # request) stops the actions already running, because waiting
+                # for them is what the budget no longer allows.
+                shutting_down = await self._cancel_inflight_that_outlived_the_session()
+                # Budget guard: stop launching NEW phase-scoped variants once the
+                # phase's cyclic budget is spent; drain in-flight then return.
+                if not shutting_down and not self._dispatch_paused_for_phase_budget():
+                    spawned = await self._spawn_fitting_queued(exclude_ids=dispatched_ids)
+                    dispatched_ids.update(t.task_id for t, _, _ in spawned)
+                    inflight.extend(spawned)
+                if not inflight:
+                    return
+                done, _pending = await asyncio.wait(
+                    [atask for _, atask, _ in inflight],
+                    timeout=self._dispatcher_poll_sec,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    # Poll elapsed with no completion; re-scan in case a lane freed.
+                    continue
+                remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+                completed: list[tuple[Task, Any, Any]] = []
+                for entry in inflight:
+                    task, atask, gpu_lease = entry
+                    if atask in done:
+                        try:
+                            maybe_result: Any = atask.result()
+                        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
+                            maybe_result = exc
+                        completed.append((task, maybe_result, gpu_lease))
+                    else:
+                        remaining.append(entry)
+                inflight = remaining
+                for task, maybe_result, gpu_lease in completed:
+                    await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+        finally:
+            # ``_inflight_actions`` is dispatcher-wide: the inline path registers
+            # a handle there too, and that action is meant to outlive the caller
+            # that started it. The pump owns exactly the entries still in its own
+            # ``inflight``, so leaving by any door other than the drained one --
+            # cancelled at shutdown, or a raise from the bookkeeping -- takes
+            # those and nothing else. A drained pump has nothing left to cancel.
+            await self.cancel_inflight_actions(
+                reason="dispatcher_pump_exit",
+                only_task_ids={task.task_id for task, _atask, _gpu_lease in inflight},
             )
-            if not done:
-                # Poll elapsed with no completion; re-scan in case a lane freed.
-                continue
-            remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-            completed: list[tuple[Task, Any, Any]] = []
-            for entry in inflight:
-                task, atask, gpu_lease = entry
-                if atask in done:
-                    try:
-                        maybe_result: Any = atask.result()
-                    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
-                        maybe_result = exc
-                    completed.append((task, maybe_result, gpu_lease))
-                else:
-                    remaining.append(entry)
-            inflight = remaining
-            for task, maybe_result, gpu_lease in completed:
-                await self._reap_dispatched_task(task, maybe_result, gpu_lease)
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
@@ -357,6 +601,8 @@ class DispatcherCollaborator:
             if task.kind == "targeted_build":
                 # Off-loop builds run in their own process group and are pumped/
                 # reaped by BuildLifecycleCollaborator; never drain them here.
+                continue
+            if await self._cancel_queued_task_over_budget(task):
                 continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
@@ -566,21 +812,19 @@ class DispatcherCollaborator:
                     )
             except Exception:  # noqa: BLE001 - audit must never affect dispatch
                 pass
-            spawned.append(
-                (
+            cancel_scope = CancelScope()
+            atask = asyncio.create_task(
+                self._run_dispatched_with_gpu_release(
                     task,
-                    asyncio.create_task(
-                        self._run_dispatched_with_gpu_release(
-                            task,
-                            prebound_lease=lease,
-                            extra_context=extra_context,
-                            gpu_lease=gpu_lease,
-                            gpu_specialist_lease=gpu_specialist_lease,
-                        ),
-                    ),
-                    gpu_lease,
-                )
+                    prebound_lease=lease,
+                    extra_context=extra_context,
+                    gpu_lease=gpu_lease,
+                    gpu_specialist_lease=gpu_specialist_lease,
+                    cancel_scope=cancel_scope,
+                ),
             )
+            self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
+            spawned.append((task, atask, gpu_lease))
         return spawned
 
     async def _run_dispatched_with_gpu_release(
@@ -591,6 +835,7 @@ class DispatcherCollaborator:
         extra_context: dict[str, Any],
         gpu_lease: Any,
         gpu_specialist_lease: Any = None,
+        cancel_scope: CancelScope | None = None,
     ) -> "SubAgentResult":
         """Run a dispatched task, releasing its GPU lease in a structured finally.
 
@@ -600,7 +845,9 @@ class DispatcherCollaborator:
         ``release`` is idempotent, so the release in
         :meth:`_reap_dispatched_task` remains harmless. When a Ray
         ``GpuSpecialistLease`` was acquired it is closed here too so
-        the ``num_gpus`` lease is released on every exit path.
+        the ``num_gpus`` lease is released on every exit path. The same finally
+        retires this task's ``_inflight_actions`` handle, so the set cannot
+        outlive the work it points at.
 
         Args:
             task: The dispatched task.
@@ -611,17 +858,22 @@ class DispatcherCollaborator:
             gpu_specialist_lease: The Ray ``GpuSpecialistLease`` to close
                 (release the ``num_gpus`` actor lease), or None on the local
                 path.
+            cancel_scope: The action's cancel channel, published here rather
+                than at the call site because a task copies its context when it
+                is created and never sees a value set afterwards.
 
         Returns:
             SubAgentResult: The result from ``sub.run_task``.
         """
         try:
-            return await self.sub.run_task(
-                task,
-                prebound_lease=prebound_lease,
-                extra_context=extra_context,
-            )
+            with use_cancel_scope(cancel_scope):
+                return await self.sub.run_task(
+                    task,
+                    prebound_lease=prebound_lease,
+                    extra_context=extra_context,
+                )
         finally:
+            self._inflight_actions.pop(task.task_id, None)
             if gpu_lease is not None:
                 try:
                     await self.gpu_specialist_pool.release(gpu_lease)
@@ -858,6 +1110,16 @@ class DispatcherCollaborator:
                         "dispatcher: failed to release GPU specialist lease for task=%s",
                         task.task_id,
                     )
+            if isinstance(maybe_result, asyncio.CancelledError):
+                # Asked for, not gone wrong: the wall-clock defences stop
+                # in-flight actions on purpose. Logged as the deliberate act it
+                # is so a shutdown does not read as a crash.
+                log.warning(
+                    "dispatcher: in-flight action task=%s kind=%s was cancelled",
+                    task.task_id,
+                    task.kind,
+                )
+                continue
             if isinstance(maybe_result, BaseException):
                 log.exception(
                     "dispatcher: spawned task %s raised: %r",
@@ -1157,6 +1419,149 @@ class DispatcherCollaborator:
             )
         return None
 
+    def _time_budget_denial_for_action(
+        self,
+        action_name: str,
+    ) -> PolicyDenied | None:
+        """Refuse an action whose expected cost cannot fit the remaining session budget.
+
+        The first of the wall-clock defences: cheaper to never start a 60-minute
+        action with 20 minutes left than to reap it half-done, because a reaped
+        action spends the budget and yields no measurement. Denying here also
+        keeps the refusal out of the failure ledgers — no task row is created, so
+        nothing teaches the KB that the action failed.
+
+        What the action is expected to cost is anchored on this session's own
+        baseline round once one exists, the way PRELUDE's affordability gate
+        already is; see :func:`expected_action_cost_minutes` for why a
+        catalogue-anchored gate admits arms a real model cannot pay for.
+
+        Args:
+            action_name: The proposed/delegated/inline action name.
+
+        Returns:
+            A :class:`PolicyDenied` when the budget cannot fit the action, else
+            ``None`` (unbounded budget, exempt action, or no cost on record).
+        """
+        action = str(action_name or "").strip()
+        if not action or action in TIME_BUDGET_EXEMPT_ACTIONS:
+            return None
+        if self.shared_state.stop_reason:
+            return None
+        reg = getattr(self, "action_registry", None)
+        meta = reg.get(action) if reg is not None else None
+        if meta is None:
+            return None
+        expected_min = expected_action_cost_minutes(
+            meta,
+            measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
+        )
+        usable_sec = self.shared_state.session_budget_usable_sec()
+        if action_fits_time_budget(
+            usable_sec=usable_sec,
+            expected_cost_minutes=expected_min,
+        ):
+            return None
+        remaining_min = (usable_sec or 0.0) / 60.0
+        return PolicyDenied(
+            f"action={action!r} denied: needs ~{expected_min:.0f} min but only "
+            f"{remaining_min:.0f} min of the session budget is left",
+            rule="time_budget",
+            hint=(
+                "the wall-clock budget cannot fit this action; delegate `report` "
+                "to close the session, or pick an action that fits the time left"
+            ),
+        )
+
+    def _admission_denial_for_action(
+        self,
+        action_name: str,
+    ) -> PolicyDenied | None:
+        """Run every pre-dispatch gate for an action name, first denial wins.
+
+        The single entry point the intent handlers and the inline runner share,
+        so a new gate reaches all three paths at once.
+
+        Args:
+            action_name: The proposed/delegated/inline action name.
+
+        Returns:
+            The first :class:`PolicyDenied` that fires, else ``None``.
+        """
+        denied = self._sequence_denial_for_action(action_name)
+        if denied is not None:
+            return denied
+        return self._time_budget_denial_for_action(action_name)
+
+    async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
+        """Drop a queued task the budget can no longer fit, before it takes a lane.
+
+        The admission gate runs when the action is proposed, but a task can wait
+        for a busy lane long enough for the budget to drain underneath it. This
+        is the same gate re-applied at the last moment it is still free to say
+        no. The row is cancelled rather than left queued so the pump does not
+        re-examine it every tick, and it stays out of the failure ledgers: a task
+        that never ran is not evidence about the action.
+
+        Args:
+            task: The queued task about to be considered for dispatch.
+
+        Returns:
+            ``True`` when the task was cancelled and must be skipped this pass.
+        """
+        denied = self._time_budget_denial_for_action(task.kind)
+        if denied is None:
+            return False
+        try:
+            await self.tasks.transition(
+                task.task_id,
+                "cancelled",
+                evidence={"reason": "time_budget", "error": str(denied)},
+            )
+        except Exception:  # noqa: BLE001 — a lost row must not abort the pump
+            log.exception(
+                "dispatcher: could not cancel over-budget task=%s kind=%s",
+                task.task_id,
+                task.kind,
+            )
+            return True
+        log.warning(
+            "dispatcher: dropped queued task=%s kind=%s before dispatch: %s",
+            task.task_id,
+            task.kind,
+            denied,
+        )
+        try:
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "dispatch_denied_time_budget",
+                    "task_id": task.task_id,
+                    "action": task.kind,
+                    "error": str(denied),
+                    "hint": getattr(denied, "hint", ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability must not block dispatch
+            log.exception(
+                "dispatcher: could not record time-budget denial for task=%s",
+                task.task_id,
+            )
+        # A cancelled conc_sweep never writes last_conc_sweep on its own, so
+        # SWEEP would idle until the LLM emits skip_to_close and CI would read
+        # that as robustness_escalated. Stamp the skip here so the phase
+        # machine can close on conc_sweep_done.
+        if str(task.kind or "") == "conc_sweep":
+            try:
+                self._record_session_budget_conc_sweep_skip(denied=denied)
+            except Exception:  # noqa: BLE001 — a stamp miss must not abort the pump
+                log.exception(
+                    "dispatcher: could not record conc_sweep time-budget skip for task=%s",
+                    task.task_id,
+                )
+        return True
+
     def _sequence_denial_for_request(
         self,
         target_agent: str,
@@ -1348,9 +1753,65 @@ class DispatcherCollaborator:
                 "get_recent_outcomes or the next-tick inbox for its "
                 "delegated_result)"
             )
+        except (FuturesCancelledError, asyncio.CancelledError):
+            # The wall-clock defences stopped it on purpose. Named before the
+            # generic handler, which would file a deliberate stop as ``errored``
+            # and read as a fault in the action. Both classes are caught because
+            # whether the two are the same one varies by Python version, and on
+            # the versions where they are, it is a ``BaseException`` that would
+            # escape this bridge entirely and take the agent's turn down with it.
+            return (
+                f"(run_action_now: {name!r} was cancelled — the session is shutting down or out of wall-clock budget)"
+            )
         except Exception as exc:  # noqa: BLE001 — never crash the turn
             log.exception("run_action_now: inline run of %r failed", name)
             return f"(run_action_now: {name!r} errored: {exc!r})"
+
+    async def _inline_action_denial(
+        self,
+        action_name: str,
+        params: dict[str, Any],
+    ) -> str | None:
+        """Run the admission gates an inline action shares with a dispatched one.
+
+        The synthetic delegate goes through PolicyGate so the phase, role and
+        path gates reach an inline call exactly as they reach one that went
+        through the queue; the sequence gate is asked separately because it is
+        about what the run has already done rather than about the intent. Either
+        denial is recorded before it is reported, so an inline call that never
+        ran is still auditable.
+
+        Args:
+            action_name: Name of the action about to run.
+            params: Parameters it would run with.
+
+        Returns:
+            str | None: The message for the caller when the action is denied, or
+                ``None`` when it may run.
+        """
+        intent = Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": action_name, "params": dict(params or {})},
+        )
+        try:
+            self.policy.validate_intent("orchestration", intent)
+        except PolicyDenied as denied:
+            await self._record_policy_denied("orchestration", intent, denied)
+            return (
+                f"(run_action_now: {action_name!r} denied by policy: "
+                f"{getattr(denied, 'rule', '')!s} — "
+                f"{str(getattr(denied, 'hint', denied))[:200]})"
+            )
+        seq_denied = self._admission_denial_for_action(action_name)
+        if seq_denied is None:
+            return None
+        await self._record_policy_denied(
+            "orchestration",
+            intent,
+            seq_denied,
+            action_name=action_name,
+        )
+        return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
 
     async def _run_action_now(
         self,
@@ -1367,30 +1828,9 @@ class DispatcherCollaborator:
             A status string: a policy/sequence denial message, an
             already-in-flight notice, or the rendered delegated_result line.
         """
-
-        # PolicyGate parity: validate the synthetic delegate so phase/role/path gates apply.
-        intent = Intent(
-            type=IntentType.DELEGATE,
-            payload={"action_name": action_name, "params": dict(params or {})},
-        )
-        try:
-            self.policy.validate_intent("orchestration", intent)
-        except PolicyDenied as denied:
-            await self._record_policy_denied("orchestration", intent, denied)
-            return (
-                f"(run_action_now: {action_name!r} denied by policy: "
-                f"{getattr(denied, 'rule', '')!s} — "
-                f"{str(getattr(denied, 'hint', denied))[:200]})"
-            )
-        seq_denied = self._sequence_denial_for_action(action_name)
-        if seq_denied is not None:
-            await self._record_policy_denied(
-                "orchestration",
-                intent,
-                seq_denied,
-                action_name=action_name,
-            )
-            return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
+        denial = await self._inline_action_denial(action_name, params)
+        if denial is not None:
+            return denial
         lanes, ttl = self._registry_lanes_ttl(action_name)
         content_fp = hashlib.sha1(
             json.dumps(params or {}, sort_keys=True, default=str).encode(),
@@ -1414,7 +1854,21 @@ class DispatcherCollaborator:
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"
             )
-        result = await self.sub.run_task(task)
+        # Publish a handle for as long as the action runs. This path abandons its
+        # future once the caller's inline wait elapses -- the action keeps going
+        # by design, so without a handle nothing could stop it, including a
+        # teardown that is about to close the database underneath it. The handle
+        # is this coroutine's own task: cancelling it drops the audit publication
+        # below, which the runner's terminal transition already accounts for.
+        inline_handle = asyncio.current_task()
+        cancel_scope = CancelScope()
+        if inline_handle is not None:
+            self._inflight_actions[task.task_id] = _InflightAction(task.kind, inline_handle, cancel_scope)
+        try:
+            with use_cancel_scope(cancel_scope):
+                result = await self.sub.run_task(task)
+        finally:
+            self._inflight_actions.pop(task.task_id, None)
         result_payload = {
             "task_id": task.task_id,
             "kind": task.kind,
