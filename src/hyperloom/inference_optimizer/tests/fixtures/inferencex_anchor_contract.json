@@ -1,5 +1,5 @@
 {
-  "anchors_fingerprint": "f38b606980f3cd787834337a143b23aebc5ec37e54de459c7660ceb8c8faa028",
+  "anchors_fingerprint": "4917512af88fd31cf58f6f29c878266b4ec702ba3d9815dedb41b00177d0d7de",
   "files": {
     "benchmarks/benchmark_lib.sh": {
       "anchors": {
@@ -15,6 +15,10 @@
       },
       "sha256": "9bb3e5096ddc74398f8a33ec2dc7c787afa6ae7bf8f5dd2c8b2e387a280a7785"
     }
+  },
+  "magpie_patch": {
+    "applies": true,
+    "path": "benchmarks/benchmark_lib.sh"
   },
   "probe_target": {
     "path": "utils/evals/patches/lm_eval_sitecustomize.py",
