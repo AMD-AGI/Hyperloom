@@ -10,8 +10,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from types import SimpleNamespace
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.cli import bootstrap as cb
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -422,18 +422,24 @@ def test_snapshot_skeleton_and_session_dir_helpers(
 def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
     """start_ts stays the budget anchor, so the resume timestamp is the only leg boundary."""
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=1)
+    state.deadline_unix = 1_700_000_000.0
+    state.teardown_timings_sec = {"total": 1.5}
 
     cb._begin_resume_leg(state, reanchor_budget=False)
 
     assert state.start_ts == "2026-08-01T00:00:00+00:00"
     assert state.resumed_ts > state.start_ts
     assert state.crash_count == 1
+    assert state.deadline_unix == 1_700_000_000.0
+    assert state.teardown_timings_sec == {"total": 1.5}
 
 
 def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4)
     state.set_stop_reason("time_exhausted")
     state.closing_phase = True
+    state.deadline_unix = 1_700_000_000.0
+    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
 
     cb._begin_resume_leg(state, reanchor_budget=True)
 
@@ -442,6 +448,11 @@ def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
     assert state.stop_ts == ""
     assert state.closing_phase is False
     assert state.crash_count == 0
+    assert state.deadline_unix == 0.0
+    assert state.teardown_timings_sec == {}
+    stamped = state.stamp_deadline_unix(budget_minutes=60)
+    start = to_unix(state.start_ts)
+    assert abs(stamped - (start + 3600.0)) < 2.0
 
 
 def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
