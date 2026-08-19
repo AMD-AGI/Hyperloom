@@ -110,13 +110,14 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 ```
 
-The backend runs `install_baremetal.sh` in four phases:
+The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **Credentials**: resolves LLM gateway credentials into `.env`.
-4. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
+3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
+4. **Credentials**: resolves LLM gateway credentials into `.env`.
+5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
 ### Scenario B: Bare metal + Docker
