@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
@@ -70,6 +71,11 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.ALERT: "_handle_alert",
     IntentType.UPDATE_STATE: "_handle_update_state",
 }
+
+
+# Half the robustness stall threshold, so a single dropped beat cannot trip an
+# accusation against an agent that is blocked on a running kernel step.
+_KERNEL_HEARTBEAT_SEC: float = 150.0
 
 
 class IntentRouter:
@@ -647,6 +653,46 @@ class IntentRouter:
             )
         )
 
+    @asynccontextmanager
+    async def _kernel_step_heartbeat(self, kind: str, started: float):
+        """Keep orchestration's bus timestamp moving through an inline step.
+
+        Kernel handlers are awaited inline in the Coordinator tick, so for the
+        length of a forge run nothing advances orchestration's last-seen time
+        and stall detection accuses the very agent that dispatched the work.
+        The task-progress heartbeat cannot cover it: that reads the ``tasks``
+        table, and an inline request never becomes a row.
+
+        Args:
+            kind (str): Request kind, echoed so an operator can tell what the
+                loop is blocked on.
+            started (float): ``time.monotonic()`` at the step's start.
+        """
+
+        async def _beat() -> None:
+            while True:
+                await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
+                await self.bus.append_and_seq(
+                    Message.new(
+                        "orchestration",
+                        "*",
+                        "observation",
+                        {
+                            "kind": "kernel_step_running",
+                            "step": kind,
+                            "elapsed_sec": round(time.monotonic() - started, 1),
+                        },
+                    )
+                )
+
+        task = asyncio.create_task(_beat())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler.
 
@@ -801,10 +847,11 @@ class IntentRouter:
                         artifacts=_lifecycle_paths(merged_payload),
                     )
                     try:
-                        result = await handler(
-                            merged_payload,
-                            **handler_kwargs,
-                        )
+                        async with self._kernel_step_heartbeat(kind, _lc_t0):
+                            result = await handler(
+                                merged_payload,
+                                **handler_kwargs,
+                            )
                     except Exception as exc:  # noqa: BLE001
                         log.exception(
                             "kernel_request_handler[%s] crashed for source=%s",

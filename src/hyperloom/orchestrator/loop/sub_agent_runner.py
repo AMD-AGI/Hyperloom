@@ -35,6 +35,10 @@ log = logging.getLogger(__name__)
 # can only ever attest to this one agent. Widening that — letting any running
 # task vouch for whoever happens to be quiet — is what allowed a single busy
 # task to silence stall detection for the whole session.
+#
+# It also only covers work that becomes a row. Kernel requests are awaited
+# inline in the Coordinator tick and never reach this table, so they are kept
+# visible by a bus heartbeat raised around the handler instead.
 PROGRESS_OWNER_AGENT = "orchestration"
 
 
