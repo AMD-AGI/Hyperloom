@@ -7,7 +7,7 @@ Watches repeated ``policy_denied`` observations from the same source
 (misconfigured / systemically-rejected agent → MEDIUM alert),
 ``delegated_result`` failures clustering on one action family (stuck
 branch → ``prune_branch``), ``recover_unsuccessful`` recovery outcomes,
-and B4 ``idempotency_replay`` (repeated idempotency keys). Reads both
+and ``idempotency_replay`` (repeated idempotency keys). Reads both
 ``ctx.inbox`` and ``data.coordinator_events``.
 """
 
@@ -33,7 +33,7 @@ class EventConfig:
     delegated_failure_prune_threshold: int = 4
     # Lookback over inbox + coordinator_events for the most recent recover result.
     recover_lookback_events: int = 50
-    # B4 ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
+    # ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
     # share the same action+payload hash within one tick.
     idempotency_replay_threshold: int = 2
 

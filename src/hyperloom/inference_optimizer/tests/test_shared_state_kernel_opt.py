@@ -200,6 +200,59 @@ def test_record_kernel_opt_nonkeep_overwrites_when_prev_already_integrated(state
     )
 
 
+# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy.
+def test_record_kernel_opt_vendor_playbook_keep_is_deploy_blocked(state: SharedState):
+    """A vendor-playbook KEEP's best_artifact_path is a copy of a KernelForge
+    task-bundle config file, not a rewrite of the real installed operator
+    source -- apply_kernel_patch's legacy full-file-replace strategy would
+    otherwise happily overwrite the real site-packages module with it
+    (PR #1191 review finding #1). The KEEP itself must still be recorded
+    (the measured speedup is real), but it must never reach the
+    auto-integrate queue.
+    """
+    result = _ok_result(
+        "k010",
+        "KEEP",
+        1.25,
+        source_file="/opt/venv/lib/python3.12/site-packages/mori/ops/dispatch_combine.py",
+        artifact=(
+            "/tmp/forge/session1/attempt_dispatch/optimized_versions/"
+            "mori_ep_dispatch_combine_dispatch.py"
+        ),
+    )
+    result["attempts"] = [
+        {
+            "backend": "forge",
+            "vendor_playbook_id": "mori_ep_dispatch_combine",
+            "vendor_playbook_role": "dispatch",
+        }
+    ]
+    state.record_kernel_opt(result)
+
+    assert state.last_kernel_opt["decision"] == "KEEP"
+    assert state.last_kernel_opt["vendor_playbook_deploy_blocked"] is True
+    assert state.last_kernel_opt["vendor_playbook_id"] == "mori_ep_dispatch_combine"
+    assert state.kernel_opt_attempts["k010"]["vendor_playbook_deploy_blocked"] is True
+    assert state.pending_kernel_integrations == {}, (
+        "a vendor-playbook KEEP must never be auto-queued for integration"
+    )
+
+
+def test_record_kernel_opt_non_vendor_keep_is_not_deploy_blocked(state: SharedState):
+    """A normal (non-vendor-playbook) KEEP must still queue for integration."""
+    result = _ok_result(
+        "k001",
+        "KEEP",
+        2.0,
+        source_file="/path/moe_op.py",
+        artifact="/tmp/k001.py",
+    )
+    state.record_kernel_opt(result)
+
+    assert state.last_kernel_opt["vendor_playbook_deploy_blocked"] is False
+    assert state.pending_kernel_integrations, "a normal KEEP must still be queued"
+
+
 # next_pending_keep_kernel_id queue semantics
 def test_next_pending_keep_drains_in_micro_speedup_order(state: SharedState):
     """KEEPs on different source_files drain highest-micro-first as the stack fills."""
@@ -540,6 +593,170 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
     assert untried[0] == "k002"  # strongest-first
 
 
+def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: SharedState):
+    """mori's dispatch (7%) + combine (5%) must clear the gate together.
+
+    Neither member clears the 10% default threshold alone, but
+    _apply_vendor_operator_playbook_grouping() (tracelens_analysis.py) stamps
+    vendor_playbook_aggregate_gpu_pct=12.0 on both, since the pair is deliberately dispatched
+    as one forge-loop session (see KernelForge PR #88 / the mori vendor
+    playbook). Regression for a real gap: the gate used to compare each row's
+    own gpu_pct, so a split load like this was silently dropped as
+    below_min_gpu_pct on both members despite clearing the floor combined.
+    """
+    _set_trace(
+        state,
+        hot_kernels=[
+            {
+                "kernel_id": "k010",
+                "gpu_pct": 7.0,
+                "vendor_playbook_aggregate_gpu_pct": 12.0,
+                "reusable_native_kernel": True,
+                "source_file": "/opt/venv/.../mori_ep_config.py",
+                "name": "mori::EpDispatchCombineOp::dispatch",
+            },
+            {
+                "kernel_id": "k011",
+                "gpu_pct": 5.0,
+                "vendor_playbook_aggregate_gpu_pct": 12.0,
+                "reusable_native_kernel": True,
+                "source_file": "/opt/venv/.../mori_ep_config.py",
+                "name": "mori::EpDispatchCombineOp::combine",
+            },
+        ],
+    )
+    untried = state.untried_hot_reusable_kernels()
+    # Both members carry the group's full aggregate and must both clear the
+    # gate. No task_groups metadata is supplied here, and the two rows do
+    # NOT share (source_file, name) -- names differ (`::dispatch` vs
+    # `::combine`) -- so neither the group-key dedup nor the identity-dedup
+    # fallback collapses them into one; both remain distinct, separately
+    # gated rows.
+    assert set(untried) == {"k010", "k011"}, (
+        "vendor-playbook group must not be dropped as below_min_gpu_pct"
+    )
+
+
+def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedState):
+    """A playbook's min_gpu_pct_floor is a floor on the *threshold*, not a
+    bypass: an aggregate that clears a loosened env override but not the
+    playbook's own floor must still be gated out."""
+    _set_trace(
+        state,
+        hot_kernels=[
+            {
+                "kernel_id": "k010",
+                "gpu_pct": 2.0,
+                "vendor_playbook_aggregate_gpu_pct": 3.0,
+                "vendor_playbook_min_gpu_pct_floor": 10.0,
+                "reusable_native_kernel": True,
+                "source_file": "/opt/venv/.../mori_ep_config.py",
+                "name": "mori::EpDispatchCombineOp::dispatch",
+            },
+        ],
+    )
+    # A caller loosening the env default to 1.0% must not let this in: the
+    # playbook's own floor (10.0) still applies.
+    untried = state.untried_hot_reusable_kernels(min_gpu_pct=1.0)
+    assert untried == []
+
+
+def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state: SharedState):
+    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate
+    was a no-op on the production path because ``untried_hot_reusable_kernels()``
+    reads ``hot_kernels_top15`` (SharedState._build_hot_kernel_summaries()'s
+    projected ``summary_entry``, an explicit key whitelist) in preference to
+    raw ``hot_kernels``, and that whitelist dropped
+    ``vendor_playbook_aggregate_gpu_pct`` / ``vendor_playbook_min_gpu_pct_floor``
+    / ``vendor_playbook_group_id`` / ``patch_strategy`` entirely.
+
+    ``_set_trace()`` (used by the sibling tests above) assigns
+    ``last_trace_analyze`` directly and never populates ``hot_kernels_top15``,
+    so those tests fall through to the raw, unprojected ``hot_kernels`` and
+    cannot catch this -- this test goes through the real
+    ``record_trace_analyze()`` entry point instead, exactly like a live
+    trace-analyze result would.
+    """
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {
+                    "kernel_id": "k010",
+                    "gpu_pct": 7.0,
+                    "vendor_playbook_aggregate_gpu_pct": 12.0,
+                    "vendor_playbook_group_id": "mori_ep_dispatch_combine",
+                    "patch_strategy": "vendor_playbook",
+                    "reusable_native_kernel": True,
+                    "source_file": "/opt/venv/.../mori_ep_config.py",
+                    "name": "mori::EpDispatchCombineOp::dispatch",
+                },
+                {
+                    "kernel_id": "k011",
+                    "gpu_pct": 5.0,
+                    "vendor_playbook_aggregate_gpu_pct": 12.0,
+                    "vendor_playbook_group_id": "mori_ep_dispatch_combine",
+                    "patch_strategy": "vendor_playbook",
+                    "reusable_native_kernel": True,
+                    "source_file": "/opt/venv/.../mori_ep_config.py",
+                    "name": "mori::EpDispatchCombineOp::combine",
+                },
+            ],
+        },
+    )
+    # The projection must actually carry the fields through -- this is the
+    # exact assertion that fails without the _build_hot_kernel_summaries() fix.
+    projected = {row["kernel_id"]: row for row in state.last_trace_analyze["hot_kernels_top15"]}
+    assert projected["k010"]["vendor_playbook_aggregate_gpu_pct"] == 12.0
+    assert projected["k010"]["patch_strategy"] == "vendor_playbook"
+    assert projected["k010"]["vendor_playbook_group_id"] == "mori_ep_dispatch_combine"
+
+    # Split-load pass-through direction: neither member clears the 10%
+    # default alone (7%, 5%), but the pair's aggregate (12%) must.
+    untried = state.untried_hot_reusable_kernels()
+    assert set(untried) == {"k010", "k011"}, (
+        "aggregate gate must not degrade to bare gpu_pct on the real "
+        "record_trace_analyze() -> hot_kernels_top15 production path"
+    )
+
+
+def test_untried_hot_kernels_vendor_playbook_floor_still_applies_via_real_projection(
+    state: SharedState,
+):
+    """Unsafe-direction counterpart of the test above: a playbook's own
+    ``min_gpu_pct_floor`` must still block dispatch through the real
+    projection path, even when the caller has loosened
+    ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``. Before the projection fix this
+    degraded to the bare (loosened) threshold, letting a below-floor group
+    burn a whole forge-loop session."""
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {
+                    "kernel_id": "k010",
+                    "gpu_pct": 2.0,
+                    "vendor_playbook_aggregate_gpu_pct": 3.0,
+                    "vendor_playbook_min_gpu_pct_floor": 10.0,
+                    "reusable_native_kernel": True,
+                    "source_file": "/opt/venv/.../mori_ep_config.py",
+                    "name": "mori::EpDispatchCombineOp::dispatch",
+                },
+            ],
+        },
+    )
+    projected = state.last_trace_analyze["hot_kernels_top15"][0]
+    assert projected["vendor_playbook_min_gpu_pct_floor"] == 10.0
+
+    untried = state.untried_hot_reusable_kernels(min_gpu_pct=1.0)
+    assert untried == [], (
+        "the playbook's own floor must survive the real projection path "
+        "and still block dispatch even under a loosened env override"
+    )
+
+
 def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
     """task_group dedup: same AST function -> one slot."""
     _set_trace(
@@ -657,6 +874,23 @@ def test_integrate_fault_does_not_consume_revert_quota(state: SharedState):
     assert "rejected" not in entry
     assert state.rejected_kernel_patches == []
     assert "k001" not in state.rejected_kernel_ids
+
+
+@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
+def test_a_run_stopped_integrate_does_not_consume_revert_quota(state: SharedState, error_class):
+    """A patch the run never measured must not be counted as one that lost."""
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001",
+            decision="NEEDS_REVIEW",
+            status="failed",
+            error_class=error_class,
+        ),
+    )
+    assert entry is not None
+    assert entry["verdict_attempt_count"] == 0
+    assert entry.get("retryable") is True
+    assert state.rejected_kernel_patches == []
 
 
 def test_integrate_attempt_is_stamped_with_macro_cycle(state: SharedState):

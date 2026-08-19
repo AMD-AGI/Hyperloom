@@ -168,7 +168,7 @@ class IntentRouter:
                     ),
                 },
             )
-        denied = self._sequence_denial_for_action(action_name)
+        denied = self._admission_denial_for_action(action_name)
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
@@ -506,7 +506,7 @@ class IntentRouter:
                     ),
                 },
             )
-        denied = self._sequence_denial_for_action(action_name)
+        denied = self._admission_denial_for_action(action_name)
         if denied is not None:
             await self._record_policy_denied(
                 source,
@@ -1091,6 +1091,20 @@ class IntentRouter:
             cancelled = await self._drain_queued_baselines(reason=reason)
         else:
             cancelled = await self.tasks.cancel_family([family], reason=reason)
+        # A pruned explore family can take the GEAK 2b rebench with it; settle the
+        # slot so KERNEL is not held open waiting on a task that will never run.
+        if cancelled:
+            from ..phases.geak_rebench import settle_dangling_geak_pending
+
+            try:
+                if await settle_dangling_geak_pending(
+                    self.tasks,
+                    self.shared_state,
+                    reason=f"prune_branch:{family}",
+                ):
+                    self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — prune must not fail on bookkeeping
+                log.exception("prune_branch: GEAK pending settle failed")
         await self.bus.append_and_seq(
             Message.new(
                 source,

@@ -77,7 +77,7 @@ from ..bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from ..state.shared_state import SharedState
+from ..state.shared_state import SharedState, effective_closing_grace_sec
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
@@ -89,7 +89,6 @@ from ..trace.orchestration_trace import (
 )
 from .coordinator_helpers import (
     _infer_model_class_from_config,
-    effective_closing_grace_sec,
     format_exc_brief,
     serialize_verdict_advisory,
 )
@@ -865,6 +864,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: float | None = None
         self._run_started_monotonic: float | None = None
+        # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
+        # work is not skipped just because the session deadline has passed.
+        self._closing_deadline: float | None = None
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -928,6 +930,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
         "_internal_analysis_kind": "phase_prelude",
+        "_measured_analysis_cost_sec": "phase_prelude",
+        "_record_prelude_arm_dropped": "phase_prelude",
         "_warm_recipe_proven_items": "phase_prelude",
         "_inject_warm_recipe_history_into_ledger": "phase_prelude",
         "_filter_warm_patches_with_kg": "phase_prelude",
@@ -939,12 +943,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
         "_enqueue_internal_sweep_task": "phase_sweep",
         "_build_sweep_params_from_recipe": "phase_sweep",
+        "_record_session_budget_conc_sweep_skip": "phase_sweep",
+        "_record_terminal_conc_sweep_skip": "phase_sweep",
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
+        "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
+        "_enqueue_runnable_internal_task": "phase_close",
         "_enqueue_internal_report_task": "phase_close",
         "_enqueue_internal_session_breakdown_task": "phase_close",
+        "_run_close_task": "phase_close",
         "_record_close_step": "phase_close",
         "_enter_closing_phase": "phase_close",
         "_closing_report_terminal": "phase_close",
@@ -991,9 +1000,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_gemm_tuning_result": "phase_kernel",
         "_sync_profile_state_after_gemm_roofline": "phase_kernel",
         "_journal_gemm_tuning_keep": "phase_kernel",
-        "_promote_gemm_tuning_keep": "phase_kernel",
         "_replace_latest_gemm_tuning_attempt": "phase_kernel",
-        "_validate_forge_gemm_tuning_e2e": "phase_kernel",
+        "_gemm_e2e_candidates": "phase_kernel",
+        "_validate_gemm_tuning_e2e": "phase_kernel",
         "_should_continue_kernel_after_gemm": "phase_kernel",
         "_run_kernel_opt_after_gemm": "phase_kernel",
         "_current_tput_from_validated_gain": "phase_kernel",
@@ -1051,6 +1060,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_escalate_to_targeted_build": "phase_framework",
         "_maybe_enqueue_specialist_requested_build": "phase_framework",
         "_maybe_route_build_outcomes": "phase_framework",
+        "_route_succeeded_build": "phase_framework",
+        "_build_routing_record": "phase_framework",
+        "_note_build_routed": "phase_framework",
+        "_build_probe_was_cancelled": "phase_framework",
         "_enqueue_build_launch_probe": "phase_framework",
         "_maybe_rearm_authored_lane": "phase_framework",
         "_enqueue_author_specialist": "phase_framework",
@@ -1083,6 +1096,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "phase_framework",
         "_maybe_enqueue_enablement_baseline_revalidation": "phase_framework",
+        "_open_revalidation_row": "phase_framework",
+        "_open_row_past_spent_generations": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
@@ -1128,19 +1143,16 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_current_primary_gap": "conversation",
         "_recent_proposed_variants": "conversation",
         "_priors_match_advisory_block": "conversation",
-        "_resolve_issue_canonical": "proposals",
         "_workload_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
         "_extract_kept_best_config": "proposals",
         "_kb_best_config_overrides_for_keep": "proposals",
         "_kb_amend_recipe": "proposals",
         "_inject_explore_runtime_params": "proposals",
-        "_decaying_keep_threshold_pct": "proposals",
         "_materialize_approved_proposal": "proposals",
         "_record_proposal_task_map": "proposals",
         "_registry_lanes_ttl": "dispatcher",
         "_cycle_idem_suffix": "dispatcher",
-        "_wait_for_task_terminal": "dispatcher",
         "_cursor_advance_to_latest": "dispatcher",
         "_dispatch_paused_for_phase_budget": "dispatcher",
         "_pump_dispatcher_once": "dispatcher",
@@ -1154,6 +1166,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
+        "_time_budget_denial_for_action": "dispatcher",
+        "_admission_denial_for_action": "dispatcher",
         "_sequence_denial_for_request": "dispatcher",
         "_skip_gemm_tuning": "dispatcher",
         "_gemm_tuning_required_before_kernel_opt": "dispatcher",
@@ -1161,7 +1175,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_policy_denied": "writeback",
         "_record_observation": "writeback",
         "_record_kernel_opt_partial": "writeback",
-        "_update_cumulative_gain_validated": "writeback",
         "_record_integrate_keep": "writeback",
         "_is_promotable_result": "writeback",
         "_record_intervention_for_task": "writeback",
@@ -1182,11 +1195,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "ensure_recipe_finalized": "writeback",
         "finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
+        "_update_cumulative_gain_validated": "writeback",
         "_promote_to_shared_state": "writeback",
         "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
         "replay_for_resume": "writeback",
-        "_materialize_stack_config_for_resume": "writeback",
+        "_current_best_launch_config": "writeback",
         "build_env_spec": "writeback",
         "_resume_consistency_pass": "writeback",
         "_resume_reenter_kernel_if_needed": "writeback",
@@ -1397,15 +1411,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Lifecycle
     async def stop(self) -> None:
-        """Signal shutdown, cancel reactor tasks, finalize, and close the DB.
+        """Signal shutdown, cancel in-flight work, finalize, and close the DB.
 
-        Sets the stop event, cancels and awaits every running reactor task,
-        runs the Recipe KB T4 safety-net finalize hook when CLOSE never reached
-        a terminal publication status or its earlier attempt failed, then closes
-        the SQLite connection. Exceptions raised by reactor tasks during
-        teardown are logged, not propagated.
+        Sets the stop event, cancels and awaits the dispatched actions still
+        running plus every running reactor task, runs the Recipe KB T4
+        safety-net finalize hook when CLOSE never reached a terminal
+        publication status or its earlier attempt failed, then closes the
+        SQLite connection. Exceptions raised by reactor tasks during teardown
+        are logged, not propagated.
+
+        Dispatched actions are cancelled first and awaited: the stop event alone
+        only asks the loop to stop between ticks, so a teardown that skipped
+        them would close the database out from under work still using it.
         """
         self._stop.set()
+        try:
+            await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
+        except Exception:  # noqa: BLE001 — teardown proceeds even if cancellation misbehaves
+            log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
             if not t.done():
                 t.cancel()
@@ -1502,18 +1525,30 @@ class Coordinator(metaclass=_CoordinatorMeta):
             # hint (for example current GEAK returning no_gain -> skip_to_sweep).
             # Consume that before prompting agents again so stale phase prompts
             # cannot enqueue legacy work.
-            await self._advance_phase_if_needed()
+            await self._await_within_session_bound(
+                self._advance_phase_if_needed,
+                stage="advance_phase_pre_reactor",
+            )
             if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                await self._advance_phase_if_needed()
+                await self._await_within_session_bound(
+                    self._advance_phase_if_needed,
+                    stage="advance_phase_hint",
+                )
             for name in self._tick_roles:
-                await self._reactor_pass(name)
+                await self._await_within_session_bound(
+                    lambda n=name: self._reactor_pass(n),
+                    stage=f"reactor:{name}",
+                )
             await self._pump_dispatcher_once()
             # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
             await self._pump_framework_agent_phase_safely(caller="tick")
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
-            await self._advance_phase_if_needed()
+            await self._await_within_session_bound(
+                self._advance_phase_if_needed,
+                stage="advance_phase",
+            )
 
     def _record_coordinator_exception(
         self,
@@ -1545,6 +1580,53 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist Coordinator exception metadata")
+
+    def _seconds_until_session_bound(self) -> float | None:
+        """Seconds left on the active run or closing bound; ``None`` if unbounded.
+
+        During CLOSE the session deadline has already passed, so the bound
+        switches to ``_closing_deadline`` and CLOSE work is not skipped.
+
+        Returns:
+            Remaining seconds, or ``None`` when no bound is armed.
+        """
+        if bool(getattr(self.shared_state, "closing_phase", False)):
+            bound = self._closing_deadline
+        else:
+            bound = self._run_deadline
+        if bound is None:
+            return None
+        return float(bound) - time.monotonic()
+
+    async def _await_within_session_bound(
+        self,
+        factory: Callable[[], Awaitable[Any]],
+        *,
+        stage: str,
+    ) -> None:
+        """Run one tick step, cancelling it when the session/closing bound elapses.
+
+        The wall-clock stop lives at the end of each tick. A conversational
+        reactor turn or a long phase-enter await that never returns would skip
+        that stop. Cancelling the step lets the tick finish and enter CLOSE.
+
+        Args:
+            factory: Builds the awaitable so a skipped step is never started.
+            stage: Label for the warning log.
+        """
+        remaining = self._seconds_until_session_bound()
+        if remaining is not None and remaining <= 0.0:
+            log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
+            return
+        try:
+            # ``timeout=None`` waits until the step finishes (unbounded run).
+            await asyncio.wait_for(factory(), timeout=remaining)
+        except asyncio.TimeoutError:
+            log.warning(
+                "Coordinator: %s hit the session bound after %.1fs; cancelled so the tick can close",
+                stage,
+                remaining,
+            )
 
     # Long-run interface
     async def run(
@@ -1595,6 +1677,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._coordinator_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._coordinator_loop = None
+        # The reserve every unit of work holds back IS this window, so the
+        # admission gate has to see the operator's choice too, not only the
+        # closing phase that spends it.
+        self.shared_state.closing_grace_sec = closing_grace_sec
         max_minutes_value = max_minutes if max_minutes is not None else 0
         # Persist budget so prompts and Resume can see it.
         if max_minutes is not None:
@@ -1628,9 +1714,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     # Bump the persistent tick counter — drives phase/plateau math.
                     self.shared_state.increment_tick()
                     try:
-                        await self._advance_phase_if_needed()
+                        await self._await_within_session_bound(
+                            self._advance_phase_if_needed,
+                            stage="advance_phase_pre_reactor",
+                        )
                         if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
-                            await self._advance_phase_if_needed()
+                            await self._await_within_session_bound(
+                                self._advance_phase_if_needed,
+                                stage="advance_phase_hint",
+                            )
                     except Exception as exc:  # noqa: BLE001
                         log.exception("phase advance before reactors (run) failed")
                         self._record_coordinator_exception(
@@ -1644,7 +1736,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         for name in self._tick_roles:
                             if self._stop.is_set():
                                 break
-                            await self._reactor_pass(name)
+                            await self._await_within_session_bound(
+                                lambda n=name: self._reactor_pass(n),
+                                stage=f"reactor:{name}",
+                            )
                         # Orchestration checkpoint/compaction; cadence-based.
                         if not self._stop.is_set():
                             try:
@@ -1669,7 +1764,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         log.exception("targeted-build tick raised")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
-                        await self._advance_phase_if_needed()
+                        await self._await_within_session_bound(
+                            self._advance_phase_if_needed,
+                            stage="advance_phase",
+                        )
                     except Exception as exc:  # noqa: BLE001
                         log.exception("phase advance (run) failed")
                         self._record_coordinator_exception(
@@ -1710,6 +1808,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     closing_deadline = await self._enter_closing_phase(
                         grace_sec=grace_sec,
                     )
+                    self._closing_deadline = closing_deadline
                     continue
                 if in_closing:
                     report_terminal = await self._closing_report_terminal()
@@ -1765,11 +1864,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             # attempt, including stop-check exits that never enter PHASE_CLOSE.
             await self._recipe_kb_t4_hook()
             log.info(
-                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f cumulative_gain=%.2f%% max_minutes=%.0f",
+                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
+                "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
                 tick_n,
                 stop_reason or "unknown",
                 self.shared_state.baseline_tput,
-                self.shared_state.cumulative_gain,
+                self.shared_state.cumulative_gain_validated,
                 max_minutes_value,
             )
             # Best-effort cleanup of installed signal handlers.
@@ -2081,7 +2181,7 @@ __all__ = [
     "CoordinatorState",
     "PendingProposal",
     "SharedState",
-    # Re-exported from coordinator_helpers for callers/tests.
+    # Re-exported from coordinator_helpers / state.shared_state for callers/tests.
     "_infer_model_class_from_config",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.

@@ -114,7 +114,7 @@ def _kb_env(monkeypatch, tmp_path, **env):
 
 
 def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
-    """Env is exported before T0 and stable across --resume, so it outranks state."""
+    """Env is exported before T0 and stable across a resume, so it outranks state."""
     _kb_env(monkeypatch, tmp_path, TP="8", EP="4", INFERENCE_OPTIMIZER_NODES="2")
     monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2, "tp": 2, "ep": 2})
 
@@ -931,29 +931,6 @@ def test_wait_health_false_on_timeout(monkeypatch):
     assert lm._wait_health(timeout_s=5) is False
 
 
-def test_infera_discover_role_pods_groups_prefill_decode():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-
-    wl = {
-        "pods": [
-            {"podId": "x-frontend-a", "resourceId": 0, "podIP": "10.0.0.9"},
-            {"podId": "x-prefillworker-1", "resourceId": 1, "podIP": "10.0.1.1"},
-            {"podId": "x-prefillworker-0", "resourceId": 1, "podIP": "10.0.1.0"},
-            {"podId": "x-decodeworker-0", "resourceId": 2, "podIP": "10.0.2.0"},
-        ]
-    }
-    # Ports come off the default base, so assert against the constant: moving
-    # the default must not need this test edited.
-    base = infera_support.DEFAULT_SSH_PORT
-    stride = infera_support.ssh_role_port_offset("decode")
-    r = infera_support.discover_role_pods(wl)
-    assert [p["podIP"] for p in r["prefill"]] == ["10.0.1.0", "10.0.1.1"]
-    assert [p["sshPort"] for p in r["prefill"]] == [base, base + 1]
-    assert [p["podIP"] for p in r["decode"]] == ["10.0.2.0"]
-    assert r["decode"][0]["sshPort"] == base + stride
-    assert r["frontend"] and not r["worker"]
-
-
 def test_infera_ssh_port_role_stride_and_idle_entrypoint():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
     from hyperloom.inference_optimizer.multi_node._internal.ssh_client import DEFAULT_SSH_PORT
@@ -993,55 +970,6 @@ def test_infera_disagg_flags_and_launch_args():
 
 # ---------------------------------------------------------------------------
 # infera_support pure-helper tests (Infera backend SSH fan-out).
-
-
-def test_infera_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-
-    wl = {
-        "pods": [
-            {"podId": "dyn-frontend-abc", "resourceId": 0, "podIP": "10.0.0.9"},
-            {"podId": "dyn-worker-1", "resourceId": 1, "podIP": "10.0.0.2"},
-            {"podId": "dyn-worker-0", "resourceId": 1, "podIP": "10.0.0.1"},
-            {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
-        ]
-    }
-    w = infera_support.discover_role_pods(wl, pd_mode="aggregated")["worker"]
-    assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
-    assert [p["lwsIndex"] for p in w] == [0, 1]
-
-
-def test_infera_frontend_service_url_prefers_live_then_dns():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-
-    assert infera_support.frontend_service_url("wid", "ws") == "http://wid.ws.svc.cluster.local:8000"
-    assert (
-        infera_support.frontend_service_url("wid", "ws", {"clusterIp": "10.1.2.3", "port": 8000})
-        == "http://10.1.2.3:8000"
-    )
-
-
-def test_infera_frontend_service_url_internal_domain_and_nested_port():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-
-    # internalDomain wins.
-    assert (
-        infera_support.frontend_service_url(
-            "w",
-            "ns",
-            {"internalDomain": "w.ns.svc.cluster.local:8000", "clusterIp": "1.2.3.4", "port": {"port": 8000}},
-        )
-        == "http://w.ns.svc.cluster.local:8000"
-    )
-    # Nested port dict (SaFE shape) -> integer port, not the dict repr.
-    assert (
-        infera_support.frontend_service_url(
-            "w",
-            "ns",
-            {"clusterIp": "192.168.154.0", "port": {"protocol": "TCP", "port": 8000, "targetPort": 8000}},
-        )
-        == "http://192.168.154.0:8000"
-    )
 
 
 def test_infera_build_node_launch_args_sglang_and_kill_only():

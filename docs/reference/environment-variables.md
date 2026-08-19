@@ -26,13 +26,10 @@ These variables configure LLM gateway access and optional backend credentials.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `OPENAI_BASE_URL`      | Conditional | —    | OpenAI-side endpoint. Required together with `OPENAI_API_KEY` to enable the OpenAI side (Codex). Example: `https://<your-gateway-host>/api/v1/llm-proxy/v1`.                                                                                                                  |
-| `OPENAI_API_KEY`       | Conditional | —    | OpenAI-side key, format `ak-...`. Pairs with `OPENAI_BASE_URL`; may omit it only when the Anthropic side has no base URL either, in which case the official OpenAI endpoint is implied. Also the source for the internal LLM aliases. Never used for the Anthropic side.                                                        |
-| `ANTHROPIC_BASE_URL`   | Conditional | —    | Anthropic-side endpoint. Required together with `ANTHROPIC_API_KEY` to enable Claude. Never derived from `OPENAI_BASE_URL`.                                                                                                        |
-| `ANTHROPIC_API_KEY`    | Conditional | —    | Anthropic-side key. Pairs with `ANTHROPIC_BASE_URL`; may omit it only when the OpenAI side has no base URL either, in which case the official Anthropic endpoint is implied. Never derived from `OPENAI_API_KEY`; setting it alongside an `OPENAI_BASE_URL` but without its own base URL fails preflight.                                                                                                                                |
+| `ANTHROPIC_BASE_URL`   | Conditional | —    | Anthropic-side endpoint. Required together with `ANTHROPIC_API_KEY` to enable Claude.                                                                                                        |
+| `ANTHROPIC_API_KEY`    | Conditional | —    | Anthropic-side key. Pairs with `ANTHROPIC_BASE_URL`.                                                                                                                               |
 | `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the Ray / e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
 | `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
-| `OPENAI`<br>`_CUSTOM_HEADERS` | No  | —    | OpenAI-side equivalent, passed to the SDK client as `default_headers`. Used whenever `OPENAI_BASE_URL` is set explicitly; when the OpenAI base URL is instead derived from `ANTHROPIC_BASE_URL` (one gateway, no explicit OpenAI endpoint) the client falls back to `ANTHROPIC_CUSTOM_HEADERS`. Setup keeps it in `.env` unless the deployment is Anthropic-only, where the whole OpenAI side is scrubbed. |
 | `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
@@ -61,9 +58,8 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
-| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during `--resume`. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
+| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
-| `ROBUSTNESS_SERVER_URL`                   | No (robustness-agent)| Scan known DNS                                                     | M1 primary data source; empty disables the primary path and forces local-only probes.                                                                                                |
 | `WORKSPACE_PATH` *(legacy)*               | No                   | Unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [Upgrade Hyperloom version](upgrade.md).                            |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` *(deprecated)* | No            | Unset                                                              | **Retired** — replaced by `USER_DATA_PATH`. No longer read.                                                                                                                       |
 
@@ -95,8 +91,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-explore`, `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume`, `--resume-from`, `--force-resume`,
-  `--reset-state`.
+- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.
@@ -254,8 +249,7 @@ characters.
 **What it costs.** One call per qualifying candidate, 60-second ceiling, no
 retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
 setting. Claude uses `CLAUDE_MODEL`, then the project-wide
-`DEFAULT_CLAUDE_MODEL`; OpenAI-compatible routing uses `OPENAI_MODEL`, then
-`CODEX_MODEL`. Model settings are never borrowed across providers.
+`DEFAULT_CLAUDE_MODEL`. Model settings are never borrowed across providers.
 
 **Authority: selection only.** The model may return one of the exact shortlist
 strings and nothing else. An invented path is rejected, as is any answer below
@@ -319,12 +313,11 @@ Both tiers call an external model provider, so what leaves the host is a
 deliberate boundary rather than a side effect of building a useful prompt.
 
 **Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
-`claude_agent_sdk` or `openai_compatible`. Claude requests use the native Claude
-Agent SDK with all repository, shell and web tools denied; OpenAI-compatible
-requests use chat completions. `kernel_source_resolution.json` records the
-provider, model, source-preview decision, outcome and endpoint hostname. It
-never records keys, custom headers, URL userinfo, query parameters or the full
-prompt.
+`claude_agent_sdk`. Claude requests use the native Claude
+Agent SDK with all repository, shell and web tools denied.
+`kernel_source_resolution.json` records the provider, model, source-preview
+decision, outcome and endpoint hostname. It never records keys, custom
+headers, URL userinfo, query parameters or the full prompt.
 
 **Repository source is not sent by default.** The file heads described above are
 withheld unless `HYPERLOOM_LLM_SOURCE_PREVIEW` is set to `1`/`true`/`yes`/`on`.
@@ -352,7 +345,7 @@ metadata and credential-shaped values are dropped.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PROVIDER` | Unset (no network call) | Required provider for source fallback/review: `claude_agent_sdk` (native Claude SDK, tools denied) or `openai_compatible` (chat completions). Common provider aliases are normalized to the canonical audit value. |
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PROVIDER` | Unset (no network call) | Required provider for source fallback/review: `claude_agent_sdk` (native Claude SDK, tools denied). Common provider aliases are normalized to the canonical audit value. |
 | `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional source-resolution model override. Otherwise resolves only from the selected provider's own model variables; no cross-provider fallback. |
 | `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PREVIEW` | Unset (off) | Authorise sending the first 40 lines of candidate source files to the model provider. Applies to both the fallback and review tiers. Leave unset unless the provider is an approved destination for repository content. |
 
@@ -527,7 +520,7 @@ optional; defaults are safe for standard single-node deployments.
 | `INFERENCE_`<br>`OPTIMIZER_`<br>`AITER_JIT_DIR` | Aiter default | Per-attempt override set automatically to `<attempt_root>/aiter_jit` by each targeted build.  Override manually only when you need the global JIT cache to point at a pre-built location; leaving it unset lets each build use its own isolated directory. |
 | `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically from the session `--gpu-type`; operator-override applies to bare-metal installs outside the session.  **Compile target only — it does not participate in architecture detection.**  It names the archs a wheel is *built* for, not the installed device, so provenance ignores it entirely and resolves `gfx_arch` from `HYPERLOOM_GFX_ARCH`, then `--gpu-type`, then `rocminfo`. |
 | `MAX_JOBS` | `8` | Parallelism cap for cmake/hipcc compile steps inside a targeted build.  Reduce on memory-constrained nodes (`MAX_JOBS=4` for a 64 GB compile node).  The default `8` is conservative enough for MI300X/MI355X nodes with 512 GB+. |
-| `HYPERLOOM_`<br>`FRAMEWORK_PYTHON` | Unset | Explicit interpreter that launches the server for a from-source build (the venv Python the artifact was compiled against).  Set automatically from `FrameworkRuntime.runtime_python_exe` via `apply_runtime_override` into the per-variant YAML `benchmark.envs`.  The bypass backend honors it by launching `python -m`; the Magpie backend re-exports it from the YAML `benchmark.envs` to the server env.  Operators normally do not set this by hand. |
+| `HYPERLOOM_`<br>`FRAMEWORK_PYTHON` | Unset | Explicit interpreter that launches the server for a from-source build (the venv Python the artifact was compiled against).  Set automatically from `FrameworkRuntime.runtime_python_exe` via `apply_runtime_override` into the per-variant YAML `benchmark.envs`.  Both backends export that mapping to the server env; the bypass backend additionally uses this value as the `python -m` interpreter.  Operators normally do not set this by hand. |
 | `HYPERLOOM_`<br>`VLLM_ROCM_`<br>`INDEX_URL` | Unset | ROCm pip index URL used as the default vLLM adapter wheel index; also seeds the index allowlist. |
 | `HYPERLOOM_`<br>`ENABLEMENT_`<br>`INDEX_ALLOWLIST` | Unset | Comma-separated allowlist of pip index URL prefixes; a candidate wheel index must match one of these prefixes or provisioning is refused (supply-chain safety). |
 | `HYPERLOOM_`<br>`ENABLEMENT_`<br>`ORIGIN_ALLOWLIST` | Unset | Comma-separated allowlist of git origin URL prefixes; a candidate repo origin must match one of these prefixes or provisioning is refused (supply-chain safety). |
@@ -550,7 +543,7 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---

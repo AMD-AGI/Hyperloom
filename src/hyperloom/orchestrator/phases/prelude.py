@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging as _logging
 import math
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
@@ -23,6 +22,10 @@ from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE,
+)
+from ..loop.coordinator_helpers import (
+    expected_action_cost_minutes,
+    measured_baseline_runtime_sec,
 )
 from .base import PhaseHandler
 
@@ -111,28 +114,34 @@ def _merge_named_current_recipe_configs(
     return " ".join(token for key in order for token in pairs[key]), envs
 
 
-def _warm_kernel_keep_threshold_pct(default: float = 1.0) -> float:
-    """Return the approved combined current-contract KEEP threshold."""
+def _warm_kernel_keep_threshold_pct(state: Any) -> float:
+    """Gain a replayed champion set must clear.
+
+    Follows the shared decaying curve so the bar tracks the session's
+    macro-cycle; ``HYPERLOOM_WARM_KERNEL_KEEP_PCT`` overrides it.
+
+    Args:
+        state: The SharedState the curve reads ``macro_cycle`` from.
+
+    Returns:
+        The KEEP threshold percentage for the warm-kernel replay.
+    """
+    default = _phase_state.resolve_keep_threshold(state)
     raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
     if not raw:
         return default
     try:
         value = float(raw)
     except ValueError:
-        log.warning(
-            "warm replay: invalid HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
-            raw,
-            default,
-        )
-        return default
-    if not math.isfinite(value):
-        log.warning(
-            "warm replay: non-finite HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
-            raw,
-            default,
-        )
-        return default
-    return value
+        value = math.nan
+    if math.isfinite(value):
+        return value
+    log.warning(
+        "warm replay: unusable HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
+        raw,
+        default,
+    )
+    return default
 
 
 class PreludePhase(PhaseHandler):
@@ -151,6 +160,51 @@ class PreludePhase(PhaseHandler):
             )
             else "profile"
         )
+
+    def _measured_analysis_cost_sec(self) -> float:
+        """Expected cost of the initial roofline/profile arm, in seconds.
+
+        The analysis arm boots its own server and runs the same benchmark under
+        a profiler, so one measured baseline round is a floor on its cost rather
+        than a guess at it; :func:`expected_action_cost_minutes` applies that
+        floor and falls back to the catalog for the first analysis of a session
+        that has no measurement yet.
+
+        Returns:
+            float: Expected cost in seconds; ``0.0`` when nothing is on record,
+            which :func:`machine_state.prelude_can_afford` reads as free.
+        """
+        registry = getattr(self, "action_registry", None)
+        meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
+        return (
+            expected_action_cost_minutes(
+                meta,
+                measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
+            )
+            * 60.0
+        )
+
+    def _record_prelude_arm_dropped(self, arm: str, evidence: dict[str, Any]) -> None:
+        """Record a PRELUDE arm dropped for budget on the current phase record.
+
+        The phase record is what the session breakdown exports, so a dropped
+        arm reads as a decision with numbers behind it rather than as an arm
+        that silently never ran.
+
+        Args:
+            arm: The arm that was dropped.
+            evidence: The affordability numbers behind the decision.
+        """
+        if not _phase_state.append_phase_evidence_row(
+            getattr(self.shared_state, "phase_history", None),
+            key="budget_dropped_arms",
+            row={"arm": arm, **evidence},
+        ):
+            return
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort record
+            log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
         """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft.
@@ -1698,7 +1752,7 @@ class PreludePhase(PhaseHandler):
             "combined_current_contract": bool(
                 current_remote or kernel_pending
             ),
-            "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(),
+            "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(self.shared_state),
             "workload_compatibility": workload_compatibility,
         }
         try:
@@ -2178,12 +2232,12 @@ class PreludePhase(PhaseHandler):
                 keep_threshold = (
                     float(raw_threshold)
                     if raw_threshold is not None
-                    else _warm_kernel_keep_threshold_pct()
+                    else _warm_kernel_keep_threshold_pct(self.shared_state)
                 )
             except (TypeError, ValueError):
-                keep_threshold = _warm_kernel_keep_threshold_pct()
+                keep_threshold = _warm_kernel_keep_threshold_pct(self.shared_state)
             if not math.isfinite(keep_threshold):
-                keep_threshold = _warm_kernel_keep_threshold_pct()
+                keep_threshold = _warm_kernel_keep_threshold_pct(self.shared_state)
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
@@ -2241,6 +2295,9 @@ class PreludePhase(PhaseHandler):
             )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
+                # Resume re-points $INFERENCEX_PATH at this checkout, and stops
+                # the run when it has since vanished.
+                state.active_inferencex_path = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [
@@ -2284,36 +2341,26 @@ class PreludePhase(PhaseHandler):
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
                 outcome["replayed_patch_refs"] = replayed_patch_refs
-            # Push warm best_config onto the stack (schema mirrors explore-KEEP).
-            stack_entry = {
-                "action": "replay_warm_recipe",
-                "source_phase": "PRELUDE",
-                "name": "warm_replay",
-                "variant_name": "warm_replay",
-                "task_id": str(getattr(task, "task_id", "") or ""),
-                "extra_server_args": warm_args,
-                "extra_envs": warm_envs,
-                "tput": float(single_round_tput),
+            # Stack-entry-only metadata; the lift keeps current_best pure config.
+            entry_extra: dict[str, Any] = {
+                "gain_pct": round(measured_gain, 3),
                 "hot_tput": float(hot_tput),
                 "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
-                "gain_pct": round(measured_gain, 3),
                 # The score this promotion was judged on, recorded alongside the
                 # throughput it was judged with. ``None`` means no score could be
                 # read, not that the model scored nothing — ``eval_ran`` on the
                 # outcome separates those.
                 "accuracy": outcome.get("replay_accuracy"),
-                "workspace": str(result.get("workspace") or ""),
-                "ts": datetime.now(timezone.utc).isoformat(),
                 # source_tier records the warm-recipe tier for breakdown attribution.
                 "source_tier": outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
             if promoted_checkout:
-                stack_entry["framework_source_root"] = promoted_checkout
+                entry_extra["framework_source_root"] = promoted_checkout
             kernel_outcome = self._book_combined_kernel_keep(result, task)
             outcome["kernel"] = dict(kernel_outcome)
             if kernel_outcome.get("kept"):
-                stack_entry["kernel_replay"] = {
+                entry_extra["kernel_replay"] = {
                     "validation": "combined_recipe_kernel",
                     "count": kernel_outcome["kept"],
                     "columns": sorted(
@@ -2326,14 +2373,14 @@ class PreludePhase(PhaseHandler):
                 }
             patch_result = result.get("warm_patch_result")
             if isinstance(patch_result, dict):
-                stack_entry["recipe_patch_statuses"] = list(
+                entry_extra["recipe_patch_statuses"] = list(
                     patch_result.get("patches") or []
                 )
             if replayed_patch_refs:
-                stack_entry["replayed_patch_refs"] = replayed_patch_refs
+                entry_extra["replayed_patch_refs"] = replayed_patch_refs
             # Resume safety: do not clobber existing stack entries.
             state.optimization_stack = list(state.optimization_stack or [])
-            # Idempotency guard: skip push if a prior promote already pushed it.
+            # A prior promote owns the outcome; re-running would re-journal it.
             already_pushed = any(
                 isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
             )
@@ -2346,32 +2393,21 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
                 return
-            state.optimization_stack.append(stack_entry)
-            # gain_per_stack_entry runs in lock-step with optimization_stack.
-            gp = list(getattr(state, "gain_per_stack_entry", []) or [])
-            gp.append(round(measured_gain, 3))
-            state.gain_per_stack_entry = gp
-            # Cumulative gain is absolute tput vs baseline, not additive deltas.
-            total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
-            state.cumulative_gain = round(total_gain, 3)
-            state.cumulative_gain_validated = round(total_gain, 3)
-            state.cumulative_gain_validated_ts = stack_entry["ts"]
-            state.cumulative_gain_validated_stack_len = len(state.optimization_stack)
-            state.current_best = {
-                "action": "warm_replay",
-                "name": "warm_replay",
-                "tput": single_round_tput,
-                "hot_tput": hot_tput,
-                "cold_tput": cold_round_tput if cold_round_tput > 0 else None,
-                "extra_server_args": warm_args,
-                "extra_envs": warm_envs,
-            }
-            if promoted_checkout:
-                state.current_best["framework_source_root"] = promoted_checkout
-            if stack_entry.get("kernel_replay"):
-                state.current_best["kernel_replay"] = dict(
-                    stack_entry["kernel_replay"]
-                )
+            self._lift_to_current_best(
+                "replay_warm_recipe",
+                float(single_round_tput),
+                {
+                    "name": "warm_replay",
+                    "candidate_extra_server_args": warm_args,
+                    "extra_envs": warm_envs,
+                    "source_phase": "PRELUDE",
+                    "task_id": str(getattr(task, "task_id", "") or ""),
+                    "workspace": str(result.get("workspace") or ""),
+                },
+                entry_extra=entry_extra,
+            )
+            if baseline_tput > 0:
+                self._update_cumulative_gain_validated(single_round_tput)
             log.info(
                 "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
                 "min_required=+%.2f%%); pushed warm_replay onto stack",
@@ -2455,6 +2491,22 @@ class PreludePhase(PhaseHandler):
         if not isinstance(baseline_tput, (int, float)) or baseline_tput <= 0:
             return
         if (state.auto_roofline_pending_task_id or "").strip():
+            return
+        affordable, evidence = _phase_state.prelude_can_afford(
+            state,
+            expected_cost_sec=self._measured_analysis_cost_sec(),
+        )
+        if not affordable:
+            log.warning(
+                "PRELUDE: skipping the initial %s — %.0fs of preparation budget "
+                "left (bound=%s) against an expected %.0fs. The optimization "
+                "phases keep the time instead.",
+                self._internal_analysis_kind(),
+                evidence.get("affordable_sec", 0.0),
+                evidence.get("bound", ""),
+                evidence.get("expected_cost_sec", 0.0),
+            )
+            self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
             rl_task = await self._enqueue_internal_analysis_task(

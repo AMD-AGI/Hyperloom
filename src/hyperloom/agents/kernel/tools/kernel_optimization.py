@@ -1402,14 +1402,9 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         runtime_flags.update(candidate["runtime_flags"])
     runtime_flags.setdefault("is_multigpu", bool(candidate.get("is_multigpu")))
     runtime_flags.setdefault("num_gpus_recommended", candidate.get("num_gpus_recommended"))
-    # Standalone shim: keeps kernel-agent scripts independent from ``hyperloom``.
-    from _payload_aliases import (  # type: ignore[import-not-found]
-        read_extra_server_args as _read_eserver,
-    )
-
     extra_server_args = (
         getattr(args, "extra_server_args", "")
-        or _read_eserver(candidate)
+        or candidate.get("extra_server_args", "")
         or candidate.get("candidate_extra_server_args", "")
     )
     parsed_sglang_args = parse_extra_server_args(str(extra_server_args))

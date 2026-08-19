@@ -80,7 +80,6 @@ Required optimize CLI flags:
 - `--max-minutes-explore-pct 0.39`
 - `--max-minutes-sweep-pct 0.01`
 - `--explore-force-exit-budget-pct 0.01`
-- `--explore-force-exit-hours-remaining 0.05`
 - `--no-framework-agent`
 - `--no-kernel`
 - `--no-enable-conc-sweep`
@@ -196,13 +195,12 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-explore-pct 0.39`,
-   `--max-minutes-sweep-pct 0.01`,
-   `--explore-force-exit-budget-pct 0.01`, and
-   `--explore-force-exit-hours-remaining 0.05` in the optimize command. With
-   FRAMEWORK_AGENT and KERNEL_AGENT disabled, Hyperloom redistributes their
-   shares so most of the short run budget is reserved for EXPLORE while still
-   leaving SWEEP/CLOSE time to exit cleanly near the deadline.
+5. Include `--max-minutes-explore-pct 0.39` and `--max-minutes-sweep-pct 0.01`
+   in the optimize command. With FRAMEWORK_AGENT and KERNEL_AGENT disabled,
+   Hyperloom redistributes their shares so most of the short run budget is
+   reserved for EXPLORE while still leaving SWEEP/CLOSE time to exit cleanly
+   near the deadline. Also include `--explore-force-exit-budget-pct 0.01`: with
+   no KERNEL phase to hand the reserve to, EXPLORE should spend its whole share.
 6. Include `--no-framework-agent` in the optimize command so the
    FRAMEWORK_AGENT phase is skipped.
 7. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
@@ -210,5 +208,5 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 9. Include `--no-enable-roofline` in the optimize command so PRELUDE uses the lighter profile path instead of roofline analysis.
 10. Report the session ID, log path, PID, and initial health check result.
 11. Monitor the process every 300 seconds until work is done.
-12. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+12. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 13. If `stop_reason` in the current session `state.json` is final, stop and exit.

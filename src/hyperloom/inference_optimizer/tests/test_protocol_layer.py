@@ -317,6 +317,8 @@ def test_task_states_and_terminals():
     assert "queued" in TASK_STATES
     assert "succeeded" in TERMINAL_STATES
     assert "running" not in TERMINAL_STATES
+    # A retry takes a fresh idempotency key, never a re-run of the failed row.
+    assert "failed" in TERMINAL_STATES
 
 
 @pytest.mark.asyncio

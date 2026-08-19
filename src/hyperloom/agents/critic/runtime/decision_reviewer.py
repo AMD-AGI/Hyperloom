@@ -466,15 +466,6 @@ class DecisionReviewer:
         """
         req = parse_request(raw_request)
         merge = self.session_memory.merge_context(req.session_id, req.context)
-        self.session_memory.append_event(
-            req.session_id,
-            {
-                "kind": "init_session",
-                "explicit_keys": merge.explicit_keys,
-                "from_memory_keys": merge.from_memory_keys,
-                "missing_keys": merge.missing_keys,
-            },
-        )
         return {
             "session_id": req.session_id,
             "merged_context": merge.merged,
@@ -525,13 +516,6 @@ class DecisionReviewer:
                     "items": len(drafts),
                 }
             )
-        self.session_memory.append_event(
-            req.session_id,
-            {
-                "kind": "close_session",
-                "kb_writes": [w["result"]["status"] for w in outcome.kb_writes],
-            },
-        )
         return outcome
 
     # ------------------------------------------------------------------
@@ -576,14 +560,6 @@ class DecisionReviewer:
             bundle.required_context = critical_missing
             bundle.kb_read_skipped_reason = "missing_critical_context"
             bundle.notes.append("model and/or framework unknown — KB priors not fetched")
-            self.session_memory.append_event(
-                req.session_id,
-                {
-                    "kind": "prepare_review",
-                    "missing_critical": critical_missing,
-                    "kb_skipped": True,
-                },
-            )
             return bundle
 
         # Skip KB reads only if explicitly disabled or inappropriate kind.
@@ -595,14 +571,6 @@ class DecisionReviewer:
         if not self.kb_writer.read_enabled:
             bundle.kb_read_skipped_reason = "kb_read_disabled"
             bundle.notes.append("KB_READ_ENABLED=false — proceeding without priors")
-            self.session_memory.append_event(
-                req.session_id,
-                {
-                    "kind": "prepare_review",
-                    "kb_skipped": True,
-                    "reason": "kb_read_disabled",
-                },
-            )
             return bundle
 
         # Breaker open from an earlier failure → skip another timeout.
@@ -610,15 +578,6 @@ class DecisionReviewer:
             bundle.kb_read_skipped_reason = "kb_unreachable"
             bundle.notes.append("KB service unreachable (circuit breaker open); proceeding without priors")
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
-            self.session_memory.append_event(
-                req.session_id,
-                {
-                    "kind": "prepare_review",
-                    "kb_skipped": True,
-                    "reason": "kb_unreachable",
-                    "breaker": self.kb_writer.kb_breaker_state(),
-                },
-            )
             return bundle
 
         scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
@@ -644,16 +603,6 @@ class DecisionReviewer:
                 topic_hits[p.msg_id] = priors.get("priors") or []
                 if priors.get("cache") == "kb_unreachable":
                     any_kb_unreachable = True
-                self.session_memory.append_event(
-                    req.session_id,
-                    {
-                        "kind": "kb_prior_lookup",
-                        "msg_id": p.msg_id,
-                        "topic": topic,
-                        "cache": priors.get("cache"),
-                        "count": len(topic_hits[p.msg_id]),
-                    },
-                )
                 priors_requests.append(
                     {
                         "msg_id": p.msg_id,
@@ -676,15 +625,6 @@ class DecisionReviewer:
             bundle.kb_priors_for_decision = priors.get("priors") or []
             if priors.get("cache") == "kb_unreachable":
                 any_kb_unreachable = True
-            self.session_memory.append_event(
-                req.session_id,
-                {
-                    "kind": "kb_prior_lookup_decision",
-                    "topic": topic,
-                    "cache": priors.get("cache"),
-                    "count": len(bundle.kb_priors_for_decision),
-                },
-            )
             priors_requests.append(
                 {
                     "msg_id": None,

@@ -42,6 +42,7 @@ from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CODEX_MODEL,
 )
 
+from ..actions.stop_attribution import stopped_by_the_run_class
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
 from ..trace.parse_usage import (
@@ -54,6 +55,8 @@ from ._recorder_trace import trace_recording_skipped
 # Re-exported: callers patch these at ``request_handlers.<name>``.
 from ._kernel_decisions import (
     _honest_flag as _honest_flag,
+    _entry_by_kernel_id as _entry_by_kernel_id,
+    index_attempts_by_kernel_id as index_attempts_by_kernel_id,
     _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
     kernel_patch_key as kernel_patch_key,
     find_rejected_kernel_patch as find_rejected_kernel_patch,
@@ -72,6 +75,10 @@ from ._kernel_decisions import (
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
     is_collective_candidate as is_collective_candidate,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
+)
+from ..state.kernel_decision_settings import (
+    effective_hot_kernel_gpu_pct,
+    effective_hot_kernel_min_gpu_pct,
 )
 
 
@@ -1394,11 +1401,24 @@ def _fill_integrate_defaults_from_state(
             }
 
     kernel_id = str(resolved.get("kernel_id") or "")
-    if kernel_id and not resolved.get("task_group_key"):
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
-        task_group_key = str(attempt.get("task_group_key") or "")
-        if task_group_key:
-            resolved["task_group_key"] = task_group_key
+    if kernel_id:
+        attempt = _entry_by_kernel_id(state, kernel_id) or {}
+        if not resolved.get("task_group_key"):
+            task_group_key = str(attempt.get("task_group_key") or "")
+            if task_group_key:
+                resolved["task_group_key"] = task_group_key
+        # Defense-in-depth mirror of _queue_kernel_keep()'s refusal to queue
+        # a vendor-playbook KEEP for auto-integration (PR #1191 review
+        # finding #1): this also catches an LLM-initiated integrate request
+        # that names the kernel_id directly, bypassing the pending-queue
+        # lookup above via _resolve_kernel_patch_identity()'s
+        # last_kernel_opt.best_artifact_path backfill.
+        if attempt.get("vendor_playbook_deploy_blocked"):
+            resolved["_vendor_playbook_deploy_blocked"] = True
+        elif isinstance(state.last_kernel_opt, dict) and str(
+            state.last_kernel_opt.get("kernel_id") or ""
+        ) == kernel_id and state.last_kernel_opt.get("vendor_playbook_deploy_blocked"):
+            resolved["_vendor_playbook_deploy_blocked"] = True
 
     return resolved
 
@@ -1536,7 +1556,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
     if kernel_id:
-        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        attempt = _entry_by_kernel_id(state, kernel_id) or {}
         _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
         if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
             resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
@@ -4071,8 +4091,6 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
         return {}
     if str(current_best.get("action") or "") != "fusion":
         return {}
-    if str(current_best.get("engine") or "") != "forge_fusion":
-        return {}
     envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
     if not isinstance(envs, dict):
         return {}
@@ -5878,8 +5896,8 @@ def _batch_kernel_candidates(
 
     # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
-    attempts_by_kid: dict[str, dict] = {}
     attempts_by_task: dict[str, dict] = {}
+    attempts_by_kid: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
         resolve_hot_kernel_min_gpu_pct,
@@ -5894,8 +5912,8 @@ def _batch_kernel_candidates(
 
             state = SharedState.load_or_init(session_dir)
             rejected_kernel_ids = set(state.rejected_kernel_ids or [])
-            attempts_by_kid = dict(state.kernel_opt_attempts or {})
             attempts_by_task = dict(state.kernel_opt_task_attempts or {})
+            attempts_by_kid = index_attempts_by_kernel_id(attempts_by_task)
             in_flight = _in_flight_kernel_ids(session_dir)
         except Exception:
             log.exception(
@@ -5990,10 +6008,7 @@ def _batch_kernel_candidates(
         recorded_ledger = next(
             (
                 (ledger_id, entry)
-                for ledger_id, entry in {
-                    **attempts_by_kid,
-                    **attempts_by_task,
-                }.items()
+                for ledger_id, entry in attempts_by_task.items()
                 if isinstance(entry, dict)
                 and (
                     (
@@ -6007,9 +6022,9 @@ def _batch_kernel_candidates(
                     )
                     or (
                         not group_key
-                        and ledger_id in member_ids
                         and group_id
                         and str(entry.get("task_group_id") or "") == group_id
+                        and str(entry.get("current_kernel_id") or "") in member_ids
                     )
                 )
             ),
@@ -6081,13 +6096,15 @@ def _batch_kernel_candidates(
                     continue
         if not primary_cand.get("source_file"):
             continue
-        try:
-            picked_pct = float(primary_cand.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            picked_pct = 0.0
-        if picked_pct < min_gpu_pct:
+        # Vendor-playbook groups (mori's dispatch+combine) are gated on the
+        # sum of the group's members, not the picked member's own share, and
+        # may pin a per-playbook floor -- see
+        # effective_hot_kernel_gpu_pct's docstring. No-op for ordinary
+        # task_group members, which carry neither field.
+        gate_floor = effective_hot_kernel_min_gpu_pct(primary_cand, min_gpu_pct)
+        if effective_hot_kernel_gpu_pct(primary_cand) < gate_floor:
             for m in member_ids:
-                skipped.setdefault(m, f"below_min_gpu_pct={min_gpu_pct}")
+                skipped.setdefault(m, f"below_min_gpu_pct={gate_floor}")
             continue
         # Shallow copy + attach group so the subprocess sees the task_group.
         item = dict(primary_cand)
@@ -6148,8 +6165,11 @@ def _batch_kernel_candidates(
         legacy_eligible = deduped
 
     for kernel_id, item, row_pct in legacy_eligible:
-        if row_pct < min_gpu_pct:
-            skipped[kernel_id] = f"below_min_gpu_pct={min_gpu_pct}"
+        # See the task_group gate above: prefer a vendor-playbook group's
+        # aggregate share and floor over the row's own gpu_pct when stamped.
+        gate_floor = effective_hot_kernel_min_gpu_pct(item, min_gpu_pct)
+        if max(row_pct, effective_hot_kernel_gpu_pct(item)) < gate_floor:
+            skipped[kernel_id] = f"below_min_gpu_pct={gate_floor}"
             continue
         selected.append(item)
 
@@ -7333,6 +7353,28 @@ async def integrate_handler(
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
+    if payload.get("_vendor_playbook_deploy_blocked"):
+        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
+        # tuning) has no deployable artifact: best_artifact_path is a copy of
+        # a KernelForge task-bundle config file, not a rewrite of the real
+        # installed operator, and apply_kernel_patch's legacy full-file
+        # replace would happily overwrite the real site-packages module with
+        # it (PR #1191 review finding #1). Refuse before touching the
+        # filesystem rather than letting a config-file copy silently
+        # corrupt a live install.
+        return {
+            "status": "failed",
+            "error_class": "vendor_playbook_not_deployable",
+            "error": (
+                "integrate refused: kernel_id="
+                f"{payload.get('kernel_id')!r} is a vendor-playbook result "
+                "(closed-source operator launch-config tuning); it has no "
+                "deployable artifact and must not be applied as a source patch"
+            ),
+            "decision": "NEEDS_REVIEW",
+            "kernel_id": payload.get("kernel_id"),
+        }
+
     base_tput = float(payload.get("base_tput", 0.0))
     if base_tput <= 0:
         return {
@@ -7565,6 +7607,21 @@ async def integrate_handler(
         rebaseline_error_class = (
             str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
         ) or "bench_exception"
+        stopped = stopped_by_the_run_class(rebaseline_error_class)
+        if stopped is not None:
+            # Nothing was measured, so the patch has no verdict to answer for.
+            return {
+                "status": "failed",
+                "error_class": stopped.error_class,
+                "error": stopped.interrupted,
+                "decision": "NEEDS_REVIEW",
+                "rebaseline_detail": bench_result,
+                "kernel_id": kernel_id,
+                "patch_path": patch_path,
+                "target_file": payload.get("target_file") or payload.get("source_file"),
+                "apply_result": apply_result,
+                "revert_result": revert_result,
+            }
         return {
             "status": "failed",
             "error_class": rebaseline_error_class,

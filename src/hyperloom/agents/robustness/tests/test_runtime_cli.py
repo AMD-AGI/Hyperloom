@@ -88,20 +88,48 @@ async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_run_tick_propagates_session_id_when_prompt_lacks_it(tmp_path: Path):
+async def test_run_tick_hands_the_parsed_snapshot_to_the_reactor(tmp_path: Path, monkeypatch):
+    """Every parsed shared-state field must survive the trip into the reactor."""
+    captured: dict[str, object] = {}
+
+    async def _capture_tick(_self, ctx):
+        captured["ctx"] = ctx
+        return []
+
+    from hyperloom.agents.robustness.role.reactor import Reactor
+
+    monkeypatch.setattr(Reactor, "tick", _capture_tick, raising=True)
+
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
 
-    prompt = "=== Shared session state ===\ncrash_count=0\n=== Inbox for robustness ===\n(no new messages)\n"
+    prompt = (
+        "=== Time budget ===\n"
+        "elapsed=116.0min  remaining=4.0min  budget=120min  closing_phase=False\n"
+        "=== Shared session state ===\n"
+        "tick=42\n"
+        "stop_reason=time_exhausted\n"
+        "crash_count=3\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
     request = _coerce_request(
         {
             "kind": "coordinator_inbox",
-            "session_id": "sess-fallback",
+            "session_id": "sess-snapshot",
             "raw_prompt": prompt,
             "options": {"session_dir": str(tmp_path)},
         }
     )
     emit = await _run_tick(request)
-    assert emit["session_id"] == "sess-fallback"
+
+    assert emit["session_id"] == "sess-snapshot"
+    snap = captured["ctx"].shared_state  # type: ignore[union-attr]
+    assert snap.tick == 42
+    assert snap.stop_reason == "time_exhausted"
+    assert snap.crash_count == 3
+    assert snap.budget_minutes == 120.0
+    assert snap.remaining_minutes == 4.0
+    assert snap.elapsed_minutes == 116.0
 
 
 def test_coerce_request_rejects_bad_kind():
@@ -220,24 +248,15 @@ def test_subprocess_tick_help_smoke():
 
 
 # ---------------------------------------------------------------------------
-# M2 multi-node options plumbing
+# Multi-node options plumbing
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
     """``request.options`` overrides land on the per-tick :class:`Config`."""
-    # Drop workload-uid env so the only non-default Config value comes from options.
-    for key in (
-        "ROBUSTNESS_WORKLOAD_UID",
-        "CLAW_WORKLOAD_UID",
-        "WORKLOAD_UID",
-        "KUBE_WORKLOAD_UID",
-        "RAY_JOB_ID",
-        "ROBUSTNESS_DISABLE_LOCAL_PROBE",
-        "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
-        "ROBUSTNESS_NODES",
-    ):
+    # Drop the env so the only non-default Config value comes from options.
+    for key in ("ROBUSTNESS_DISABLE_LOCAL_PROBE", "ROBUSTNESS_NODES"):
         monkeypatch.delenv(key, raising=False)
 
     captured: dict[str, object] = {}
@@ -266,11 +285,7 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
             **_REQUEST_HEARTBEAT,
             "options": {
                 "session_dir": str(tmp_path),
-                "robustness_server_url": "",
                 "disable_local_probe": True,
-                "enable_cluster_pod_metrics": True,
-                "pod_metrics_categories": "gpu,memory",
-                "workload_uid": "wl-123",
                 "nodes": 4,
             },
         }
@@ -279,9 +294,6 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 
     config = captured["config"]
     assert config.disable_local_probe is True
-    assert config.enable_cluster_pod_metrics is True
-    assert config.pod_metrics_categories == ("gpu", "memory")
-    assert config.workload_uid == "wl-123"
     assert config.nodes == 4
 
 
@@ -302,6 +314,9 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
             def drain_usage(self):
                 return usage
 
+            async def aclose(self):
+                return None
+
         bundle.components.rca = _StubRca()
         return bundle
 
@@ -318,7 +333,7 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
     request = _coerce_request(
         {
             **_REQUEST_HEARTBEAT,
-            "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+            "options": {"session_dir": str(tmp_path)},
         }
     )
     emit = await _run_tick(request)
@@ -348,7 +363,7 @@ async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
     request = _coerce_request(
         {
             **_REQUEST_HEARTBEAT,
-            "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+            "options": {"session_dir": str(tmp_path)},
         }
     )
     emit = await _run_tick(request)

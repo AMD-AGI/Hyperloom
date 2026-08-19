@@ -242,11 +242,6 @@ def _save_cache(index: SourceIndex) -> None:
 _PROCESS_INDEX: SourceIndex | None = None
 
 
-def reset_index_cache() -> None:
-    """Drop the in-process index singleton (for tests / a forced rebuild)."""
-    global _PROCESS_INDEX
-    _PROCESS_INDEX = None
-
 
 def load_or_build(frameworks: dict[str, source_env.FrameworkRoot] | None = None) -> SourceIndex:
     """Return a cached index for the current versions, or build + cache one.

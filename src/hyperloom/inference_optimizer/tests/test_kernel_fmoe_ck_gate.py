@@ -103,7 +103,7 @@ async def test_unsupported_shape_is_skipped_before_the_restart(
     model = _qwen3_moe_model(tmp_path / "Qwen3-30B-A3B")
     result = _fmoe_ck_result(tuned_csv)
 
-    await _phase(tmp_path, model, tp=8)._validate_forge_gemm_tuning_e2e(result)
+    await _phase(tmp_path, model, tp=8)._validate_gemm_tuning_e2e(result)
 
     reverted = result["e2e_results"]["reverted"]
     assert [r["reason"] for r in reverted] == [_SKIP_REASON]
@@ -120,7 +120,7 @@ async def test_supported_shape_still_reaches_validation(
     model = _qwen3_moe_model(tmp_path / "Qwen3-30B-A3B")
     result = _fmoe_ck_result(tuned_csv)
 
-    await _phase(tmp_path, model, tp=2)._validate_forge_gemm_tuning_e2e(result)
+    await _phase(tmp_path, model, tp=2)._validate_gemm_tuning_e2e(result)
 
     assert [c["task_id"] for c in integrate_spy] == ["gemm_tune_e2e_fmoe_ck"]
     assert [k["tuner"] for k in result["e2e_results"]["kept"]] == ["fmoe_ck"]
@@ -133,7 +133,7 @@ async def test_gate_only_applies_to_fmoe_ck(tmp_path: Path, integrate_spy, tuned
     result = _fmoe_ck_result(tuned_csv)
     result["tuners_run"][0]["tuner"] = "fmoe_asm"
 
-    await _phase(tmp_path, model, tp=8)._validate_forge_gemm_tuning_e2e(result)
+    await _phase(tmp_path, model, tp=8)._validate_gemm_tuning_e2e(result)
 
     assert [c["task_id"] for c in integrate_spy] == ["gemm_tune_e2e_fmoe_asm"]
     assert result["e2e_results"]["reverted"] == []
@@ -144,7 +144,7 @@ async def test_undecidable_model_is_not_skipped(tmp_path: Path, integrate_spy, t
     """No readable config: leave the call to sglang rather than skip on a guess."""
     result = _fmoe_ck_result(tuned_csv)
 
-    await _phase(tmp_path, str(tmp_path / "absent"), tp=8)._validate_forge_gemm_tuning_e2e(result)
+    await _phase(tmp_path, str(tmp_path / "absent"), tp=8)._validate_gemm_tuning_e2e(result)
 
     assert [c["task_id"] for c in integrate_spy] == ["gemm_tune_e2e_fmoe_ck"]
     assert [r["reason"] for r in result["e2e_results"]["reverted"]] != [_SKIP_REASON]

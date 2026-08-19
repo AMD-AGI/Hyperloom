@@ -955,6 +955,7 @@ _VLLM_GEN_TPUT_RE = re.compile(
 
 # Fraction of the leading warmup samples dropped before averaging so the
 # estimate reflects sustained decode rather than the cold-start climb.
+# ``bypass_analysis`` parses the same log with 0.2 and a different clamp bound.
 _DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
 
 

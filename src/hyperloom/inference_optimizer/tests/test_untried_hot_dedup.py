@@ -22,8 +22,7 @@ def _state(hot, *, rejected=(), attempts=None):
         last_trace_analyze={"hot_kernels_top15": hot, "task_groups": []},
         optimization_stack=[],
         rejected_kernel_ids=list(rejected),
-        kernel_opt_attempts=attempts or {},
-        kernel_opt_task_attempts=None,  # populated by _ensure_kernel_task_state
+        kernel_opt_task_attempts=dict(attempts or {}),
     )
 
 

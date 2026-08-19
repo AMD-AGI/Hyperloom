@@ -92,8 +92,11 @@ analysis task.
 
 ## Cost / runtime
 
-* `cost_minutes_p50=8` / `cost_minutes_p75=15` — dominated by profile
-  (Magpie + torch profiler overhead) + trace_analyze (TraceLens
-  subprocess); `trace_split` inside TraceLens adds < 30s.
+* `typical_runtime_min=10` — dominated by profile (Magpie + torch profiler
+  overhead) + trace_analyze (TraceLens subprocess); `trace_split` inside
+  TraceLens adds < 30s. The estimate is calibrated on small models: a field
+  session measured an 81-minute roofline, so the budget guards prefer this
+  session's own measured baseline round once one exists and fall back to this
+  number only before that.
 * `requires_lanes=[profile_lane]` — same lane as `profile` so we
   don't run two profile-class tasks concurrently against the server.

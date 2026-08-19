@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
@@ -20,7 +22,12 @@ from hyperloom.orchestrator.roles.mock_backend import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.close import (
+    _CLOSE_STEP_WAIT_CEILING_SEC,
+    _CLOSE_STEP_WAIT_FLOOR_SEC,
+)
 from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS
+from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 
 
 @dataclass
@@ -36,6 +43,8 @@ class _BareState:
     recipe_finalize_attempts: int = 0
     recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    max_minutes: int = 0
+    closing_grace_sec: float | None = None
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
@@ -43,6 +52,9 @@ class _BareState:
 
     def set_stop_reason(self, reason: str) -> None:
         self.stop_reason = reason
+
+    def closing_reserve_sec(self) -> float:
+        return effective_closing_grace_sec(self.max_minutes, self.closing_grace_sec)
 
 
 @dataclass
@@ -83,7 +95,8 @@ class _StubTaskRegistry:
         row = _StubTaskRow(
             task_id=tid,
             kind=kind,
-            state="succeeded",
+            # Matches the registry's INSERT: a new row is always ``queued``.
+            state="queued",
             params=dict(params),
             idempotency_key=idempotency_key,
         )
@@ -247,6 +260,248 @@ async def test_enqueue_internal_report_task_reuses_existing(coord):
     task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
     assert task is existing
     assert "internal-report-close_phase_entry" not in coord.tasks._by_key
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_report_task_replaces_a_cancelled_one(coord):
+    """A report the deadline path enqueued and then cancelled cannot be run; the sequencer needs a live one.
+
+    Regression for the ``cannot transition from 'cancelled' to 'running'``
+    crash: the helper used to answer "was one enqueued?" when the caller needs
+    "is one runnable?".
+    """
+    dead = _StubTaskRow(
+        task_id="wallclock-report",
+        kind="report",
+        state="cancelled",
+        params={},
+        idempotency_key="closing-report-1234",
+    )
+    coord.tasks._by_id["wallclock-report"] = dead
+    coord.shared_state.closing_report_task_id = "wallclock-report"
+
+    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+
+    assert task is not dead
+    assert task.state == "queued"
+    assert coord.shared_state.closing_report_task_id == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_report_task_retries_past_a_dead_idempotent_row(coord):
+    """The idempotency key itself can resolve to a corpse; the retry key mints a runnable row."""
+    coord.tasks._by_key["internal-report-close_phase_entry"] = _StubTaskRow(
+        task_id="dead-idempotent",
+        kind="report",
+        state="cancelled",
+        params={},
+        idempotency_key="internal-report-close_phase_entry",
+    )
+
+    task = await coord._enqueue_internal_report_task(reason="close_phase_entry")
+
+    assert task.task_id != "dead-idempotent"
+    assert task.idempotency_key == "internal-report-close_phase_entry-retry"
+    assert task.state == "queued"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_still_reports_when_the_first_report_task_was_cancelled(coord):
+    """End to end: a session that hits its deadline is the one whose report matters most."""
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.tasks._by_id["wallclock-report"] = _StubTaskRow(
+        task_id="wallclock-report",
+        kind="report",
+        state="cancelled",
+        params={},
+        idempotency_key="closing-report-1234",
+    )
+    coord.shared_state.closing_report_task_id = "wallclock-report"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    by_step = {r["step"]: r for r in rows}
+    assert by_step["report"]["status"] == "done"
+    assert [t.task_id for t in coord.sub.run_calls] != ["wallclock-report"]
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_task_is_reported_not_run(coord):
+    """Backstop: nothing hands a terminal row to ``run_task``, whose ``queued -> running`` would raise."""
+    done = _StubTaskRow(
+        task_id="already-done",
+        kind="report",
+        state="succeeded",
+        params={},
+        idempotency_key="internal-report-close_phase_entry",
+    )
+
+    state = await coord._run_close_task(done, step="1 (report)")
+
+    assert state == "succeeded"
+    assert coord.sub.run_calls == []
+
+
+class _FinishesWhileWaiting(_StubTaskRegistry):
+    """Registry whose running row lands terminal after ``lands_on`` lookups."""
+
+    def __init__(self, terminal_state: str, *, lands_on: int = 2):
+        super().__init__()
+        self._terminal_state = terminal_state
+        self._lands_on = lands_on
+        self.gets = 0
+
+    async def get(self, task_id):
+        row = await super().get(task_id)
+        self.gets += 1
+        if self.gets >= self._lands_on:
+            row.state = self._terminal_state
+        return row
+
+
+def _running_report_row(coord, *, kind: str = "report") -> _StubTaskRow:
+    """Register a close-step task the wall-clock deadline path already enqueued AND dispatched."""
+    row = _StubTaskRow(
+        task_id="wallclock-report",
+        kind=kind,
+        state="running",
+        params={},
+        idempotency_key="closing-report-1234",
+    )
+    coord.tasks._by_id[row.task_id] = row
+    return row
+
+
+def _clock_advancing_by(monkeypatch: pytest.MonkeyPatch, step_sec: float) -> None:
+    """Give the CLOSE module a monotonic clock that jumps ``step_sec`` per read.
+
+    The wait under test is measured in minutes, so a test that spent it would
+    be a test nobody runs. Only the CLOSE module's view of the clock is
+    replaced, which leaves the event loop's own timekeeping alone.
+    """
+    from hyperloom.orchestrator.phases import close as close_mod
+
+    now = 0.0
+
+    def _monotonic() -> float:
+        nonlocal now
+        now += step_sec
+        return now
+
+    monkeypatch.setattr(
+        close_mod,
+        "time",
+        SimpleNamespace(monotonic=_monotonic, time=time.time),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_state", ["succeeded", "failed"])
+async def test_a_running_task_is_waited_for_not_re_run(coord, terminal_state: str):
+    """``running -> running`` is not a transition the registry has; asking for it kills the step.
+
+    The deadline path dispatches the report before CLOSE is entered, so the
+    sequencer routinely meets its own step already under way. It was documented
+    as "the sequencer will wait for it" and implemented as a second dispatch.
+    """
+    coord.tasks = _FinishesWhileWaiting(terminal_state)
+    coord._dispatcher_poll_sec = 0.01
+    coord.shared_state.max_minutes = 60
+
+    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+
+    assert state == terminal_state
+    assert coord.sub.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever(
+    coord,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The wait is patient, not unbounded: a step that never lands is recorded, not awaited forever."""
+    coord._dispatcher_poll_sec = 0.0
+    coord.shared_state.max_minutes = 60
+    _clock_advancing_by(monkeypatch, step_sec=30.0)
+
+    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+
+    assert state == "running"
+    assert coord.sub.run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_wait_for_a_running_report_outlives_a_short_session_reserve(
+    coord,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A ten-minute session reserves twelve seconds for CLOSE; no report is written in twelve seconds.
+
+    Bounding the wait by the reserve made it a wait on paper only — the step
+    the deadline path dispatched was declared failed while it was still
+    running, and the session that ran out of time is the one whose report is
+    worth the most. The bound belongs to the work, so it is the report's own
+    expected runtime.
+    """
+    coord.tasks = _FinishesWhileWaiting("succeeded", lands_on=5)
+    coord._dispatcher_poll_sec = 0.0
+    coord.shared_state.max_minutes = 10
+    assert coord.shared_state.closing_reserve_sec() == pytest.approx(12.0)
+    # Five looks at five simulated seconds apiece: past the reserve, inside the
+    # two minutes the catalogue prices a report at.
+    _clock_advancing_by(monkeypatch, step_sec=5.0)
+
+    state = await coord._run_close_task(_running_report_row(coord), step="1 (report)")
+
+    assert state == "succeeded"
+    assert coord.sub.run_calls == []
+
+
+def test_the_wait_is_the_step_s_own_expected_runtime(coord):
+    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+
+    assert bound == pytest.approx(ACTION_CATALOGUE["report"].typical_runtime_min * 60.0)
+
+
+def test_a_step_the_catalogue_prices_at_almost_nothing_still_gets_the_floor(coord):
+    """``session_breakdown`` is priced at 12s; giving up on it after 12s is giving up on it."""
+    row = _running_report_row(coord, kind="session_breakdown")
+
+    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+
+
+def test_an_uncatalogued_step_gets_the_floor_too(coord):
+    row = _running_report_row(coord, kind="not_an_action")
+
+    assert coord.phase_close._close_step_wait_sec(row) == pytest.approx(_CLOSE_STEP_WAIT_FLOOR_SEC)
+
+
+def test_an_extravagantly_priced_step_is_capped(coord):
+    """A wedged step must not hold the process open for as long as its action might legitimately run."""
+    coord.action_registry = {"report": SimpleNamespace(typical_runtime_min=1000.0)}
+
+    bound = coord.phase_close._close_step_wait_sec(_running_report_row(coord))
+
+    assert bound == pytest.approx(_CLOSE_STEP_WAIT_CEILING_SEC)
+
+
+@pytest.mark.asyncio
+async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
+    """End to end: the waited-for report is reported like any other outcome."""
+    coord.tasks = _FinishesWhileWaiting("succeeded")
+    coord._dispatcher_poll_sec = 0.01
+    coord.shared_state.max_minutes = 60
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    _running_report_row(coord)
+    coord.shared_state.closing_report_task_id = "wallclock-report"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    report = next(r for r in rows if r["step"] == "report")
+    assert report["status"] == "done"
+    assert "wallclock-report" not in [t.task_id for t in coord.sub.run_calls]
 
 
 @pytest.mark.asyncio

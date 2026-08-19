@@ -31,9 +31,13 @@ log = logging.getLogger(__name__)
 # Constants below are read from other modules; listed here to mark them as
 # intentionally exported.
 __all__ = [
+    "TIME_BUDGET_EXEMPT_ACTIONS",
     "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
+    "action_fits_time_budget",
     "coerce_needs_gpu",
+    "expected_action_cost_minutes",
+    "measured_baseline_runtime_sec",
 ]
 
 
@@ -216,26 +220,142 @@ _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 _MAX_ROOFLINE_FAILURE_RETRIES: int = 3
 
 
-def effective_closing_grace_sec(
-    max_minutes: float | None,
-    closing_grace_sec: float | None,
-) -> float:
-    """Resolve the closing-phase grace window after the wall-clock deadline.
+# Actions that must stay startable no matter how little budget is left: they
+# are how a session ends cleanly, so a time gate that refused them would
+# strand the run with nothing to show. ``recover`` is not among them — it
+# takes the server-lifecycle lane, prices at five catalogue minutes, and
+# holds a twenty-minute lease; treating it as a closing action is what let a
+# spent session keep working past the wall clock.
+TIME_BUDGET_EXEMPT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "report",
+        "session_breakdown",
+    }
+)
 
-    Explicit ``closing_grace_sec`` (including ``0`` to disable) wins;
-    otherwise default to ``min(120, max_minutes * 60 * 0.02)``.
+# The lanes that serialize GPU work: an action requiring one of them spends its
+# time running a benchmark round, so what this session measured says more about
+# it than a catalogue estimate does.
+_GPU_BENCH_LANES: frozenset[str] = frozenset(
+    {
+        "benchmark_lane",
+        "profile_lane",
+    }
+)
+
+
+def measured_baseline_runtime_sec(shared_state: Any | None) -> float:
+    """Read this session's own measured baseline round, in seconds.
 
     Args:
-        max_minutes: The wall-clock budget in minutes (used for the default).
-        closing_grace_sec: Explicit grace window in seconds; when not
-            ``None`` it is used verbatim.
+        shared_state (Any | None): The session ``SharedState``, or ``None`` when
+            the caller has no session context.
 
     Returns:
-        The closing-phase grace window in seconds.
+        float: The measured baseline runtime; ``0.0`` when the session has not
+            landed a baseline yet, which every caller reads as "no measurement".
     """
-    if closing_grace_sec is not None:
-        return float(closing_grace_sec)
-    return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
+    try:
+        return max(0.0, float(getattr(shared_state, "baseline_runtime_sec", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _action_benches_on_gpu(meta: Any | None) -> bool:
+    """Whether an action's cost is dominated by a benchmark round on the GPU.
+
+    Read off the lanes the action must hold rather than off a list of names, so
+    an action added to the catalogue is classified by what it does. The
+    benchmark and profile lanes are exactly the two that serialize GPU work; an
+    action holding neither (``report``, ``target_analysis``, ``specialist``)
+    costs what its own bookkeeping costs and has nothing to do with model size.
+
+    Args:
+        meta (Any | None): The action's catalogue metadata.
+
+    Returns:
+        bool: ``True`` when the action runs at least one benchmark round.
+    """
+    lanes = getattr(meta, "requires_lanes", ()) or ()
+    try:
+        return any(str(lane) in _GPU_BENCH_LANES for lane in lanes)
+    except TypeError:
+        return False
+
+
+def expected_action_cost_minutes(
+    meta: Any | None,
+    *,
+    measured_baseline_sec: float = 0.0,
+) -> float:
+    """Read an action's expected cost, preferring what this session measured.
+
+    Every budget guard goes through here so the field is named once. Reading it
+    inline with a ``getattr`` default turned the catalogue's move off YAML —
+    which renamed the field — into a gate that admitted everything without a
+    word, because "no estimate on record" and "the field moved" look the same
+    from a default.
+
+    The catalogue's estimates are calibrated on small models (``baseline`` 5
+    min, ``roofline`` 10 min) while the two sessions that motivated the
+    wall-clock work measured 51 and 125 minutes of baseline and an 81-minute
+    roofline. A guard anchored on the catalogue alone therefore admits arms the
+    session cannot pay for — it would not have stopped either field run. So one
+    measured baseline round is taken as a *floor* on any action that runs a
+    benchmark round of its own: it is this model on this GPU under this
+    workload, which is what those actions spend their time doing. It is a floor
+    rather than a replacement because an action that benches several variants
+    costs more than one round, never less, and the catalogue is the only thing
+    that knows how many.
+
+    Args:
+        meta (Any | None): The action's catalogue metadata, or ``None`` for an
+            action the catalogue does not carry.
+        measured_baseline_sec (float): This session's measured baseline runtime
+            in seconds, from :func:`measured_baseline_runtime_sec`; ``0.0``
+            before a baseline lands, which leaves the catalogue in charge.
+
+    Returns:
+        float: The expected cost in minutes; ``0.0`` when nothing is on record.
+    """
+    try:
+        catalogue_min = float(getattr(meta, "typical_runtime_min", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        catalogue_min = 0.0
+    if measured_baseline_sec <= 0.0 or not _action_benches_on_gpu(meta):
+        return catalogue_min
+    return max(catalogue_min, measured_baseline_sec / 60.0)
+
+
+def action_fits_time_budget(
+    *,
+    usable_sec: float | None,
+    expected_cost_minutes: float,
+) -> bool:
+    """Decide whether an action's expected cost still fits the remaining budget.
+
+    The anchor is the action's *expected* cost (its typical runtime), not its
+    pessimistic tail. Judging fit on the pessimistic tail would abandon usable
+    budget — with 90 minutes left we would refuse an action that finishes in 60
+    minutes half the time — and the session already has a wall-clock reaper for
+    the overruns, so the optimistic anchor is the one that keeps the tail of a
+    session productive. This mirrors how the grid admits variants.
+
+    Args:
+        usable_sec: Budget left after the closing reserve, from
+            ``SharedState.session_budget_usable_sec``; ``None`` means unbounded.
+        expected_cost_minutes: The action's expected cost in minutes; values at
+            or below zero mean "no estimate on record".
+
+    Returns:
+        ``True`` when the action may start: the budget is unbounded, no estimate
+        is on record, or the expected cost fits what is left.
+    """
+    if usable_sec is None:
+        return True
+    if expected_cost_minutes <= 0.0:
+        return True
+    return usable_sec >= expected_cost_minutes * 60.0
 
 
 def _parse_iso_unix(ts: str) -> float:

@@ -1044,9 +1044,7 @@ class ConversationCollaborator:
             The rendered advisory text, or ``""`` when not applicable.
         """
         state = self.shared_state
-        keep = self._decaying_keep_threshold_pct()
-        if keep is None:
-            return ""
+        keep = _phase_state.resolve_keep_threshold(state)
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
         if cycle < 1:
             return ""
