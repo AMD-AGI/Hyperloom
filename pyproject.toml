@@ -190,6 +190,11 @@ hyperloom = [
 "hyperloom.agents.kernel" = [
     "scripts/*.sh",
 ]
+# Vendor-operator-playbook registry (see tools/_vendor_operator_playbooks.py):
+# read at runtime by classify_patchability()/forge_submit.py, so it must ship.
+"hyperloom.agents.kernel.tools" = [
+    "vendor_operator_playbooks.json",
+]
 # ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
 # and raises FileNotFoundError when they are absent from the install.
 "hyperloom.inference_optimizer.assets.agentx" = [

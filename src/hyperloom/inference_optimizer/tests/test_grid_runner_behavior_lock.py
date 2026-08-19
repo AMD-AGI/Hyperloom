@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 from hyperloom.orchestrator.actions.executors import (
@@ -26,6 +27,9 @@ from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
+)
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
 )
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
@@ -107,58 +111,64 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _run_with_pulse_capture(
+    *,
+    multi_node,
+    run_side_effect,
+    base,
+    out,
+    restart=None,
+    keep_going=True,
+    grid_n=1,
+    scope=None,
+    notes=None,
+):
+    pulse_calls: list = []
+
+    async def fake_pulse(**kwargs):
+        pulse_calls.append(kwargs)
+
+    async def collect(**note):
+        notes.append(note)
+
+    with ExitStack() as st:
+        st.enter_context(patch.object(mne, "is_multi_node", lambda: multi_node))
+        st.enter_context(patch.object(gr, "_robustness_pulse", side_effect=fake_pulse))
+        st.enter_context(
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=run_side_effect,
+            )
+        )
+        if restart is not None:
+            st.enter_context(patch.object(mnsl, "restart_server_for_round", restart))
+        # Entered outside ``asyncio.run`` on purpose: a task copies the context
+        # at creation, which is how the dispatcher's scope reaches the action it
+        # publishes it for.
+        if scope is not None:
+            st.enter_context(use_cancel_scope(scope))
+        if notes is not None:
+            st.enter_context(progress_scope(collect))
+        grid = [GridVariant(name=f"c{i}") for i in range(grid_n)]
+        results = asyncio.run(
+            run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=grid,
+                output_root=out,
+                magpie_python=sys.executable,
+                variant_timeout_sec=10,
+                gpu_type="mi300x",
+                keep_going_on_failure=keep_going,
+            )
+        )
+    return results, pulse_calls
+
+
 class TestPulseMatrix:
     """``_pulse_after_variant`` (progress note plus ``_robustness_pulse``) fires
     on every variant outcome, including the multi-node
     ``mn_server_restart_failed`` path that used to leave before reaching it."""
-
-    def _run_with_pulse_capture(
-        self,
-        *,
-        multi_node,
-        run_side_effect,
-        base,
-        out,
-        restart=None,
-        keep_going=True,
-        grid_n=1,
-        notes=None,
-    ):
-        pulse_calls: list = []
-
-        async def fake_pulse(**kwargs):
-            pulse_calls.append(kwargs)
-
-        async def collect(**note):
-            notes.append(note)
-
-        with ExitStack() as st:
-            st.enter_context(patch.object(mne, "is_multi_node", lambda: multi_node))
-            st.enter_context(patch.object(gr, "_robustness_pulse", side_effect=fake_pulse))
-            st.enter_context(
-                patch(
-                    "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-                    side_effect=run_side_effect,
-                )
-            )
-            if notes is not None:
-                st.enter_context(progress_scope(collect))
-            if restart is not None:
-                st.enter_context(patch.object(mnsl, "restart_server_for_round", restart))
-            grid = [GridVariant(name=f"c{i}") for i in range(grid_n)]
-            results = asyncio.run(
-                run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
-                    grid=grid,
-                    output_root=out,
-                    magpie_python=sys.executable,
-                    variant_timeout_sec=10,
-                    gpu_type="mi300x",
-                    keep_going_on_failure=keep_going,
-                )
-            )
-        return results, pulse_calls
 
     def test_mn_server_restart_failed_reaches_the_variant_boundary(self, tmp_path, monkeypatch):
         """A variant whose remote server never came back still ends its own row.
@@ -177,7 +187,7 @@ class TestPulseMatrix:
         async def _restart_fail(**_kwargs):
             raise mnsl.ServerRestartFailed("server /health did not return 200")
 
-        results, pulse_calls = self._run_with_pulse_capture(
+        results, pulse_calls = _run_with_pulse_capture(
             multi_node=True,
             run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
             base=base,
@@ -200,7 +210,7 @@ class TestPulseMatrix:
         async def _restart_fail(**_kwargs):
             raise mnsl.ServerRestartFailed("health probe timed out")
 
-        results, pulse_calls = self._run_with_pulse_capture(
+        results, pulse_calls = _run_with_pulse_capture(
             multi_node=True,
             run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
             base=base,
@@ -223,7 +233,7 @@ class TestPulseMatrix:
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
 
-        results, pulse_calls = self._run_with_pulse_capture(
+        results, pulse_calls = _run_with_pulse_capture(
             multi_node=False,
             run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
             base=base,
@@ -298,13 +308,85 @@ class TestPulseMatrix:
             _valid_workspace(Path(cmd[out_idx + 1]))
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-        results, pulse_calls = self._run_with_pulse_capture(
+        results, pulse_calls = _run_with_pulse_capture(
             multi_node=False,
             run_side_effect=_ok,
             base=base,
             out=tmp_path / "out",
         )
         assert results[0].status == "succeeded"
+        assert len(pulse_calls) == 1
+
+
+class TestThePulseStaysOutOfACancelledActionsUnwind:
+    """A cancel is answered by unwinding, not by observing what was cancelled.
+
+    A cooperative stop *returns* its sentinel, so ``run_grid`` walks its ordinary
+    stop path and would spend the pulse's whole budget between recording the row
+    and releasing the lease -- serially, inside the window the dispatcher gives
+    the action to finish. That window is derived from the terms of the unwind and
+    this is not one of them, so the pulse is skipped rather than budgeted for:
+    eight seconds of observing a tree the orchestrator just reaped is what the
+    rows already built are traded away for when the window expires.
+
+    The gate is the cancel scope and not the sentinel returncode, because a
+    variant can be failing for its own reasons when the cancel lands -- its row
+    is a genuine failure and its pulse would run in the same window.
+    """
+
+    def _cancelled_scope(self) -> CancelScope:
+        scope = CancelScope()
+        scope.cancel(reason="session_time_exhausted")
+        return scope
+
+    def test_the_round_the_run_stopped_is_not_pulsed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results, pulse_calls = _run_with_pulse_capture(
+            multi_node=False,
+            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(
+                cmd, ORCHESTRATOR_CANCELLED_RETURNCODE, "", ""
+            ),
+            base=base,
+            out=tmp_path / "out",
+            scope=self._cancelled_scope(),
+        )
+        assert results[0].status == "skipped"
+        assert results[0].error_class == "orchestrator_cancelled"
+        assert pulse_calls == [], "the pulse must not run inside the cancel window"
+
+    def test_a_variant_failing_on_its_own_when_the_cancel_lands_is_not_pulsed(self, tmp_path, monkeypatch):
+        """The row is a real failure; the eight seconds are still not affordable."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results, pulse_calls = _run_with_pulse_capture(
+            multi_node=False,
+            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
+            base=base,
+            out=tmp_path / "out",
+            scope=self._cancelled_scope(),
+        )
+        assert results[0].error_class == "no_benchmark_workspace"
+        assert pulse_calls == []
+
+    def test_a_variant_that_failed_under_a_live_scope_is_still_pulsed(self, tmp_path, monkeypatch):
+        """Only a cancel silences the tick, so #1177's terminal-row tick survives."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results, pulse_calls = _run_with_pulse_capture(
+            multi_node=False,
+            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
+            base=base,
+            out=tmp_path / "out",
+            scope=CancelScope(),
+        )
+        assert results[0].error_class == "no_benchmark_workspace"
         assert len(pulse_calls) == 1
 
 

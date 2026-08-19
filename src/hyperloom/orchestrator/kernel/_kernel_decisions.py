@@ -35,6 +35,8 @@ from ..state.kernel_decision_settings import (
     _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     _now_iso,
+    effective_hot_kernel_gpu_pct,
+    effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
     resolve_kernel_opt_max_failures,
 )
@@ -132,6 +134,14 @@ def _queue_kernel_keep(
     entry: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Persist one KEEP patch snapshot without coupling it to an ordinal slot."""
+    if entry.get("vendor_playbook_deploy_blocked"):
+        # A vendor-playbook KEEP has no deployable artifact -- see
+        # record_kernel_opt()'s comment (PR #1191 review finding #1).
+        # Refusing to queue it here means _auto_enqueue_pending_integrations()
+        # never dispatches an integrate for it; integrate_handler() still
+        # checks this flag independently for an LLM-initiated request that
+        # names the kernel_id directly.
+        return None
     decision = str(entry.get("last_decision") or "").upper()
     try:
         micro_speedup = float(entry.get("last_micro_speedup") or 0.0)
@@ -376,6 +386,23 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             claimed_sources.add(source_file)
         result.append(record)
     return result
+
+
+def _vendor_playbook_id_from_result(result: dict[str, Any]) -> str:
+    """Return the vendor-playbook group id a ``kernel_opt`` result belongs to.
+
+    ``forge_submit._submit_vendor_playbook()`` stamps ``vendor_playbook_id``
+    on every raw per-backend attempt dict it returns (winner and reused
+    sibling alike); ``kernel_optimization.py`` carries those attempt dicts
+    through verbatim in ``result["attempts"]``. Empty when this kernel_opt
+    result did not go through the vendor-playbook path.
+    """
+    for attempt in result.get("attempts") or []:
+        if isinstance(attempt, dict):
+            vid = str(attempt.get("vendor_playbook_id") or "").strip()
+            if vid:
+                return vid
+    return ""
 
 
 def _resolve_kernel_patch_identity(
@@ -1113,6 +1140,20 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     )
     entry["last_ts"] = ts
     entry["history"] = history
+    # A vendor-playbook artifact (e.g. mori's dispatch/combine launch-config
+    # tuning, see agents/kernel/tools/_vendor_operator_playbooks.py) is a
+    # KernelForge task-bundle config file, not a rewrite of the real,
+    # installed operator source -- there is no supported path from it back
+    # to the live serving install, and apply_kernel_patch's legacy
+    # full-file-replace strategy would happily overwrite the real
+    # site-packages module with it if ever asked to (PR #1191 review
+    # finding #1). KEEP is still reported (the measured speedup is real and
+    # worth surfacing), but deploy/integrate is refused downstream --
+    # see _queue_kernel_keep() and integrate_handler()'s defense-in-depth
+    # check.
+    vendor_playbook_id = _vendor_playbook_id_from_result(result)
+    entry["vendor_playbook_id"] = vendor_playbook_id
+    entry["vendor_playbook_deploy_blocked"] = bool(vendor_playbook_id)
 
     # last_kernel_opt overwrite policy: KEEP always wins; non-KEEP writes only
     # when there is no pending KEEP to protect.
@@ -1146,6 +1187,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "deploy_repo_root": deploy_repo_root,
             "source_file": source_file,
             "task_group_key": task_group_key,
+            "vendor_playbook_id": vendor_playbook_id,
+            "vendor_playbook_deploy_blocked": bool(vendor_playbook_id),
             "ts": ts,
         }
 
@@ -1603,7 +1646,11 @@ def untried_hot_reusable_kernels(
             gpu_pct = float(k.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
             gpu_pct = 0.0
-        if gpu_pct < min_gpu_pct:
+        # Vendor-playbook groups (mori's dispatch+combine) are gated on the
+        # sum of the group's members, not each member's own share, and may
+        # pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's
+        # docstring. Ranking below still sorts on the per-row gpu_pct.
+        if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
             continue
         kid = str(k.get("kernel_id") or "")
         if not kid:

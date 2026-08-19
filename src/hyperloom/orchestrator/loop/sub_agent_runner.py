@@ -11,6 +11,7 @@ row to its terminal state.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -293,6 +294,22 @@ class SubAgentRunner:
             try:
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
+            except asyncio.CancelledError:
+                # Stopped from outside -- shutdown, or a wall-clock budget that
+                # ran out while this was running. ``CancelledError`` is not an
+                # ``Exception``, so it skips the handler below and nothing else
+                # would move the row off ``running``: it would hold its lanes
+                # and read as live work to every phase gate until the TTL sweep
+                # noticed. Recorded as ``cancelled`` rather than ``failed``
+                # because the action was never given the chance to fail.
+                await self._transition_resilient(
+                    task.task_id,
+                    "cancelled",
+                    evidence={"reason": "cancelled_in_flight"},
+                    context="executor_cancelled",
+                    allow_terminal=True,
+                )
+                raise
             except Exception as exc:  # noqa: BLE001 — surface to task.history
                 await self._transition_resilient(
                     task.task_id,
