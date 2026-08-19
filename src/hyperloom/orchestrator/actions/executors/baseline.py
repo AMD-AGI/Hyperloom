@@ -2981,12 +2981,28 @@ class BaselineExecutor:
             # Round 1 (warmup): boot + run, leave running so round 2 can
             # re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
+            # A replayed KB config is promoted onto ``current_best`` and becomes
+            # the reference every later measurement in the session is taken
+            # against, so it may not be adopted on throughput alone. The warmup
+            # round is the only round that evaluates, so forcing it here is what
+            # gives the promotion gate a score to judge; inheriting a contract
+            # with RUN_EVAL off would leave the gate with no evidence. The
+            # staged-accuracy lane owns its own eval schedule and is left alone.
+            # ``force_disable_eval`` marks the salvage retry taken when the eval
+            # is itself what aborted the run; forcing it back on there would
+            # reproduce the failure and lose the throughput baseline too.
+            force_warmup_eval = (
+                str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
+                and not defer_accuracy_until_after_measure
+                and not force_disable_eval
+            )
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
                 warmup_dir,
                 cleanup=False,
                 pid_dir=pid_dir,
                 port=port,
+                run_eval=True if force_warmup_eval else None,
             )
             log.info(
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",

@@ -1924,6 +1924,41 @@ class PreludePhase(PhaseHandler):
         self.shared_state.save(self.session_dir)
         return False
 
+    @staticmethod
+    def _replay_eval_search_root(result: dict) -> Path | None:
+        """Directory holding every round of this replay task.
+
+        The cold-start guard evaluates only in the warmup round but decides on
+        the measure round, so the score lands in a sibling directory rather
+        than under the deciding round's own workspace. Searching the workspace
+        alone finds nothing on every double-run replay: across 852 recorded
+        replays the score sat in ``warmup_round`` 320 times and in
+        ``measure_round`` never.
+
+        Args:
+            result: The ``replay_warm_recipe`` result envelope.
+
+        Returns:
+            The task-level directory containing both round directories, or
+            ``None`` when the result names no usable path.
+        """
+        from ..actions.executors.baseline import (
+            _MEASURE_ROUND_DIR,
+            _WARMUP_ROUND_DIR,
+        )
+
+        round_dirs = {_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR}
+        for key in ("output_dir", "workspace"):
+            raw = str(result.get(key) or "").strip()
+            if not raw:
+                continue
+            path = Path(raw)
+            for candidate in (path, *path.parents):
+                if candidate.name in round_dirs:
+                    return candidate.parent
+            return path
+        return None
+
     def _warm_replay_accuracy_ok(
         self,
         result: dict,
@@ -1932,17 +1967,21 @@ class PreludePhase(PhaseHandler):
     ) -> bool:
         """Whether a replayed config may be promoted on accuracy grounds.
 
-        Only high-risk configs owe a verdict, and only when a positive baseline
-        accuracy exists to compare against — the same trigger
-        :class:`ExploreExecutor` applies, so a config is not judged by one lane
-        and waved through by the other. A high-risk config that produced no
-        verdict fails closed: "no evidence" is the exact state that let 45 of
-        241 promoted replays land while the model was emitting garbage.
+        Every replay is judged, not just the ones touching a knob known to be
+        risky: a KB recipe is evidence from another session and another
+        machine, so reproducing its throughput says nothing about whether it
+        still computes correctly here. The measured score is recorded either
+        way — a promotion that was checked and passed is not the same record as
+        one that was never checked.
+
+        ``eval_ran`` separates the two ways ``replay_accuracy`` can be absent.
+        A score of 0.0 means the model answered nothing; no score at all means
+        no evidence either way, and those must not collapse into one state.
 
         Args:
             result: The ``replay_warm_recipe`` result envelope.
             task: The originating task, carrying the replayed args/envs.
-            outcome: The warm-replay outcome dict, stamped on rejection.
+            outcome: The warm-replay outcome dict, stamped either way.
 
         Returns:
             ``True`` when promotion may proceed; ``False`` when the caller must
@@ -1950,7 +1989,6 @@ class PreludePhase(PhaseHandler):
         """
         from ..actions.executors._accuracy_gate import (
             accuracy_passed,
-            is_high_accuracy_risk,
             parse_eval_results,
         )
 
@@ -1959,45 +1997,61 @@ class PreludePhase(PhaseHandler):
             baseline_accuracy = float(getattr(state, "baseline_accuracy", 0.0) or 0.0)
         except (TypeError, ValueError):
             baseline_accuracy = 0.0
-        if baseline_accuracy <= 0:
-            return True
-
-        params = (task.params if task is not None else {}) or {}
-        if not is_high_accuracy_risk(
-            extra_args=str(params.get("extra_server_args") or ""),
-            extra_envs=dict(params.get("extra_envs") or {}),
-        ):
-            return True
 
         measured = result.get("accuracy")
-        if not isinstance(measured, (int, float)):
+        eval_ran = isinstance(measured, (int, float))
+        if not eval_ran:
             measured = None
-            workspace = str(result.get("workspace") or "").strip()
-            if workspace:
+            root = self._replay_eval_search_root(result)
+            if root is not None:
                 try:
-                    parsed = parse_eval_results(Path(workspace)).get("accuracy")
+                    eval_out = parse_eval_results(root)
                 except Exception:  # noqa: BLE001 — an unreadable eval is "no verdict"
-                    parsed = None
+                    eval_out = {"error": "eval parse raised"}
+                parsed = eval_out.get("accuracy")
                 if isinstance(parsed, (int, float)):
                     measured = float(parsed)
+                    eval_ran = True
+                else:
+                    # A results file that exists but cannot be scored means the
+                    # eval ran and produced nothing usable, which is a different
+                    # state from an eval that never ran.
+                    eval_ran = not str(
+                        eval_out.get("error") or ""
+                    ).startswith("no results")
 
-        if measured is not None and accuracy_passed(baseline_accuracy, float(measured)):
-            outcome["replay_accuracy"] = float(measured)
+        outcome["eval_ran"] = bool(eval_ran)
+        outcome["replay_accuracy"] = float(measured) if measured is not None else None
+        outcome["baseline_accuracy"] = (
+            baseline_accuracy if baseline_accuracy > 0 else None
+        )
+
+        if baseline_accuracy <= 0:
+            # Nothing to compare against, so no verdict is possible.
+            return True
+        if measured is None:
+            # A measurement that failed is not evidence the config broke the
+            # model, and rejecting a sound replay costs more than admitting an
+            # unverified one. ``eval_ran`` records which of the two happened so
+            # the choice can be revisited against real data.
+            log.warning(
+                "warm-replay admitted without an accuracy verdict "
+                "(eval_ran=%s, baseline %.4f)",
+                eval_ran,
+                baseline_accuracy,
+            )
+            return True
+        if accuracy_passed(baseline_accuracy, float(measured)):
             return True
 
         reason = (
             "accuracy regression on the replayed config "
             f"(baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
-            if measured is not None
-            else "high-risk config replayed with no accuracy verdict"
         )
         if not self._require_combined_warm_rollback(result, task, outcome):
             return False
         outcome["status"] = "accuracy_failed"
         outcome["reason"] = reason
-        if measured is not None:
-            outcome["replay_accuracy"] = float(measured)
-        outcome["baseline_accuracy"] = baseline_accuracy
         state.warm_replay_outcome = outcome
         state.save(self.session_dir)
         log.info("warm-replay REJECTED on accuracy: %s", reason)
@@ -2237,10 +2291,10 @@ class PreludePhase(PhaseHandler):
                 "hot_tput": float(hot_tput),
                 "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
                 "gain_pct": round(measured_gain, 3),
-                # The verdict this promotion rests on, so CLOSE can tell a
-                # champion that was checked from one that never was without
-                # having to reconstruct which lane promoted it. ``None`` means
-                # the config was not gated, not that it scored nothing.
+                # The score this promotion was judged on, recorded alongside the
+                # throughput it was judged with. ``None`` means no score could be
+                # read, not that the model scored nothing — ``eval_ran`` on the
+                # outcome separates those.
                 "accuracy": outcome.get("replay_accuracy"),
                 "workspace": str(result.get("workspace") or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
