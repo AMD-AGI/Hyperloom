@@ -230,14 +230,35 @@ class TestAbsentEvidenceDoesNotBlock:
         )
         assert coord.shared_state.warm_replay_outcome["eval_error"] is None
 
-    def test_no_baseline_accuracy_means_no_reference_to_judge_against(self, tmp_path):
+    def test_no_baseline_missing_verdict_still_promotes(self, tmp_path):
+        coord = _coord_with_baseline(tmp_path, 0.0)
+        coord._promote_warm_replay(
+            {"status": "succeeded", "output_throughput": 738.0},
+            task=_risky_task(),
+        )
+        assert _promoted(coord) is True
+        assert coord.shared_state.warm_replay_outcome["baseline_accuracy"] is None
+
+    def test_no_baseline_collapsed_score_rejected_by_absolute_floor(self, tmp_path):
+        """``--no-eval`` sessions carry no baseline reference; a collapsed replay
+        must still be caught by the enablement absolute floor."""
         coord = _coord_with_baseline(tmp_path, 0.0)
         coord._promote_warm_replay(
             {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.20},
             task=_risky_task(),
         )
+        assert _promoted(coord) is False
+        outcome = coord.shared_state.warm_replay_outcome
+        assert outcome["status"] == "accuracy_failed"
+        assert "absolute floor" in str(outcome.get("reason") or "").lower()
+
+    def test_no_baseline_sound_score_passes_absolute_floor(self, tmp_path):
+        coord = _coord_with_baseline(tmp_path, 0.0)
+        coord._promote_warm_replay(
+            {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
+            task=_risky_task(),
+        )
         assert _promoted(coord) is True
-        assert coord.shared_state.warm_replay_outcome["baseline_accuracy"] is None
 
 
 class TestAccuracyIsRecordedOnSuccess:

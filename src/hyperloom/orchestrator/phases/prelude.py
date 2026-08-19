@@ -2042,6 +2042,8 @@ class PreludePhase(PhaseHandler):
             stop (the rollback and outcome have already been recorded).
         """
         from ..actions.executors._accuracy_gate import (
+            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+            accuracy_meets_floor,
             accuracy_passed,
             parse_eval_results,
         )
@@ -2085,9 +2087,6 @@ class PreludePhase(PhaseHandler):
             baseline_accuracy if baseline_accuracy > 0 else None
         )
 
-        if baseline_accuracy <= 0:
-            # Nothing to compare against, so no verdict is possible.
-            return True
         if measured is None:
             # A measurement that failed is not evidence the config broke the
             # model, so it must not stop the run: the replay is admitted and the
@@ -2101,13 +2100,21 @@ class PreludePhase(PhaseHandler):
                 eval_error or "no reason recorded",
             )
             return True
-        if accuracy_passed(baseline_accuracy, float(measured)):
+        if baseline_accuracy > 0:
+            if accuracy_passed(baseline_accuracy, float(measured)):
+                return True
+            reason = (
+                "accuracy regression on the replayed config "
+                f"(baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
+            )
+        elif accuracy_meets_floor(measured, DEFAULT_ENABLEMENT_ACCURACY_FLOOR):
             return True
-
-        reason = (
-            "accuracy regression on the replayed config "
-            f"(baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
-        )
+        else:
+            reason = (
+                "accuracy below absolute floor on the replayed config "
+                f"(replay {measured:.4f}, "
+                f"floor {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:.2f})"
+            )
         if not self._require_combined_warm_rollback(result, task, outcome):
             return False
         outcome["status"] = "accuracy_failed"
@@ -2215,8 +2222,9 @@ class PreludePhase(PhaseHandler):
         # throughput alone is how a config that makes the model emit garbage
         # becomes the session's reference: breaking the numerics is itself a
         # large throughput win, so the objective actively selects for it.
-        # Trigger on the same condition ExploreExecutor uses, so the two lanes
-        # that can promote a serving config agree on when accuracy is owed.
+        # Every replay is judged here, not only high-risk knobs: a KB recipe is
+        # evidence from another session, so reproducing its throughput says
+        # nothing about whether it still computes correctly here.
         if not self._warm_replay_accuracy_ok(result, task, outcome):
             return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
