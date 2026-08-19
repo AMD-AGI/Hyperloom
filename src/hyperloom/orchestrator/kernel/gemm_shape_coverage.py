@@ -43,6 +43,24 @@ _AITER_SHAPE_HIT_RE = re.compile(
 
 Shape = tuple[int, int, int]
 
+#: Columns that identify one fused-MoE dispatch (matches aiter's untuned CSV and
+#: the runtime tuple after gfx/cu_num). Token is included because the tuner
+#: emits one row per swept batch size.
+_FMOE_DISPATCH_COLUMNS = (
+    "token",
+    "model_dim",
+    "inter_dim",
+    "expert",
+    "topk",
+    "act_type",
+    "dtype",
+    "q_dtype_a",
+    "q_dtype_w",
+    "q_type",
+    "use_g1u1",
+    "doweight_stage1",
+)
+
 
 def aiter_padded_m_fine(m: int) -> int:
     """Return aiter's ``gl=0`` padded M (fine-grained lookup key)."""
@@ -221,6 +239,79 @@ def parse_aiter_consulted_tables(log_text: str) -> set[str]:
     row, and one worth naming separately.
     """
     return {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+
+
+def _normalize_fmoe_field(name: str, value: str) -> str:
+    """Normalize one MoE dispatch field for stable CSV/log comparison."""
+    text = str(value or "").strip()
+    if name in {"use_g1u1", "doweight_stage1"}:
+        if text in {"1", "True", "true"}:
+            return "True"
+        if text in {"0", "False", "false"}:
+            return "False"
+    return text
+
+
+def fmoe_dispatch_key(fields: dict[str, str]) -> tuple[str, ...]:
+    """Return the lookup key for one fused-MoE problem."""
+    return tuple(
+        _normalize_fmoe_field(name, fields.get(name, ""))
+        for name in _FMOE_DISPATCH_COLUMNS
+    )
+
+
+def tuned_fmoe_csv_keys(path: str | Path) -> set[tuple[str, ...]]:
+    """Return the fused-MoE dispatch keys present in an aiter MoE tuned CSV."""
+    out: set[tuple[str, ...]] = set()
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return out
+    if not lines:
+        return out
+    header = [col.strip() for col in lines[0].split(",")]
+    try:
+        indexes = {name: header.index(name) for name in _FMOE_DISPATCH_COLUMNS}
+    except ValueError:
+        return out
+    width = max(indexes.values()) + 1
+    for line in lines[1:]:
+        cols = line.split(",")
+        if len(cols) < width:
+            continue
+        fields = {name: cols[index] for name, index in indexes.items()}
+        if all(str(fields.get(name) or "").strip() for name in _FMOE_DISPATCH_COLUMNS):
+            out.add(fmoe_dispatch_key(fields))
+    return out
+
+
+def fmoe_tuned_config_coverage(
+    tuned_keys: Iterable[tuple[str, ...]],
+    requested_keys: Iterable[dict[str, str]],
+) -> dict[str, Any]:
+    """Report how many runtime MoE dispatches a tuned fmoe CSV can serve."""
+    tuned = {tuple(key) for key in tuned_keys}
+    requested = [fmoe_dispatch_key(key) for key in requested_keys]
+    if not requested:
+        return {
+            "requested": 0,
+            "covered": 0,
+            "coverage_pct": None,
+            "tuned_rows": len(tuned),
+        }
+    covered = [key for key in requested if key in tuned]
+    covered_set = set(covered)
+    return {
+        "requested": len(requested),
+        "covered": len(covered),
+        "coverage_pct": round(100.0 * len(covered) / len(requested), 2),
+        "tuned_rows": len(tuned),
+        "uncovered_sample": [
+            dict(zip(_FMOE_DISPATCH_COLUMNS, key, strict=True))
+            for key in requested
+            if key not in covered_set
+        ][:10],
+    }
 
 
 def tuned_csv_shapes(path: str | Path) -> set[Shape]:
