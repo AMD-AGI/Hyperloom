@@ -101,3 +101,102 @@ def test_probe_failure_raises_not_crash():
 
     with pytest.raises(AgentXPreflightError):
         check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+
+
+# --- loader-allowlist assertion ------------------------------------------------
+#
+# Flag presence cannot separate the pinned build from the previous one: aiperf
+# 0.8.0 carries weka-trace, --scenario and --benchmark-duration, and defines a
+# scenario by the same name, but locks different invariants and predates the
+# current corpus. The allowlist is the discriminator.
+
+_NEW = [
+    "semianalysis_cc_traces_weka_with_subagents",
+    "semianalysis_cc_traces_weka_with_subagents_256k",
+    "semianalysis_cc_traces_weka_062126",
+    "semianalysis_cc_traces_weka_062126_256k",
+    "weka_trace",
+]
+_OLD = [  # the pre-062126 allowlist: same flags, older corpora
+    "semianalysis_cc_traces_weka_with_subagents",
+    "semianalysis_cc_traces_weka_with_subagents_256k",
+    "weka_trace",
+]
+
+
+def _check(loaders, env=None):
+    check_aiperf_capability(
+        "/venv/bin/aiperf",
+        loader_probe=lambda _b: loaders,
+        env=env or {},
+    )
+
+
+def test_pinned_allowlist_passes():
+    _check(_NEW)
+
+
+def test_stale_build_is_rejected():
+    """The exact case a flag probe waves through."""
+    with pytest.raises(AgentXPreflightError) as ei:
+        _check(_OLD)
+    msg = str(ei.value)
+    assert "stale build" in msg
+    assert "semianalysis_cc_traces_weka_062126" in msg
+
+
+def test_stale_build_is_rejected_even_when_the_pinned_corpus_is_admitted():
+    """The silent path a run-scoped check alone leaves open.
+
+    Upstream's own H100/H200 recipes pin an older corpus via
+    WEKA_LOADER_OVERRIDE. A stale aiperf DOES admit that corpus, so asking only
+    "is this run's corpus allowed" waves the stale build through and it replays
+    under the wrong invariants. Build currency has to be asserted separately.
+    """
+    with pytest.raises(AgentXPreflightError) as ei:
+        _check(_OLD, env={"WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_with_subagents"})
+    assert "stale build" in str(ei.value)
+
+
+def test_current_build_accepts_an_older_corpus_pin():
+    """On a current build an older corpus is a legitimate operator choice."""
+    _check(_NEW, env={"WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_with_subagents"})
+
+
+def test_unknown_corpus_pin_is_rejected_before_the_server_boots():
+    with pytest.raises(AgentXPreflightError) as ei:
+        _check(_NEW, env={"WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_nonexistent"})
+    assert "not in the" in str(ei.value)
+
+
+def test_agentx_dataset_outranks_weka_loader_override():
+    with pytest.raises(AgentXPreflightError):
+        _check(
+            _NEW,
+            env={
+                "AGENTX_DATASET": "semianalysis_cc_traces_weka_nonexistent",
+                "WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_062126",
+            },
+        )
+
+
+def test_unreadable_allowlist_falls_back_and_says_so(capsys):
+    """Refusing outright would break setups that work today over what may be an
+    unusual install layout -- but the weaker check must not pass silently."""
+    check_aiperf_capability(
+        "/venv/bin/aiperf",
+        loader_probe=lambda _b: None,
+        probe=lambda _b: "weka-trace --scenario --benchmark-duration",
+        env={},
+    )
+    assert "could not read" in capsys.readouterr().err
+
+
+def test_unreadable_allowlist_still_rejects_a_flagless_build():
+    with pytest.raises(AgentXPreflightError):
+        check_aiperf_capability(
+            "/venv/bin/aiperf",
+            loader_probe=lambda _b: None,
+            probe=lambda _b: "nothing useful here",
+            env={},
+        )
