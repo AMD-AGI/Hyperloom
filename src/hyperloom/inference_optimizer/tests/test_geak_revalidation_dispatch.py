@@ -186,6 +186,157 @@ async def test_enqueue_internal_stack_rebench_uses_macro_cycle_idempotency_key(
 
 
 @pytest.mark.asyncio
+async def test_rebench_can_be_rebuilt_after_cancel_within_same_cycle(coordinator) -> None:
+    """A cancelled rebench must not block a fresh one in the same macro-cycle.
+
+    ``create_or_return_existing`` hands back the cancelled row for a reused key,
+    which KERNEL then reads as ``rebench_unavailable`` and the GEAK win stays
+    audit-only for the rest of the cycle.
+    """
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.macro_cycle = 0
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--max-num-batched-tokens 8192", "env": ""},
+    }
+
+    first = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    first_id = str(first["task_id"])
+    assert first["task_state"] == "queued"
+
+    # An explore-family prune settles the queued rebench mid-cycle.
+    assert first_id in await c.tasks.cancel_family(["explore"], reason="prune_branch")
+
+    second = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+
+    assert second["task_id"] != first_id
+    assert second["task_state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_prune_settles_geak_pending_when_rebench_cancelled(coordinator) -> None:
+    """Pruning the explore family must not leave the slot stuck awaiting."""
+    c = coordinator
+    st = c.shared_state
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok"}
+
+    rebench = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="pruned-rebench",
+    )
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": rebench.task_id}
+    st.resume_pending_revalidation = True
+
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    await c._handle_prune_branch(
+        "robustness",
+        Intent(type=IntentType.PRUNE_BRANCH, payload={"family": "explore", "reason": "prune_branch"}),
+    )
+
+    assert (await c.tasks.get(rebench.task_id)).state == "cancelled"
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert st.resume_pending_revalidation is False
+
+
+@pytest.mark.asyncio
+async def test_settled_pending_rejects_late_rebench_result(coordinator) -> None:
+    """A settled slot must not be revived by a late/orphan rebench completion."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "baseline", "tput": 100.0, "extra_server_args": ""}
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--foo", "env": ""},
+        "accepted_kernels": ["k1"],
+    }
+    st.geak_pending = {"status": "rebench_cancelled", "revalidation_error": "close_sequence"}
+    st.resume_pending_revalidation = False
+
+    task = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="late-rebench",
+    )
+
+    await c._promote_to_shared_state(
+        task.kind,
+        {
+            "output_throughput": 150.0,
+            "best_variant": {"fingerprint": "abc"},
+            "winners": [],
+        },
+        task=task,
+    )
+
+    assert st.current_best["tput"] == 100.0
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert not any(e.get("action") == "geak_e2e" for e in st.optimization_stack)
+
+
+@pytest.mark.asyncio
+async def test_cleared_pending_without_resume_flag_rejects_result(coordinator) -> None:
+    """An empty slot is only a resume signal when the resume flag is set."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "baseline", "tput": 100.0, "extra_server_args": ""}
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--foo", "env": ""},
+        "accepted_kernels": ["k1"],
+    }
+    st.geak_pending = {}
+    st.resume_pending_revalidation = False
+
+    task = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="post-clear-rebench",
+    )
+
+    await c._promote_to_shared_state(
+        task.kind,
+        {
+            "output_throughput": 150.0,
+            "best_variant": {"fingerprint": "abc"},
+            "winners": [],
+        },
+        task=task,
+    )
+
+    assert st.current_best["tput"] == 100.0
+    assert not any(e.get("action") == "geak_e2e" for e in st.optimization_stack)
+
+
+def test_legacy_placeholder_does_not_match_cycle_scoped_keys() -> None:
+    """The legacy slot must not absorb a cycle-scoped rebench from another cycle."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    def _task(key: str) -> Task:
+        return Task(task_id="t1", kind="explore", state="queued", params={}, idempotency_key=key)
+
+    assert gr.geak_rebench_tracks_pending_task(
+        gr.LEGACY_GEAK_REVALIDATE_PLACEHOLDER,
+        _task(gr.LEGACY_GEAK_REVALIDATE_PLACEHOLDER),
+        macro_cycle=0,
+    )
+    assert not gr.geak_rebench_tracks_pending_task(
+        gr.LEGACY_GEAK_REVALIDATE_PLACEHOLDER,
+        _task("geak-revalidate-c3"),
+        macro_cycle=0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_geak_rebench_survives_kernel_to_sweep_transition(coordinator) -> None:
     c = coordinator
     st = c.shared_state
@@ -480,8 +631,8 @@ async def test_advance_into_close_settles_pending_end_to_end(coordinator) -> Non
 
 
 @pytest.mark.asyncio
-async def test_close_entry_leaves_running_rebench_pending(coordinator) -> None:
-    """A rebench already running survives CLOSE cancellation, so keep waiting."""
+async def test_settle_waits_while_rebench_still_running(coordinator) -> None:
+    """Settling is state-driven: a running rebench can still deliver, so wait."""
     c = coordinator
     st = c.shared_state
     st.kernel_optimizer = "geak"
@@ -500,3 +651,50 @@ async def test_close_entry_leaves_running_rebench_pending(coordinator) -> None:
 
     assert settled is False
     assert st.geak_pending["status"] == "awaiting_rebench"
+
+
+@pytest.mark.asyncio
+async def test_close_drain_cancels_running_rebench_and_settles(coordinator) -> None:
+    """CLOSE writes reports only, so a running rebench is stopped, not awaited.
+
+    Leaving it running would hold the GPU lane against the post-opt roofline and
+    could still rewrite current_best after the report was generated.
+    """
+    c = coordinator
+    st = c.shared_state
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok"}
+
+    rebench = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="running-into-close",
+    )
+    await c.tasks.transition(rebench.task_id, "running")
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": rebench.task_id}
+    st.resume_pending_revalidation = True
+
+    await c._drain_geak_rebench_for_close()
+
+    assert (await c.tasks.get(rebench.task_id)).state == "cancelled"
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert st.resume_pending_revalidation is False
+
+
+@pytest.mark.asyncio
+async def test_prune_drain_leaves_running_rebench_alone(coordinator) -> None:
+    """A backlog drain only clears queued work; running rebench keeps going."""
+    c = coordinator
+    running = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="running-during-prune",
+    )
+    await c.tasks.transition(running.task_id, "running")
+
+    cancelled = await gr.cancel_geak_rebench_tasks(c.tasks, reason="prune_branch")
+
+    assert cancelled == []
+    assert (await c.tasks.get(running.task_id)).state == "running"
