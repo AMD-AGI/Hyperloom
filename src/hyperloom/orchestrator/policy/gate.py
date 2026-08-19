@@ -683,7 +683,6 @@ class PolicyGate:
     """
 
     role_registry: dict[str, "AgentRole"]
-    action_registry: Any | None = None
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
@@ -969,13 +968,6 @@ class PolicyGate:
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
-        # Unwired in production: coordinator.py builds the gate without
-        # action_registry, so this is None there.
-        if self.action_registry is not None and self.action_registry.get(action_name) is None:
-            raise PolicyDenied(
-                f"unknown action_name={action_name!r} (not in the action catalogue)",
-                rule="unknown_action",
-            )
         # Per-action source allowlist (e.g. ``recover`` is robustness-only).
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -1017,11 +1009,10 @@ class PolicyGate:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
         Requires ``action_name``, then hard-rejects kernel_agent-owned
-        actions (REQUEST-only) before the action-catalogue lookup, which is
-        soft — unknown names are rejected only when a registry is wired.
-        Mirrors the delegate channel's sweep-singleton, per-action source,
-        GEMM-tuning ownership, phase, and external-tool collision gates so
-        an LLM cannot sidestep them by proposing instead of delegating.
+        actions (REQUEST-only). Mirrors the delegate channel's
+        sweep-singleton, per-action source, GEMM-tuning ownership, phase,
+        and external-tool collision gates so an LLM cannot sidestep them by
+        proposing instead of delegating.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -1033,8 +1024,7 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: if ``action_name`` is missing, kernel_agent-owned,
-                unknown (with a registry wired), or fails one of the
-                mirrored action gates.
+                or fails one of the mirrored action gates.
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
@@ -1047,12 +1037,6 @@ class PolicyGate:
                 f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
-            )
-        # Soft check — same unwired catalogue as the delegate twin above.
-        if self.action_registry is not None and self.action_registry.get(action_name) is None:
-            raise PolicyDenied(
-                f"propose_action: unknown action_name={action_name!r} (not in the action catalogue)",
-                rule="unknown_action",
             )
         # sweep_phase_singleton (defense in depth on the propose_action channel).
         # conc_sweep is Coordinator-internal (never LLM-proposed); _validate_phase_action
