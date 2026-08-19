@@ -876,6 +876,23 @@ def test_integrate_fault_does_not_consume_revert_quota(state: SharedState):
     assert "k001" not in state.rejected_kernel_ids
 
 
+@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
+def test_a_run_stopped_integrate_does_not_consume_revert_quota(state: SharedState, error_class):
+    """A patch the run never measured must not be counted as one that lost."""
+    entry = state.record_kernel_integrate_result(
+        _integrate_result(
+            "k001",
+            decision="NEEDS_REVIEW",
+            status="failed",
+            error_class=error_class,
+        ),
+    )
+    assert entry is not None
+    assert entry["verdict_attempt_count"] == 0
+    assert entry.get("retryable") is True
+    assert state.rejected_kernel_patches == []
+
+
 def test_integrate_attempt_is_stamped_with_macro_cycle(state: SharedState):
     state.macro_cycle = 2
     entry = state.record_kernel_integrate_result(

@@ -7564,7 +7564,7 @@ async def integrate_handler(
         if stopped is not None:
             # Nothing was measured, so the patch has no verdict to answer for.
             return {
-                "status": "stopped",
+                "status": "failed",
                 "error_class": stopped.error_class,
                 "error": stopped.interrupted,
                 "decision": "NEEDS_REVIEW",

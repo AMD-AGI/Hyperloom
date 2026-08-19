@@ -3021,7 +3021,7 @@ class IntegratePatchExecutor:
                 stash_state,
                 stash_note,
                 {
-                    "status": "stopped",
+                    "status": "failed",
                     "error_class": stopped.error_class,
                     "error": stopped.interrupted,
                     "specialist_task_id": specialist_task_id,
