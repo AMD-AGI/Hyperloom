@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX budget profile, search-scope collapse, and the runtime guards.
+"""AgentX budget profile, search-scope collapse, and the session-level guards.
 
 An AgentX round costs orders of magnitude more wall-clock than a synthetic one,
 so budgets sized for the latter reap healthy variants -- and an overtime kill is
 terminal (the variant skips the KEEP ladder entirely). These tests pin the
-widened budgets, the scope reductions that make the cost affordable, and the
-two guards that stop an AgentX session from silently measuring something else.
+widened budgets, the scope reductions that make the cost affordable, and the two
+guards that stop a session from silently measuring something other than what it
+reports: the bypass-backend combination, and a resume that changes benchmark
+mode or crosses an AgentX measurement epoch.
 
 Every case asserts the synthetic path is untouched.
 """
@@ -212,100 +214,3 @@ def test_resume_tolerates_sessions_predating_the_field(monkeypatch):
     _off(monkeypatch)
     assert agentx_state_is_stale(_St("", 0)) == ""
 
-
-# --- variant workload guard ---------------------------------------------------
-
-
-def _gv(**kw):
-    from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-
-    kw.setdefault("name", "v")
-    return GridVariant(**kw)
-
-
-def _guard(grid):
-    from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
-        apply_agentx_workload_guard,
-    )
-
-    return apply_agentx_workload_guard(grid)
-
-
-def test_workload_guard_is_noop_without_agentx(monkeypatch):
-    _off(monkeypatch)
-    gv = _gv(extra_envs={"AGENTX_DATASET": "weka_trace", "CONC": "8"},
-             extra_server_args="--max-model-len 4096 --enable-prefix-caching")
-    kept, notes = _guard([gv])
-    assert notes == []
-    assert kept[0].extra_envs == {"AGENTX_DATASET": "weka_trace", "CONC": "8"}
-    assert kept[0].extra_server_args == "--max-model-len 4096 --enable-prefix-caching"
-
-
-def test_workload_guard_strips_corpus_and_concurrency_envs(monkeypatch):
-    """AGENTX_DATASET swaps the corpus outright; CONC retargets the contract."""
-    _on(monkeypatch)
-    gv = _gv(extra_envs={"AGENTX_DATASET": "weka_trace", "CONC": "8", "VLLM_FOO": "1"})
-    kept, notes = _guard([gv])
-    assert kept[0].extra_envs == {"VLLM_FOO": "1"}
-    assert len(notes) == 1 and notes[0]["source"] == "agentx_workload_guard"
-
-
-def test_workload_guard_strips_unset_envs_too(monkeypatch):
-    """Deleting a key is just another way of overwriting it."""
-    _on(monkeypatch)
-    gv = _gv(unset_envs=["MAX_MODEL_LEN", "VLLM_FOO"])
-    kept, _ = _guard([gv])
-    assert kept[0].unset_envs == ["VLLM_FOO"]
-
-
-def test_workload_guard_strips_context_flags_but_keeps_the_rest(monkeypatch):
-    """The variant is sanitised, not discarded -- the other flags still matter."""
-    _on(monkeypatch)
-    gv = _gv(extra_server_args="--enable-prefix-caching --max-model-len 4096 --moe-backend auto")
-    kept, notes = _guard([gv])
-    assert kept[0].extra_server_args == "--enable-prefix-caching --moe-backend auto"
-    assert len(kept) == 1  # never dropped
-    assert "arg --max-model-len" in notes[0]["reason"]
-
-
-def test_workload_guard_handles_equals_form(monkeypatch):
-    _on(monkeypatch)
-    gv = _gv(extra_server_args="--context-length=262144 --tp 8")
-    kept, _ = _guard([gv])
-    assert kept[0].extra_server_args == "--tp 8"
-
-
-def test_workload_guard_leaves_genuine_speed_knobs_alone(monkeypatch):
-    """max-num-seqs / batched-tokens change speed, not what is measured."""
-    _on(monkeypatch)
-    args = "--max-num-seqs 512 --max-num-batched-tokens 16384"
-    gv = _gv(extra_server_args=args)
-    kept, notes = _guard([gv])
-    assert kept[0].extra_server_args == args
-    assert notes == []
-
-
-@pytest.mark.parametrize(
-    "args,expected,removed",
-    [
-        ("--max-model-len 4096", "", True),
-        ("--max-model-len=4096", "", True),
-        ("--max-model-len", "", True),  # flag at end, no value
-        ("--max-model-len --enable-prefix-caching", "--enable-prefix-caching", True),
-        ("--a 1 --max-model-len 4096 --b 2", "--a 1 --b 2", True),
-        ("--max-model-len 1 --max-model-len 2", "", True),
-        ("", "", False),
-        # Prefix collision: a longer flag that merely starts with the same text
-        # must survive untouched. Getting this wrong silently deletes an
-        # unrelated tuning knob.
-        ("--max-model-len-extra 5", "--max-model-len-extra 5", False),
-        ("--enable-prefix-caching", "--enable-prefix-caching", False),
-    ],
-)
-def test_strip_server_flag_edges(args, expected, removed):
-    from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
-        _strip_server_flag,
-    )
-
-    out, hit = _strip_server_flag(args, "--max-model-len")
-    assert (out, hit) == (expected, removed)

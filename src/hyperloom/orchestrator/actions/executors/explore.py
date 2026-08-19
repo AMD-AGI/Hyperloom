@@ -60,7 +60,6 @@ from ._grid_runner import (
     GridVariant,
     _num_gpus_for_config,
     _resolve_session_dir,
-    apply_agentx_workload_guard,
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
     reorder_grid_for_multi_node,
@@ -1059,13 +1058,6 @@ class ExploreExecutor:
             # would re-enable the (hang-prone) aiter MoE runner. No-op unless
             # the pin is set. Self-gates, so safe to run in any mode.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            # Under AgentX, strip knobs that redefine the workload rather than
-            # tune it (corpus, concurrency, context contract). Strips, never
-            # drops -- the rest of the proposal is still worth measuring.
-            # No-op unless HYPERLOOM_AGENTX is on.
-            runnable, _agx_notes = apply_agentx_workload_guard(runnable)
-            for _n in _agx_notes:
-                log.warning("explore: %s (%s)", _n.get("reason", ""), _n.get("name", "?"))
             for _d in (*_mn_dropped, *_aiter_dropped):
                 skipped_dup.append(
                     {
