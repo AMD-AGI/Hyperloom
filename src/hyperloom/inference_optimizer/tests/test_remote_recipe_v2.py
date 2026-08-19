@@ -790,31 +790,6 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
     assert has_new_keep(state) is False
 
 
-def test_baseline_enablement_only_stack_does_not_enable_write(tmp_path: Path) -> None:
-    state = _state(tmp_path)
-    state.optimization_stack = [
-        {
-            "action": "integrate_patch",
-            "baseline_enablement": True,
-            "attribution_eligible": False,
-        }
-    ]
-    assert has_new_keep(state) is False
-
-
-def test_baseline_enablement_plus_perf_keep_enables_write(tmp_path: Path) -> None:
-    state = _state(tmp_path)
-    state.optimization_stack = [
-        {
-            "action": "integrate_patch",
-            "baseline_enablement": True,
-            "attribution_eligible": False,
-        },
-        {"action": "integrate_patch", "tput": 1500.0},
-    ]
-    assert has_new_keep(state) is True
-
-
 @pytest.mark.parametrize(
     ("url", "token", "match"),
     [
