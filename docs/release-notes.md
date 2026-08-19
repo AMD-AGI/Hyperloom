@@ -14,8 +14,6 @@ or view a detailed breakdown of all previous Hyperloom pre-release versions unde
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
-## Unreleased
-
 ## Hyperloom 1.0.0b2 release
 
 The [1.0.0b2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2)
