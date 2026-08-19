@@ -2764,17 +2764,99 @@ _AITER_SERVING_MARKERS = {
     "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
 }
 
-#: aiter logs the fused-MoE problem it dispatched as
-#: ``[fused_moe] using ... (cu, token, dim, inter, experts, topk, act, dtype,
-#: q_dtype_a, q_dtype_w, q_type, ...)``.
+#: aiter logs every fused-MoE problem it dispatches as a 14-field tuple. The
+#: wording before it varies -- measured across 2948 real lines there are three
+#: forms, and one of them interposes its own parenthesised kernel names:
+#:
+#:   [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, ...)
+#:   [fused_moe] no tuned FlyDSL config for ('gfx950', 256, 256, 4096, ...)
+#:   [fused_moe] using 2stage (kernelName1='...', kernelName2='...') for ('gfx950', ...)
+#:
+#: so the tuple is anchored on `` for (`` rather than on the wording. The field
+#: order matches aiter's untuned CSV columns after dropping gfx and cu_num, which
+#: the runtime supplies itself.
 _AITER_FUSED_MOE_TUPLE_RE = re.compile(
-    r"\[fused_moe\] using \S+ \S+ for \(\d+, \d+, \d+, \d+, \d+, \d+, "
-    r"'[^']*', '[^']*', '([^']*)', '([^']*)'"
+    r"\[fused_moe\].*? for \("
+    r"'(?P<gfx>[^']*)', "
+    r"(?P<cu_num>\d+), (?P<token>\d+), (?P<model_dim>\d+), (?P<inter_dim>\d+), "
+    r"(?P<expert>\d+), (?P<topk>\d+), "
+    r"'(?P<act_type>[^']*)', '(?P<dtype>[^']*)', "
+    r"'(?P<q_dtype_a>[^']*)', '(?P<q_dtype_w>[^']*)', '(?P<q_type>[^']*)', "
+    r"(?P<use_g1u1>True|False), (?P<doweight_stage1>True|False)\)"
+)
+
+#: Which dtypes fall in each of aiter's width buckets. Mirrors ``bit16_list`` /
+#: ``bit8_list`` / ``bit4_list`` in
+#: ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages_common.py``.
+_AITER_BIT16_DTYPES = frozenset({"bfloat16", "float16"})
+_AITER_BIT8_DTYPES = frozenset({"float8_e4m3fn", "float8_e4m3fnuz", "int8"})
+_AITER_BIT4_DTYPES = frozenset({"float4_e2m1fn_x2", "uint32", "int4"})
+
+#: The fields that identify one MoE problem, ignoring the token count (which the
+#: tuner sweeps) and cu_num/gfx (which the runtime supplies).
+_FMOE_SHAPE_FIELDS = (
+    "model_dim",
+    "inter_dim",
+    "expert",
+    "topk",
+    "act_type",
+    "dtype",
+    "q_dtype_a",
+    "q_dtype_w",
+    "q_type",
+    "use_g1u1",
+    "doweight_stage1",
 )
 
 
+def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
+    """Return whether aiter's CK MoE codegen has a kernel family for this pair.
+
+    ``get_gemm1_kernels_list`` / ``get_gemm2_kernels_list`` pick a family from the
+    activation/weight widths and raise ``Unsupported data type combination`` for
+    anything else. Notably a BF16 activation against FP4 weights -- which the
+    serving path runs happily -- matches no family, so handing it to the tuner
+    trades a silent no-op for a hard error.
+    """
+    act = q_dtype_a.replace("torch.", "")
+    weight = q_dtype_w.replace("torch.", "")
+    if act in _AITER_BIT16_DTYPES and weight in _AITER_BIT16_DTYPES:
+        return True
+    if act in _AITER_BIT8_DTYPES and weight in _AITER_BIT8_DTYPES:
+        return True
+    # The a8w4 family is FP8-only on the activation side; INT8 does not qualify.
+    if act.startswith("float8") and weight in _AITER_BIT4_DTYPES:
+        return True
+    return act in _AITER_BIT4_DTYPES and weight in _AITER_BIT4_DTYPES
+
+
+def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
+    """Return the distinct MoE problems a server log shows aiter dispatching.
+
+    Deduplicated on everything but the token count, preserving first-seen order.
+    One model routinely yields several problems -- the same checkpoint dispatches
+    both a BF16-activation and an FP8-activation variant, and the EP path appends
+    a masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
+    model config states. Neither is derivable from the config, which is why the
+    log is the authoritative source for what to tune.
+    """
+    if not server_log:
+        return []
+    try:
+        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    seen: dict[tuple[str, ...], dict[str, str]] = {}
+    for match in _AITER_FUSED_MOE_TUPLE_RE.finditer(text):
+        fields = match.groupdict()
+        identity = tuple(fields[name] for name in _FMOE_SHAPE_FIELDS)
+        if identity not in seen:
+            seen[identity] = fields
+    return list(seen.values())
+
+
 def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
-    """Return whether aiter's CK MoE tuner can tune what the server dispatched.
+    """Return whether aiter's CK MoE tuner can tune anything the server dispatched.
 
     The tuner builds its kernel candidates from the activation/weight dtype pair
     and rejects some combinations the serving path happily runs. Measured on
@@ -2782,23 +2864,101 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
     ``AITER_MXFP4_BF16`` backend) benchmarks fine but fails candidate generation
     with ``Unsupported data type combination: b16, fp4x2``, so routing it to
     ``fmoe_ck`` would only trade silent no-op for a hard tuner error.
+
+    A single checkpoint can dispatch several dtype pairs at once, so this asks
+    whether *any* of them is tunable; per-problem filtering happens where the
+    tuning input is written.
     """
     if not server_log:
         return False
-    try:
-        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    combos = {
-        (q_a.replace("torch.", ""), q_w.replace("torch.", ""))
-        for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
-    }
-    if not combos:
+    keys = _aiter_fused_moe_dispatch_keys(server_log)
+    if not keys:
         # MoE evidence without a parseable problem tuple: let Forge decide.
         return True
-    return not any(
-        act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos
+    return any(
+        _aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"])
+        for key in keys
     )
+
+
+#: Header aiter's MoE tuner expects for its untuned input CSV.
+_FMOE_UNTUNED_CSV_HEADER = (
+    "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+    "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
+)
+
+
+def _write_fmoe_untuned_csv_from_log(
+    server_log: str,
+    tokens: list[int],
+    workspace: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
+
+    Returns ``(csv_path, report)``; ``csv_path`` is "" when nothing tunable was
+    observed. Writing the observed tuple verbatim is the whole point: the
+    quantisation pair, the per-partition ``inter_dim`` and the EP-inflated
+    expert/topk counts are all properties of what the serving framework chose,
+    and every attempt to re-derive them from the model config is a guess that has
+    already produced tables no runtime lookup could reach.
+
+    Problems whose dtype pair aiter's codegen rejects are dropped rather than
+    passed through, because one unsupported row aborts the whole tuner run.
+    """
+    report: dict[str, Any] = {
+        "observed": 0,
+        "tunable": 0,
+        "dropped_unsupported": [],
+        "keys": [],
+    }
+    keys = _aiter_fused_moe_dispatch_keys(server_log)
+    report["observed"] = len(keys)
+    if not keys:
+        return "", report
+
+    tunable: list[dict[str, str]] = []
+    for key in keys:
+        pair = (key["q_dtype_a"], key["q_dtype_w"])
+        if _aiter_moe_dtype_pair_supported(*pair):
+            tunable.append(key)
+            report["keys"].append(
+                {name: key[name] for name in _FMOE_SHAPE_FIELDS}
+            )
+        else:
+            combo = f"{pair[0]}/{pair[1]}"
+            if combo not in report["dropped_unsupported"]:
+                report["dropped_unsupported"].append(combo)
+    report["tunable"] = len(tunable)
+    if not tunable:
+        return "", report
+
+    token_list = sorted({int(t) for t in tokens if int(t) > 0}) or [1]
+    lines = [_FMOE_UNTUNED_CSV_HEADER]
+    for key in tunable:
+        for token in token_list:
+            lines.append(
+                f"{token},{key['model_dim']},{key['inter_dim']},"
+                f"{key['expert']},{key['topk']},{key['act_type']},{key['dtype']},"
+                f"{key['q_dtype_a']},{key['q_dtype_w']},{key['q_type']},"
+                f"{1 if key['use_g1u1'] == 'True' else 0},"
+                f"{1 if key['doweight_stage1'] == 'True' else 0}"
+            )
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    csv_path = workspace / "untuned_fmoe_from_runtime.csv"
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log.info(
+        "Forge GEMM shapes: derived %d MoE problem(s) x %d token(s) from %s%s",
+        len(tunable),
+        len(token_list),
+        server_log,
+        (
+            f"; dropped {report['dropped_unsupported']} as untunable by aiter"
+            if report["dropped_unsupported"]
+            else ""
+        ),
+    )
+    return str(csv_path), report
 
 
 def _aiter_serving_evidence(server_log: str) -> set[str]:
@@ -3547,6 +3707,20 @@ async def _run_forge_gemm_tuning(
                 resolved_model_path,
             )
 
+    # MoE shapes come from the runtime, never from inference. The dispatch tuple
+    # in the server log states the quantisation pair, the per-partition inter_dim
+    # and the EP-inflated expert/topk counts; none of the three is recoverable
+    # from the model config, and guessing them is what produced tuned tables no
+    # runtime lookup could reach.
+    moe_untuned_csv = str(payload.get("moe_untuned_csv") or "").strip()
+    if moe_untuned_csv and not _path_is_existing_file(moe_untuned_csv):
+        moe_untuned_csv = ""
+    moe_key_report: dict[str, Any] = {}
+    if not moe_untuned_csv:
+        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(
+            kernel_sig_log, tokens, workspace
+        )
+
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
     forge_framework = _forge_framework_for_vllm(
         framework=framework,
@@ -3667,6 +3841,7 @@ async def _run_forge_gemm_tuning(
         "skip_gpu_check": True,
         "tokens": tokens,
         "untuned_csv": untuned_csv,
+        "moe_untuned_csv": moe_untuned_csv,
         "shapes_json": shapes_json,
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
@@ -3708,6 +3883,11 @@ async def _run_forge_gemm_tuning(
     result.setdefault("framework", framework)
     result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", raw_model_path)
+    if moe_key_report:
+        # Kept even when nothing was tunable: "no MoE problem was observed" and
+        # "the observed pair is one aiter cannot tune" lead to different actions,
+        # and neither is visible from the tuner's own status.
+        result.setdefault("moe_key_source", moe_key_report)
     if shape_alignment is not None:
         result.setdefault("shape_alignment", shape_alignment)
     if shape_capture is not None:
