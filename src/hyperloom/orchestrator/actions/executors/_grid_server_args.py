@@ -168,6 +168,13 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return _reserialize_json_blobs(" ".join(out))
 
 
+# Serving-ineligible harness flags. Enroll here; compose_server_args strips
+# them after merge so they cannot KEEP into EXTRA_*_ARGS / current_best.
+_BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = (
+    "--no-enable-prefix-caching",
+)
+
+
 def compose_server_args(
     *,
     inherited_args: str | None = "",
@@ -176,15 +183,20 @@ def compose_server_args(
     remove_args: Any = None,
     args_mode: str = "append",
 ) -> str:
-    """Compose inherited/base/variant args with optional remove/replace semantics."""
+    """Compose inherited/base/variant args with optional remove/replace semantics.
+
+    Always strips :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` from the result.
+    """
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
         pruned_base = remove_server_args(base_extra_args, remove_args)
         pruned_variant = remove_server_args(variant_extra_args, remove_args)
-        return merge_server_args(pruned_base, pruned_variant)
-    combined_base = merge_server_args(inherited_args, base_extra_args)
-    pruned = remove_server_args(combined_base, remove_args)
-    return merge_server_args(pruned, variant_extra_args)
+        composed = merge_server_args(pruned_base, pruned_variant)
+    else:
+        combined_base = merge_server_args(inherited_args, base_extra_args)
+        pruned = remove_server_args(combined_base, remove_args)
+        composed = merge_server_args(pruned, variant_extra_args)
+    return remove_server_args(composed, _BENCHMARK_HARNESS_FLAG_DENYLIST)
 
 
 
