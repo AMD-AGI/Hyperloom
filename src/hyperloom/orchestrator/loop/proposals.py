@@ -188,6 +188,34 @@ class ProposalsCollaborator:
             or self.recipe_kb is None
         ):
             return
+        # AgentX measurements stay out of the cross-session KB until the KB can
+        # tell the two workloads apart. The recipe canonical id is a seven-tuple
+        # of model/hardware/framework/precision identity with no workload and no
+        # mode segment, and the row's workload tags are copied from
+        # SharedState.isl/osl -- which under AgentX are the inert 1024/1024
+        # placeholders. So an AgentX throughput would overwrite a synthetic
+        # best_throughput on a bare numeric comparison, and the row would then
+        # be tagged as if it were a 1024/1024 synthetic run, which a later
+        # synthetic session's shape filter matches *positively*. The store is
+        # machine-global and --reset-state does not clear it, so the damage
+        # outlives the session that caused it.
+        #
+        # Skipping the write costs AgentX rounds their contribution to warm
+        # start; it is the reversible half of the fix. The other half -- putting
+        # the mode into the recipe identity and dropping the placeholder tags --
+        # changes the KB schema and needs a migration, so it is deliberately not
+        # bundled here.
+        from hyperloom.orchestrator.actions.executors._workload_envs import agentx_enabled
+
+        if agentx_enabled():
+            log.info(
+                "_kb_amend_recipe: skipped (AgentX). The recipe KB has no mode or workload "
+                "dimension, so an agentic-replay throughput would overwrite a synthetic "
+                "best_throughput and be tagged isl/osl=%s/%s.",
+                getattr(self.shared_state, "isl", "?"),
+                getattr(self.shared_state, "osl", "?"),
+            )
+            return
         try:
             cid = self._workload_canonical_id()
         except Exception:  # noqa: BLE001

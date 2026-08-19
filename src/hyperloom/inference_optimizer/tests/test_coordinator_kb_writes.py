@@ -602,3 +602,43 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]
     assert any("page64_no_radix" in (d or "") for d in descs), descs
     assert not any((d or "") == f"[{_FW}] explore → regress on {_MODEL}/{_HW}" for d in descs), descs
+
+
+# --- AgentX stays out of the cross-session KB ----------------------------------
+#
+# The recipe canonical id is a seven-tuple of model/hardware/framework/precision
+# identity: no workload, no mode. The row's workload tags are copied from
+# SharedState.isl/osl, which under AgentX are the inert 1024/1024 placeholders.
+# So an agentic-replay throughput would overwrite a synthetic best_throughput on
+# a bare numeric comparison, and the row would then be tagged as if it were a
+# 1024/1024 synthetic run -- which a later synthetic session's shape filter
+# matches positively. The store is machine-global and --reset-state does not
+# clear it, so the damage outlives the session that caused it.
+
+
+def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+
+    class _ForbiddenRecipeKB:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"AgentX amend reached the recipe KB: {name}")
+
+    coord.recipe_kb = _ForbiddenRecipeKB()
+    coord._kb_amend_recipe(
+        append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"}
+    )
+
+
+def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch) -> None:
+    """The gate must not cost the synthetic path its knowledge."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    coord = _make_coordinator(tmp_path)
+    coord._kb_amend_recipe(
+        append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"}
+    )
+
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row is not None, "the AgentX gate must not silence the synthetic path"
+    statements = [x.get("statement") for x in (row.get("lessons") or [])]
+    assert "synthetic still recorded" in statements
