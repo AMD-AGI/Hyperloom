@@ -16,6 +16,10 @@ from ..base import (
 )
 from ._invocation import render_invocation_block
 
+# ``geak_pending.status`` values meaning the candidate was measured but its
+# revalidation never landed, so the win was abandoned rather than judged.
+_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
+
 
 @register_renderer("final")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
@@ -87,7 +91,23 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
             )
         )
-    if geak_pending and geak_pending.get("status") == "awaiting_rebench":
+    geak_pending_status = str(geak_pending.get("status") or "")
+    if geak_pending and geak_pending_status in _GEAK_DROPPED_STATUSES:
+        self_gain = geak_pending.get("self_reported_gain_pct")
+        self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+        drop_reason = str(geak_pending.get("revalidation_error") or "").strip() or "reason not recorded"
+        facts.append(
+            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
+            f"revalidation (status={geak_pending_status}, {drop_reason})."
+        )
+        warnings.append(
+            "A measured GEAK e2e candidate was abandoned because its same-harness "
+            f"revalidation could not land ({drop_reason}). It was never judged on "
+            "merit, so this session's gain may understate what the optimizer "
+            "actually found — the candidate's artefacts are on disk but absent "
+            "from current_best / action_path / the validated gain."
+        )
+    elif geak_pending and geak_pending_status == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
         facts.append(

@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..kernel import collective_recovery as _collective_recovery
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -45,12 +46,6 @@ log = _logging.getLogger(__name__)
 # non-existent path and exercise the "no complete aiter config anywhere" branch
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
-
-# Idempotency key of the same-harness GEAK rebench enqueued by
-# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
-# ``geak_pending`` before the task row exists, so the phase guard already sees a
-# pending revalidation while the enqueue is in flight.
-_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
 
 
 def _collective_comm_share(state: Any) -> tuple[float | None, str]:
@@ -810,15 +805,32 @@ class KernelPhase(PhaseHandler):
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
             # Reserve the pending slot BEFORE the task exists. The rebench runs
-            # as an ``explore`` task, a kind no later phase allows, so the phase
-            # boundary cancels it on sight; ``kernel_work_pending`` is what holds
-            # KERNEL open until the rebench lands. Publishing the reservation
-            # after enqueue left a window where the guard saw no revalidation id,
-            # let KERNEL exit, and the cancel swept the freshly queued task —
-            # stranding a validated win as audit-only.
+            # as an ``explore`` task; non-CLOSE phase boundaries may spare it
+            # via ``spare_geak_rebench_on_phase_transition`` so the rebench can
+            # finish after KERNEL winds down. Publishing the reservation after
+            # enqueue left a window where KERNEL could exit and cancel the row.
+            cycle = int(getattr(state, "macro_cycle", 0) or 0)
+            placeholder_keys = _geak_rebench.geak_revalidation_placeholder_keys(cycle)
+            inflight = await _geak_rebench.find_inflight_geak_rebench_task(self.tasks)
+            if inflight is not None and inflight.state in {"queued", "running"}:
+                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+                pending["status"] = "awaiting_rebench"
+                pending["revalidation_task_id"] = inflight.task_id
+                pending.pop("revalidation_error", None)
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                log.info(
+                    "geak: revalidation already in flight (%s); skipping duplicate enqueue",
+                    inflight.task_id,
+                )
+                return True
+
             reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             reserved["status"] = "awaiting_rebench"
-            reserved.setdefault("revalidation_task_id", _GEAK_REVALIDATE_IDEMPOTENCY_KEY)
+            if not str(reserved.get("revalidation_task_id") or "").strip():
+                reserved["revalidation_task_id"] = _geak_rebench.geak_revalidate_idempotency_key(
+                    cycle
+                )
             reserved.pop("revalidation_error", None)
             state.geak_pending = reserved
             state.save(self.session_dir)
@@ -840,8 +852,8 @@ class KernelPhase(PhaseHandler):
                 return True
 
             pending["status"] = "rebench_unavailable"
-            # Drop the reservation placeholder so no stale id outlives the slot.
-            if pending.get("revalidation_task_id") == _GEAK_REVALIDATE_IDEMPOTENCY_KEY:
+            # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
+            if pending.get("revalidation_task_id") in placeholder_keys:
                 pending.pop("revalidation_task_id", None)
             pending["revalidation_error"] = str(
                 (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
