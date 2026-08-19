@@ -40,13 +40,36 @@ def _log(tmp_path, text: str) -> str:
 
 AITER_FUSED_MOE = (
     "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
-    "(256, 8192, 3072, 1536, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
+    "('gfx950', 256, 256, 8192, 1536, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
     "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
 )
 AITER_FUSED_MOE_BF16_FP4 = (
     "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
-    "(256, 8192, 3072, 3072, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
+    "('gfx950', 256, 256, 8192, 3072, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
     "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+)
+
+# Verbatim lines from a production server.log, one per wording aiter emits.
+# Kept literal because the previous hand-written fixtures dropped the leading
+# gfx field, which let a regex that could never match a real log pass its tests.
+REAL_2STAGE_DEFAULT = (
+    "[aiter] [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, 512, 256, 6, "
+    "'ActivationType.Silu', 'torch.bfloat16', 'torch.float8_e4m3fn', "
+    "'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+)
+REAL_NO_TUNED_FLYDSL = (
+    "[aiter] [fused_moe] no tuned FlyDSL config for ('gfx950', 256, 256, 4096, 512, 256, 6, "
+    "'ActivationType.Silu', 'torch.bfloat16', 'torch.float8_e4m3fn', "
+    "'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False), using heuristic "
+    "FlyDSL fallback (kn1='flydsl_moe1_afp8_wfp4_bf16_t32x128x256_w2_gui', "
+    "kn2='flydsl_moe2_afp8_wfp4_bf16_t32x128x256_atomic_bnt2')"
+)
+REAL_2STAGE_WITH_KERNEL_NAMES = (
+    "(Worker_TP7 pid=26394) [aiter] [fused_moe] using 2stage "
+    "(kernelName1='flydsl_moe1_afp8_wfp4_bf16_t64x128x256_w4_bnt0_gui_fp8', "
+    "kernelName2='opus_moe2_afp8_wfp4_fp8_t64x256x256_sbm64_rbn3584') for "
+    "('gfx950', 256, 8192, 7168, 512, 384, 6, 'ActivationType.Silu', 'torch.bfloat16', "
+    "'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
 )
 
 
@@ -69,10 +92,19 @@ class TestAiterServingEvidence:
         assert krh._aiter_serving_evidence(str(tmp_path / "absent.log")) == set()
 
 
-def _moe_tuple(q_a: str, q_w: str, q_type: str = "QuantType.per_1x32") -> str:
+def _moe_tuple(
+    q_a: str,
+    q_w: str,
+    q_type: str = "QuantType.per_1x32",
+    *,
+    inter_dim: int = 3072,
+    expert: int = 128,
+    topk: int = 4,
+) -> str:
     return (
         "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
-        f"(256, 8192, 3072, 3072, 128, 4, 'ActivationType.Swiglu', 'torch.bfloat16', "
+        f"('gfx950', 256, 8192, 3072, {inter_dim}, {expert}, {topk}, "
+        f"'ActivationType.Swiglu', 'torch.bfloat16', "
         f"'{q_a}', '{q_w}', '{q_type}', True, False)"
     )
 
@@ -95,19 +127,162 @@ class TestCkMoeTunerSupport:
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.bfloat16", "QuantType.No"))
         assert krh._aiter_ck_moe_tuner_supports(log)
 
-    def test_any_unsupported_combo_blocks_the_model(self, tmp_path):
-        """gpt-oss logs both combos; the unsupported one has to win."""
+    def test_a_mixed_log_stays_tunable_because_rows_are_filtered(self, tmp_path):
+        """One checkpoint dispatches several pairs; the tunable ones still count.
+
+        Measured in production: the same model logs both a BF16-activation and an
+        FP8-activation problem. Blocking the whole model on the unsupported one
+        would forfeit the tunable half, so the untunable rows are dropped when the
+        tuning input is written instead.
+        """
         log = _log(
             tmp_path,
             _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
             + "\n"
-            + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"),
+            + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=257, topk=5),
+        )
+        assert krh._aiter_ck_moe_tuner_supports(log)
+
+    def test_an_entirely_unsupported_log_is_rejected(self, tmp_path):
+        log = _log(
+            tmp_path,
+            _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2")
+            + "\n"
+            + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=257, topk=5),
         )
         assert not krh._aiter_ck_moe_tuner_supports(log)
 
     def test_moe_evidence_without_a_parseable_tuple_defers_to_forge(self, tmp_path):
         log = _log(tmp_path, "INFO Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend.\n")
         assert krh._aiter_ck_moe_tuner_supports(log)
+
+
+class TestDispatchKeyExtraction:
+    """The regex must match every wording aiter actually emits.
+
+    A hand-written fixture previously omitted the leading gfx field, so a regex
+    that could not match a single real log line passed its tests while silently
+    disabling the dtype gate in production.
+    """
+
+    def test_matches_the_plain_default_wording(self, tmp_path):
+        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_DEFAULT))
+        assert len(keys) == 1
+        assert keys[0]["inter_dim"] == "512"
+        assert keys[0]["q_dtype_a"] == "torch.float8_e4m3fn"
+        assert keys[0]["q_dtype_w"] == "torch.float4_e2m1fn_x2"
+        assert keys[0]["expert"] == "256"
+        assert keys[0]["topk"] == "6"
+
+    def test_matches_the_flydsl_fallback_wording(self, tmp_path):
+        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_NO_TUNED_FLYDSL))
+        assert len(keys) == 1
+        assert keys[0]["inter_dim"] == "512"
+
+    def test_matches_the_wording_that_interposes_kernel_names(self, tmp_path):
+        """This form puts its own parenthesised group before the tuple."""
+        keys = krh._aiter_fused_moe_dispatch_keys(
+            _log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES)
+        )
+        assert len(keys) == 1
+        assert keys[0]["model_dim"] == "7168"
+        assert keys[0]["expert"] == "384"
+
+    def test_dedupes_on_everything_but_the_token_count(self, tmp_path):
+        a = REAL_2STAGE_DEFAULT
+        b = REAL_2STAGE_DEFAULT.replace("256, 256, 4096", "256, 512, 4096")
+        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, a + "\n" + b))
+        assert len(keys) == 1
+
+    def test_keeps_distinct_problems_from_one_model(self, tmp_path):
+        """The EP path inflates expert/topk by one; that is a separate problem."""
+        a = _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
+        b = _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2", expert=129, topk=5)
+        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, a + "\n" + b))
+        assert len(keys) == 2
+
+    def test_missing_log(self, tmp_path):
+        assert krh._aiter_fused_moe_dispatch_keys("") == []
+        assert krh._aiter_fused_moe_dispatch_keys(str(tmp_path / "absent.log")) == []
+
+
+class TestDtypePairSupport:
+    """Mirrors the four kernel families in aiter's CK MoE codegen."""
+
+    def test_supported_pairs(self):
+        for act, weight in (
+            ("torch.bfloat16", "torch.bfloat16"),
+            ("torch.float16", "torch.float16"),
+            ("torch.float8_e4m3fn", "torch.float8_e4m3fn"),
+            ("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"),
+            ("torch.float8_e4m3fnuz", "torch.float4_e2m1fn_x2"),
+            ("torch.float4_e2m1fn_x2", "torch.float4_e2m1fn_x2"),
+        ):
+            assert krh._aiter_moe_dtype_pair_supported(act, weight), (act, weight)
+
+    def test_bf16_activation_with_fp4_weight_is_the_known_rejection(self):
+        assert not krh._aiter_moe_dtype_pair_supported(
+            "torch.bfloat16", "torch.float4_e2m1fn_x2"
+        )
+
+    def test_int8_activation_does_not_qualify_for_the_a8w4_family(self):
+        """The a8w4 branch requires an FP8 activation specifically."""
+        assert not krh._aiter_moe_dtype_pair_supported(
+            "torch.int8", "torch.float4_e2m1fn_x2"
+        )
+
+
+class TestWriteFmoeUntunedCsvFromLog:
+    def test_writes_one_row_per_problem_and_token(self, tmp_path):
+        path, report = krh._write_fmoe_untuned_csv_from_log(
+            _log(tmp_path, REAL_2STAGE_DEFAULT), [4, 512], tmp_path / "ws"
+        )
+        rows = [
+            line for line in open(path, encoding="utf-8").read().splitlines() if line
+        ]
+        assert rows[0].split(",") == [
+            "token", "model_dim", "inter_dim", "expert", "topk", "act_type", "dtype",
+            "q_dtype_a", "q_dtype_w", "q_type", "use_g1u1", "doweight_stage1",
+        ]
+        assert len(rows) == 3  # header + 2 tokens
+        assert rows[1] == (
+            "4,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
+            "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
+        )
+        assert report["observed"] == 1
+        assert report["tunable"] == 1
+        assert report["dropped_unsupported"] == []
+
+    def test_drops_pairs_the_tuner_would_reject(self, tmp_path):
+        """One unsupported row aborts the whole aiter tuner run, so filter first."""
+        log = _log(
+            tmp_path,
+            _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
+            + "\n"
+            + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=129),
+        )
+        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+
+        body = open(path, encoding="utf-8").read()
+        assert "torch.bfloat16,torch.float4_e2m1fn_x2" not in body
+        assert report["observed"] == 2
+        assert report["tunable"] == 1
+        assert report["dropped_unsupported"] == ["torch.bfloat16/torch.float4_e2m1fn_x2"]
+
+    def test_no_tunable_problem_yields_no_csv(self, tmp_path):
+        log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
+        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+
+        assert path == ""
+        assert report["observed"] == 1
+        assert report["tunable"] == 0
+
+    def test_no_moe_evidence_yields_no_csv(self, tmp_path):
+        path, report = krh._write_fmoe_untuned_csv_from_log(
+            _log(tmp_path, "INFO server started\n"), [8], tmp_path / "ws"
+        )
+        assert path == ""
+        assert report["observed"] == 0
 
 
 class TestResolveVllmAiterRouting:
