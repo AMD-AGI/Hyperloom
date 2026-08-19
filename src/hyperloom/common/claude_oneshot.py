@@ -130,6 +130,10 @@ def ensure_available() -> None:
 def message_text(message: Any) -> list[str]:
     """Extract text fragments from one Claude SDK message.
 
+    Covers every shape the SDK emits across versions: a bare string, a ``.text``
+    attribute, ``.content`` blocks exposing ``.text`` (object or dict), and a
+    ``ResultMessage.result`` summary string.
+
     Args:
         message: A message yielded by ``claude_agent_sdk.query``.
 
@@ -149,6 +153,9 @@ def message_text(message: Any) -> list[str]:
             block_text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
             if isinstance(block_text, str):
                 parts.append(block_text)
+    result_text = getattr(message, "result", None)
+    if isinstance(result_text, str) and result_text:
+        parts.append(result_text)
     return parts
 
 

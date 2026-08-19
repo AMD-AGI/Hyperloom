@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the ``same_payload_loop`` signal (B1)."""
+"""Unit tests for the ``same_payload_loop`` signal."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from hyperloom.agents.robustness.sources.base import SourceData
 def _ctx() -> ReactorContext:
     return ReactorContext(
         tick_index=1,
-        shared_state=SharedStateSnapshot(session_id="sess-1"),
+        shared_state=SharedStateSnapshot(),
         inbox=[],
         now_unix=1.0,
     )
@@ -205,7 +205,7 @@ def test_inbox_and_coordinator_events_combined():
     ]
     ctx = ReactorContext(
         tick_index=1,
-        shared_state=SharedStateSnapshot(session_id="sess-1"),
+        shared_state=SharedStateSnapshot(),
         inbox=inbox,
         now_unix=1.0,
     )

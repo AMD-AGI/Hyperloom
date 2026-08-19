@@ -573,5 +573,5 @@ def test_build_phase_timeline_merges_journal_and_kernel_lanes(
     decisions = {(e.get("action"), e.get("decision")) for e in timeline}
     assert ("explore", "REVERT") in decisions
     assert ("integrate", "KEEP") in decisions
-    # action_timeline aliases phase_timeline.
-    assert out["action_timeline"] == timeline
+    # action_timeline alias was removed; phase_timeline is the canonical key.
+    assert out["phase_timeline"] == timeline

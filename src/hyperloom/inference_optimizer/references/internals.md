@@ -30,10 +30,11 @@ lives in `orchestrator/prompts/orchestration.md`. In brief:
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **IR-6 HARD force-exit**: EXPLORE exits the moment wall-clock remaining <
-  `--explore-force-exit-hours-remaining` (default 3.0 h) OR phase budget <
-  `--explore-force-exit-budget-pct` (default 20%). Non-negotiable — leaves
-  buffer for KERNEL_AGENT → SWEEP → CLOSE + report.
+- **IR-6 HARD force-exit**: EXPLORE exits the moment the unspent fraction of its
+  own phase budget drops to `--explore-force-exit-budget-pct` (default 20%).
+  Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is already
+  inside that fraction, since charge-back rebuilds the allotment from the time
+  left at phase entry; there is no session-remaining arm.
 - **Plateau advisory**: EXPLORE / KERNEL_AGENT / FRAMEWORK plateau signals are
   computed every tick and rendered as advisory in the orchestration prompt. They
   do NOT drive phase advance — the LLM may emit

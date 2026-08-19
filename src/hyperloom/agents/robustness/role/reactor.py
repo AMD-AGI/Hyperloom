@@ -3,7 +3,7 @@
 
 """Reactor: the heart of the robustness role.
 
-A single :meth:`Reactor.tick` runs the M1 pipeline: :class:`DegradeRouter` ->
+A single :meth:`Reactor.tick` runs the pipeline: :class:`DegradeRouter` ->
 :class:`Classifier` -> :class:`ActionLadder` -> :class:`PolicyAware` filter ->
 :class:`FindingSink` persist -> return validated intents. The Reactor holds tick
 state but no business logic (that lives in classifier + ladder) so transports

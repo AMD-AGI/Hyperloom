@@ -320,7 +320,7 @@ that path is missing or reaped.
 
 ## Resume fails: "manifest.json not found"
 
-**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume` exits with
+**Symptom.** `python -m hyperloom.inference_optimizer.cli optimize --resume-from` exits with
 `manifest.json not found under <dir>` or `state.json missing`.
 
 **Cause**: `USER_DATA_PATH` points at a different directory than the
@@ -336,10 +336,9 @@ original session, or the session never reached the point of writing
    echo "$USER_DATA_PATH"
    find "$USER_DATA_PATH" -name manifest.json
    ```
-2. If you used a custom path the first time, pass the actual session
-   directory explicitly:
+2. Pass the actual session directory:
    ```bash
-   python3 -m hyperloom.inference_optimizer.cli optimize --resume --resume-from "$SESSION_DIR"
+   python3 -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"
    ```
 3. If `manifest.json` truly never existed, resume is not possible —
    restart with a fresh `--model …` launch.

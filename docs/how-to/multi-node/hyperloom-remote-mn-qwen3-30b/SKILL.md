@@ -175,7 +175,8 @@ FORGE_PATH=${NFS_SHARED_ROOT}/KernelForge
 
 - Session lands in `$USER_DATA_PATH/<model_basename>/<UTC_ts>/`; `USER_DATA_PATH`
   is platform-injected and kept unchanged.
-- Crash recovery: `optimize --resume` on the **same** session dir (never a second
-  `optimize`; resume past a terminal `stop_reason` needs `--force-resume`).
+- Crash recovery: `optimize --resume-from "$SESSION_DIR"` on the **same** session
+  dir (never a second `optimize`; resume past a terminal `stop_reason` needs
+  `--force-resume`).
 - Releasing the cluster is the platform's job, not the optimizer's — it happens
   when the session ends.

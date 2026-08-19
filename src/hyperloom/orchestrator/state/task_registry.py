@@ -44,7 +44,7 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     "cancelled": frozenset(),
 }
 
-TERMINAL_STATES = frozenset({"succeeded", "cancelled"})
+TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if not outgoing)
 
 # Progress notes a task's ``history`` retains, oldest dropped first.
 # ``record_progress`` re-reads and rewrites the whole blob inside a

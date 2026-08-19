@@ -251,26 +251,11 @@ def _queue_kernel_keep(
 
 
 def _ensure_kernel_task_state(state) -> None:
-    """Lazily migrate ordinal attempts and KEEP patches into stable ledgers."""
+    """Initialise the stable ledger and re-queue the KEEPs recorded in it."""
     if not isinstance(getattr(state, "kernel_opt_task_attempts", None), dict):
         state.kernel_opt_task_attempts = {}
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
-    for ledger_id, raw_entry in (state.kernel_opt_attempts or {}).items():
-        if not isinstance(raw_entry, dict):
-            continue
-        entry = dict(raw_entry)
-        task_key = _stable_kernel_task_key(
-            task_group_key=str(entry.get("task_group_key") or ""),
-            kernel_id=str(entry.get("kernel_id") or ledger_id),
-            source_file=str(entry.get("last_source_file") or ""),
-        )
-        entry.setdefault("stable_task_key", task_key)
-        entry.setdefault(
-            "current_kernel_id",
-            str(entry.get("kernel_id") or ledger_id),
-        )
-        state.kernel_opt_task_attempts.setdefault(task_key, entry)
     for task_key, stable_entry in state.kernel_opt_task_attempts.items():
         if not isinstance(stable_entry, dict):
             continue
@@ -493,7 +478,7 @@ def _stamp_integration_validation(
     if task_key:
         entries.append((state.kernel_opt_task_attempts or {}).get(task_key))
     if kernel_id:
-        entries.append((state.kernel_opt_attempts or {}).get(kernel_id))
+        entries.append(_entry_by_kernel_id(state, kernel_id))
     for attempt in entries:
         if not isinstance(attempt, dict):
             continue
@@ -555,9 +540,7 @@ def record_kernel_integrate_result(
     kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(state, result)
     task_group_key = str(
         result.get("task_group_key")
-        or ((state.kernel_opt_attempts or {}).get(kernel_id) or {}).get(
-            "task_group_key"
-        )
+        or (_entry_by_kernel_id(state, kernel_id) or {}).get("task_group_key")
         or ""
     )
     integration_id = str(result.get("integration_id") or "")
@@ -796,14 +779,6 @@ def record_kernel_integrate_result(
             stable_attempt["integration_status"] = "rejected"
             stable_attempt["integration_rejected_reason"] = reason
             stable_attempt["integration_rejected_at"] = _now_iso()
-        ordinal_attempt = (state.kernel_opt_attempts or {}).get(kernel_id)
-        if (
-            isinstance(ordinal_attempt, dict)
-            and str(ordinal_attempt.get("stable_task_key") or "") == task_key
-        ):
-            ordinal_attempt["integration_status"] = "rejected"
-            ordinal_attempt["integration_rejected_reason"] = reason
-            ordinal_attempt["integration_rejected_at"] = _now_iso()
     return entry
 
 
@@ -944,41 +919,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     )
     ts = _now_iso()
 
-    prior_ledger_id = kernel_id
-    prior_entry = dict(state.kernel_opt_attempts.get(kernel_id) or {})
-    if task_group_key:
-        matching_ledger = next(
-            (
-                (ledger_id, ledger_entry)
-                for ledger_id, ledger_entry in (
-                    state.kernel_opt_attempts or {}
-                ).items()
-                if isinstance(ledger_entry, dict)
-                and str(ledger_entry.get("task_group_key") or "")
-                == task_group_key
-            ),
-            None,
-        )
-        if matching_ledger is not None:
-            prior_ledger_id, matching_entry = matching_ledger
-            prior_entry = dict(matching_entry)
-            if prior_ledger_id != kernel_id:
-                displaced_entry = state.kernel_opt_attempts.get(kernel_id)
-                state.kernel_opt_attempts.pop(prior_ledger_id, None)
-                if (
-                    isinstance(displaced_entry, dict)
-                    and str(displaced_entry.get("task_group_key") or "")
-                    != task_group_key
-                ):
-                    # Preserve a task currently occupying the new ordinal slot.
-                    # Reranking commonly swaps two IDs; the vacated prior slot is
-                    # collision-free and remains discoverable by task_group_key.
-                    state.kernel_opt_attempts[prior_ledger_id] = displaced_entry
-                state.rejected_kernel_ids = [
-                    rejected_id
-                    for rejected_id in (state.rejected_kernel_ids or [])
-                    if rejected_id != prior_ledger_id
-                ]
+    prior_entry = dict(_entry_by_kernel_id(state, kernel_id) or {})
     legacy_task_keys = {
         str(item)
         for item in (result.get("legacy_task_group_keys") or [])
@@ -1023,21 +964,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         prior_entry = dict(stable_prior_entry)
         if migrated_stable_key and migrated_stable_key != stable_task_key:
             state.kernel_opt_task_attempts.pop(migrated_stable_key, None)
-            for ledger_id, legacy_entry in list(
-                state.kernel_opt_attempts.items()
-            ):
-                if ledger_id == kernel_id or not isinstance(
-                    legacy_entry,
-                    dict,
-                ):
-                    continue
-                if (
-                    str(legacy_entry.get("stable_task_key") or "")
-                    == migrated_stable_key
-                    or str(legacy_entry.get("task_group_key") or "")
-                    == migrated_stable_key
-                ):
-                    state.kernel_opt_attempts.pop(ledger_id, None)
     prior_task_group_key = (
         task_group_key
         if migrated_stable_key
@@ -1053,11 +979,10 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             member_id
             for member_id in [
                 kernel_id,
-                prior_ledger_id,
                 *task_group_kernel_ids,
             ]
             if str(
-                (state.kernel_opt_attempts.get(member_id) or {}).get(
+                (_entry_by_kernel_id(state, member_id) or {}).get(
                     "task_group_key"
                 )
                 or ""
@@ -1262,7 +1187,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         entry["task_group_shape_case_count"] = int(
             result.get("task_group_shape_case_count") or 0
         )
-    state.kernel_opt_attempts[kernel_id] = entry
     state.kernel_opt_task_attempts[stable_task_key] = dict(entry)
     _queue_kernel_keep(
         state,
@@ -1545,6 +1469,37 @@ def has_keep_pending_integrate(state) -> bool:
             non-empty.
     """
     return bool(next_pending_keep_kernel_id(state))
+
+
+def index_attempts_by_kernel_id(attempts: Any) -> dict[str, dict]:
+    """Re-index a stable-keyed attempt ledger by trace-local ``current_kernel_id``.
+
+    The ordinal id is not an identity — reranking moves it between operators, so
+    two stable entries can claim the same one. The latest-stamped entry wins,
+    which is the one currently occupying the ordinal slot.
+
+    Args:
+        attempts: A ``kernel_opt_task_attempts`` mapping, or anything falsy.
+
+    Returns:
+        ``{current_kernel_id: attempt}``, holding the ledger's own entry dicts.
+    """
+    latest: dict[str, tuple[str, dict]] = {}
+    for entry in (attempts or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        kernel_id = str(entry.get("current_kernel_id") or "")
+        if not kernel_id:
+            continue
+        ts = str(entry.get("last_ts") or entry.get("ts") or "")
+        if ts >= latest.get(kernel_id, ("", {}))[0]:
+            latest[kernel_id] = (ts, entry)
+    return {kernel_id: entry for kernel_id, (_ts, entry) in latest.items()}
+
+
+def _entry_by_kernel_id(state, kernel_id: str) -> dict | None:
+    """The stable-ledger entry currently holding ``kernel_id``, or ``None``."""
+    return index_attempts_by_kernel_id(state.kernel_opt_task_attempts).get(kernel_id)
 
 
 def kernel_opt_attempts_count(state) -> int:

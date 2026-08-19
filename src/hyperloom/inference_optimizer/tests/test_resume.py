@@ -431,7 +431,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
 
 
 class TestN23ResumePerSession:
-    """``--resume`` understands the N17 per-session layout, exercising ``find_latest_per_session_dir``."""
+    """``--resume-from`` addresses a session inside the N17 per-session layout."""
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch, tmp_path):
@@ -439,20 +439,6 @@ class TestN23ResumePerSession:
 
         monkeypatch.setenv(_paths.ENV_USER_DATA_PATH, str(tmp_path))
         monkeypatch.delenv(_paths.ENV_CURRENT_SESSION_DIR, raising=False)
-
-    def test_resume_picks_latest_subdir_after_two_launches(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
-
-        sd1 = _paths.make_session_dir(model_name="DeepSeek-R1-0528")
-        assert _paths.find_latest_per_session_dir() == sd1
-        assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd1
-
-        later_ts = "29990101T000000Z"
-        sd2 = tmp_path / "DeepSeek-R1-0528" / later_ts
-        sd2.mkdir(parents=True)
-
-        assert _paths.find_latest_per_session_dir() == sd2
-        assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd2
 
     def test_resume_does_not_mutate_user_data_path(self, tmp_path):
         from hyperloom.inference_optimizer.session import paths as _paths
@@ -464,11 +450,6 @@ class TestN23ResumePerSession:
         assert _os.environ[_paths.ENV_CURRENT_SESSION_DIR] == str(sd)
         assert _paths.workspace_root() == tmp_path
         assert tmp_path in sd.parents
-
-    def test_resume_falls_back_to_flat_when_no_per_session_subdir(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
-
-        assert _paths.find_latest_per_session_dir() is None
 
     def test_resume_from_explicit_path_must_be_under_workspace_root(
         self,
@@ -488,36 +469,22 @@ class TestN23ResumePerSession:
         except ValueError:
             pass
 
-    def test_latest_picks_across_models_when_model_name_omitted(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["optimize", "--resume"],
+            # The command line already-deployed robustness monitor copies send.
+            ["optimize", "--resume", "--resume-from", "/tmp/sess"],
+        ],
+    )
+    def test_no_session_can_be_resumed_without_naming_it(self, argv):
+        """``--resume`` cannot start a run; it exits instead of choosing a session."""
+        from hyperloom.inference_optimizer.cli.parser import _build_parser
 
-        (tmp_path / "ModelA").mkdir()
-        (tmp_path / "ModelA" / "20260101T000000Z").mkdir()
-        (tmp_path / "ModelB").mkdir()
-        (tmp_path / "ModelB" / "20260520T000000Z").mkdir()
-        (tmp_path / "ModelC").mkdir()
-        (tmp_path / "ModelC" / "20260315T000000Z").mkdir()
+        with pytest.raises(SystemExit) as exc:
+            _build_parser().parse_args(argv)
+        assert exc.value.code == 2
 
-        picked = _paths.find_latest_per_session_dir()
-        assert picked is not None
-        assert picked.parent.name == "ModelB"
-        assert picked.name == "20260520T000000Z"
-
-    def test_workspace_shared_dirs_never_picked_as_session(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
-
-        (tmp_path / "runtime").mkdir()
-        (tmp_path / "runtime" / "20990101T000000Z").mkdir()
-        (tmp_path / "logs").mkdir()
-        (tmp_path / "logs" / "20990101T000000Z").mkdir()
-        (tmp_path / "RealModel").mkdir()
-        (tmp_path / "RealModel" / "20260518T100000Z").mkdir()
-
-        picked = _paths.find_latest_per_session_dir()
-        assert picked is not None
-        assert picked.parent.name == "RealModel"
-        assert "runtime" not in str(picked)
-        assert "logs" not in str(picked)
 
 
 # _load_kernel_agent_env_fallback hard-fails on bad state

@@ -161,7 +161,7 @@ def collect_roofline_progress(
 
     # Headline numbers.
     current_best_tput = trajectory[-1]["tput"] if trajectory else 0.0
-    cumulative_gain_pct = _to_float(state.get("cumulative_gain")) or 0.0
+    cumulative_gain_pct = _to_float(state.get("cumulative_gain_validated")) or 0.0
     pct_of_ceiling = (
         round(current_best_tput / ceiling_tok * 100.0, 4) if ceiling_available and current_best_tput > 0 else None
     )

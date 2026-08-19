@@ -425,8 +425,8 @@ def build_manifest(
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate
-        # the on-disk artifacts. Falls back to the resolved workspace_root().
-        "user_data_path": (os.environ.get("USER_DATA_PATH") or "").strip() or str(_paths.workspace_root()),
+        # the on-disk artifacts.
+        "user_data_path": str(_paths.workspace_root()),
         "model_path": model_path,
         "model_name": model_name,
         "framework": framework or "sglang",
@@ -496,7 +496,7 @@ def write_manifest(
 
 def load_manifest(session_dir: Path) -> dict[str, Any]:
     """Read ``manifest.json`` for an existing session. Raises
-    ``FileNotFoundError`` if missing (the signal ``--resume`` uses to refuse a
+    ``FileNotFoundError`` if missing (the signal ``--resume-from`` uses to refuse a
     fresh sandbox).
 
     Args:
@@ -511,7 +511,7 @@ def load_manifest(session_dir: Path) -> dict[str, Any]:
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(
-            f"manifest.json not found under {session_dir} — the session was never initialised; cannot --resume"
+            f"manifest.json not found under {session_dir} — the session was never initialised; cannot resume"
         )
     with p.open(encoding="utf-8") as f:
         return json.load(f)

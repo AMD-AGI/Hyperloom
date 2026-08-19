@@ -26,6 +26,7 @@ from ._common import (
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
+    phase_at,
 )
 
 
@@ -287,7 +288,7 @@ def _build_phase_windows(
 
 
 def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
-    """Return the phase active at ``ts`` per ``windows`` (latest <= ts).
+    """Return the phase active at ISO-or-numeric ``ts`` per ``windows``.
 
     Args:
         ts (Any): An ISO-8601 timestamp (or numeric Unix value).
@@ -301,13 +302,7 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
     unix = _parse_iso_unix(ts)
     if unix is None or not windows:
         return ""
-    phase = ""
-    for entered, name in windows:
-        if entered <= unix:
-            phase = name
-        else:
-            break
-    return phase
+    return phase_at(unix, windows)
 
 
 # Components whose unjoined LLM spend is legitimately not tied to a single

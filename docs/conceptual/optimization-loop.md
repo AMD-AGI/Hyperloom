@@ -230,8 +230,9 @@ The old `backends` and `params` action names are compatibility aliases
 for archived reporting only. New sessions write the merged
 `explore_search` ledger.
 
-After each KEEP, the runtime revalidates the full stack end to end so
-the reported cumulative gain is not just a sum of per-round deltas.
+After each KEEP, the runtime revalidates the full stack end to end, so
+the reported `cumulative_gain_validated` always comes from a measurement
+taken with every accepted change applied.
 
 ## KERNEL_AGENT
 

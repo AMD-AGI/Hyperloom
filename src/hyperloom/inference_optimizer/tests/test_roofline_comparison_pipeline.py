@@ -76,7 +76,6 @@ def _mock_state(
         baseline_tput=4309.2,
         baseline_accuracy=0.0,
         current_best={"action": "params", "tput": 4357.27},
-        cumulative_gain=1.12,
         cumulative_gain_validated=0.33,
         cumulative_gain_validated_ts="2026-05-24T13:47:22+00:00",
         cumulative_gain_validated_stack_len=2,

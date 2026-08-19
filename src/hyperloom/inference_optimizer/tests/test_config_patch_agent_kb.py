@@ -33,7 +33,6 @@ def _state(stack: list[dict]) -> SimpleNamespace:
         optimization_stack=stack,
         current_best={"tput": 130.0},
         cumulative_gain_validated=30.0,
-        cumulative_gain=30.0,
         gain_per_stack_entry=[],
         session_id="s1",
         recipe_kb_session_id="s1",

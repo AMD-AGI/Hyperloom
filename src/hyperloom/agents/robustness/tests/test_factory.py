@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Smoke tests for the M1 factory."""
+"""Smoke tests for the factory."""
 
 from __future__ import annotations
 
@@ -22,19 +22,17 @@ from hyperloom.agents.robustness.role.prompt_inputs import (
 @pytest.mark.asyncio
 async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Path):
     config = Config(session_dir=tmp_path)
-    config.robustness_server_url = ""
     bundle = build_reactor_components(config)
     try:
         ctx = ReactorContext(
             tick_index=0,
-            shared_state=SharedStateSnapshot(session_id="sess-1", crash_count=2),
+            shared_state=SharedStateSnapshot(crash_count=2),
             inbox=[],
             now_unix=1000.0,
         )
         intents = await bundle.reactor.tick(ctx)
         assert intents
         assert any(i.type is IntentType.ALERT for i in intents)
-        assert bundle.server_client is None
     finally:
         await bundle.aclose()
 
@@ -42,13 +40,13 @@ async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
     """The factory-built classifier must resolve a config for every registry
-    slot: entries the factory omits (e.g. cluster_fault) fall back to the
-    registry default, so nothing is left unconfigured."""
+    slot: entries the factory omits fall back to the registry default, so
+    nothing is left unconfigured."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     expected_slots = {spec.config_attr for spec in _SIGNAL_REGISTRY if spec.config_attr}
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     bundle = build_reactor_components(config)
     try:
         resolved = bundle.components.classifier.signal_configs
@@ -66,25 +64,10 @@ async def test_the_stall_escalation_threshold_reaches_the_signal_from_the_config
     In code: like every other threshold on ``Config`` it is set by whoever
     constructs it, not by an environment variable ``discover`` reads.
     """
-    config = Config(session_dir=tmp_path, robustness_server_url="", agent_stall_high_after_s=7200.0)
+    config = Config(session_dir=tmp_path, agent_stall_high_after_s=7200.0)
     bundle = build_reactor_components(config)
     try:
         assert bundle.components.classifier.signal_configs["stall"].severity_high_after_s == 7200.0
-    finally:
-        await bundle.aclose()
-
-
-@pytest.mark.asyncio
-async def test_build_reactor_components_uses_server_url_when_set(tmp_path: Path):
-    config = Config(
-        session_dir=tmp_path,
-        robustness_server_url="http://example.invalid:8000",
-    )
-    bundle = build_reactor_components(config)
-    try:
-        # Assert the bundle wires the server_client when a URL is configured.
-        assert bundle.server_client is not None
-        assert bundle.server_client.base_url == "http://example.invalid:8000"
     finally:
         await bundle.aclose()
 
@@ -96,7 +79,7 @@ async def test_build_reactor_components_uses_server_url_when_set(tmp_path: Path)
 async def test_factory_uses_noop_engine_when_credentials_missing(tmp_path: Path):
     from hyperloom.agents.robustness.decision.rca_engine import NoopRcaEngine
 
-    config = Config(session_dir=tmp_path, robustness_server_url="")
+    config = Config(session_dir=tmp_path)
     bundle = build_reactor_components(config)
     try:
         assert isinstance(bundle.components.rca, NoopRcaEngine)
@@ -123,9 +106,7 @@ async def test_config_discover_normalizes_retired_deepseek_env(monkeypatch, tmp_
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("ROBUSTNESS_LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
-    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
-
-    config = await Config.discover()
+    config = Config.discover()
 
     # The OpenAI side is filled too, and it is checked first.
     assert config.llm_provider == "openai"
@@ -145,9 +126,7 @@ async def test_config_discover_uses_dual_protocol_gateway_anthropic_side(monkeyp
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
-    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
-
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "anthropic"
     assert config.llm_base_url == "https://api.deepseek.com/anthropic"
@@ -171,9 +150,7 @@ async def test_config_discover_selects_anthropic_for_a_subscription_token(monkey
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
-    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
-
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "anthropic"
     assert config.llm_api_key == ""
@@ -188,9 +165,7 @@ async def test_config_discover_anthropic_model_follows_claude_model(monkeypatch,
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
-    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
-
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "anthropic"
     assert config.llm_model == "claude-opus-4-6"
@@ -204,9 +179,7 @@ async def test_config_discover_openai_model_follows_codex_model(monkeypatch, tmp
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
-    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
-
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_provider == "openai"
     assert config.llm_model == "gpt-5.5"
@@ -221,9 +194,7 @@ async def test_config_discover_does_not_treat_gateway_key_as_official_openai(mon
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
-    monkeypatch.setattr("hyperloom.agents.robustness.config._probe_robustness_server", lambda: _async_value(""))
-
-    config = await Config.discover()
+    config = Config.discover()
 
     assert config.llm_base_url == ""
     assert config.llm_api_key == ""
@@ -240,7 +211,6 @@ async def test_factory_uses_llm_engine_when_credentials_present(tmp_path: Path):
 
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="http://chat-server.invalid/v1",
         llm_api_key="secret",
     )
@@ -261,7 +231,6 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkey
     monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: True)
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="https://api.deepseek.com/anthropic",
         llm_api_key="secret",
         llm_provider="anthropic",
@@ -296,7 +265,6 @@ async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_p
 
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url=base_url,
         llm_api_key=api_key,
         llm_provider=provider,
@@ -322,7 +290,6 @@ async def test_factory_falls_back_to_noop_when_the_anthropic_transport_is_unusab
     monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: False)
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="",
         llm_api_key="",
         llm_provider="anthropic",
@@ -341,7 +308,6 @@ async def test_factory_still_noops_when_the_openai_side_has_no_key(tmp_path: Pat
 
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="http://chat-server.invalid/v1",
         llm_api_key="",
         llm_provider="openai",
@@ -359,7 +325,6 @@ async def test_factory_respects_explicit_disable(tmp_path: Path):
 
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="http://chat-server.invalid/v1",
         llm_api_key="secret",
         llm_rca_enabled=False,
@@ -378,7 +343,6 @@ async def test_factory_respects_env_disable(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("ROBUSTNESS_LLM_RCA_DISABLED", "1")
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="http://chat-server.invalid/v1",
         llm_api_key="secret",
     )
@@ -396,7 +360,6 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
 
     config = Config(
         session_dir=tmp_path,
-        robustness_server_url="",
         llm_base_url="http://chat-server.invalid/v1",
         llm_api_key="secret",
         llm_rca_severity_min="medium",
@@ -416,19 +379,19 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: Path):
+async def test_factory_uses_quiet_source_when_local_probe_disabled(tmp_path: Path):
     """``disable_local_probe`` swaps the LocalProbe for a quiet stub that never yields high-severity local symptoms."""
-    from hyperloom.agents.robustness.factory import _QuietFallback
+    from hyperloom.agents.robustness.factory import _QuietSource
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
     config = Config(session_dir=tmp_path, disable_local_probe=True)
     bundle = build_reactor_components(config)
     try:
         router = bundle.components.router
-        fallback = router._fallback  # type: ignore[attr-defined]
-        assert isinstance(fallback, _QuietFallback)
-        assert not isinstance(fallback, LocalProbeSource)
-        data = await fallback.fetch(None)
+        primary = router._primary  # type: ignore[attr-defined]
+        assert isinstance(primary, _QuietSource)
+        assert not isinstance(primary, LocalProbeSource)
+        data = await primary.fetch(None)
         assert data.local_processes == []
         assert data.local_server_health == []
         assert data.degraded_reason and "local-probe disabled" in data.degraded_reason
@@ -453,7 +416,7 @@ async def test_the_quiet_fallback_does_not_pass_its_empty_process_list_off_as_ev
     config = Config(session_dir=tmp_path, disable_local_probe=True)
     bundle = build_reactor_components(config)
     try:
-        data = await bundle.components.router._fallback.fetch(None)  # type: ignore[attr-defined]
+        data = await bundle.components.router._primary.fetch(None)  # type: ignore[attr-defined]
         assert data.local_processes_known is False
         probed = replace(
             data,
@@ -463,7 +426,7 @@ async def test_the_quiet_fallback_does_not_pass_its_empty_process_list_off_as_ev
         )
         ctx = ReactorContext(
             tick_index=0,
-            shared_state=SharedStateSnapshot(session_id="sess-1"),
+            shared_state=SharedStateSnapshot(),
             inbox=[],
             now_unix=1.0,
         )
@@ -475,15 +438,15 @@ async def test_the_quiet_fallback_does_not_pass_its_empty_process_list_off_as_ev
 
 
 @pytest.mark.asyncio
-async def test_factory_default_keeps_local_probe_fallback(tmp_path: Path):
+async def test_factory_default_keeps_local_probe_primary(tmp_path: Path):
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
     config = Config(session_dir=tmp_path)
     bundle = build_reactor_components(config)
     try:
         router = bundle.components.router
-        fallback = router._fallback  # type: ignore[attr-defined]
-        assert isinstance(fallback, LocalProbeSource)
+        primary = router._primary  # type: ignore[attr-defined]
+        assert isinstance(primary, LocalProbeSource)
     finally:
         await bundle.aclose()
 
@@ -496,9 +459,9 @@ async def test_factory_default_auto_probes_inference_server(tmp_path: Path):
     config = Config(session_dir=tmp_path)
     bundle = build_reactor_components(config)
     try:
-        fallback = bundle.components.router._fallback  # type: ignore[attr-defined]
-        assert isinstance(fallback, LocalProbeSource)
-        targets = fallback._config.health_probe_targets  # type: ignore[attr-defined]
+        primary = bundle.components.router._primary  # type: ignore[attr-defined]
+        assert isinstance(primary, LocalProbeSource)
+        targets = primary._config.health_probe_targets  # type: ignore[attr-defined]
         assert config.inference_server_health_url in targets
     finally:
         await bundle.aclose()
@@ -513,9 +476,9 @@ async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
     config = Config(session_dir=tmp_path, auto_probe_inference_server=False)
     bundle = build_reactor_components(config)
     try:
-        fallback = bundle.components.router._fallback  # type: ignore[attr-defined]
-        assert isinstance(fallback, LocalProbeSource)
-        targets = fallback._config.health_probe_targets  # type: ignore[attr-defined]
+        primary = bundle.components.router._primary  # type: ignore[attr-defined]
+        assert isinstance(primary, LocalProbeSource)
+        targets = primary._config.health_probe_targets  # type: ignore[attr-defined]
         assert config.inference_server_health_url not in targets
     finally:
         await bundle.aclose()
@@ -537,7 +500,7 @@ async def test_a_framework_added_to_the_config_knob_is_recognised_as_a_server(tm
     config.server_process_patterns.append("tinyserve.entrypoint")
     bundle = build_reactor_components(config)
     try:
-        probe_cfg = bundle.components.router._fallback._config  # type: ignore[attr-defined]
+        probe_cfg = bundle.components.router._primary._config  # type: ignore[attr-defined]
         monkeypatch.setattr(
             local_probe.subprocess,
             "run",
@@ -555,27 +518,5 @@ async def test_a_framework_added_to_the_config_knob_is_recognised_as_a_server(tm
         assert [(p["pid"], p["rss_mb"], p["cmd"], p["is_server"]) for p in found] == [
             (9, 1024.0, "python -m tinyserve.entrypoint --port 8888", True)
         ]
-    finally:
-        await bundle.aclose()
-
-
-@pytest.mark.asyncio
-async def test_factory_forwards_multi_node_options_to_server_source(tmp_path: Path):
-    """``enable_cluster_pod_metrics`` / ``workload_uid`` reach the server source."""
-
-    config = Config(
-        session_dir=tmp_path,
-        robustness_server_url="http://example.invalid:8000",
-        enable_cluster_pod_metrics=True,
-        pod_metrics_categories=("gpu", "memory"),
-        workload_uid="wl-42",
-    )
-    bundle = build_reactor_components(config)
-    try:
-        router = bundle.components.router
-        primary = router._primary  # type: ignore[attr-defined]
-        assert primary._enable_cluster_pod_metrics is True  # type: ignore[attr-defined]
-        assert primary._pod_metrics_categories == ("gpu", "memory")  # type: ignore[attr-defined]
-        assert primary._workload_uid == "wl-42"  # type: ignore[attr-defined]
     finally:
         await bundle.aclose()

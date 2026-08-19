@@ -187,47 +187,6 @@ def compose_server_args(
     return merge_server_args(pruned, variant_extra_args)
 
 
-def split_config_changes(
-    config_changes: dict[str, str],
-) -> tuple[str, dict[str, str]]:
-    """Split a flat config_changes dict into (server_args_str, envs_dict).
-
-    Keys starting with ``-`` are CLI flags: they are rebuilt into an argv
-    string (``--flag value`` or bare ``--flag``) and returned as
-    ``server_args``.  All other keys are env vars and returned as ``envs``.
-    This translates the legacy flat representation produced by
-    ``_framework_config_levers_from_done`` into the structured form that
-    ``GridVariant`` expects so ``--``-prefixed flags reach ``EXTRA_{FW}_ARGS``
-    instead of being silently dropped by ``valid_env_key``.
-
-    Args:
-        config_changes: Flat dict from a framework specialist deliverable,
-            mixing ``--flag: value`` server-arg keys with ``ENV_VAR: value``
-            env keys.
-
-    Returns:
-        A ``(server_args, envs)`` tuple where ``server_args`` is an argv-like
-        string safe to assign to ``GridVariant.extra_server_args`` and
-        ``envs`` is a ``dict[str, str]`` for ``GridVariant.extra_envs``.
-    """
-    from ._grid_base import coerce_extra_envs
-
-    arg_tokens: list[str] = []
-    env_items: dict[str, str] = {}
-    for k, v in (config_changes or {}).items():
-        key = str(k).strip()
-        val = str(v).strip()
-        if key.startswith("-"):
-            if val:
-                arg_tokens.append(f"{key}={val}" if "=" not in key else f"{key} {val}")
-            else:
-                arg_tokens.append(key)
-        else:
-            if key:
-                env_items[key] = val
-    server_args = merge_server_args(*arg_tokens) if arg_tokens else ""
-    return server_args, coerce_extra_envs(env_items)
-
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted
 # JSON key or string value should be (letters/digits/underscore plus the ``.``,
