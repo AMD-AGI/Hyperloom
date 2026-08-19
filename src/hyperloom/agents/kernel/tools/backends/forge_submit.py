@@ -2279,6 +2279,12 @@ def _validated_commit_lineage_and_timing(
     return best_commit, baseline_ms, best_ms
 
 
+# The schema KernelForge stamps into best_result.json
+# (``kernel_agents.loop.reporting.MANIFEST_SCHEMA_VERSION``). Pinned, not
+# ranged: a version this does not name is one nothing here has read.
+_FORGE_BEST_RESULT_SCHEMA_VERSION = 2
+
+
 def _validated_forge_best_result(
     payload: dict | None,
     *,
@@ -2295,7 +2301,7 @@ def _validated_forge_best_result(
     """
     if not isinstance(payload, dict):
         return None
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != _FORGE_BEST_RESULT_SCHEMA_VERSION:
         return None
     if payload.get("correctness_passed") is not True:
         return None
