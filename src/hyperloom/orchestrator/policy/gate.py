@@ -23,7 +23,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
-    KERNEL_REQUEST_KIND_ALIASES,
+    REQUEST_KIND_TO_OWNED_ACTION,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from ..phases.machine_state import (
@@ -1180,12 +1180,12 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
-        # canonical owned action so the phase-action gate applies identically.
-        gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
-        if gated_kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+        # The wire kind and the action name are different vocabularies; resolve
+        # to the owned action so the phase-action gate sees a name it knows.
+        owned_action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
+        if kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
             raise PolicyDenied(
-                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane "
+                f"request kind {kind!r} is a Coordinator-owned kernel lane "
                 f"and not LLM-requestable ({role.name})",
                 rule="phase_incompatible",
                 hint=(
@@ -1198,11 +1198,11 @@ class PolicyGate:
                     "source-level kernel instead."
                 ),
             )
-        # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
+        # R1 phase_incompatible: gate the resolved action against the phase.
         if (
-            target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS
-        ) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
-            self._validate_phase_action(role, gated_kind, intent_kind="request")
+            target == "kernel_agent" and owned_action in KERNEL_AGENT_OWNED_ACTIONS
+        ) or owned_action in COORDINATOR_INTERNAL_ACTIONS:
+            self._validate_phase_action(role, owned_action, intent_kind="request")
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(

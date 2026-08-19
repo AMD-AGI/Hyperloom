@@ -735,7 +735,7 @@ def test_policy_gate_denies_kernel_request_in_explore():
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "kernel_opt",
+            "kind": "run_optimization",
             "params": {},
         },
     )
@@ -775,32 +775,67 @@ def test_policy_gate_gates_apply_patch_alias_like_integrate():
     assert _rule_for("apply_patch") == "phase_incompatible"
 
 
-def test_policy_gate_does_not_widen_explore_for_kernel_request():
-    """EXPLORE no longer widens to kernel_agent-owned kinds."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="EXPLORE",
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
+def test_policy_gate_phase_matrix_over_every_kernel_request_kind():
+    """Every wire kind that maps to an owned action gates on that action.
+
+    The prompt mandates the wire kind (``run_optimization``), while
+    ``PHASE_ALLOWED_ACTIONS`` is keyed by the action name (``kernel_opt``), so
+    this walks the real handler table rather than a hand-written list.
+    """
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        REQUEST_KIND_TO_OWNED_ACTION,
     )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
+
+    for kind, action in REQUEST_KIND_TO_OWNED_ACTION.items():
+        for phase in phase_state.PHASE_NAMES:
+            state = SharedState()
+            state.record_phase_transition(
+                to_phase=phase,
+                reason="phase_entered",
+                evidence={},
+                ts="2026-05-19T00:00:00+00:00",
+                ts_unix=1.0,
+            )
+            gate = PolicyGate(
+                role_registry=_make_role_registry(),
+                shared_state=state,
+                strict_phase=True,
+            )
+            intent = Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": kind,
+                    "params": {},
+                },
+            )
+            allowed = action in phase_state.PHASE_ALLOWED_ACTIONS[phase]
+            if allowed:
+                gate.validate_intent("orchestration", intent)
+            else:
+                with pytest.raises(PolicyDenied) as excinfo:
+                    gate.validate_intent("orchestration", intent)
+                assert excinfo.value.rule == "phase_incompatible", (kind, phase)
+
+
+def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
+    """A new handler kind cannot arrive silently ungated."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
+        REQUEST_KIND_TO_OWNED_ACTION,
     )
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "kernel_opt",
-            "params": {},
-        },
+    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+
+    # trace_analyze has no owning action and no phase membership, so there is
+    # nothing to gate it against; it is refreshed on demand from any phase.
+    exempt = {"trace_analyze"}
+    ungated = (
+        set(KERNEL_REQUEST_HANDLERS)
+        - set(REQUEST_KIND_TO_OWNED_ACTION)
+        - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+        - exempt
     )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
+    assert ungated == set(), f"request kinds reach no phase gate: {sorted(ungated)}"
 
 
 def test_policy_gate_does_not_widen_kernel_for_explore_propose():
