@@ -10,8 +10,9 @@
 #
 # Phase 1  base preflight  — ROCm / GPU arch / ROCm torch / serving framework
 # Phase 2  framework       — optional bare-metal SGLang/vLLM install
-# Phase 3  credentials     — resolve Anthropic/DeepSeek LLM creds into .env
-# Phase 4  runtime env     — persist bare-metal runtime vars into .env
+# Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
+# Phase 4  credentials     — resolve Anthropic/DeepSeek LLM creds into .env
+# Phase 5  runtime env     — persist bare-metal runtime vars into .env
 #
 # Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
 # (io pkg, Magpie, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
@@ -25,6 +26,11 @@ REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
 DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
+
+HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0b2}"
+ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
+ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
 OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
@@ -113,7 +119,7 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT.
+VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
 
@@ -182,8 +188,8 @@ _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.fin
 
 # The interpreter that owns a given framework. vLLM lives in its own venv under
 # FRAMEWORK_ENV=isolated; every other engine uses the shared interpreter. Every
-# framework probe goes through here so preflight and framework resolution never
-# disagree about where an engine is installed.
+# framework probe goes through here so preflight, framework resolution and the
+# profiler hotfix can never disagree about where an engine is installed.
 framework_probe_python() {
   local fw="$1" default_py="$2"
   if [ "$fw" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
@@ -898,6 +904,198 @@ install_requested_framework() {
   esac
 }
 
+rocm_profiler_hotfix_applied() {
+  local target_dir="$1" hip_lib="$2" tracer_lib="$3"
+  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || true)")" = "$hip_lib" ] \
+    && [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || true)")" = "$tracer_lib" ]
+}
+
+rocm_profiler_hotfix_compatible() {
+  local py hip
+  py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
+  hip="$("$py" - <<'PY' 2>/dev/null || true
+try:
+    import torch
+    print(getattr(torch.version, "hip", None) or "")
+except Exception:
+    pass
+PY
+)"
+  case "$hip" in
+    7.2*) log "torch.version.hip=${hip}; ROCm profiler hotfix is eligible" ;;
+    "") warn "torch ROCm runtime not importable; skipping ROCm profiler hotfix" ; return 1 ;;
+    *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
+  esac
+
+  # The hotfix swaps the ROCm profiler libraries that torch.profiler loads, so
+  # it is engine-agnostic: gate it on "some serving framework is present", not
+  # on sglang/vllm specifically, or an atom-only host silently loses profiling.
+  # Walks $FRAMEWORKS for the same reason resolve_installed_framework does.
+  local found="" fw probe_py _hotfix_arr
+  IFS=',' read -r -a _hotfix_arr <<< "$FRAMEWORKS"
+  for fw in "${_hotfix_arr[@]}"; do
+    fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
+    probe_py="$(framework_probe_python "$fw" "$py")"
+    _py_has "$probe_py" "$fw" && found="${found:+${found} }${fw}"
+  done
+  [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
+  log "framework imports: ${found}"
+}
+
+download_rocm_profiler_hotfix_libs() {
+  local tmp_dir archive url
+  tmp_dir="$(mktemp -d)"
+  command -v curl >/dev/null 2>&1 || {
+    rm -rf "$tmp_dir"
+    warn "curl not found; cannot download ROCm profiler hotfix asset"
+    return 1
+  }
+  # Public release asset; no auth needed on an open-source repo.
+  url="https://github.com/${HYPERLOOM_WHEEL_REPO}/releases/download/${HYPERLOOM_WHEEL_TAG}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}" >&2
+  if ! curl -fSL -o "$archive" "$url" >&2; then
+    rm -rf "$tmp_dir"
+    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}"
+    return 1
+  fi
+  if ! tar -xzf "$archive" -C "$tmp_dir"; then
+    rm -rf "$tmp_dir"
+    warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"
+    return 1
+  fi
+  if ! find "$tmp_dir" -maxdepth 1 -type f -name 'libamdhip64.so.7.*' | grep -q . \
+     || ! find "$tmp_dir" -maxdepth 1 -type f -name 'libroctracer64.so.4.*' | grep -q .; then
+    rm -rf "$tmp_dir"
+    warn "${ROCM_PROFILER_HOTFIX_ASSET} does not contain the expected ROCm hotfix libraries"
+    return 1
+  fi
+  printf '%s\n' "$tmp_dir"
+}
+
+backup_rocm_profiler_hotfix_targets() {
+  local target_dir="$1" backup_dir="$2" path real
+  install -d "$backup_dir"
+  for path in \
+    "${target_dir}/libamdhip64.so" \
+    "${target_dir}/libamdhip64.so.7" \
+    "${target_dir}/libroctracer64.so" \
+    "${target_dir}/libroctracer64.so.4"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    cp -a "$path" "$backup_dir"/
+    real="$(readlink -f "$path" 2>/dev/null || true)"
+    if [ -n "$real" ] && [ -e "$real" ]; then
+      cp -a "$real" "$backup_dir"/
+    fi
+  done
+}
+
+install_rocm_profiler_hotfix_libs() {
+  local source_dir="$1" target_dir="$2" hip_lib="$3" tracer_lib="$4"
+  install -m 0644 "${source_dir}/${hip_lib}" "${target_dir}/${hip_lib}" || return 1
+  install -m 0644 "${source_dir}/${tracer_lib}" "${target_dir}/${tracer_lib}" || return 1
+  ln -sfnT "$hip_lib" "${target_dir}/libamdhip64.so.7" || return 1
+  ln -sfnT libamdhip64.so.7 "${target_dir}/libamdhip64.so" || return 1
+  ln -sfnT "$tracer_lib" "${target_dir}/libroctracer64.so.4" || return 1
+  ln -sfnT libroctracer64.so.4 "${target_dir}/libroctracer64.so" || return 1
+}
+
+rollback_rocm_profiler_hotfix_targets() {
+  local backup_dir="$1" target_dir="$2"
+  [ -d "$backup_dir" ] || return 1
+  if compgen -G "${backup_dir}/libamdhip64.so*" >/dev/null; then
+    cp -a "${backup_dir}"/libamdhip64.so* "$target_dir"/ || return 1
+  fi
+  if compgen -G "${backup_dir}/libroctracer64.so*" >/dev/null; then
+    cp -a "${backup_dir}"/libroctracer64.so* "$target_dir"/ || return 1
+  fi
+  return 0
+}
+
+verify_rocm_profiler_hotfix() {
+  local target_dir="$1" hip_lib="$2" tracer_lib="$3" py
+  log "verifying ROCm profiler hotfix links"
+  ls -l "${target_dir}/libamdhip64.so" "${target_dir}/libamdhip64.so.7" \
+        "${target_dir}/libroctracer64.so" "${target_dir}/libroctracer64.so.4" || return 1
+  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so")")" = "$hip_lib" ] \
+    || { warn "libamdhip64.so does not point to ${hip_lib}"; return 1; }
+  [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so")")" = "$tracer_lib" ] \
+    || { warn "libroctracer64.so does not point to ${tracer_lib}"; return 1; }
+
+  py="$(resolve_python)" || return 1
+  "$py" - "$target_dir" <<'PY'
+import ctypes
+import os
+import sys
+
+target_dir = sys.argv[1]
+for name in ("libamdhip64.so", "libroctracer64.so"):
+    path = os.path.join(target_dir, name)
+    print(f"{path} -> {os.path.realpath(path)}")
+    ctypes.CDLL(path)
+    print(f"loaded: {path}")
+
+import torch
+
+hip = getattr(torch.version, "hip", None)
+print(f"torch.version.hip={hip}")
+if not hip:
+    raise SystemExit("torch.version.hip is empty after ROCm profiler hotfix")
+PY
+}
+
+apply_rocm_profiler_hotfix() {
+  local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
+  local extract_dir backup_dir hip_lib tracer_lib
+
+  log "Phase 3: applying ROCm profiler hotfix"
+  log "ROCM_PROFILER_HOTFIX_ASSET=${ROCM_PROFILER_HOTFIX_ASSET}"
+
+  [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
+  rocm_profiler_hotfix_compatible || return 0
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    log "check-only: ROCm profiler hotfix release asset will not be downloaded"
+    log "current libamdhip64.so -> $(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || echo missing)"
+    log "current libroctracer64.so -> $(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || echo missing)"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
+    log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
+    log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
+    return 0
+  fi
+
+  extract_dir="$(download_rocm_profiler_hotfix_libs)" \
+    || { warn "could not obtain ROCm profiler hotfix libraries; skipping"; return 0; }
+  hip_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libamdhip64.so.*' | sort | tail -n 1)")"
+  tracer_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libroctracer64.so.*' | sort | tail -n 1)")"
+  if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then
+    log "ROCm profiler hotfix already applied (${hip_lib}, ${tracer_lib})"
+    verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib" || warn "existing ROCm profiler hotfix verification reported issues"
+    rm -rf "$extract_dir"
+    return 0
+  fi
+  backup_dir="${target_dir}/.profiler_hotfix_backup_$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_rocm_profiler_hotfix_targets "$target_dir" "$backup_dir"
+  log "backed up current ROCm profiler libraries to ${backup_dir}"
+  if ! install_rocm_profiler_hotfix_libs "$extract_dir" "$target_dir" "$hip_lib" "$tracer_lib" \
+     || ! verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib"; then
+    warn "ROCm profiler hotfix failed; attempting rollback from ${backup_dir}"
+    if rollback_rocm_profiler_hotfix_targets "$backup_dir" "$target_dir"; then
+      warn "rollback succeeded; continuing without ROCm profiler hotfix"
+      rm -rf "$extract_dir"
+      return 0
+    fi
+    rm -rf "$extract_dir"
+    die "ROCm profiler hotfix failed and rollback did not complete"
+  fi
+  rm -rf "$extract_dir"
+  log "ROCm profiler hotfix applied"
+}
+
 read_dotenv_var() {
   local name="$1"
   [ -f "$DOTENV" ] || return 0
@@ -1022,7 +1220,7 @@ migrate_legacy_deepseek_env() {
 # Resolve the Anthropic entrypoint (plus the OpenAI side of a dual-protocol
 # gateway). Mirrors runtime credential validation.
 resolve_credentials() {
-  log "Phase 3: credentials"
+  log "Phase 4: credentials"
   local anthropic_key anthropic_token anthropic_url
   local oauth_token dv_oauth_token
   local dv_anthropic_key dv_anthropic_token dv_anthropic_url
@@ -1231,6 +1429,8 @@ write_runtime_dotenv() {
   [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && upsert_dotenv_var SGLANG_ROCM_PYPI_VERSION "$SGLANG_ROCM_PYPI_VERSION"
   [ -n "${AITER_REF:-}" ] && upsert_dotenv_var AITER_REF "$AITER_REF"
   [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && upsert_dotenv_var KERNEL_OPT_BACKEND_ORDER "$KERNEL_OPT_BACKEND_ORDER"
+  [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_REPO "$HYPERLOOM_WHEEL_REPO"
+  [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
@@ -1335,6 +1535,7 @@ _default_workspace_root() {
   fi
 
   install_requested_framework
+  apply_rocm_profiler_hotfix
   if [ "$INSTALL_FRAMEWORK" != "none" ] && [ "$SKIP_BASE_CHECK" -eq 0 ]; then
     base_preflight
   fi

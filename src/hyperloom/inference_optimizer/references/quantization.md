@@ -34,7 +34,7 @@ Rules:
 - `mxfp4*` schemes are MI355X-only.
 - Keep `--precision` consistent with quantization, for example
   `--quantize-scheme fp8` with `--precision fp8`.
-- Quantization is one-shot and skipped on `--resume`.
+- Quantization is one-shot and never runs on a resume.
 - Failed or unusable quantization hard-stops with `SystemExit(3)`; it never
   silently optimizes the source model.
 - A scheme/GPU mismatch via `--quantize-scheme` is skipped, emits

@@ -46,10 +46,13 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
     --max-hours 2.0
 ```
 
-Resume an interrupted session:
+Resume an interrupted session (the session dir is always named explicitly —
+take it from the launch-info JSON or the `HYPERLOOM_LAUNCH` line the CLI
+printed at launch):
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --resume
+python3 -m hyperloom.inference_optimizer.cli optimize \
+    --resume-from "$SESSION_DIR"
 ```
 
 See `python -m hyperloom.inference_optimizer.cli optimize --help` for the full flag set and

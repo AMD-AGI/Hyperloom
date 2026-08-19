@@ -191,7 +191,7 @@ def test_write_minimal_final_json_idempotent(tmp_path):
 
 
 def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
-    # A prior crash-safe fallback is stale after --resume and must be
+    # A prior crash-safe fallback is stale after a resume and must be
     # overwritten with the current state, NOT preserved.
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -420,6 +420,56 @@ def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
     assert section["context_tokens_at_compaction"] == {}
     assert warnings == []
 
+
+def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
+    """A recorder fragment replaces its whole section, so it must not own workload."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+    (tmp_path / "state.json").write_text(
+        json.dumps({"session_id": "s", "framework": "sglang", "model_name": "qwen3-8b"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"session_id": "s", "framework_version": "0.4.1", "workload": {"conc": 64}}),
+        encoding="utf-8",
+    )
+    instrument.snapshot_state_sections(
+        tmp_path,
+        SimpleNamespace(framework="sglang", model_name="qwen3-8b", model_path="", session_id="s"),
+    )
+
+    workload = ex.build(tmp_path)["workload"]
+    assert workload["framework_name"] == "sglang"
+    assert workload["framework_version"] == "0.4.1"
+    assert workload["conc"] == 64
+    # Unset knobs stay None; a recorder fragment used to coerce them to 0.
+    assert workload["tp"] is None
+
+
+def test_recorder_snapshot_leaves_the_sweep_variants_intact(tmp_path):
+    """Only the collector can scan the variant points off disk."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+    (tmp_path / "state.json").write_text(
+        json.dumps({"session_id": "s", "last_sweep": {"grid_size": 2}}),
+        encoding="utf-8",
+    )
+    instrument.snapshot_state_sections(
+        tmp_path,
+        SimpleNamespace(
+            session_id="s",
+            last_sweep={"grid_size": 2},
+            framework="sglang",
+            model_name="m",
+            model_path="",
+        ),
+    )
+
+    assert "all_variants" in ex.build(tmp_path)["sweep"]
 
 # ---- session_meta duration ----
 

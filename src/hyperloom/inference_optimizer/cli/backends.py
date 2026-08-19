@@ -273,7 +273,7 @@ def _build_proposal_scorer(
     deployments (the scorer is OpenAI-compatible only) or when the resolved
     model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
     scorer is purely advisory and never gates anything. The flag is not
-    persisted across ``--resume``.
+    persisted across ``--resume-from``.
 
     ``session_dir`` is forwarded so the scorer can append its per-model
     token usage to the full-trace ledger; when omitted trace writes are skipped.
@@ -302,47 +302,16 @@ def _build_proposal_scorer(
     return ProposalScorer(models=models, session_dir=session_dir)
 
 
-def _robustness_server_configured(args: argparse.Namespace) -> bool:
-    """Return True when a robustness-server endpoint is configured.
-
-    The server is the only cluster-wide signal source on multi-node; when
-    wired the agent runs with ``disable_local_probe`` /
-    ``enable_cluster_pod_metrics`` and the sandbox-local LocalProbe false
-    positives are silenced. Configured = ``--robustness-server-url`` or
-    ``ROBUSTNESS_SERVER_URL`` is set.
-
-    Args:
-        args: Parsed CLI args carrying ``robustness_server_url``.
-
-    Returns:
-        ``True`` when a robustness-server endpoint is configured via flag or
-        environment.
-    """
-    url = (getattr(args, "robustness_server_url", None) or "").strip()
-    if url:
-        return True
-    return bool((os.environ.get("ROBUSTNESS_SERVER_URL") or "").strip())
-
-
-_MULTI_NODE_WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
-    "ROBUSTNESS_WORKLOAD_UID",
-    "CLAW_WORKLOAD_UID",
-    "WORKLOAD_UID",
-    "KUBE_WORKLOAD_UID",
-    "RAY_JOB_ID",
-)
-
-
 def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     """Collect non-default ``request.options`` overrides from CLI flags.
 
     Only emits keys the operator actually passed so the runtime CLI falls
     back to its own defaults / env-discovery for the rest.
 
-    Multi-node (``--nodes >= 2``): defaults ``disable_local_probe`` +
-    ``enable_cluster_pod_metrics`` to True, forwards a workload_uid hint,
+    Multi-node (``--nodes >= 2``): defaults ``disable_local_probe`` to True,
     disables the 127.0.0.1:8888 auto-probe, and lifts the ``no_levers_found``
-    floor to 60 min so cluster-sourced signals replace the local sandbox.
+    floor to 60 min. The sandbox-local probes would only see one pod, so the
+    agent runs on the node-agnostic budget / progress / inbox signals instead.
 
     Single-node opt-in: ``--robustness-disable-server-probe`` sets
     ``auto_probe_inference_server=False`` to silence the 127.0.0.1:8888 /health
@@ -357,9 +326,6 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         (and multi-node policy); keys the operator did not set are omitted.
     """
     options: dict[str, Any] = {}
-    server_url = getattr(args, "robustness_server_url", None)
-    if server_url is not None:
-        options["robustness_server_url"] = server_url
     llm_rca = getattr(args, "robustness_llm_rca", None)
     if llm_rca is not None:
         options["llm_rca_enabled"] = bool(llm_rca)
@@ -369,37 +335,11 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     if nodes > 1:
         options["nodes"] = nodes
 
-    workload_uid = (getattr(args, "robustness_workload_uid", None) or "").strip()
-    if not workload_uid:
-        for key in _MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
-            candidate = (os.environ.get(key) or "").strip()
-            if candidate:
-                workload_uid = candidate
-                break
-    if workload_uid:
-        options["workload_uid"] = workload_uid
-
     disable_local = getattr(args, "robustness_disable_local_probe", None)
     if disable_local is None and multi_node:
         disable_local = True
     if disable_local is not None:
         options["disable_local_probe"] = bool(disable_local)
-
-    enable_pod_metrics = getattr(args, "robustness_enable_cluster_pod_metrics", None)
-    if enable_pod_metrics is None and multi_node:
-        enable_pod_metrics = True
-    if enable_pod_metrics is not None:
-        options["enable_cluster_pod_metrics"] = bool(enable_pod_metrics)
-
-    categories_raw = getattr(args, "robustness_pod_metrics_categories", None)
-    if categories_raw:
-        if isinstance(categories_raw, (list, tuple)):
-            cat_iter = categories_raw
-        else:
-            cat_iter = str(categories_raw).split(",")
-        cat_list = [c.strip() for c in cat_iter if str(c).strip()]
-        if cat_list:
-            options["pod_metrics_categories"] = cat_list
 
     # ``auto_probe_inference_server`` controls the 127.0.0.1:8888 /health probe
     # in LocalProbe. Default it OFF for multi-node (server lives in the head pod)

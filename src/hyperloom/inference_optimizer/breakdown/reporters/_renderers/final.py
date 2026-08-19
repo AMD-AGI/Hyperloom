@@ -38,21 +38,17 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     final_tput = f.get("throughput_tok_s_per_gpu")
     base_tput = b.get("throughput_tok_s_per_gpu")
     gain_v = f.get("cumulative_gain_pct_validated")
-    gain_round = f.get("cumulative_gain_pct_per_round_sum")
     val_stack_len = f.get("validated_at_stack_len")
     val_ts = f.get("validated_ts")
     stack_changed = bool(f.get("stack_changed_after_validation"))
     extra_args = f.get("extra_server_args") or ""
     action_path = f.get("action_path") or []
-    gain_provenance = str(f.get("cumulative_gain_provenance") or "")
     revalidation_pending = bool(f.get("revalidation_pending"))
     # Self-reported GEAK candidate excluded from the headline; surfaced as an audit-only note.
     geak_pending = f.get("geak_pending") if isinstance(f.get("geak_pending"), dict) else {}
     pending_awaiting = geak_pending.get("status") == "awaiting_rebench"
-    # Gain is provisional when provenance says so, or a revalidation is pending with no positive validated number.
-    is_provisional = ("provisional" in gain_provenance) or (
-        revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
-    )
+    # Gain is provisional when a cross-harness revalidation is pending with no confirmed validated number.
+    is_provisional = revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
     # Headline is unvalidated when a GEAK candidate is pending with no positive validated gain.
     headline_unvalidated = pending_awaiting and not (isinstance(gain_v, (int, float)) and gain_v > 0)
 
@@ -74,33 +70,23 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if is_provisional:
-        if gain_round is not None:
-            facts.append(
-                f"Provisional cumulative gain: {fmt_pct(gain_round, plus=True)} "
-                "— PENDING same-harness revalidation, NOT yet validated."
-            )
+        facts.append("Cumulative gain is PENDING same-harness revalidation; no validated number exists yet.")
         warnings.append(
-            "Reported gain is PROVISIONAL and cross-harness "
-            f"(provenance={gain_provenance or 'unknown'}): the numerator was "
-            "measured by the delegated optimizer's harness and the denominator "
-            "is the orchestrator baseline. A same-harness full-stack rebench is "
-            "pending; the validated gain will replace this number once it lands."
+            "The recorded gain basis is PROVISIONAL and cross-harness: measured by the "
+            "delegated optimizer's harness against the orchestrator baseline, so "
+            "no gain is reported here. A same-harness full-stack rebench is "
+            "pending and will supply the validated number."
         )
-    else:
-        if gain_v is not None and not headline_unvalidated:
-            facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
-            decisions.append(
-                Decision(
-                    kind="kept" if (gain_v or 0) > 0 else "attempted",
-                    subject="final",
-                    metric_pct=float(gain_v),
-                    rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
-                )
+    elif gain_v is not None and not headline_unvalidated:
+        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
+        decisions.append(
+            Decision(
+                kind="kept" if (gain_v or 0) > 0 else "attempted",
+                subject="final",
+                metric_pct=float(gain_v),
+                rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
             )
-        if gain_round is not None and not headline_unvalidated:
-            facts.append(
-                f"Per-round summed gain: {fmt_pct(gain_round)} (non-additive, do not present as the user-visible number)."
-            )
+        )
     if geak_pending and geak_pending.get("status") == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
@@ -139,8 +125,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("final_throughput_tok_s_per_gpu", final_tput),
             ("throughput_unit", f.get("throughput_unit") or None),
             ("cumulative_gain_pct_validated", gain_v),
-            ("cumulative_gain_pct_per_round_sum", gain_round),
-            ("cumulative_gain_provenance", gain_provenance or None),
             ("revalidation_pending", revalidation_pending or None),
             ("geak_pending", geak_pending or None),
             ("validated_at_stack_len", val_stack_len),

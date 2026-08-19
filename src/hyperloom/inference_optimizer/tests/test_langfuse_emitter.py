@@ -1423,7 +1423,7 @@ def test_pair_key_degrades_when_turn_absent():
 
 
 def _status(**over) -> dict:
-    base = {"phase": "EXPLORE", "stop_reason": "", "cumulative_gain": 12.5}
+    base = {"phase": "EXPLORE", "stop_reason": "", "cumulative_gain_validated": 12.5}
     base.update(over)
     return base
 

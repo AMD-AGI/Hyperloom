@@ -36,81 +36,6 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = 4
 
 
-# Env vars consulted by _detect_stack_fingerprint (operator pins that
-# bypass the import/marker-file auto-detect).
-_STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
-    "rocm": ("ROCM_VERSION", "HIP_VERSION"),
-    "aiter": ("AITER_COMMIT", "AITER_VERSION"),
-    "sglang": ("SGLANG_VERSION", "SGL_VERSION"),
-    "vllm": ("VLLM_VERSION",),
-}
-
-
-def _read_first_line(path: Path) -> str:
-    """Return the first non-empty, stripped line of a file.
-
-    Args:
-        path (Path): File to read.
-
-    Returns:
-        str: First non-blank line stripped of surrounding whitespace, or an
-        empty string when the file is missing, empty, or unreadable.
-    """
-    try:
-        if not path.exists():
-            return ""
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            s = line.strip()
-            if s:
-                return s
-    except OSError:
-        return ""
-    return ""
-
-
-def _detect_stack_fingerprint() -> dict[str, str]:
-    """Best-effort ``stack_fingerprint``. Per component, first non-empty wins:
-    env var -> /opt/rocm marker (rocm only) -> package __version__/__commit__.
-    Missing components map to ``"unknown"``.
-
-    Returns:
-        Mapping of component name to detected version/commit (``"unknown"``
-        when not found).
-    """
-    out: dict[str, str] = {}
-    for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
-        val = ""
-        for var in env_vars:
-            candidate = (os.environ.get(var) or "").strip()
-            if candidate:
-                val = candidate
-                break
-        if not val and component == "rocm":
-            for marker in ("/opt/rocm/.info/version", "/opt/rocm/.info/version-utils"):
-                v = _read_first_line(Path(marker))
-                if v:
-                    val = v
-                    break
-        if not val:
-            try:
-                if component == "sglang":
-                    import sglang as _mod  # type: ignore
-
-                    val = str(getattr(_mod, "__version__", "")).strip()
-                elif component == "vllm":
-                    import vllm as _mod  # type: ignore
-
-                    val = str(getattr(_mod, "__version__", "")).strip()
-                elif component == "aiter":
-                    import aiter as _mod  # type: ignore
-
-                    val = str(getattr(_mod, "__commit__", None) or getattr(_mod, "__version__", "")).strip()
-            except Exception:  # noqa: BLE001 — defensive, missing pkg is normal.
-                val = ""
-        out[component] = val or "unknown"
-    return out
-
-
 def _git_revision() -> str:
     """Best-effort source revision of the repo containing this package.
 
@@ -425,8 +350,8 @@ def build_manifest(
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate
-        # the on-disk artifacts. Falls back to the resolved workspace_root().
-        "user_data_path": (os.environ.get("USER_DATA_PATH") or "").strip() or str(_paths.workspace_root()),
+        # the on-disk artifacts.
+        "user_data_path": str(_paths.workspace_root()),
         "model_path": model_path,
         "model_name": model_name,
         "framework": framework or "sglang",
@@ -447,8 +372,12 @@ def build_manifest(
         "pid": os.getpid(),
         "host": platform.node() or socket.gethostname() or "",
         "image": _detect_image(),
-        # Snapshotted so resume-after-redeploy can detect drift.
-        "stack_fingerprint": _detect_stack_fingerprint(),
+        # Snapshotted so resume-after-redeploy can detect drift. Taken from the
+        # shared builder because the manifest is what the KB row, the specialist
+        # prompt and resume all read, and each of them drops "unknown": a
+        # detector that only sees this interpreter leaves an isolated framework
+        # venv missing from every one of them.
+        "stack_fingerprint": _prov.get("stack_fingerprint") or {},
         # Locked at session start; resume reads it back so a restart can't
         # change concurrency semantics.
         "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
@@ -496,7 +425,7 @@ def write_manifest(
 
 def load_manifest(session_dir: Path) -> dict[str, Any]:
     """Read ``manifest.json`` for an existing session. Raises
-    ``FileNotFoundError`` if missing (the signal ``--resume`` uses to refuse a
+    ``FileNotFoundError`` if missing (the signal ``--resume-from`` uses to refuse a
     fresh sandbox).
 
     Args:
@@ -511,7 +440,7 @@ def load_manifest(session_dir: Path) -> dict[str, Any]:
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(
-            f"manifest.json not found under {session_dir} — the session was never initialised; cannot --resume"
+            f"manifest.json not found under {session_dir} — the session was never initialised; cannot resume"
         )
     with p.open(encoding="utf-8") as f:
         return json.load(f)

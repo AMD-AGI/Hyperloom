@@ -24,8 +24,6 @@ def test_runs_root_and_dir():
     assert sp.runs_root(SD) == SD / "runs"
     p = sp.runs_dir(SD, "baseline", "t1")
     assert p == SD / "runs" / "baseline" / "t1"
-    # blank task_id falls back to "unknown"
-    assert sp.runs_dir(SD, "baseline", "").name == "unknown"
 
 
 def test_runs_dir_rejects_unknown_action():
@@ -36,6 +34,8 @@ def test_runs_dir_rejects_unknown_action():
 @pytest.mark.parametrize(
     "bad_task_id",
     [
+        "",
+        "   ",
         "../escape",
         "..",
         ".",
@@ -45,9 +45,8 @@ def test_runs_dir_rejects_unknown_action():
         "x/y",
     ],
 )
-def test_runs_dir_rejects_task_id_traversal(bad_task_id):
-    # Legitimate task ids are single path components; anything path-like must
-    # be rejected so it cannot relocate the sandbox.
+def test_runs_dir_rejects_bad_task_id(bad_task_id):
+    # Blank or path-like ids would relocate the sandbox onto a shared path.
     with pytest.raises(ValueError):
         sp.runs_dir(SD, "baseline", bad_task_id)
 
@@ -57,14 +56,14 @@ def test_runs_dir_accepts_uuid_hex_task_id():
     assert sp.runs_dir(SD, "baseline", tid) == SD / "runs" / "baseline" / tid
 
 
-def test_kernel_agent_runs_dir_rejects_traversal():
-    for bad in ("../x", ".", "a/b", "/abs"):
+def test_kernel_agent_runs_dir_rejects_bad_id():
+    for bad in ("", "   ", "../x", ".", "a/b", "/abs"):
         with pytest.raises(ValueError):
             sp.kernel_agent_runs_dir(SD, bad)
 
 
-def test_patches_dir_rejects_traversal():
-    for bad in ("../x", ".", "a/b", "/abs"):
+def test_patches_dir_rejects_bad_id():
+    for bad in ("", "   ", "../x", ".", "a/b", "/abs"):
         with pytest.raises(ValueError):
             sp.patches_dir(SD, bad)
 
@@ -75,9 +74,7 @@ def test_validate_action_strips():
 
 def test_kernel_and_patch_paths():
     assert sp.kernel_agent_runs_dir(SD, "s1") == SD / "kernel-agent" / "runs" / "s1"
-    assert sp.kernel_agent_runs_dir(SD, "").name == "unknown"
     assert sp.patches_dir(SD, "k1") == SD / "patches" / "k1"
-    assert sp.patches_dir(SD, "").name == "unknown"
 
 
 def test_reports_dir():
@@ -95,12 +92,13 @@ def test_trace_paths():
 def test_enablement_paths():
     assert sp.enablement_dir(SD) == SD / "reports" / "enablement"
     assert sp.enablement_round_dir(SD, "abc123") == SD / "reports" / "enablement" / "abc123"
-    assert sp.enablement_round_dir(SD, "").name == "unknown"
 
 
-def test_enablement_round_dir_rejects_traversal():
+@pytest.mark.parametrize("task_id", ["../evil", ""])
+def test_enablement_round_dir_refuses_an_unusable_id(task_id):
+    """A blank id would put every round in one directory; the caller skips those."""
     with pytest.raises(ValueError):
-        sp.enablement_round_dir(SD, "../evil")
+        sp.enablement_round_dir(SD, task_id)
 
 
 def test_research_and_competitor_paths():

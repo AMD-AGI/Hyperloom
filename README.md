@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
 [![Lint](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml)
-[![Version](https://img.shields.io/badge/version-1.0.0b1-blue)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.0.0b2-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 
@@ -39,6 +39,16 @@ Hyperloom combines:
   with dynamic agents, long-horizon campaigns, and self-evolving optimization
   guided by a curated knowledge base of hardware learnings, pitfalls, and
   prior campaign artifacts.
+
+## Supported Features
+
+| Feature | Options |
+|------|-------|
+| Workload | Inference |
+| Platform | MI300X, MI325X, MI355X |
+| Framework | vLLM, SGLang |
+| Kernel Language | HIP, Triton, FlyDSL |
+| Backend | Claude |
 
 ## Get Started
 

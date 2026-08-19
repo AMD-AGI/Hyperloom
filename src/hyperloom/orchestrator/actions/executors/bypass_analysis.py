@@ -77,7 +77,8 @@ def steady_state_mean(samples: list[float], *, warmup_skip_frac: float = 0.2) ->
     """Average the steady-state portion of throughput samples.
 
     Drops the leading ``warmup_skip_frac`` of samples before averaging; falls
-    back to the full set when the trim would empty it.
+    back to the full set when the trim would empty it. ``benchmark_result``
+    parses the same log with 0.25 and a different clamp bound.
 
     Args:
         samples: Positive throughput samples in log order.

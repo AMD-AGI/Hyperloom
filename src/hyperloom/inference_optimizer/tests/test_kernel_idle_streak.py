@@ -220,7 +220,6 @@ def test_fingerprint_ignores_fields_that_are_not_progress():
 
     base = SimpleNamespace(
         kernel_opt_task_attempts={"k000": {"last_decision": "", "last_micro_speedup": 1.0}},
-        kernel_opt_attempts={},
         rejected_kernel_ids=[],
         last_kernel_opt={},
         optimization_stack=[],
@@ -242,7 +241,6 @@ def test_fingerprint_tracks_inflight_task_ids():
 
     state = SimpleNamespace(
         kernel_opt_task_attempts={},
-        kernel_opt_attempts={},
         rejected_kernel_ids=[],
         last_kernel_opt={},
         optimization_stack=[],

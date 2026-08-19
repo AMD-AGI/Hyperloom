@@ -37,7 +37,6 @@ from .backends import (
     _build_proposal_scorer,
     _official_anthropic_only,
     _official_openai_only,
-    _robustness_server_configured,
     resolve_robustness_options,
 )
 from .model_gate import (
@@ -100,6 +99,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
+    ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
 )
@@ -444,7 +444,7 @@ SESSION_BUSY_EXIT_CODE = 3
 def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``.
 
-    Guards both fresh ``optimize`` and ``--resume`` against a second optimizer
+    Guards both fresh ``optimize`` and ``--resume-from`` against a second optimizer
     attaching to the same ``session_dir``. When a live optimizer already owns
     the session this refuses to run before any ``state.json`` / lease mutation.
 
@@ -1065,13 +1065,9 @@ _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid.
 
-    Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
-    separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
-    auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
-
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``robustness_backend`` / ``nodes`` and server config).
+            ``robustness_backend``).
 
     Returns:
         str: The resolved robustness backend (one of
@@ -1080,31 +1076,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen, explicit = _resolve_choice(
+    chosen, _ = _resolve_choice(
         "robustness_backend",
         DEFAULT_ROBUSTNESS_BACKEND,
         _VALID_ROBUSTNESS_BACKENDS,
         "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
         args=args,
     )
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
-        if explicit:
-            print(
-                f"WARN: --robustness-agent selected but nodes={nodes} and "
-                f"no robustness-server configured — the agent's LocalProbe "
-                f"family targets sandbox-local resources (ray, inference "
-                f"server, GPU, ...) that all live in separate pods on "
-                f"multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; configure "
-                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
-                f"the agent backend, or pass --robustness-mock explicitly "
-                f"to suppress this warning. See "
-                f"src/hyperloom/inference_optimizer/multi_node/SKILL.md "
-                f"(Robustness limitation in multi-node mode).",
-                file=sys.stderr,
-            )
-        chosen = "mock"
     return chosen
 
 
@@ -1457,7 +1435,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
     # resume branch re-exports the real values after ``_resolve_workload_knobs``
     # so downstream (incl. preflight) never sees the placeholder default.
-    if not args.resume and not args.resume_from:
+    if not args.resume_from:
         _export_workload_envs_for_optimize(
             args,
             nodes_resolved=nodes_resolved,
@@ -1533,53 +1511,32 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         codex_follows_claude=codex_follows_claude,
     )
 
-    # `--resume-from <path>` implies `--resume` (operator convenience).
-    if args.resume_from and not args.resume:
-        args.resume = True
-
-    if args.resume:
-        # Resume mode: USER_DATA_PATH stays at workspace level; pick the
-        # per-session subdir via --resume-from or auto-pick the latest. Pin
-        # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR for consistent resolution.
+    if args.resume_from:
+        # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
         from ..session.paths import (
             ENV_CURRENT_SESSION_DIR,
-            find_latest_per_session_dir,
             workspace_root,
         )
 
         ws = workspace_root()
-        if args.resume_from:
-            session_dir = Path(args.resume_from).expanduser().resolve()
-            try:
-                session_dir.relative_to(ws.resolve())
-            except ValueError:
-                print(
-                    f"ERROR: --resume-from {session_dir!r} is not under "
-                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
-                    f"workspace root (the parent of the per-session subdirs) "
-                    f"and pass the per-session subdir via --resume-from.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if not session_dir.is_dir():
-                print(
-                    f"ERROR: --resume-from {session_dir!r} does not exist.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        else:
-            picked = find_latest_per_session_dir()
-            if picked is not None:
-                session_dir = picked
-                print("  --resume: auto-picked latest per-session subdir")
-            else:
-                # No per-session subdir found — workspace_root itself is the
-                # session_dir (e.g. resuming a pre-existing single-dir session).
-                session_dir = ws
-                print(
-                    f"  --resume: no per-session subdir found under "
-                    f"{ws}/<model>/<ts>/; falling back to {ws}"
-                )
+        session_dir = Path(args.resume_from).expanduser().resolve()
+        try:
+            session_dir.relative_to(ws.resolve())
+        except ValueError:
+            print(
+                f"ERROR: --resume-from {session_dir!r} is not under "
+                f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                f"workspace root (the parent of the per-session subdirs) "
+                f"and pass the per-session subdir via --resume-from.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if not session_dir.is_dir():
+            print(
+                f"ERROR: --resume-from {session_dir!r} does not exist.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
         os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
         # Ensure per-session skeleton exists (idempotent mkdir -p).
@@ -1595,11 +1552,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
-            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+            print(f"ERROR: --resume-from failed: {exc}", file=sys.stderr)
             sys.exit(2)
         if not (session_dir / "state.json").exists():
             print(
-                f"ERROR: --resume failed: {session_dir}/state.json missing "
+                f"ERROR: --resume-from failed: {session_dir}/state.json missing "
                 f"(manifest exists but Coordinator never wrote SharedState)",
                 file=sys.stderr,
             )
@@ -1609,7 +1566,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
         print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
-        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(f"  prior cumul_gain      : {state.cumulative_gain_validated:.2f}%")
         print(
             f"  prior current_best    : "
             f"{(state.current_best or {}).get('action')}/"
@@ -1766,7 +1723,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gated_terminal = {"target_reached"}
         if prior_stop in gated_terminal and not force_resume:
             print(
-                f"\nERROR: --resume blocked by terminal stop_reason="
+                f"\nERROR: --resume-from blocked by terminal stop_reason="
                 f"{prior_stop!r}.\n"
                 f"\n"
                 f"  SKILL.md (Run-time signals): {prior_stop!r} is a "
@@ -1836,8 +1793,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not args.model:
             print(
                 "ERROR: model is required. Pass --model <path> or set "
-                "MODEL_PATH env (or use --resume to continue an existing "
-                "session at the canonical session_dir).",
+                "MODEL_PATH env (or use --resume-from <session_dir> to "
+                "continue an existing session).",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1961,7 +1918,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
-        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/.
+        # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         # Use the resolved identity so a quantized run is named after the source
         # model (e.g. "<model>-quantized") instead of the generic export-dir
         # basename "quantized".
@@ -2134,6 +2091,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Resolve robustness backend choice + runtime root, mirroring critic.
     robustness_choice = _resolve_robustness_choice(args)
     robustness_agent_root: Path | None = None
+    # T0 anchor writes warm_start_* via its own SharedState load; reload before
+    # persisting launch-shape fields so seed/resume memory cannot clobber them.
+    state = SharedState.load_or_init(session_dir)
     robustness_options = resolve_robustness_options(args, state)
     state.robustness_options = robustness_options
     # Persist before the Coordinator reads SharedState off disk, or the launch
@@ -2168,7 +2128,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin
-    # env var; reinforced here for --resume paths. Do NOT overwrite
+    # env var; reinforced here for resume paths. Do NOT overwrite
     # USER_DATA_PATH — it must remain the workspace root for concurrent sessions
     # and install.sh on shared filesystems (WekaFS).
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
@@ -2200,7 +2160,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Advisory multi-model specialist-proposal scorer, disabled by default
         # (enable via --proposal-scoring). When active it scores each
         # proposal_set and surfaces results to Orchestration without gating.
-        # Not persisted across --resume. ``session_dir`` lets it append per-model
+        # Not persisted across a resume. ``session_dir`` lets it append per-model
         # token usage to the full-trace ledger (component=proposal_scorer).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON; fires when
@@ -2479,6 +2439,12 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
+
+    # Absolutise before the parser defaults or any session path derive from it:
+    # subprocesses run with their own cwd, so a relative value would diverge.
+    user_data = os.environ.get(ENV_USER_DATA_PATH, "")
+    if user_data and not Path(user_data).is_absolute():
+        os.environ[ENV_USER_DATA_PATH] = str(Path(user_data).expanduser().absolute())
 
     parser = _build_parser()
     # Strict on purpose. The platform's prompt FLAGS block is authored by hand,

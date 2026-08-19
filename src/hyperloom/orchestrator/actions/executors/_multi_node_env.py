@@ -69,7 +69,7 @@ def mn_bench_warmup_enabled() -> bool:
 def is_multi_node() -> bool:
     """True iff the optimizer is operating on a >=2-node RayJob cluster.
 
-    State file wins over env so ``--resume`` works: state ``nodes`` >= 2 wins,
+    State file wins over env so a resume works: state ``nodes`` >= 2 wins,
     else fall back to ``$INFERENCE_OPTIMIZER_NODES``.
 
     Returns:
@@ -93,7 +93,7 @@ def resolve_kb_topology() -> dict[str, Any]:
     """Resolve the node/GPU and PD-disaggregation topology for the KB hardware suffix.
 
     Mirrors :func:`is_multi_node`'s source priority so the recipe KB key stays
-    stable across ``--resume``: the ``multi_node_state.json`` values win
+    stable across a resume: the ``multi_node_state.json`` values win
     (persisted), then the ``INFERENCE_OPTIMIZER_NODES`` /
     ``INFERENCE_OPTIMIZER_GPUS_PER_NODE`` env fallbacks. The CLI exports both
     before the T0 anchor, so a fresh run (where the state file is not written
@@ -157,7 +157,7 @@ def resolve_kb_topology() -> dict[str, Any]:
 
     # Parallel formation (tp / ep) is fixed at launch, not explored, so it
     # belongs in the KB key: a best_config tuned at one split is invalid at
-    # another. The CLI exports TP / EP before T0 (stable across --resume), so
+    # another. The CLI exports TP / EP before T0 (stable across a resume), so
     # env wins; state fields are the resume fallback.
     def _int_pref_env(env_key: str, *state_keys: str, default: int = 1) -> int:
         raw = (os.environ.get(env_key, "") or "").strip()
