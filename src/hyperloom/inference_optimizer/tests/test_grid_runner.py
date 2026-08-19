@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import _grid_variant_filter
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -1065,10 +1066,12 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
 
 @pytest.fixture(autouse=False)
 def _reset_help_cache():
-    """Clear the framework-keyed help-text cache before/after each test."""
+    """Clear the framework-keyed help-text caches before/after each test."""
     _grid_runner._HELP_TEXT_CACHE.clear()
+    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
     yield
     _grid_runner._HELP_TEXT_CACHE.clear()
+    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL.clear()
 
 
 def test_probe_server_help_text_atom_returns_help_when_importable(
@@ -1099,7 +1102,12 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
     _reset_help_cache,
     monkeypatch,
 ):
-    """Subprocess failures surface as ``""`` and are NOT cached (transient failures must not poison the slot)."""
+    """A failure surfaces as ``""`` and is held off rather than re-paid at once.
+
+    Re-probing on every variant costs a ten-second import each time on a box
+    that does not have the framework. A crash might still resolve, so the
+    hold-off expires; a missing interpreter will not, and does not.
+    """
     raised = {"n": 0}
 
     def fake_run(*args, **kwargs):
@@ -1108,9 +1116,48 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _grid_runner._probe_server_help_text("atom") == ""
-    # Re-probe invokes subprocess again rather than serving an empty cached value.
+    assert _grid_runner._probe_server_help_text("atom") == ""
+    assert raised["n"] == 1
+
+    # The hold-off is bounded, so a framework that recovers is picked back up.
+    _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] = 0.0
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
+
+
+def test_probe_server_help_text_missing_interpreter_is_not_retried(
+    _reset_help_cache,
+    monkeypatch,
+):
+    """An absent interpreter cannot fix itself inside one session."""
+    raised = {"n": 0}
+
+    def fake_run(*args, **kwargs):
+        raised["n"] += 1
+        raise FileNotFoundError("no such interpreter")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _grid_runner._probe_server_help_text("atom") == ""
+    assert _grid_runner._probe_server_help_text("atom") == ""
+    assert raised["n"] == 1
+    assert _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] == float("inf")
+
+
+def test_probe_server_help_text_ignores_a_failed_runs_stderr(
+    _reset_help_cache,
+    monkeypatch,
+):
+    """A traceback is not help text.
+
+    Treating it as one makes every gated flag look absent from the help, which
+    drops the variants carrying them instead of sparing them.
+    """
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(cmd, 1, "", "Traceback ... ImportError"),
+    )
+    assert _grid_runner._probe_server_help_text("atom") == ""
 
 
 def test_probe_server_help_text_cache_keyed_by_framework(
