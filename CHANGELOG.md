@@ -93,6 +93,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   single source of truth for the kernel backend on a resume as well. The field
   itself is unchanged and still feeds the session breakdown.
 
+### Fixed
+
+- **`best_result.json` is read again.** `_validated_forge_best_result` gated on
+  `schema_version == 1`; KernelForge has stamped `2` into that file since
+  2026-08-13. Every published best was therefore rejected and the kernel
+  backend fell through to the caller checkpoint or the stdout sentinel, losing
+  the one record that survives a hard kill — the case it exists for. The gate
+  now names the producer's constant, and a test pins the two together so the
+  next bump cannot drift silently. The eight tests that already covered this
+  salvage path were passing only because their fixtures carried the same wrong
+  version; they now publish what the producer publishes.
+
 ## [v1.0.0b1] - 2026-08-11
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

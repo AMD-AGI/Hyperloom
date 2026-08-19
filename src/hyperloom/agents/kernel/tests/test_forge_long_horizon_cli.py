@@ -72,7 +72,7 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
 
 def _published_manifest(commit_hash: str, **overrides) -> dict:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "commit_hash": commit_hash,
         "correctness_passed": True,
         "baseline_wall_ms": 3.0,

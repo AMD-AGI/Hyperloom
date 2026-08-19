@@ -55,7 +55,7 @@ def _publish(workspace: Path, payload: dict) -> None:
 
 def _manifest(commit_hash: str, **overrides) -> dict:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "commit_hash": commit_hash,
         "correctness_passed": True,
         "baseline_wall_ms": 2.0,
@@ -113,7 +113,7 @@ def test_missing_manifest_yields_no_evidence(repo):
     "overrides",
     [
         pytest.param({"correctness_passed": False}, id="correctness_failed"),
-        pytest.param({"schema_version": 2}, id="unknown_schema"),
+        pytest.param({"schema_version": 1}, id="superseded_schema"),
         pytest.param({"mean_case_speedup": 1.0}, id="no_mean_case_gain"),
         pytest.param({"mean_case_speedup": None}, id="missing_mean_case_speedup"),
         pytest.param({"baseline_wall_ms": 0.0}, id="unusable_baseline"),
@@ -215,7 +215,7 @@ def test_corrupt_manifest_is_ignored_rather_than_raising(repo):
     workspace, _base_commit = repo
     root = workspace / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "best_result.json").write_text('{"schema_version": 1, "comm')
+    (root / "best_result.json").write_text('{"schema_version": 2, "comm')
 
     assert forge_submit._read_forge_best_result(str(workspace)) is None
 
@@ -377,6 +377,17 @@ def test_a_refused_applyback_names_the_clause_that_refused_it(repo):
     assert len(problems) == 1
     assert "framework" in problems[0]
     assert "torch" in problems[0]
+
+
+def test_the_pinned_best_result_schema_is_the_one_the_producer_stamps():
+    """The gate drifted silently once; this is what would have caught it."""
+    forge_submit._ensure_forge_on_path()
+    reporting = pytest.importorskip("kernel_agents.loop.reporting")
+
+    assert (
+        forge_submit._FORGE_BEST_RESULT_SCHEMA_VERSION
+        == reporting.MANIFEST_SCHEMA_VERSION
+    )
 
 
 def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
