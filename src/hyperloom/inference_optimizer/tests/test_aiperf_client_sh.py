@@ -38,6 +38,9 @@ def _fake_builtin(write_pid: bool) -> str:
 
 _FAKE_AIPERF = r"""#!/usr/bin/env bash
 # Record env markers, write a minimal export into --artifact-dir, exit rc.
+# FAKE_AIPERF_SLEEP keeps the process alive long enough for the PROFILE branch
+# to find it running; it is 0 for every other test.
+sleep "${FAKE_AIPERF_SLEEP:-0}"
 art=""
 prev=""
 for a in "$@"; do
@@ -58,8 +61,12 @@ exit "${FAKE_RC:-0}"
 """
 
 _FAKE_CURL = r"""#!/usr/bin/env bash
-# /v1/models -> model json; profile endpoints -> ok.
+# /v1/models -> model json; profile endpoints -> ok. Records the argv of any
+# /start_profile call so tests can assert what was (or was not) forwarded.
 for a in "$@"; do case "$a" in *v1/models*) echo '{"data":[{"id":"m"}]}'; exit 0;; esac; done
+for a in "$@"; do
+  case "$a" in *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";; esac
+done
 exit 0
 """
 
@@ -289,6 +296,54 @@ def test_missing_framework_fail_loud(tmp_path):
     r = _run(bench, bind, res, tmp_path, FRAMEWORK="")
     assert r.returncode == 2
     assert not (res / "inferencex_result.json").exists()
+
+
+# --- PROFILE=1 self-bracketing ------------------------------------------------
+
+
+def _run_profile(bench, bind, res, tmp_path, **extra_env):
+    """PROFILE=1 with the window collapsed, so the branch runs in seconds."""
+    return _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        AGENTX_PROFILE_WARMUP_S="1",
+        AGENTX_PROFILE_WINDOW_S="0",
+        FAKE_AIPERF_SLEEP="6",
+        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+        **extra_env,
+    )
+
+
+def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
+    """SGLang takes its capture bounds in the POST body, not on the serve line.
+
+    A bare POST leaves the capture unbounded and the worker accumulates profiler
+    events in host RAM until the cgroup OOM-killer takes it out mid-run, which
+    surfaces as an unexplained server death rather than a profiling bug.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    body = '{"start_step":0,"num_steps":128,"with_stack":true}'
+    r = _run_profile(bench, bind, res, tmp_path, PROFILE_EXTRA_BODY=body)
+    assert r.returncode == 0, r.stderr
+    argv = (tmp_path / "curl.txt").read_text().splitlines()
+    assert "-d" in argv
+    assert argv[argv.index("-d") + 1] == body
+    assert "Content-Type: application/json" in argv
+
+
+@pytest.mark.parametrize("env", [{"PROFILE_EXTRA_BODY": "{}"}, {}])
+def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
+    """vLLM carries its bounds on --profiler-config; an empty body must not be
+    posted as one, or the endpoint gets a meaningless payload."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run_profile(bench, bind, res, tmp_path, **env)
+    assert r.returncode == 0, r.stderr
+    argv = (tmp_path / "curl.txt").read_text().splitlines()
+    assert "start_profile" in " ".join(argv)  # the call still happened
+    assert "-d" not in argv
 
 
 def test_agentx_server_script_override_without_framework(tmp_path):
