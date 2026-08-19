@@ -317,6 +317,48 @@ async def test_cleared_pending_without_resume_flag_rejects_result(coordinator) -
     assert not any(e.get("action") == "geak_e2e" for e in st.optimization_stack)
 
 
+def _render_final(geak_pending: dict) -> tuple[list[str], list[str]]:
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+
+    section = render(
+        {
+            "final": {
+                "throughput_tok_s_per_gpu": 140.0,
+                "cumulative_gain_pct_validated": 0.0,
+                "geak_pending": geak_pending,
+            },
+            "baseline": {"throughput_tok_s_per_gpu": 100.0},
+        }
+    )
+    return list(section.key_facts), list(section.warnings)
+
+
+def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
+    """A measured candidate dropped for a missed rebench must be visible."""
+    facts, warnings = _render_final(
+        {
+            "status": "rebench_cancelled",
+            "revalidation_error": "close_sequence",
+            "self_reported_gain_pct": 12.5,
+        }
+    )
+
+    blob = " ".join(facts + warnings).lower()
+    assert "rebench" in blob
+    assert any("close_sequence" in w or "could not" in w.lower() for w in warnings)
+    # The dropped candidate must not be presented as awaiting anything.
+    assert not any("awaiting" in f.lower() for f in facts)
+
+
+def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
+    facts, warnings = _render_final(
+        {"status": "awaiting_rebench", "self_reported_gain_pct": 12.5}
+    )
+
+    assert any("AWAITING" in f for f in facts)
+    assert warnings
+
+
 def test_legacy_placeholder_does_not_match_cycle_scoped_keys() -> None:
     """The legacy slot must not absorb a cycle-scoped rebench from another cycle."""
     from hyperloom.orchestrator.state.task_registry import Task

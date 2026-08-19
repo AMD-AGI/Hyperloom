@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   no longer promote, drop the candidate, or replay through the GEAK harness, and
   are recorded as an observation rather than dropped silently.
 
+- **A GEAK candidate abandoned without revalidation is now reported.** The final
+  report and the mission view only recognised `awaiting_rebench`, so a measured
+  candidate left at `rebench_unavailable` (or the new `rebench_cancelled`)
+  produced no fact and no warning: the session read as if nothing had been
+  found. Both statuses now emit a warning naming the drop reason, so a gain that
+  understates what the optimizer measured is visible instead of silent.
+
 ## [v1.0.0b2] - 2026-08-19
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

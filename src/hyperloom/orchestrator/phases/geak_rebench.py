@@ -50,7 +50,20 @@ def is_geak_same_harness_rebench_task(kind: str, params: dict[str, Any] | None) 
 
 
 def spare_geak_rebench_on_phase_transition(*, target_phase: str, kind: str, params: dict[str, Any]) -> bool:
-    """Return True to leave a queued GEAK rebench alive across a phase boundary."""
+    """Return True to leave a queued GEAK rebench alive across a phase boundary.
+
+    Deny-list rather than allow-list: only ``CLOSE`` kills the rebench, every
+    other target spares it. The window that actually matters is KERNEL through
+    SWEEP (plus the SWEEP re-loop back into EXPLORE), so an allow-list would be
+    tighter — but the phase set changes over time and a missing entry silently
+    reintroduces the audit-only bug this whole path exists to prevent, whereas a
+    surplus entry costs at most one wasted bench.
+
+    Correctness of the surplus is owned elsewhere: a rebench that outlives its
+    macro-cycle is refused by :func:`geak_rebench_should_apply_result`, because
+    the slot it would have to be tracked in has moved on. So this predicate only
+    decides whether the task keeps running, never whether its result counts.
+    """
     if (target_phase or "").strip().upper() == PHASE_CLOSE:
         return False
     return is_geak_same_harness_rebench_task(kind, params)
@@ -64,8 +77,12 @@ def geak_rebench_tracks_pending_task(
 ) -> bool:
     """True when ``geak_pending.revalidation_task_id`` tracks this rebench task.
 
-    Placeholder ids only match a task carrying that same key, so a rebench from
-    another macro-cycle cannot claim the slot.
+    The slot normally holds a task id. It holds a key instead only inside the
+    reservation window — the slot is published before the task row exists so the
+    phase guard can see a pending revalidation — and, on state written before
+    keys were cycle-scoped, the bare legacy key. Both are matched through
+    :func:`geak_revalidation_placeholder_keys`, which requires the task to carry
+    that same key, so a rebench from another macro-cycle cannot claim the slot.
     """
     tracked = str(pending_task_id or "").strip()
     if not tracked:
