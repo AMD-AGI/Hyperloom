@@ -2151,6 +2151,7 @@ class KernelPhase(PhaseHandler):
         Like kernel_opt's per-kernel integrate: try each candidate's env one by
         one, measured against ``current_best``. KEEPs accumulate (stacked envs);
         REVERTs are discarded, so one bad candidate cannot drag down the set.
+        A round the run stopped ends the sweep with its tuners unrecorded.
         """
         from ..kernel.request_handlers import integrate_handler
 

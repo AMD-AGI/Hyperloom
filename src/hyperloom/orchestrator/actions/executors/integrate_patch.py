@@ -2997,7 +2997,7 @@ class IntegratePatchExecutor:
         gate_evidence: dict[str, Any],
         ctx: Any,
     ) -> dict[str, Any]:
-        """Throughput KEEP / REVERT decision with optional stack rebench."""
+        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it."""
         base_tput = float(params.get("base_tput") or 0.0)
         # Grade against the current live anchor, not a stale task snapshot.
         live_anchor = resolve_grading_anchor_tput(shared_state)
@@ -3024,14 +3024,11 @@ class IntegratePatchExecutor:
                     "status": "stopped",
                     "error_class": stopped.error_class,
                     "error": stopped.interrupted,
-                    "ends_the_batch": stopped.ends_the_batch,
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
-                    "base_tput": base_tput,
-                    "keep_threshold_pct": keep_threshold_pct,
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                 },

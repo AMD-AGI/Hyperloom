@@ -7567,7 +7567,6 @@ async def integrate_handler(
                 "status": "stopped",
                 "error_class": stopped.error_class,
                 "error": stopped.interrupted,
-                "ends_the_batch": stopped.ends_the_batch,
                 "decision": "NEEDS_REVIEW",
                 "rebaseline_detail": bench_result,
                 "kernel_id": kernel_id,
