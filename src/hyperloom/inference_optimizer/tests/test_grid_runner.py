@@ -5,27 +5,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+)
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
+    SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
     _parse_skip_spec,
     _run_magpie,
+    _SESSION_KILL_GRACE_SEC,
     apply_runtime_benchmark_overrides,
     apply_user_skip_list,
     coerce_extra_envs,
@@ -33,6 +41,8 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     resolve_skip_spec,
     run_grid,
 )
+
+from .conftest import enable_multi_node, launches_by_round_slot
 
 
 # Section 1: _write_variant_abort_marker
@@ -1389,6 +1399,750 @@ async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
 
     assert len(ran) == 2
     assert [r.status for r in results] == ["succeeded", "succeeded"]
+
+
+def _capture_launches(recorded: list[dict]):
+    """A ``run_with_session_kill`` double that records how each round was launched.
+
+    Only benchmark rounds are recorded: the interpreter probe carries no
+    ``--output-dir`` and is module-memoized, so counting it would make these
+    assertions depend on which test ran first.
+
+    Args:
+        recorded: Appended to per launched round, each record carrying the
+            ``round_slot`` the round wrote into alongside the launch kwargs.
+
+    Returns:
+        A callable usable as ``side_effect``.
+    """
+
+    def fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        recorded.append({"round_slot": slot.name, **kwargs})
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    return fake_run
+
+
+def _granted_timeouts(recorded: list[dict]) -> list[int]:
+    """The hard timeout each recorded round was granted, in launch order."""
+    return [int(launch["timeout"]) for launch in recorded]
+
+
+# Every output slot one variant launches a benchmark process into, in launch
+# order: the discarded warmup, the multi-node client warmup, and the measured
+# round. All three are full benchmark passes on the GPU.
+_GRID_ROUND_SLOTS = ("warmup_round", "mn_warmup", "variant_00_v0")
+
+
+async def _launch_every_pass_of_one_variant(
+    tmp_path,
+    monkeypatch,
+    *,
+    session_deadline_sec: float | None,
+) -> list[dict]:
+    """Run one variant with every optional pass enabled, recording each launch.
+
+    The passes are independently gated -- the discarded warmup on lifecycle
+    eligibility, the client warmup on multi-node -- so a test that wants to reach
+    every launch site the grid has must turn all of them on at once.
+
+    Args:
+        tmp_path: Test-scoped directory for the config and the output root.
+        monkeypatch: Used to put the grid on the multi-node path.
+        session_deadline_sec: The session deadline handed to ``run_grid``.
+
+    Returns:
+        list[dict]: One record per launched round, as ``_capture_launches`` makes
+            them.
+    """
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    enable_multi_node(monkeypatch)
+    recorded: list[dict] = []
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ),
+        patch(
+            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+        ),
+    ):
+        await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("v0")],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=600,
+            session_deadline_sec=session_deadline_sec,
+            variant_expected_sec=30.0,
+            warmup_before_measure=True,
+        )
+    return recorded
+
+
+class TestSessionGridBounds:
+    """One definition of the two numbers every benching arm needs.
+
+    A deadline derived one way in one executor and another way in the next
+    produces arms that abandon different amounts of the tail budget.
+    """
+
+    def test_no_session_means_no_bounds(self):
+        assert _grid_runner.session_grid_bounds(None) == (None, None)
+
+    def test_reads_the_deadline_and_the_measured_baseline(self):
+        state = MagicMock()
+        state.grid_session_deadline_sec.return_value = 4242.0
+        state.baseline_runtime_sec = 600.0
+        assert _grid_runner.session_grid_bounds(state) == (4242.0, 600.0)
+
+    def test_unmeasured_baseline_yields_no_estimate(self):
+        """Zero is "not measured yet", which must not read as "needs 0 seconds"."""
+        state = MagicMock()
+        state.grid_session_deadline_sec.return_value = 4242.0
+        state.baseline_runtime_sec = 0.0
+        assert _grid_runner.session_grid_bounds(state) == (4242.0, None)
+
+    def test_unparseable_baseline_yields_no_estimate(self):
+        state = MagicMock()
+        state.grid_session_deadline_sec.return_value = None
+        state.baseline_runtime_sec = "not-a-number"
+        assert _grid_runner.session_grid_bounds(state) == (None, None)
+
+    def test_state_without_the_deadline_accessor_is_tolerated(self):
+        state = SimpleNamespace(baseline_runtime_sec=600.0)
+        assert _grid_runner.session_grid_bounds(state) == (None, 600.0)
+
+    def test_a_variant_is_priced_as_a_boot_and_a_benchmark(self):
+        """What a variant actually spends, rather than what the baseline spent.
+
+        A variant cannot re-attach to anyone else's server -- its config differs
+        in the very knobs that decide how one comes up -- so it pays a boot and
+        then a benchmark. The baseline's 900s cold round is 350s of boot and 550s
+        of benchmarking that also paid the first request's kernel compile; the
+        variant pays that boot and the 400s a benchmark costs once the compile is
+        cached. Admitting on the 900s abandons 150s of every variant's worth of
+        tail budget.
+        """
+        state = SimpleNamespace(
+            grid_session_deadline_sec=lambda: 4242.0,
+            baseline_runtime_sec=900.0,
+            baseline_post_ready_runtime_sec=550.0,
+            baseline_warm_runtime_sec=400.0,
+        )
+
+        deadline, variant_sec = _grid_runner.session_grid_bounds(state)
+
+        assert deadline == 4242.0
+        assert variant_sec == pytest.approx(750.0)
+
+    def test_a_baseline_with_no_hot_pass_prices_the_benchmark_from_the_cold_one(self):
+        """The post-ready segment stands in, over-predicting by the compile."""
+        state = SimpleNamespace(
+            grid_session_deadline_sec=lambda: None,
+            baseline_runtime_sec=900.0,
+            baseline_post_ready_runtime_sec=550.0,
+        )
+
+        assert _grid_runner.session_grid_bounds(state)[1] == pytest.approx(900.0)
+
+    def test_a_baseline_that_never_reported_its_boot_falls_back_to_the_whole_round(self):
+        """A scriptable workload runs no server, so there is no split to read."""
+        state = SimpleNamespace(
+            grid_session_deadline_sec=lambda: None,
+            baseline_runtime_sec=900.0,
+            baseline_warm_runtime_sec=400.0,
+        )
+
+        assert _grid_runner.session_grid_bounds(state)[1] == pytest.approx(900.0)
+
+
+class TestSessionBudgetAdmission:
+    """A variant is admitted on what it is expected to need, not on its backstop.
+
+    ``variant_timeout_sec`` is the catastrophic-hang cap (~baseline x 2 for
+    explore). Gating admission on it abandons the tail of the budget: with a
+    20-minute baseline the grid refuses to start a round with 30 minutes left.
+    """
+
+    @pytest.mark.asyncio
+    async def test_variant_runs_when_budget_fits_expected_but_not_the_backstop(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 120.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert [r.status for r in results] == ["succeeded"]
+        assert len(recorded) == 1
+
+    @pytest.mark.asyncio
+    async def test_variant_skipped_when_budget_cannot_fit_the_expected_runtime(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 10.0,
+                variant_expected_sec=300.0,
+            )
+
+        assert recorded == []
+        assert [r.status for r in results] == ["skipped"]
+
+    @pytest.mark.asyncio
+    async def test_without_an_estimate_the_stricter_backstop_check_is_kept(self, tmp_path):
+        """Callers that cannot estimate keep the pre-existing, stricter gate."""
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 120.0,
+                variant_expected_sec=None,
+            )
+
+        assert recorded == []
+        assert [r.status for r in results] == ["skipped"]
+
+
+class TestSessionBudgetTimeoutClamp:
+    """A granted cap never exceeds what the session can still pay for.
+
+    explore derives caps from the measured baseline (up to 4h) and never
+    consulted the budget, so a 3h session could hand a single variant more time
+    than the whole run was given.
+    """
+
+    @pytest.mark.asyncio
+    async def test_granted_cap_is_clamped_to_the_remaining_budget(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=7800,
+                session_deadline_sec=time.monotonic() + 120.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert len(recorded) == 1
+        granted = _granted_timeouts(recorded)[0]
+        # The cap is allowed a small grace past the deadline so the in-process
+        # session watchdog trips first and attributes the kill correctly.
+        assert 60 <= granted <= 120 + _SESSION_KILL_GRACE_SEC, (
+            f"expected a cap clamped to the ~120s budget, got {granted}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_declared_cap_is_kept_when_the_budget_is_larger(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 36000.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert _granted_timeouts(recorded) == [600]
+
+    @pytest.mark.asyncio
+    async def test_no_deadline_leaves_the_declared_cap_untouched(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=None,
+                variant_expected_sec=30.0,
+            )
+
+        assert _granted_timeouts(recorded) == [600]
+
+
+class TestSessionKillAttribution:
+    """A round reaped for the session budget is not a verdict about the variant."""
+
+    @pytest.mark.asyncio
+    async def test_mid_round_budget_kill_is_recorded_as_skipped_not_failed(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+
+        def fake_run(cmd, *args, **kwargs):
+            return subprocess.CompletedProcess(cmd, SESSION_TIME_EXHAUSTED_RETURNCODE, "", "")
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 120.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert [r.status for r in results] == ["skipped"]
+        assert results[0].error_class == "session_time_exhausted"
+        # Never the overtime label, which asserts the variant is abnormally slow.
+        assert not getattr(results[0], "killed_overtime", False)
+        assert results[0].output_throughput is None
+
+    @pytest.mark.asyncio
+    async def test_the_hard_cap_leaves_room_for_the_session_watchdog_to_win(self, tmp_path):
+        """Both fire at the same instant, and the sentinel must get there first.
+
+        The hard cap raises ``TimeoutExpired``, which the ledger reads as a variant
+        timeout, so it is granted a small grace past the session deadline.
+        """
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=7800,
+                session_deadline_sec=time.monotonic() + 60.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert len(recorded) == 1
+        granted = _granted_timeouts(recorded)[0]
+        assert granted > 60, f"hard cap {granted}s must sit past the ~60s deadline, not on it"
+        assert granted <= 90, f"the grace must stay small, got {granted}s"
+
+    @pytest.mark.parametrize("round_slot", _GRID_ROUND_SLOTS)
+    @pytest.mark.asyncio
+    async def test_the_session_deadline_reaches_the_subprocess_layer(self, tmp_path, monkeypatch, round_slot):
+        """Regression: the clamped cap alone bounds the round but mislabels the kill.
+
+        Parameterized over every pass a variant costs, because each launch site
+        hands the deadline over on its own. A site that leaves it out is still
+        bounded by its clamped cap, so the round still ends -- as a
+        ``TimeoutExpired`` the ledger reads as a variant too slow to measure.
+        """
+        deadline = time.monotonic() + 120.0
+        recorded = await _launch_every_pass_of_one_variant(
+            tmp_path,
+            monkeypatch,
+            session_deadline_sec=deadline,
+        )
+
+        assert launches_by_round_slot(recorded)[round_slot]["session_deadline_sec"] == deadline
+
+    @pytest.mark.asyncio
+    async def test_no_pass_of_a_variant_is_launched_without_the_deadline(self, tmp_path, monkeypatch):
+        """The net for a pass added later, which no per-slot test would know about."""
+        deadline = time.monotonic() + 120.0
+        recorded = await _launch_every_pass_of_one_variant(
+            tmp_path,
+            monkeypatch,
+            session_deadline_sec=deadline,
+        )
+
+        assert set(launches_by_round_slot(recorded)) >= set(_GRID_ROUND_SLOTS)
+        assert [c["round_slot"] for c in recorded if c.get("session_deadline_sec") != deadline] == []
+
+
+def _reaping_round(returncode: int, *, slot_name: str):
+    """A ``run_with_session_kill`` double that reaps one named round of a variant.
+
+    Args:
+        returncode: The sentinel the reaped round comes back with.
+        slot_name: Output-slot directory name identifying the round to reap;
+            every other round succeeds with a valid report.
+
+    Returns:
+        tuple: The ``side_effect`` callable, and the list of slot names it
+            appends to as rounds are launched.
+    """
+    launched: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        # The module-memoized interpreter probe is not a benchmark round.
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        launched.append(slot.name)
+        if slot.name == slot_name:
+            return subprocess.CompletedProcess(cmd, returncode, "", "")
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    return fake_run, launched
+
+
+class TestEveryRoundCarriesTheStopThatEndedIt:
+    """A round the run stopped is a stop whichever round it was.
+
+    The measured round is not the only full benchmark pass a variant costs: the
+    discarded warmup runs the same workload, and so does the multi-node client
+    warmup. A reap in either has exactly as much to say about the variant as one
+    in the measured round -- nothing -- so grading it as ``warmup_round_failed``
+    files a verdict the run never reached, and ignoring the returncode entirely
+    keeps launching benchmark rounds after the orchestrator asked the action to
+    stop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_warmup_reaped_by_the_budget_is_skipped_not_a_failed_variant(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        fake_run, launched = _reaping_round(SESSION_TIME_EXHAUSTED_RETURNCODE, slot_name="warmup_round")
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=fake_run,
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("cand0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 600.0,
+                variant_expected_sec=30.0,
+                warmup_before_measure=True,
+            )
+
+        assert launched == ["warmup_round"], "the measured round must not run after the warmup was reaped"
+        assert [r.status for r in results] == ["skipped"]
+        assert results[0].error_class == "session_time_exhausted"
+        assert _read_marker(tmp_path / "out" / "variant_00_cand0")["error_class"] == "session_time_exhausted"
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_warmup_ends_the_grid_instead_of_booting_the_next_variant(self, tmp_path):
+        """Every remaining variant would boot its own server on the Ray path.
+
+        ``run_session_kill`` re-``ensure()``s a lease whose actor the cancel just
+        killed, so a grid that keeps going after a cancel starts a fresh actor
+        and a fresh GPU server per remaining variant.
+        """
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        fake_run, launched = _reaping_round(ORCHESTRATOR_CANCELLED_RETURNCODE, slot_name="warmup_round")
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=fake_run,
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("c0"), GridVariant("c1"), GridVariant("c2")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                keep_going_on_failure=True,
+                session_deadline_sec=time.monotonic() + 600.0,
+                variant_expected_sec=30.0,
+                warmup_before_measure=True,
+            )
+
+        assert launched == ["warmup_round"], f"a cancelled action kept launching rounds: {launched}"
+        assert [r.status for r in results] == ["skipped"] * 3
+        assert [r.error_class for r in results] == ["orchestrator_cancelled"] * 3
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_multi_node_warmup_ends_the_grid(self, tmp_path, monkeypatch):
+        """The multi-node warmup discarded its returncode along with its report."""
+        from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+        from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
+
+        async def fake_restart_server_for_round(**_kwargs):
+            return None
+
+        monkeypatch.setattr(mnsl, "restart_server_for_round", fake_restart_server_for_round)
+        fake_run, launched = _reaping_round(ORCHESTRATOR_CANCELLED_RETURNCODE, slot_name="mn_warmup")
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("c0"), GridVariant("c1")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                keep_going_on_failure=True,
+                session_deadline_sec=time.monotonic() + 600.0,
+                variant_expected_sec=30.0,
+            )
+
+        assert launched == ["mn_warmup"], f"a cancelled action kept launching rounds: {launched}"
+        assert [r.error_class for r in results] == ["orchestrator_cancelled"] * 2
+
+
+class TestSessionBudgetWarmupRounds:
+    """A warmup round costs a full pass, and the measured round is paid first."""
+
+    @pytest.mark.asyncio
+    async def test_admission_accounts_for_the_warmup_pass(self, tmp_path):
+        """Budget for one round is not budget for a warmup plus a measure round.
+
+        Admitting on a single round's estimate would let a variant in and then
+        clamp its measured round to nothing, turning a budget shortfall into a
+        ledger full of spurious timeouts.
+        """
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=_capture_launches(recorded),
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 40.0,
+                variant_expected_sec=30.0,
+                warmup_before_measure=True,
+            )
+
+        assert recorded == []
+        assert [r.status for r in results] == ["skipped"]
+
+    @pytest.mark.asyncio
+    async def test_the_budget_is_re_checked_after_the_uncapped_server_restart(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """The admission gate is taken before the one launch it does not cover.
+
+        The per-variant multi-node server restart sits between the gate at the top
+        of the loop and the first pass, and it is under no cap of its own: booting
+        a large model across nodes can take longer than a benchmark pass. So a
+        variant can be admitted on a budget that fits both its passes and reach the
+        warmup with a budget that fits neither -- and the grid has no skip there,
+        so it launches the warmup anyway, watches it get killed, swallows that as
+        best-effort, and finds the measured round no longer fits.
+
+        Scaled down by a thousand from the field shape (1300s left, 2x600s
+        admitted, a 300s restart) so the restart's cost is real elapsed time
+        rather than a clock the test pretends about.
+        """
+        from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+        from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+        monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
+        restarts: list[float] = []
+
+        async def slow_restart(**_kwargs):
+            restarts.append(time.monotonic())
+            await asyncio.sleep(0.5)
+
+        monkeypatch.setattr(mnsl, "restart_server_for_round", slow_restart)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 1.3,
+                variant_expected_sec=0.6,
+            )
+
+        assert restarts, "the restart never ran, so this is not the case under test"
+        launched = [c["round_slot"] for c in recorded]
+        assert launched == [], f"a pass was launched into a budget the restart had spent: {launched}"
+        assert [r.status for r in results] == ["skipped"]
+        assert [r.error_class for r in results] == [SESSION_TIME_EXHAUSTED_CLASS]
+
+    @pytest.mark.asyncio
+    async def test_warmup_cap_reserves_budget_for_the_measured_round(self, tmp_path):
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=_capture_launches(recorded),
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+        ):
+            await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=7800,
+                session_deadline_sec=time.monotonic() + 300.0,
+                variant_expected_sec=60.0,
+                warmup_before_measure=True,
+            )
+
+        by_round = launches_by_round_slot(recorded)
+        warmup = next(int(c["timeout"]) for c in recorded if "warmup" in c["round_slot"])
+        measure = next(int(c["timeout"]) for c in recorded if "warmup" not in c["round_slot"])
+        assert warmup >= 60, f"a warmup capped under the 60s a pass takes is launched to be killed, got {warmup}"
+        assert warmup <= 240 + _SESSION_KILL_GRACE_SEC, (
+            f"warmup cap must hold back the measured round's 60s, got {warmup}"
+        )
+        assert warmup <= measure, "the warmup is never granted more than the round it holds budget back for"
+        assert len(by_round) == 2, f"expected a warmup and a measured round, got {list(by_round)}"
+
+    @pytest.mark.asyncio
+    async def test_a_warmup_killed_at_a_clamped_cap_is_logged_with_the_cap_it_got(self, tmp_path, caplog):
+        """The abort line is the only record of how long the round was allowed.
+
+        The declared cap is a hang backstop; what the warmup was granted is that
+        cap minus the reserve, and a round killed after four minutes logged as a
+        two-hour timeout reads as a variant that hangs rather than a budget that
+        ran out.
+        """
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            if "--output-dir" not in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "ok", "")
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            recorded.append({"round_slot": slot.name, **kwargs})
+            raise subprocess.TimeoutExpired(cmd, float(kwargs.get("timeout") or 0.0))
+
+        with (
+            patch(
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                side_effect=fake_run,
+            ),
+            patch(
+                "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+                return_value={"eligible": True, "framework": "sglang", "port": 30000, "reason": ""},
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=7800,
+                session_deadline_sec=time.monotonic() + 300.0,
+                variant_expected_sec=60.0,
+                warmup_before_measure=True,
+            )
+
+        granted = int(recorded[0]["timeout"])
+        assert granted < 7800, f"this test needs a clamped cap to be about, got {granted}"
+        aborts = [r.message for r in caplog.records if "warmup timeout" in r.message]
+        assert aborts, f"the warmup abort was not logged: {[r.message for r in caplog.records]}"
+        assert f"timeout_sec={granted}" in aborts[0], f"the abort line reports a cap the round never had: {aborts[0]}"
+        assert results[0].error_class == "warmup_magpie_timeout"
 
 
 class TestCompactJsonServerArgs:

@@ -1911,7 +1911,7 @@ def _delegate_coord(tmp_path: Path):
     c.bus = _StubBus()
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
-    c._sequence_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
+    c._admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
     c._registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
     return c

@@ -55,10 +55,15 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import compose_server_args
-from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
+from ._stack_rebench import (
+    DEFAULT_STACK_STABLE_PCT,
+    StackRebenchResult,
+    measure_stack_rebench,
+)
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -979,6 +984,27 @@ def _git_restore_stash_if_needed(
     return f"git stash pop {ref} rc={cp.returncode}: {detail}; user changes remain in git stash"
 
 
+def _restore_stash_logged(
+    framework_root: Path,
+    stash_state: str,
+    stash_ref: str,
+) -> str:
+    """Restore a pre-candidate stash, reporting a failure to do so.
+
+    Args:
+        framework_root (Path): The tree the stash was taken from.
+        stash_state (str): The state :func:`_git_stash_if_dirty` returned.
+        stash_ref (str): The stash ref to pop.
+
+    Returns:
+        str: The failure note, or ``""`` when nothing was left in the stash.
+    """
+    note = _git_restore_stash_if_needed(framework_root, stash_state, stash_ref)
+    if note:
+        log.warning("integrate_patch: user-change stash restore failed: %s", note)
+    return note
+
+
 def _with_stash_restore(
     framework_root: Path,
     stash_state: str,
@@ -986,10 +1012,9 @@ def _with_stash_restore(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Restore a pre-candidate stash before returning an executor result."""
-    note = _git_restore_stash_if_needed(framework_root, stash_state, stash_ref)
+    note = _restore_stash_logged(framework_root, stash_state, stash_ref)
     if not note:
         return result
-    log.warning("integrate_patch: user-change stash restore failed: %s", note)
     out = dict(result)
     out["stash_restore_error"] = note
     return out
@@ -1651,40 +1676,54 @@ class IntegratePatchExecutor:
         if localize_early is not None:
             return localize_early
 
-        apply_result = await self._stage_apply(ctx, params, extra, specialist_task_id, shared_state, done_payload)
-        if apply_result is not None:
-            return apply_result
+        # The apply and the gate both mutate the framework tree behind the
+        # operator's auto-stash, and both cross awaits while it is on the stack --
+        # the apply stage writes a KB record on each of its failure verdicts. So
+        # the guard spans both: whichever stage was running, the candidate is
+        # taken back out and the stash handed back, and the stop is re-raised
+        # rather than graded. Each stage publishes its tree-mutation bookkeeping
+        # to ``ctx`` as it becomes real, because that is all the handler can see
+        # when the stop arrives mid-stage.
+        try:
+            apply_result = await self._stage_apply(
+                ctx, params, extra, specialist_task_id, shared_state, done_payload
+            )
+            if apply_result is not None:
+                return apply_result
 
-        # _stage_apply populates these.
-        output_root: Path = ctx._ip_output_root  # type: ignore[attr-defined]
-        framework_root: Path | None = ctx._ip_framework_root  # type: ignore[attr-defined]
-        stash_state: str = ctx._ip_stash_state  # type: ignore[attr-defined]
-        stash_note: str = ctx._ip_stash_note  # type: ignore[attr-defined]
-        applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
-        applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
-        config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
-        extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
-        extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
-        setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
+            # _stage_apply populates these.
+            output_root: Path = ctx._ip_output_root  # type: ignore[attr-defined]
+            framework_root: Path | None = ctx._ip_framework_root  # type: ignore[attr-defined]
+            stash_state: str = ctx._ip_stash_state  # type: ignore[attr-defined]
+            stash_note: str = ctx._ip_stash_note  # type: ignore[attr-defined]
+            applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
+            applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
+            config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
+            extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
+            extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
+            setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
-        return await self._stage_gate(
-            ctx,
-            params,
-            extra,
-            specialist_task_id=specialist_task_id,
-            shared_state=shared_state,
-            done_payload=done_payload,
-            output_root=output_root,
-            framework_root=framework_root,
-            stash_state=stash_state,
-            stash_note=stash_note,
-            applied=applied,
-            applied_artifacts=applied_artifacts,
-            config_changes_applied=config_changes_applied,
-            extra_server_args_applied=extra_server_args_applied,
-            extra_envs_applied=extra_envs_applied,
-            setup_result=setup_result,
-        )
+            return await self._stage_gate(
+                ctx,
+                params,
+                extra,
+                specialist_task_id=specialist_task_id,
+                shared_state=shared_state,
+                done_payload=done_payload,
+                output_root=output_root,
+                framework_root=framework_root,
+                stash_state=stash_state,
+                stash_note=stash_note,
+                applied=applied,
+                applied_artifacts=applied_artifacts,
+                config_changes_applied=config_changes_applied,
+                extra_server_args_applied=extra_server_args_applied,
+                extra_envs_applied=extra_envs_applied,
+                setup_result=setup_result,
+            )
+        except BaseException:
+            self._undo_ungraded_candidate(ctx)
+            raise
 
     # ---------------------------------------------------------------------------
     # Stage helpers (called sequentially by __call__)
@@ -2365,6 +2404,14 @@ class IntegratePatchExecutor:
         applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
+        # From here on the tree is mutable and the stash is on the stack, so
+        # ``__call__``'s undo has to be able to see both before this stage
+        # returns: ``applied`` is published by identity and appended to in place.
+        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
+        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
+        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
+        ctx._ip_applied = applied  # type: ignore[attr-defined]
+        ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         for patch in patch_paths:
             if git_tree:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
@@ -2420,6 +2467,7 @@ class IntegratePatchExecutor:
                 artifact_specs,
                 backup_root=output_root / "artifact_backups",
             )
+            ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
             if artifact_apply_errors:
                 self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
@@ -2469,12 +2517,9 @@ class IntegratePatchExecutor:
                 },
             )
 
+        # The tree-mutation values are already published above, as the tree took
+        # them; what is left is what only the gate reads.
         ctx._ip_output_root = output_root  # type: ignore[attr-defined]
-        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
-        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
-        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
-        ctx._ip_applied = applied  # type: ignore[attr-defined]
-        ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
         ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
@@ -2513,6 +2558,13 @@ class IntegratePatchExecutor:
             params = dict(params)
             params["runtime_override"] = provision_result.runtime.to_runtime_override()
 
+        # Bound both bench legs by the session wall-clock, as the sweep and explore
+        # arms already are: the declared cap answers "how long before this counts
+        # as hung", not "how much budget is left", so without this a patch benched
+        # near the end of a run could outlive the run itself. Resolved once here
+        # and reused by the parity leg -- the deadline is an absolute monotonic
+        # timestamp, so it stays correct as the gate progresses.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
         try:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
@@ -2520,6 +2572,8 @@ class IntegratePatchExecutor:
                 extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         except FrameworkScriptMismatchError as exc:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -3009,6 +3063,13 @@ class IntegratePatchExecutor:
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
+        # Both the parity leg and the stack rebench below are additional full
+        # benches, so they need the same session bound the first bench got.
+        # Resolved here rather than threaded from the caller because the deadline
+        # is an absolute monotonic timestamp: the budget the first bench spent is
+        # already reflected in it.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
+
         parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
         if switch_manifest:
             parity = await self._switch_off_parity(
@@ -3017,6 +3078,8 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 switch_manifest=switch_manifest,
                 base_tput=base_tput,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
             if not parity.get("ok"):
                 # An unmeasurable parity leg reverts under its own verdict: the patch
@@ -3170,6 +3233,8 @@ class IntegratePatchExecutor:
                 extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
                 base_tput=base_tput,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
             rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
                 confirm["accuracy_pass"],
@@ -3361,6 +3426,8 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         switch_manifest: list[dict[str, Any]],
         base_tput: float,
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> dict[str, Any]:
         """Verify the patch is genuinely inert with every rewrite switch unset.
 
@@ -3384,6 +3451,10 @@ class IntegratePatchExecutor:
             specialist_task_id: The originating specialist.
             switch_manifest: Parsed switch manifest.
             base_tput: Pre-patch throughput to compare against.
+            session_deadline_sec: Monotonic-clock session budget deadline for the
+                parity bench, or ``None`` when unbounded.
+            variant_expected_sec: Expected bench runtime, used to decide whether
+                the remaining budget can fit the parity leg at all.
 
         Returns:
             ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
@@ -3410,6 +3481,8 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 unset_envs=switch_names,
                 variant_suffix="-parity",
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
             return {
@@ -3749,6 +3822,44 @@ class IntegratePatchExecutor:
                 exc,
             )
 
+    def _undo_ungraded_candidate(self, ctx: Any) -> None:
+        """Take the candidate back out when a stage unwound instead of returning.
+
+        Every REVERT the stages themselves decide hangs off an ``except
+        Exception``, and the stop that matters most here is not one of those: the
+        dispatcher cancels in-flight actions on shutdown and on a spent
+        wall-clock budget, and ``CancelledError`` derives from ``BaseException``.
+        Unhandled, it leaves the patch in the framework tree and the operator's
+        auto-stash on the stack — and the budget case does not end the process,
+        so CLOSE would report against a tree carrying a patch nothing ever
+        graded.
+
+        The cancel itself is re-raised by the caller rather than turned into a
+        REVERT verdict, so the run records it the way
+        :mod:`..stop_attribution` requires: work the run stopped, not work that
+        failed. Every step here is synchronous, so no second cancel can be
+        delivered part-way through the undo.
+
+        Read from ``ctx`` rather than from arguments because a stop can arrive
+        mid-stage, before the stage has returned anything to the caller: what the
+        undo owes is exactly what the tree has already been given, and each stage
+        publishes that as it happens. A stage that has not stashed yet leaves
+        ``clean`` behind, which makes the whole undo a no-op.
+
+        Args:
+            ctx: The runner context the stages publish their ``_ip_*``
+                tree-mutation bookkeeping onto.
+        """
+        framework_root: Path | None = getattr(ctx, "_ip_framework_root", None)
+        self._revert_artifacts(list(getattr(ctx, "_ip_applied_artifacts", None) or []))
+        self._revert_patches(framework_root, list(getattr(ctx, "_ip_applied", None) or []))
+        if framework_root is not None:
+            _restore_stash_logged(
+                framework_root,
+                str(getattr(ctx, "_ip_stash_state", "") or "clean"),
+                str(getattr(ctx, "_ip_stash_note", "") or ""),
+            )
+
     def _revert_patches(
         self,
         framework_root: Path | None,
@@ -3886,6 +3997,8 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         unset_envs: "list[str] | None" = None,
         variant_suffix: str = "",
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
@@ -3902,6 +4015,11 @@ class IntegratePatchExecutor:
                 an earlier KEEP put them into the base configuration.
             variant_suffix: Appended to the variant name so a second leg does not
                 collide with the first one's grid slot.
+            session_deadline_sec: Monotonic-clock session budget deadline, or
+                ``None`` when unbounded. Resolved by the caller, which owns the
+                session context.
+            variant_expected_sec: Expected bench runtime used to decide whether
+                the remaining budget can fit this bench at all.
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
@@ -3990,6 +4108,8 @@ class IntegratePatchExecutor:
                 result_dir=override_result_dir,
                 base_args_mode=str(params.get("base_args_mode") or "append"),
                 serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         finally:
             if serving_lease is not None:
@@ -4162,12 +4282,18 @@ class IntegratePatchExecutor:
         extra_envs_applied: dict[str, str],
         specialist_task_id: str,
         base_tput: float,
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> dict[str, Any]:
         """Re-bench the patched stack once more and re-grade throughput + accuracy.
 
         Mirrors the explore ledger's post-KEEP confirmation: a patch only KEEPs
         if a second full-stack run still clears the stability floor and the
         accuracy gate. Returns ``stable`` / ``tput`` / ``accuracy_pass`` / etc.
+
+        ``session_deadline_sec`` / ``variant_expected_sec`` bound the
+        confirmation round by the session wall-clock, so it cannot outlive the
+        run it is confirming for.
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
@@ -4201,24 +4327,12 @@ class IntegratePatchExecutor:
         _rt_rb = params.get("runtime_override")
         if isinstance(_rt_rb, dict) and _rt_rb:
             variant.runtime_override = dict(_rt_rb)
-        # A confirmation rebench must remain a stability check, not become a
-        # stricter second discovery gate as the per-cycle KEEP threshold decays.
-        # An explicit lower per-task floor remains valid, but it cannot exceed
-        # half of the threshold that admitted this patch.
-        keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
-        requested_stable_threshold_pct = float(
-            params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)
-        )
-        stable_threshold_pct = min(
-            requested_stable_threshold_pct,
-            max(0.0, keep_threshold_pct / 2.0),
-        )
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,
             variant=variant,
             base_tput=base_tput,
-            stable_threshold_pct=stable_threshold_pct,
+            stable_threshold_pct=self._rebench_stable_threshold_pct(params),
             output_slot=output_root / "stack_rebench",
             variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
             model_path=resolved_model or None,
@@ -4227,7 +4341,49 @@ class IntegratePatchExecutor:
             result_dir=override_result_dir,
             magpie_python=params.get("magpie_python") or None,
             base_args_mode=str(params.get("base_args_mode") or "append"),
+            session_deadline_sec=session_deadline_sec,
+            variant_expected_sec=variant_expected_sec,
         )
+        return self._graded_rebench(rebench, params=params, override_result_dir=override_result_dir)
+
+    def _rebench_stable_threshold_pct(self, params: dict[str, Any]) -> float:
+        """The floor a confirmation rebench's throughput is graded against.
+
+        A confirmation must remain a stability check rather than become a
+        stricter second discovery gate as the per-cycle KEEP threshold decays. An
+        explicit lower per-task floor stays valid, but it cannot exceed half of
+        the threshold that admitted this patch in the first place.
+
+        Args:
+            params: The task parameters, read for the per-task overrides.
+
+        Returns:
+            float: The stability floor as a percentage over the base throughput.
+        """
+        keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+        requested_stable_threshold_pct = float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT))
+        return min(requested_stable_threshold_pct, max(0.0, keep_threshold_pct / 2.0))
+
+    def _graded_rebench(
+        self,
+        rebench: StackRebenchResult,
+        *,
+        params: dict[str, Any],
+        override_result_dir: str | None,
+    ) -> dict[str, Any]:
+        """Grade a finished confirmation round and shape its verdict for the caller.
+
+        Args:
+            rebench: The confirmation round's measurement.
+            params: The task parameters, read for the accuracy baseline and
+                framework.
+            override_result_dir: An explicit ``$RESULT_DIR``, which wins over the
+                round's own workspace when grading accuracy.
+
+        Returns:
+            dict[str, Any]: ``stable`` / ``tput`` / ``workspace`` / ``warnings`` /
+                ``stable_floor`` / ``accuracy_pass``.
+        """
         # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
         # ``rebench.workspace``), so grade from there, honoring ``result_dir``.
         rebench_eval_root = override_result_dir or (str(Path(rebench.workspace).parent) if rebench.workspace else "")
