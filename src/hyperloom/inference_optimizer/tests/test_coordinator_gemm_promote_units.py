@@ -2015,13 +2015,7 @@ class TestForgeGemmRuntimeConfigMerge:
     @pytest.mark.asyncio
     async def test_a_stopped_run_leaves_its_tuners_unjudged(self, tmp_path, monkeypatch):
         """A clock that ran out is not a verdict on the tuners it interrupted."""
-        coord = _coord(
-            tmp_path,
-            baseline_tput=100.0,
-            baseline_runtime_sec=10.0,
-            framework="sglang",
-            current_best={"action": "warm_replay", "tput": 110.0},
-        )
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
         first = tmp_path / "fmoe.csv"
         second = tmp_path / "dense.csv"
@@ -2032,7 +2026,7 @@ class TestForgeGemmRuntimeConfigMerge:
         async def _fake_integrate(payload, *, session_dir):
             calls.append(payload)
             return {
-                "status": "stopped",
+                "status": "failed",
                 "error_class": "session_time_exhausted",
                 "decision": "NEEDS_REVIEW",
             }
@@ -2047,16 +2041,13 @@ class TestForgeGemmRuntimeConfigMerge:
 
         result = {
             "backend": "forge",
-            "precision": "bf16",
-            "workspace": str(tmp_path / "gemm"),
             "tuners_run": [
                 {
                     "status": "ok",
                     "tuner": "fmoe_ck",
-                    "improved_shapes": 2,
+                    "improved_shapes": 1,
                     "env_var": "AITER_CONFIG_FMOE",
                     "env_value": str(first),
-                    "best_micro_speedup": 1.2,
                 },
                 {
                     "status": "ok",
@@ -2064,19 +2055,17 @@ class TestForgeGemmRuntimeConfigMerge:
                     "improved_shapes": 1,
                     "env_var": "AITER_CONFIG_DENSE",
                     "env_value": str(second),
-                    "best_micro_speedup": 1.1,
                 },
             ],
         }
 
         await phase._validate_gemm_tuning_e2e(result)
 
-        # The stop ends the batch, so the second tuner is never launched.
         assert len(calls) == 1
-        e2e = result["e2e_results"]
-        assert e2e["kept"] == []
-        assert e2e["reverted"] == []
+        assert result["e2e_results"]["kept"] == []
+        assert result["e2e_results"]["reverted"] == []
         assert coord.shared_state.optimization_stack == []
+
 
     @pytest.mark.asyncio
     async def test_stacks_keeps_and_reverts(self, tmp_path, monkeypatch):
