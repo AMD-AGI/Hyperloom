@@ -41,7 +41,12 @@ log() { echo "[aiperf_client] $*"; }
 
 : "${MODEL:?MODEL required}"
 PORT="${PORT:-8000}"
-CONC="${CONC:-16}"
+# Concurrency is measurement-defining and upstream makes it a hard requirement
+# (benchmark_lib.sh check_env_vars exits 1 on an empty CONC). A default here
+# would produce a full 3600s scenario-locked run at a concurrency nobody chose,
+# and the mapped result records no concurrency at all, so the mismatch would be
+# invisible afterwards. The switch always projects CONC; if it ever stops, say so.
+: "${CONC:?CONC required (the AgentX switch projects it from the benchmark config)}"
 RESULT_DIR="${RESULT_DIR:-$(pwd)}"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
 ART="${RESULT_DIR}/aiperf_artifacts"
@@ -226,16 +231,41 @@ AIPERF="${AIPERF_BIN:-aiperf}"
 # win on the surviving short sessions. Matches upstream's 0.10.
 FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
 
-# The scenario enforces a 900s minimum benchmark duration, so a shortened
-# AGENTX_DURATION is a hard startup abort rather than a quick run -- there would
-# be no way to smoke-test this path at all. Upstream opts into --unsafe-override
-# below the floor; the scenario then stamps metadata.submission_valid false,
-# which benchmark_result.py rejects, so a smoke can never be mistaken for a
-# leaderboard measurement. AGENTX_ prefix because the scrub eats AIPERF_ names.
+# ── Non-canonical workloads may run, but may never be submittable ────────────
+# The scenario enforces a 900s duration floor, so a shortened AGENTX_DURATION is
+# a hard startup abort rather than a quick run -- there would be no way to smoke
+# test this path at all. Upstream opts into --unsafe-override below the floor.
+#
+# --unsafe-override alone is NOT sufficient to make a run non-submittable: aiperf
+# stamps submission_valid=false only when the override actually suppressed a
+# violation, so forcing the flag at the canonical 3600s (where there is nothing
+# to suppress) leaves a fully KEEP-able result. And the scenario has no concept
+# of corpus size at all, so shrinking AGENTX_NUM_ENTRIES to 50 traces produces
+# submission_valid=true on a workload nothing on the leaderboard ran.
+#
+# So Hyperloom stamps the verdict itself. Every deviation from the canonical
+# workload is collected here and handed to map_aiperf.py, which forces
+# submission_valid=false with these reasons attached; benchmark_result.py then
+# refuses the measurement. A smoke can be run, and can never be mistaken for a
+# leaderboard measurement -- by construction rather than by promise.
+CANON_ENTRIES=393
+CANON_DURATION=3600
+NONCANON=()
+[ "$NENT" != "$CANON_ENTRIES" ] && NONCANON+=("entries=${NENT}(canonical ${CANON_ENTRIES})")
+[ "$DURATION" != "$CANON_DURATION" ] && NONCANON+=("duration=${DURATION}s(canonical ${CANON_DURATION}s)")
+[ -n "${AGENTX_MAX_CTX:-}" ] && NONCANON+=("client_context_cap=${AGENTX_MAX_CTX}")
+[ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ] && NONCANON+=("unsafe_override_forced")
+
 SMOKE_ARGS=()
-if [ "$DURATION" -lt 900 ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then
+if [ "$DURATION" -lt "$CANON_DURATION" ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then
+  # Below the floor the scenario would abort outright; at or above it the flag
+  # is harmless (nothing to suppress) and keeps the two paths uniform.
   SMOKE_ARGS+=(--unsafe-override)
-  log "SMOKE: --unsafe-override (duration=${DURATION}s); submission_valid will be false and the result cannot KEEP"
+fi
+if [ ${#NONCANON[@]} -gt 0 ]; then
+  _reasons="$(IFS=,; echo "${NONCANON[*]}")"
+  export AGENTX_NONCANONICAL_REASONS="$_reasons"
+  log "SMOKE: non-canonical workload [${_reasons}] -- this result will be stamped submission_valid=false and cannot KEEP"
 fi
 
 log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} duration=${DURATION}s warmup=${WARMLANE}/lane grace=${WARMGRACE}s fail-thresh=${FRT}${AGENTX_MAX_CTX:+ maxctx=${AGENTX_MAX_CTX}}"

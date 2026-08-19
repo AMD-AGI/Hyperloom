@@ -1161,24 +1161,34 @@ _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 43200  # 12 h for the whole sweep action
 
 
 def _preflight_agentx_backend(args: argparse.Namespace) -> None:
-    """Reject the one backend combination where AgentX silently does nothing.
+    """Reject the combinations where AgentX labels work it did not do.
 
-    The AgentX switch works by overwriting ``benchmark.benchmark_script``. The
-    bypass backend never reads that field for a serving framework, so
-    ``HYPERLOOM_AGENTX=1`` with ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` produces
-    a full run of ordinary synthetic measurements labelled as an AgentX session
-    -- with no warning anywhere. Nobody sets both on purpose; refuse instead of
-    handing back numbers that mean something other than what they claim.
+    The AgentX switch works by overwriting ``benchmark.benchmark_script``, and
+    there are two ways for that overwrite not to happen while every other
+    AgentX-gated behaviour still fires:
+
+    * The bypass backend never reads that field for a serving framework, so
+      ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` produces a full run of ordinary
+      synthetic measurements labelled as an AgentX session.
+    * ``apply_agentx_switch`` returns early for a scriptable framework (xdit and
+      friends have no serving endpoint for aiperf to drive). ``agentx_enabled()``
+      is a bare env read, though, so the session still disables eval, turns the
+      concurrency sweep off, collapses the ISL/OSL grid, widens every budget,
+      and stamps ``benchmark_mode="agentx"`` on its state -- over a workload that
+      never touched a trace.
+
+    Neither is set on purpose; refuse instead of handing back numbers that mean
+    something other than what they claim.
 
     Args:
-        args: Parsed CLI namespace (unused; kept uniform with the other gates).
+        args: Parsed CLI namespace; ``framework`` decides the scriptable case.
 
     Raises:
-        SystemExit: When both AgentX and the bypass backend are requested.
+        SystemExit: When AgentX is combined with either.
     """
-    del args
     if not _agentx_enabled():
         return
+    from hyperloom.inference_optimizer import framework_registry
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
         resolve_backend_name,
     )
@@ -1190,6 +1200,17 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
             "The bypass backend ignores benchmark_script for serving frameworks, "
             "so AgentX would not run and the session would report synthetic "
             "measurements as AgentX results. Pick one.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    framework = str(getattr(args, "framework", "") or "").strip().lower()
+    if framework and framework_registry.is_scriptable(framework):
+        print(
+            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
+            "scriptable. The AgentX switch only replaces the benchmark client of a "
+            "serving framework, so no trace would be replayed -- but the session "
+            "would still be labelled AgentX and run on AgentX budgets. Pick one.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1237,16 +1258,51 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
         args.conc_sweep_total_budget_sec = _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
 
 
-# Peak prompt length in the 256k-capped weka corpus, which is what every model
-# family outside upstream's 1M-context whitelist replays. Deliberately the
-# conservative of the two variants: the whitelist lives in aiperf_client.sh and
+# Largest input+output a single request reaches in the 256k-capped weka corpus,
+# measured over all 30,141 requests of semianalysis_cc_traces_weka_062126_256k
+# (max input alone is 255,808). That variant is what every model family outside
+# upstream's 1M-context whitelist replays, and it is deliberately the
+# conservative of the two: the whitelist lives in aiperf_client.sh and
 # duplicating it here would give two copies to keep in sync, while the families
 # on it carry ~1M contexts and so never trip this bound anyway.
 AGENTX_CAPPED_CORPUS_PEAK_TOKENS = 255_999
 
 
+def _warn_if_context_too_small_for_corpus(resolved: int, source: str) -> None:
+    """Say up front when the served window cannot hold the replay corpus.
+
+    Not fatal: the run is still the honest one to make, and a model that cannot
+    hold the corpus cannot hold a leaderboard row either. But the failure would
+    otherwise surface an hour in, as requests the server refuses accumulate into
+    a context-overflow rate the scenario turns into submission_valid=false (or,
+    past ``--failed-request-threshold``, an abort) -- with nothing pointing at
+    the cause. Deliberately checked against the RESOLVED value whatever its
+    source: an explicit ``--max-model-len 8192`` or a stale exported
+    ``$MAX_MODEL_LEN`` are the likeliest ways to get this wrong, and gating the
+    check on the auto-resolved branch would stay silent for exactly those.
+    """
+    if not _agentx_enabled() or resolved >= AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
+        return
+    print(
+        f"WARNING: HYPERLOOM_AGENTX is on but the served context window "
+        f"({resolved}, from {source}) is below the replay corpus peak "
+        f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS} input+output tokens). Requests that "
+        f"do not fit will be refused by the server; the run is expected to come "
+        f"back non-submittable, and a model this size is not comparable on the "
+        f"AgentX board.",
+        file=sys.stderr,
+    )
+
+
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
+    resolved = _resolve_run_max_model_len_inner(args)
+    _warn_if_context_too_small_for_corpus(*resolved)
+    return resolved
+
+
+def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str]:
+    """Resolution proper; the corpus-fit warning is applied by the caller."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
     max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
@@ -1268,30 +1324,17 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     if _agentx_enabled():
         native = _load_model_max_position_embeddings(str(args.model or ""))
         if native:
-            if int(native) < AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
-                # Not fatal: the run is still the honest one to make, and a model
-                # that cannot hold the corpus cannot hold a leaderboard row
-                # either. But the failure would otherwise surface ~an hour in as
-                # an error-rate abort, with nothing pointing at the cause. Say it
-                # up front, while the operator is still watching.
-                print(
-                    f"WARNING: HYPERLOOM_AGENTX is on but the model's native context "
-                    f"({int(native)}) is below the replay corpus peak "
-                    f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS}). Traces that do not fit "
-                    f"will be rejected by the server, and once the error rate passes "
-                    f"--failed-request-threshold the round aborts. Expect this run to "
-                    f"fail; a model this size is not comparable on the AgentX board.",
-                    file=sys.stderr,
-                )
             return int(native), "agentx-native-context"
-        # Model not on disk yet (uncached HF id): aiperf_client.sh re-resolves
-        # from $MODEL_PATH once it exists. Fall through rather than guess, but
-        # say so -- the interim value is a synthetic-shape derivation that does
-        # not describe this workload.
+        # Model not on disk yet (uncached HF id). Nothing downstream recomputes
+        # this -- the client deliberately never emits a context cap and the
+        # server phase is a bare delegation -- so the fallback below really is
+        # what the server gets. It is a synthetic-shape derivation that does not
+        # describe this workload; the corpus-fit warning fires on it.
         print(
-            "WARNING: HYPERLOOM_AGENTX is on but the model's native context "
-            "could not be read yet; MAX_MODEL_LEN falls back to the synthetic "
-            "ISL+OSL derivation until the benchmark client re-resolves it.",
+            "WARNING: HYPERLOOM_AGENTX is on but the model's native context could "
+            "not be read (weights not on disk yet), so MAX_MODEL_LEN falls back "
+            "to the synthetic ISL+OSL derivation and the server will be booted at "
+            "that width. Pre-fetch the weights, or pass --max-model-len.",
             file=sys.stderr,
         )
     return (

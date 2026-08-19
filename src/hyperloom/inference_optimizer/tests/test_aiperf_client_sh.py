@@ -311,12 +311,83 @@ def test_missing_framework_fail_loud(tmp_path):
 # --- smoke escape hatch ---------------------------------------------------------
 
 
+def _result(res):
+    import json
+
+    return json.loads((res / "inferencex_result.json").read_text())
+
+
 def test_default_run_is_not_flagged_unsafe(tmp_path):
     """The canonical 3600s run must stay submittable."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "--unsafe-override" not in _aiperf_args(res)
+    assert not _result(res)["submission_invalid_reasons"]
+
+
+def test_missing_conc_fails_loud(tmp_path):
+    """A missing CONC must abort, not silently pick a concurrency.
+
+    Concurrency is measurement-defining and upstream makes it a hard requirement.
+    A default would produce a full scenario-locked run at a concurrency nobody
+    chose, and the mapped result records no concurrency at all, so the mismatch
+    would be invisible afterwards.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    env_without_conc = {"CONC": ""}
+    r = _run(bench, bind, res, tmp_path, **env_without_conc)
+    assert r.returncode != 0
+    assert "CONC required" in (r.stderr + r.stdout)
+    assert not (res / "inferencex_result.json").exists()
+
+
+# --- non-canonical workloads may run, but may never be submittable -------------
+#
+# aiperf cannot judge these: the scenario has no concept of corpus size, and it
+# stamps a False verdict only when --unsafe-override actually suppressed a
+# violation. So the client reports the deviation and map_aiperf forces it.
+
+
+def test_shrunken_corpus_cannot_keep(tmp_path):
+    """A reduced trace count is a smoke, not a leaderboard measurement.
+
+    Without this the corpus could be cut to a handful of traces while
+    ``submission_valid`` stayed true -- exactly the failure this whole path
+    exists to prevent, arriving through the one knob the scenario cannot see.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_NUM_ENTRIES="50")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("entries=50" in x for x in out["submission_invalid_reasons"])
+
+
+def test_forced_unsafe_override_at_canonical_duration_cannot_keep(tmp_path):
+    """``--unsafe-override`` alone does NOT invalidate a run.
+
+    aiperf stamps the verdict false only when the override suppressed a real
+    violation, so forcing it at 3600s -- where there is nothing to suppress --
+    would otherwise leave a fully KEEP-able result while the log claimed the
+    opposite.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_UNSAFE_OVERRIDE="true")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("unsafe_override_forced" in x for x in out["submission_invalid_reasons"])
+
+
+def test_client_side_context_cap_cannot_keep(tmp_path):
+    """An opt-in ``AGENTX_MAX_CTX`` drops traces, so it is non-canonical too."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_MAX_CTX="32768")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("client_context_cap" in x for x in out["submission_invalid_reasons"])
 
 
 def test_short_duration_opts_into_unsafe_override(tmp_path):

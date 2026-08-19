@@ -175,6 +175,35 @@ def test_bypass_guard_rejects_the_silent_combination(monkeypatch):
     assert ei.value.code == 2
 
 
+def test_guard_rejects_agentx_with_a_scriptable_framework(monkeypatch):
+    """The other way for the switch to no-op while every gate still fires.
+
+    ``apply_agentx_switch`` returns early for a scriptable framework, but
+    ``agentx_enabled()`` is a bare env read -- so eval is disabled, the conc
+    sweep is turned off, the grid is collapsed, budgets are widened and the
+    state is stamped ``benchmark_mode="agentx"`` over a workload that never
+    touched a trace.
+    """
+    _on(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        _preflight_agentx_backend(argparse.Namespace(framework="xdit"))
+    assert ei.value.code == 2
+
+
+def test_guard_allows_agentx_with_a_serving_framework(monkeypatch):
+    _on(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
+    for fw in ("vllm", "sglang"):
+        _preflight_agentx_backend(argparse.Namespace(framework=fw))  # must not raise
+
+
+def test_scriptable_guard_is_inert_without_agentx(monkeypatch):
+    """A scriptable run on its own is perfectly normal."""
+    _off(monkeypatch)
+    _preflight_agentx_backend(argparse.Namespace(framework="xdit"))  # must not raise
+
+
 # --- resume staleness ---------------------------------------------------------
 
 
