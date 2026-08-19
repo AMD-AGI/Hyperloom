@@ -1175,13 +1175,34 @@ ensure_aiperf() {
     log "would pip install aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
     return 0
   fi
+  # Presence is not enough. Measured: the previous pin (aiperf 0.8.0) carries
+  # weka-trace, --scenario and --benchmark-duration, and defines a scenario by
+  # the same name -- but with different invariants and an allowlist that predates
+  # the current corpus. A presence-only skip therefore left every already
+  # provisioned box on the old build after a pin bump, silently, while the
+  # preflight's own advice ("install via install.sh") pointed back at this no-op.
+  # Record what we installed and reinstall when it no longer matches.
+  local stamp="${HYPERLOOM_STATE_DIR:-${HOME}/.hyperloom}/aiperf_installed_ref"
+  local -a pip_args=("${PIP_EXTRA[@]}")
   if command -v aiperf >/dev/null 2>&1; then
-    log "aiperf already on PATH; skipping install"
-    return 0
+    if [ "$(cat "$stamp" 2>/dev/null)" = "$AIPERF_REF" ]; then
+      log "aiperf on PATH is the pinned ref ${AIPERF_REF:0:8}; skipping install"
+      return 0
+    fi
+    log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); reinstalling"
+    # Deliberately NOT --no-deps: a newer aiperf may need dependencies the old
+    # one did not, and installing the package without them is a worse failure
+    # than the stale build we are replacing.
+    pip_args+=(--force-reinstall)
   fi
   log "installing aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
-  if "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$AIPERF_PACKAGE_SPEC"; then
+  if "$PYTHON" -m pip install --quiet "${pip_args[@]}" "$AIPERF_PACKAGE_SPEC"; then
     log "aiperf installed OK"
+    # Stamp only after a success, so a failed upgrade retries next run instead
+    # of recording a ref that is not what is on disk. Best-effort: an unwritable
+    # state dir costs a redundant reinstall, never a wrong skip.
+    mkdir -p "$(dirname "$stamp")" 2>/dev/null && printf '%s\n' "$AIPERF_REF" > "$stamp" 2>/dev/null || \
+      warn "could not record the installed aiperf ref at ${stamp}; the next run will reinstall"
   else
     warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
   fi
