@@ -232,23 +232,38 @@ def _validate_magpie_python_override(value: str) -> str:
     return str(resolved)
 
 
-def _resolve_probe_python() -> str:
+def _resolve_probe_python(framework: str = "vllm") -> str:
     """Resolve the interpreter a build-accuracy probe must use.
 
     A capability probe only produces a correct drop decision when it inspects
     the SAME framework install the benchmark server loads, so a bare ``python3``
     off ``$PATH`` is deliberately NOT a fallback.
 
+    vLLM is the one framework the installer may place in its own venv, because
+    its ROCm wheel pins a torch that would clash with the shared stack; sglang
+    and atom are always in the shared one. So the isolated venv leads only for
+    vLLM, matching how the installer and preflight resolve the same question.
+
     Resolution order:
-    1. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
+    1. ``$VLLM_VENV_ROOT/bin/python`` when probing vLLM and it is executable.
+    2. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
        harness; on a single-venv install this is also the vLLM venv.
-    2. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
+    3. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
        alongside ``shutil.which("vllm")``) when it exists on disk.
-    3. ``_resolve_magpie_python()``'s canonical fallback via step 1.
+    4. ``_resolve_magpie_python()``'s canonical fallback via step 2.
+
+    Args:
+        framework (str): Framework whose install the probe must inspect.
 
     Returns:
         str: Path to the interpreter the probe should invoke.
     """
+    if (framework or "").strip().lower() == "vllm":
+        venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
+        if venv_root:
+            venv_python = str(Path(venv_root) / "bin" / "python")
+            if os.access(venv_python, os.X_OK):
+                return venv_python
     magpie_python = _resolve_magpie_python()
     # Prefer the harness interpreter; on a single-venv box it already IS the
     # vLLM venv.

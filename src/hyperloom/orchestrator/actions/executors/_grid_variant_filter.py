@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 
 from hyperloom.common.env import is_truthy
 
@@ -357,22 +358,27 @@ def xdit_blacklist_reason(
 
 _HELP_TEXT_CACHE: dict[str, str] = {}
 
+# Framework -> monotonic deadline before which the probe is not retried.
+# ``inf`` for a failure that cannot resolve itself inside one session.
+_HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
+_HELP_PROBE_RETRY_SEC: float = 300.0
+
 # Per-framework ``--help`` extraction commands. Each is a single-shot
 # ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
+# Argv *tails*: the interpreter is resolved per framework at call time, because
+# vLLM may live in its own venv and a bare python3 off $PATH is not necessarily
+# the install the benchmark server loads.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "sglang": (
-        "python3",
         "-c",
         "from sglang.launch_server import parser; parser.print_help()",
     ),
     "vllm": (
-        "python3",
         "-c",
         "from vllm.entrypoints.openai.api_server import make_arg_parser; make_arg_parser(None).print_help()",
     ),
     # atom exposes EngineArgs.add_cli_args (mirrors vLLM).
     "atom": (
-        "python3",
         "-c",
         "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
         "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
@@ -386,7 +392,14 @@ def _probe_server_help_text(framework: str) -> str:
 
     Supported: ``sglang``, ``vllm``, ``atom``; unknown values return ``""``.
     Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
-    fall through to NOT filtering. Empty results are NOT cached.
+    fall through to NOT filtering.
+
+    A failure is cached too, or a box without the framework installed re-pays a
+    ten-second import on every variant. A missing interpreter or an absent
+    module will not fix itself within a session and is cached outright; a
+    timeout or a crash might, so it is cached only briefly. Either way the first
+    one is logged: a silently empty probe means compatibility rules stopped
+    running with nothing to say so.
 
     Args:
         framework (str): Framework name; matched case-insensitively.
@@ -398,22 +411,48 @@ def _probe_server_help_text(framework: str) -> str:
     fw = (framework or "").strip().lower()
     if fw in _HELP_TEXT_CACHE:
         return _HELP_TEXT_CACHE[fw]
-    cmd = _HELP_PROBE_COMMANDS.get(fw)
-    if cmd is None:
+    argv_tail = _HELP_PROBE_COMMANDS.get(fw)
+    if argv_tail is None:
         return ""
+    expiry = _HELP_PROBE_FAILED_UNTIL.get(fw)
+    if expiry is not None and time.monotonic() < expiry:
+        return ""
+    # Deferred: _grid_runner imports this module at module scope.
+    from ._grid_runner import _resolve_probe_python
+
+    permanent = False
     try:
+        interpreter = _resolve_probe_python(fw)
         proc = subprocess.run(
-            list(cmd),
+            [interpreter, *argv_tail],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        out = (proc.stdout or "") + (proc.stderr or "")
-    except Exception:  # noqa: BLE001 — best-effort, see docstring
-        out = ""
+        # Only a clean exit is help text. stderr on a failed run is a
+        # traceback, and treating that as help makes every flag look absent,
+        # which drops the variants carrying them rather than sparing them.
+        out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
+        permanent = proc.returncode != 0
+        reason = f"exit={proc.returncode}"
+    except FileNotFoundError as exc:
+        out, permanent, reason = "", True, repr(exc)
+    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+        out, reason = "", repr(exc)
     if out:
         _HELP_TEXT_CACHE[fw] = out
-    return out
+        return out
+    if fw not in _HELP_PROBE_FAILED_UNTIL:
+        log.warning(
+            "compatibility probe for %s produced no help text (%s); "
+            "flag-version drops are disabled for it",
+            fw,
+            reason,
+        )
+    _HELP_PROBE_FAILED_UNTIL[fw] = (
+        float("inf") if permanent else time.monotonic() + _HELP_PROBE_RETRY_SEC
+    )
+    return ""
 
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
