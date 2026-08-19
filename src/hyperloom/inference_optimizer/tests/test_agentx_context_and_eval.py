@@ -60,6 +60,40 @@ def test_max_model_len_synthetic_path_unchanged(tmp_path, monkeypatch):
     assert (val, src) == (1024 + 1024 + 4096, "auto")
 
 
+def test_short_context_model_warns_before_the_round_starts(tmp_path, monkeypatch, capsys):
+    """A model too small for the corpus must say so up front.
+
+    The run still proceeds -- it is the honest one to make, and a model that
+    cannot hold the corpus cannot hold a leaderboard row either. But left
+    unannounced the failure surfaces roughly an hour in as a
+    ``--failed-request-threshold`` abort, with nothing pointing at the cause.
+    """
+    from hyperloom.inference_optimizer.cli import AGENTX_CAPPED_CORPUS_PEAK_TOKENS
+
+    _clear(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    short = AGENTX_CAPPED_CORPUS_PEAK_TOKENS // 8
+    val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=short)))
+    assert (val, src) == (short, "agentx-native-context")  # still runs
+    err = capsys.readouterr().err
+    assert "native context" in err and str(AGENTX_CAPPED_CORPUS_PEAK_TOKENS) in err
+
+
+def test_long_context_model_does_not_warn(tmp_path, monkeypatch, capsys):
+    """A model that fits the corpus must stay quiet."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    _resolve_run_max_model_len(_args(_model_dir(tmp_path)))  # 262144 > peak
+    assert "native context" not in capsys.readouterr().err
+
+
+def test_short_context_model_is_silent_on_the_synthetic_path(tmp_path, monkeypatch, capsys):
+    """The corpus does not exist off the AgentX path; warning there is noise."""
+    _clear(monkeypatch)
+    _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=4096)))
+    assert "native context" not in capsys.readouterr().err
+
+
 def test_max_model_len_agentx_uses_native_context(tmp_path, monkeypatch):
     """AgentX ON resolves the model's own window instead of the synthetic shape."""
     _clear(monkeypatch)

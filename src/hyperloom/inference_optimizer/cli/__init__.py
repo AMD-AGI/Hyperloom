@@ -1237,6 +1237,14 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
         args.conc_sweep_total_budget_sec = _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
 
 
+# Peak prompt length in the 256k-capped weka corpus, which is what every model
+# family outside upstream's 1M-context whitelist replays. Deliberately the
+# conservative of the two variants: the whitelist lives in aiperf_client.sh and
+# duplicating it here would give two copies to keep in sync, while the families
+# on it carry ~1M contexts and so never trip this bound anyway.
+AGENTX_CAPPED_CORPUS_PEAK_TOKENS = 255_999
+
+
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
     if getattr(args, "max_model_len", None):
@@ -1260,6 +1268,21 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     if _agentx_enabled():
         native = _load_model_max_position_embeddings(str(args.model or ""))
         if native:
+            if int(native) < AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
+                # Not fatal: the run is still the honest one to make, and a model
+                # that cannot hold the corpus cannot hold a leaderboard row
+                # either. But the failure would otherwise surface ~an hour in as
+                # an error-rate abort, with nothing pointing at the cause. Say it
+                # up front, while the operator is still watching.
+                print(
+                    f"WARNING: HYPERLOOM_AGENTX is on but the model's native context "
+                    f"({int(native)}) is below the replay corpus peak "
+                    f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS}). Traces that do not fit "
+                    f"will be rejected by the server, and once the error rate passes "
+                    f"--failed-request-threshold the round aborts. Expect this run to "
+                    f"fail; a model this size is not comparable on the AgentX board.",
+                    file=sys.stderr,
+                )
             return int(native), "agentx-native-context"
         # Model not on disk yet (uncached HF id): aiperf_client.sh re-resolves
         # from $MODEL_PATH once it exists. Fall through rather than guess, but
