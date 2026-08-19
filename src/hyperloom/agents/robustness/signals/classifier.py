@@ -22,7 +22,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateStore
 from .aiter_jit import AiterJitConfig, AiterJitDetector
 from .budget import BudgetConfig, evaluate_budget_signals
-from .cluster_fault import ClusterFaultConfig, evaluate_cluster_fault_signals
 from .conversation_progress import ConversationProgressConfig, evaluate_conversation_progress_signals
 from .crash import CrashConfig, evaluate_crash_signals
 from .critic_health import (
@@ -40,7 +39,6 @@ from .external_deps import (
     evaluate_external_deps_signals,
 )
 from .gpu_leak import GpuLeakConfig, GpuLeakDetector
-from .health import HealthConfig, evaluate_health_signals
 from .kernel_pipeline import (
     KernelPipelineConfig,
     RayPendingDetector,
@@ -104,7 +102,7 @@ class SignalSpec:
 def _external_deps_extra_kwargs(classifier: "Classifier") -> dict[str, Any]:
     """Inject the shared TraceLens CLI latch into ``evaluate_external_deps_signals``.
 
-    The latch is a configless one-shot helper owned by the classifier (so J3
+    The latch is a configless one-shot helper owned by the classifier (so the rule
     fires at most once per session); it is a sibling of the external_deps row
     rather than its own signal.
 
@@ -125,7 +123,6 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
     SignalSpec("stall", "stall", StallConfig, evaluator=evaluate_stall_signals),
     SignalSpec("crash", "crash", CrashConfig, evaluator=evaluate_crash_signals),
     SignalSpec("event", "event", EventConfig, evaluator=evaluate_event_signals),
-    SignalSpec("health", "health", HealthConfig, evaluator=evaluate_health_signals),
     SignalSpec(
         "local_health",
         "local_health",
@@ -138,12 +135,6 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         GpuLeakConfig,
         detector_cls=GpuLeakDetector,
         state_view_key="gpu_leak",
-    ),
-    SignalSpec(
-        "cluster_fault",
-        "cluster_fault",
-        ClusterFaultConfig,
-        evaluator=evaluate_cluster_fault_signals,
     ),
     SignalSpec(
         "budget",
@@ -218,7 +209,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         CriticHealthConfig,
         evaluator=evaluate_critic_health_signals,
     ),
-    # F1 ray-pending is stateful; F2/F5 live in the module helper — both
+    # Ray-pending is stateful; the other two live in the module helper — both
     # driven off one KernelPipelineConfig slot.
     SignalSpec(
         "ray_pending",
@@ -239,7 +230,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         StateIntegrityConfig,
         evaluator=evaluate_state_integrity_signals,
     ),
-    # TraceLens CLI latch is owned by the classifier and injected here so J3
+    # TraceLens CLI latch is owned by the classifier and injected here so it
     # fires at most once per session.
     SignalSpec(
         "external_deps",

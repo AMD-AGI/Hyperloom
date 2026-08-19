@@ -12,6 +12,7 @@ from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
+from ..state.task_registry import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -23,8 +24,6 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# Task states past which the same idempotency key may be reused for a retry.
-_TERMINAL_TASK_STATES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
 
 
@@ -408,26 +407,9 @@ class ProposalsCollaborator:
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)
-        keep = self._decaying_keep_threshold_pct()
-        if keep is not None:
-            params.setdefault("keep_threshold_pct", keep)
-            params.setdefault("stack_stable_threshold_pct", keep / 2.0)
-
-    def _decaying_keep_threshold_pct(self) -> float | None:
-        """Per-cycle KEEP threshold to inject, or ``None`` to keep executor defaults.
-
-        The bar shrinks along the shared decaying curve as macro-cycles accrue.
-
-        Returns:
-            The decayed per-cycle KEEP threshold percentage.
-        """
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
-        return _phase_state.decaying_keep_threshold_pct(
-            cycle,
-            multi_node=is_multi_node(),
-        )
+        keep = _phase_state.resolve_keep_threshold(self.shared_state)
+        params.setdefault("keep_threshold_pct", keep)
+        params.setdefault("stack_stable_threshold_pct", keep / 2.0)
 
     async def _materialize_approved_proposal(
         self,
@@ -484,9 +466,7 @@ class ProposalsCollaborator:
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            keep = self._decaying_keep_threshold_pct()
-            if keep is not None:
-                params.setdefault("keep_threshold_pct", keep)
+            params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
             # Seed the patched-eval server with the same base args/config every
             # other eval server uses, else it launches on bare framework defaults
             # and crashes at startup regardless of the patch.
@@ -511,7 +491,7 @@ class ProposalsCollaborator:
             )
             if not was_existing:
                 break
-            if task.state not in _TERMINAL_TASK_STATES:
+            if task.state not in TERMINAL_STATES:
                 await self._record_observation(
                     "coordinator",
                     "observation",

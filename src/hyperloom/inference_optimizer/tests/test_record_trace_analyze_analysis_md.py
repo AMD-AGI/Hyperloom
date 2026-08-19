@@ -122,7 +122,7 @@ def test_snapshot_id_starts_at_one_after_empty_state() -> None:
 
 
 def test_baseline_gain_captured_at_snapshot_time() -> None:
-    """``roofline_baseline_gain_at_snapshot`` is a point-in-time capture of cumulative_gain."""
+    """``roofline_baseline_gain_at_snapshot`` is a point-in-time capture of the validated gain."""
     state = SharedState()
     state.cumulative_gain_validated = 0.0
     state.record_trace_analyze(

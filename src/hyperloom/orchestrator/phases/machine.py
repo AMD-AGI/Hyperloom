@@ -233,21 +233,16 @@ class MachinePhase(PhaseHandler):
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
 
-        Priority order (Inv-8.2): abort > exit_terminal > exit_normal, per phase_state.compute_next_phase.
+        Priority order (Inv-8.2): global terminal > exit_terminal > exit_normal, per phase_state.compute_next_phase.
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()
-        max_hours_arg: float | None = None
-        mm = float(getattr(state, "max_minutes", 0) or 0.0)
-        if mm > 0:
-            max_hours_arg = mm / 60.0
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
             explore_enabled=self._explore_enabled(),
-            max_hours=max_hours_arg,
         )
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()

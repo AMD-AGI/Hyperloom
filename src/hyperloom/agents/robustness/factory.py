@@ -4,11 +4,10 @@
 """High-level builders that turn a :class:`Config` into a running reactor.
 
 :func:`build_reactor_components` returns a :class:`ReactorBundle` (reactor +
-ReactorComponents + FindingSink + RobustnessServerClient) so callers can
-manage lifecycles via ``await bundle.aclose()``. All hosts drive
-``bundle.reactor.tick(ctx)`` per tick; the blessed transport is the
-subprocess CLI (mirrors critic-agent), no in-process Backend adapter. The
-factory never blocks on remote services — ``Config.discover`` already probed.
+ReactorComponents + FindingSink) so callers can manage lifecycles via
+``await bundle.aclose()``. All hosts drive ``bundle.reactor.tick(ctx)`` per
+tick; the blessed transport is the subprocess CLI (mirrors critic-agent), no
+in-process Backend adapter.
 """
 
 from __future__ import annotations
@@ -47,7 +46,6 @@ from .signals.crash import CrashConfig
 from .signals.decision_audit import DecisionAuditConfig
 from .signals.event import EventConfig
 from .signals.gpu_leak import GpuLeakConfig
-from .signals.health import HealthConfig
 from .signals.critic_health import CriticHealthConfig
 from .signals.external_deps import ExternalDepsConfig
 from .signals.kernel_pipeline import KernelPipelineConfig
@@ -63,12 +61,8 @@ from .signals.progress import ProgressConfig
 from .signals.repeated_payload import RepeatedPayloadConfig
 from .signals.state_integrity import StateIntegrityConfig
 from .signals.stall import StallConfig
-from .sources.base import DegradeRouter, Source, SourceData, SourceUnavailable
+from .sources.base import DegradeRouter, Source, SourceData
 from .sources.local_probe import LocalProbeConfig, LocalProbeSource
-from .sources.server_client import (
-    RobustnessServerClient,
-    RobustnessServerSource,
-)
 
 
 log = logging.getLogger(__name__)
@@ -80,17 +74,15 @@ class ReactorBundle:
 
     reactor: Reactor
     components: ReactorComponents
-    server_client: RobustnessServerClient | None
     sink: FindingSink
 
     async def aclose(self) -> None:
-        """Release lifecycle resources held by the bundle.
+        """Close the RCA engine's provider client.
 
-        Closes the underlying robustness-server HTTP client when one was
-        created; a no-op in local-only mode.
+        The engine only acts on a client it created, so an injected one is
+        left to its owner.
         """
-        if self.server_client is not None:
-            await self.server_client.aclose()
+        await self.components.rca.aclose()
 
 
 def _build_local_probe_config(config: Config) -> LocalProbeConfig:
@@ -163,12 +155,12 @@ def build_reactor_components(
 ) -> ReactorBundle:
     """Construct everything the reactor needs.
 
-    Wires the primary/fallback sources, degrade router, detectors,
-    state store, finding sink, and RCA engine into a single bundle.
+    Wires the source, degrade router, detectors, state store, finding sink,
+    and RCA engine into a single bundle.
 
     Args:
         config (Config): Discovered configuration — typically the result
-            of ``await Config.discover()``.
+            of ``Config.discover()``.
         rca (RcaEngine | None): Optional RCA engine override. Defaults to
             an auto-selected engine (Noop unless LLM RCA is enabled).
         session_id (str | None): Override for the FindingSink filename.
@@ -176,39 +168,24 @@ def build_reactor_components(
             sandbox writes to a stable file.
 
     Returns:
-        ReactorBundle: The assembled reactor plus the lifecycle handles
-        (components, server client, and sink) the caller must manage.
+        ReactorBundle: The assembled reactor plus the components and sink
+        the caller must manage.
     """
-    # Primary source: robustness-server (omitted in local-only mode).
-    server_client: RobustnessServerClient | None = None
+    # Multi-node guard: the probe only sees its own pod, so it is disabled there.
     primary: Source
-    if config.robustness_server_url:
-        server_client = RobustnessServerClient(
-            config.robustness_server_url,
-            timeout_s=config.server_request_timeout_s,
-        )
-        primary = RobustnessServerSource(
-            server_client,
-            metrics_window_s=config.metrics_window_s,
-            enable_cluster_pod_metrics=config.enable_cluster_pod_metrics,
-            pod_metrics_categories=tuple(config.pod_metrics_categories),
-            workload_uid=config.workload_uid,
-        )
-    else:
-        primary = _NoServerSource(
-            "robustness-server",
-            "config.robustness_server_url is empty",
-        )
-
-    # Multi-node guard: ``disable_local_probe`` swaps LocalProbe for a quiet stub.
-    fallback: Source
     if config.disable_local_probe:
-        fallback = _QuietFallback(
+        primary = _QuietSource(
             name="local-probe",
-            reason="config.disable_local_probe is True (multi-node policy)",
+            reason="local-probe disabled: config.disable_local_probe is True",
         )
     else:
-        fallback = LocalProbeSource(_build_local_probe_config(config))
+        primary = LocalProbeSource(_build_local_probe_config(config))
+
+    # LocalProbe raises when every sub-probe is empty; degrade to silence.
+    fallback: Source = _QuietSource(
+        name="quiet-fallback",
+        reason="local probe produced no data",
+    )
 
     router = DegradeRouter(
         primary,
@@ -222,9 +199,8 @@ def build_reactor_components(
         DetectorStateStore(session_dir=config.session_dir) if config.state_store_enabled else None
     )
 
-    # Config->SignalConfig map keyed by ``SignalSpec.config_attr``; slots the
-    # registry defaults (e.g. ``cluster_fault``) are omitted here and filled by
-    # the classifier from the registry ``config_factory``.
+    # Config->SignalConfig map keyed by ``SignalSpec.config_attr``; omitted
+    # slots are filled by the classifier from the registry ``config_factory``.
     signal_configs: dict[str, Any] = {
         "stall": StallConfig(
             stall_timeout_s=config.agent_stall_timeout_s,
@@ -234,7 +210,6 @@ def build_reactor_components(
         "event": EventConfig(
             idempotency_replay_threshold=config.idempotency_replay_threshold,
         ),
-        "health": HealthConfig(),
         "local_health": LocalHealthConfig(
             gpu_temp_warn_c=config.gpu_temp_warn_c,
             disk_used_warn_pct=config.disk_used_warn_pct,
@@ -367,7 +342,6 @@ def build_reactor_components(
     return ReactorBundle(
         reactor=Reactor(components),
         components=components,
-        server_client=server_client,
         sink=sink,
     )
 
@@ -466,57 +440,29 @@ def _parse_severity(value: str) -> SymptomSeverity:
 
 
 @dataclass
-class _NoServerSource:
-    """Permanent stub used when no robustness-server URL is configured.
+class _QuietSource:
+    """Source that collects nothing, carrying its reason for saying so.
 
-    DegradeRouter degrades it after ``fail_threshold`` ticks, after which
-    the LocalProbe takes over without further probes.
-    """
-
-    name: str
-    reason: str
-
-    async def fetch(self, ctx: Any) -> SourceData:
-        """Always fail, signalling the source is unavailable.
-
-        Args:
-            ctx (Any): The fetch context (ignored).
-
-        Returns:
-            SourceData: Never returns normally.
-
-        Raises:
-            SourceUnavailable: Always, with the configured reason.
-        """
-        raise SourceUnavailable(self.reason)
-
-
-@dataclass
-class _QuietFallback:
-    """Silent fallback used when ``disable_local_probe`` is on.
-
-    Returns empty :class:`SourceData` (not raising) so DegradeRouter never
-    enters FAILED; the signal layer treats empty fields as "no data" and
-    stays quiet — the multi-node policy of no LocalProbe symptoms. The
-    transition is still visible via ``primary_state`` / ``degraded_reason``.
+    Returns empty :class:`SourceData` rather than raising, so probe-derived
+    rules see "no data" and stay quiet instead of failing the tick. The reason
+    stays visible via ``degraded_reason``.
     """
 
     name: str
     reason: str
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
-        """Return empty source data describing the disabled local probe.
+        """Return empty source data annotated with this source's reason.
 
         Args:
             ctx: Fetch context supplied by the source protocol; unused because
-                this fallback never collects data.
+                this source never collects data.
 
         Returns:
-            A :class:`SourceData` with no signals, annotated with a
-            ``degraded_reason`` explaining that the local probe is disabled.
+            A :class:`SourceData` with no signals and a ``degraded_reason``.
         """
         return SourceData(
-            degraded_reason=f"local-probe disabled: {self.reason}",
+            degraded_reason=self.reason,
             # Nothing looked: an empty process list here is ignorance, not
             # evidence that no server is running.
             local_processes_known=False,

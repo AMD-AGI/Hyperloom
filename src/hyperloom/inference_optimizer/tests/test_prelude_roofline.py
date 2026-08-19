@@ -217,22 +217,37 @@ async def test_profile_kind_keeps_the_plain_key(coord: Coordinator):
     assert task.idempotency_key == "internal-analysis-prelude_initial"
 
 
+@pytest.mark.parametrize(
+    "named_state,reopens",
+    [
+        ("succeeded", True),
+        ("cancelled", True),
+        # A watchdog-reclaimed roofline reports no result, so the gate release
+        # is the only thing that can ever clear the marker it left.
+        ("failed", True),
+        ("running", False),
+        ("queued", False),
+    ],
+)
 @pytest.mark.asyncio
-async def test_watermark_gate_reopens_after_the_roofline_it_names_finished(
+async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finished(
     coord: Coordinator,
+    named_state: str,
+    reopens: bool,
 ):
-    """A marker left on a finished task gated the watermark forever, and it is
-    persisted state, so resuming the session inherited the wedge."""
+    """The gate exists so two rooflines never run at once, so it must hold for
+    every live state and release for every finished one. It is persisted state:
+    a marker left on a finished task is a wedge the next resume inherits."""
     state = coord.shared_state
     state.baseline_tput = 100.0
     state.cumulative_gain_validated = 50.0
     state.last_roofline_tput = 0.0
 
-    stale = await coord._enqueue_internal_analysis_task(
+    named = await coord._enqueue_internal_analysis_task(
         reason="integrate_keep_watermark",
     )
-    coord.tasks._tasks[stale.task_id].state = "succeeded"
-    state.auto_roofline_pending_task_id = stale.task_id
+    coord.tasks._tasks[named.task_id].state = named_state
+    state.auto_roofline_pending_task_id = named.task_id
     state.roofline_failure_streak = 1  # its trace analysis failed
     assert coord._needs_roofline_for_watermark() is False
 
@@ -240,34 +255,8 @@ async def test_watermark_gate_reopens_after_the_roofline_it_names_finished(
         reason="integrate_keep_watermark",
     )
 
-    assert enqueued is True
-    assert state.auto_roofline_pending_task_id != stale.task_id
-
-
-@pytest.mark.asyncio
-async def test_watermark_gate_holds_while_a_roofline_is_genuinely_running(
-    coord: Coordinator,
-):
-    """The gate exists so two rooflines never run at once; releasing it must
-    depend on the task being finished, not merely on being asked."""
-    state = coord.shared_state
-    state.baseline_tput = 100.0
-    state.cumulative_gain_validated = 50.0
-    state.last_roofline_tput = 0.0
-    state.roofline_failure_streak = 1
-
-    live = await coord._enqueue_internal_analysis_task(
-        reason="integrate_keep_watermark",
-    )
-    coord.tasks._tasks[live.task_id].state = "running"
-    state.auto_roofline_pending_task_id = live.task_id
-
-    enqueued = await coord._maybe_enqueue_watermark_roofline(
-        reason="integrate_keep_watermark",
-    )
-
-    assert enqueued is False
-    assert state.auto_roofline_pending_task_id == live.task_id
+    assert enqueued is reopens
+    assert (state.auto_roofline_pending_task_id != named.task_id) is reopens
 
 
 def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``gain_plateau`` and ``no_levers_found`` signals (B2 / B3)."""
+"""Unit tests for the ``gain_plateau`` and ``no_levers_found`` signals."""
 
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ def _ctx(
     explore_started: bool = False,
 ) -> ReactorContext:
     snap = SharedStateSnapshot(
-        session_id="sess-1",
         tick=tick,
         macro_cycle=macro_cycle,
         cumulative_gain_validated=cumulative_gain_validated,

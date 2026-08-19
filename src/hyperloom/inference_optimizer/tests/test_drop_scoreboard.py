@@ -60,6 +60,7 @@ def _legacy_state_payload() -> dict:
         "session_id": "legacy-sid",
         "baseline_tput": 1234.0,
         "cumulative_gain": 2.5,
+        "cumulative_gain_validated": 2.0,
         "action_scores": {
             "backends": {"base_score": 5.0, "score_mult": 0.8},
             "params": {"base_score": 4.0, "score_mult": 1.0},
@@ -79,7 +80,14 @@ def test_from_dict_drops_action_scores_silently():
     loaded = SharedState.from_dict(raw)
     assert not hasattr(loaded, "action_scores")
     assert loaded.baseline_tput == 1234.0
-    assert loaded.cumulative_gain == 2.5
+    assert loaded.cumulative_gain_validated == 2.0
+
+
+def test_from_dict_drops_the_unvalidated_gain():
+    """The raw gain was a second copy of the validated one; a resume must not revive it."""
+    loaded = SharedState.from_dict(_legacy_state_payload())
+    assert not hasattr(loaded, "cumulative_gain")
+    assert loaded.cumulative_gain_validated == 2.0
 
 
 def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
@@ -92,6 +100,7 @@ def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
     loaded.save(sd)
     written = json.loads((sd / "state.json").read_text())
     assert "action_scores" not in written
+    assert "cumulative_gain" not in written
 
 
 def test_scoring_module_was_retired():

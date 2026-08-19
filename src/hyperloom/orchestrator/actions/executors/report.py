@@ -6,8 +6,8 @@
 Reads SharedState + the bus event log and writes
 ``$SESSION_DIR/reports/final.json`` (machine-readable, dashboard shape) and
 ``final.md`` (human-readable). The returned dict surfaces both paths.
-``final.json`` carries the run identity, stop reason, baseline/best, per-round
-and validated cumulative gain, completeness annotations, event counts and
+``final.json`` carries the run identity, stop reason, baseline/best, the
+validated cumulative gain, completeness annotations, event counts and
 highlights, plus optional blocks (failure summary, roofline comparison,
 external baseline, concurrency-sweep and kernel-optimization pointers) when the
 corresponding data exists; ``final.md`` renders the same content as sections.
@@ -408,10 +408,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
     "conc_sweep_failed": "Post-sweep concurrency sweep reached a failed terminal result.",
-    "explore_force_exit_low_budget": "EXPLORE force-exited: the remaining wall-clock budget was too low to start new work.",
+    "explore_force_exit_low_budget": "EXPLORE force-exited: it had spent its own phase budget down to the force-exit threshold.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
-    "framework_agent_force_exit_low_budget": "The framework-enablement agent force-exited on a low remaining budget.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
     # Pre-flight gates (fail fast before booting a server).
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
@@ -544,7 +543,6 @@ def _build_summary_dict(
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
-        "cumulative_gain": state.cumulative_gain,
         # Validated gain (what the run actually delivered).
         "cumulative_gain_validated": state.cumulative_gain_validated,
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
@@ -635,9 +633,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
             f"(action=`{cb.get('action', '?')}`)"
         )
-    # Per-round sum — informational, not end-to-end deliverable.
-    lines.append(f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`  *(per-round sum — informational only)*")
-    # Validated gain — always printed so the report never quotes only the raw sum.
+    # Printed even when never validated, so a missing rebench is stated, not implied.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
@@ -1174,7 +1170,7 @@ def _write_kernel_opt_summary(
     """Build + write ``reports/kernel_optimization_summary.json``.
 
     Best-effort (failure logged, returns ``None`` so the final.json write
-    still happens). Aggregates ``kernel_opt_attempts`` with per-kernel
+    still happens). Aggregates ``kernel_opt_task_attempts`` with per-kernel
     ``results/<kid>.json`` for the "why no optimized kernel?" view.
 
     Args:
@@ -1436,10 +1432,9 @@ class ReportExecutor:
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(
-            "report_executor: wrote %s and %s (cumulative_gain=%.2f%% per_round_sum / %.2f%% validated)",
+            "report_executor: wrote %s and %s (cumulative_gain_validated=%.2f%%)",
             md_path,
             json_path,
-            state.cumulative_gain,
             state.cumulative_gain_validated,
         )
         publish_result = self._maybe_publish_results(session_dir, state)

@@ -6,7 +6,7 @@
 * ``framework_registry.primary_metric_name`` (which field is the result).
 * ``collect_roofline_progress`` independent latency ceiling + ``ceiling_kind``.
 * ``_normalize_roofline_snapshot`` preserving the latency siblings.
-* recorder ``_snapshot_final`` emitting e2el / unit / primary_metric.
+* ``collect_final`` emitting e2el / unit / primary_metric.
 * ``SharedState._backfill_scriptable_latency`` deriving e2el from tput.
 """
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from hyperloom.inference_optimizer import framework_registry as fr
 from hyperloom.inference_optimizer.breakdown.collectors import roofline as col
-from hyperloom.inference_optimizer.breakdown.recorder import instrument as inst
+from hyperloom.inference_optimizer.breakdown.collectors import sessions as sess
 
 
 class TestPrimaryMetricName:
@@ -53,7 +53,7 @@ class TestCollectRooflineProgressLatencyCeiling:
         return {
             "framework": "xdit",
             "baseline_tput": 0.168919,
-            "cumulative_gain": 550.5,
+            "cumulative_gain_validated": 550.5,
             "optimization_stack": [
                 {"ts": "2026-01-01T00:00:00", "tput": 1.098901, "variant_name": "v", "action": "explore"}
             ],
@@ -104,58 +104,55 @@ class TestCollectRooflineProgressLatencyCeiling:
         assert out["latency_ceiling_available"] is False
 
 
-class _Rec:
-    def __init__(self):
-        self.singletons: dict[str, dict] = {}
+class TestCollectFinalEmitsLatency:
+    """``collect_final`` is the single producer of the final section."""
 
-    def record_singleton(self, name, payload):
-        self.singletons[name] = payload
+    def _state(self, framework: str, current_best: dict) -> dict:
+        return {
+            "framework": framework,
+            "current_best": current_best,
+            "optimization_stack": [{"action": current_best.get("action", "explore")}],
+            "cumulative_gain_validated": 0.0,
+            "cumulative_gain_validated_ts": "",
+        }
 
+    def test_scriptable_final_surfaces_the_derived_e2el(self, tmp_path):
+        """``save`` derives the latency; the collector surfaces what it wrote.
 
-class _St:
-    def __init__(self, **kw):
-        self.framework = kw.get("framework", "xdit")
-        self.current_best = kw.get("current_best", {})
-        self.optimization_stack = kw.get("optimization_stack", [])
-        self.cumulative_gain_validated = kw.get("cumulative_gain_validated", 0.0)
-        self.cumulative_gain = kw.get("cumulative_gain", 0.0)
-        self.cumulative_gain_validated_ts = kw.get("cumulative_gain_validated_ts", "")
+        ``_backfill_scriptable_latency`` runs before ``state.json`` is written,
+        so ``current_best`` already carries ``e2el_mean_ms`` when read back.
+        """
+        from hyperloom.orchestrator.state.shared_state import SharedState
 
+        st = SharedState(session_id="s", model_name="m", model_path="/m")
+        st.framework = "xdit"
+        st.current_best = {"action": "explore", "tput": 1.098901}
+        st._backfill_scriptable_latency()
 
-class TestSnapshotFinalEmitsLatency:
-    def test_scriptable_final_derives_e2el_from_tput(self):
-        rec = _Rec()
-        st = _St(
-            framework="xdit",
-            current_best={"action": "explore", "tput": 1.098901},
-            optimization_stack=[{"action": "explore"}],
+        final = sess.collect_final(
+            tmp_path,
+            self._state("xdit", st.current_best),
+            [],
         )
-        inst._snapshot_final(rec, st)
-        final = rec.singletons["final"]
         assert final["throughput_unit"] == "img/s"
         assert final["primary_metric"] == "e2el_mean_ms"
         # 1000 / 1.098901 ~= 910.0
         assert final["e2el_mean_ms"] == round(1000.0 / 1.098901, 4)
 
-    def test_scriptable_final_prefers_measured_e2el(self):
-        rec = _Rec()
-        st = _St(
-            framework="xdit",
-            current_best={"action": "explore", "tput": 1.098901, "e2el_mean_ms": 980.0},
-            optimization_stack=[{"action": "explore"}],
+    def test_scriptable_final_prefers_measured_e2el(self, tmp_path):
+        final = sess.collect_final(
+            tmp_path,
+            self._state("xdit", {"action": "explore", "tput": 1.098901, "e2el_mean_ms": 980.0}),
+            [],
         )
-        inst._snapshot_final(rec, st)
-        assert rec.singletons["final"]["e2el_mean_ms"] == 980.0
+        assert final["e2el_mean_ms"] == 980.0
 
-    def test_serving_final_has_no_derived_e2el(self):
-        rec = _Rec()
-        st = _St(
-            framework="sglang",
-            current_best={"action": "grid", "tput": 123.4},
-            optimization_stack=[{"action": "grid"}],
+    def test_serving_final_has_no_derived_e2el(self, tmp_path):
+        final = sess.collect_final(
+            tmp_path,
+            self._state("sglang", {"action": "grid", "tput": 123.4}),
+            [],
         )
-        inst._snapshot_final(rec, st)
-        final = rec.singletons["final"]
         assert final["throughput_unit"] == "tok/s"
         assert final["primary_metric"] == "throughput_tok_s_per_gpu"
         assert final["e2el_mean_ms"] is None

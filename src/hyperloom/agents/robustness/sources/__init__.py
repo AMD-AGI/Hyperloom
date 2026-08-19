@@ -3,9 +3,10 @@
 
 """Data sources used by the reactor.
 
-Layered as ``robustness-server`` (preferred) -> ``local probe`` (fallback)
-through :class:`DegradeRouter`. The contract is narrow so each source is
-a drop-in replacement.
+The local probe is the only collector; :class:`DegradeRouter` keeps it
+behind a silent fallback so a failing probe degrades to "no data" instead
+of failing the tick. The contract is narrow so each source is a drop-in
+replacement.
 """
 
 from .base import (
@@ -16,15 +17,12 @@ from .base import (
     SourceUnavailable,
 )
 from .local_probe import LocalProbeConfig, LocalProbeSource
-from .server_client import RobustnessServerClient, RobustnessServerSource
 
 __all__ = [
     "DegradeRouter",
     "HealthState",
     "LocalProbeConfig",
     "LocalProbeSource",
-    "RobustnessServerClient",
-    "RobustnessServerSource",
     "Source",
     "SourceData",
     "SourceUnavailable",

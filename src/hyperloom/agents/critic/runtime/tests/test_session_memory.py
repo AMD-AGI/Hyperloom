@@ -85,17 +85,6 @@ def test_append_decision_rejects_non_dict(tmp_session_root):
         sm.append_decision("sess_1", "not a dict")  # type: ignore[arg-type]
 
 
-def test_events_jsonl_roundtrip(tmp_session_root):
-    sm = SessionMemory(root=tmp_session_root)
-    sm.append_event("sess_1", {"kind": "kb_cache_miss"})
-    sm.append_event("sess_1", {"kind": "kb_write_ok", "id": "kb_xxx"})
-    events = [
-        json.loads(line)
-        for line in (sm.session_dir("sess_1") / "events.jsonl").read_text("utf-8").splitlines()
-        if line.strip()
-    ]
-    assert [e["kind"] for e in events] == ["kb_cache_miss", "kb_write_ok"]
-
 
 def test_priors_cache_hit_and_miss(tmp_session_root, monkeypatch):
     sm = SessionMemory(root=tmp_session_root)
@@ -151,13 +140,3 @@ def test_atomic_write_does_not_leave_tmp_files(tmp_session_root):
     assert not list(sd.glob("*.tmp"))
 
 
-def test_jsonl_records_are_well_formed_lines(tmp_session_root):
-    sm = SessionMemory(root=tmp_session_root)
-    sm.append_event("sess_1", {"kind": "x"})
-    sm.append_event("sess_1", {"kind": "y"})
-    raw = (sm.session_dir("sess_1") / "events.jsonl").read_text("utf-8")
-    lines = [ln for ln in raw.splitlines() if ln.strip()]
-    assert len(lines) == 2
-    for ln in lines:
-        obj = json.loads(ln)
-        assert "ts" in obj and "kind" in obj

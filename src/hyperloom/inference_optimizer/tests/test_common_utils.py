@@ -1657,7 +1657,7 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path))
     assert paths.asset_root() == tmp_path
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "does_not_exist"))
-    assert paths.find_latest_per_session_dir() is None
+    assert paths.workspace_root() == tmp_path / "does_not_exist"
 
 
 
