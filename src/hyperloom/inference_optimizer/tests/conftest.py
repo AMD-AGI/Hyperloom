@@ -46,6 +46,43 @@ def _bootstrap_kernel_agent_env() -> None:
 _bootstrap_kernel_agent_env()
 
 
+def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
+    """Put the executors in multi-node mode with a no-op per-round server restart.
+
+    Multi-node is what puts a discarded client-warmup pass in front of a measured
+    round, so it is the mode in which one round launches more than one benchmark
+    process -- and the restart between them is the part that needs a cluster.
+
+    Args:
+        monkeypatch: The requesting test's monkeypatch fixture.
+        nodes: How many nodes to claim, which is what the executors read.
+    """
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+    async def _no_restart(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
+    monkeypatch.setattr(mnl, "restart_server_for_round", _no_restart)
+
+
+def launches_by_round_slot(recorded: list[dict]) -> dict[str, dict]:
+    """Index recorded benchmark launches by the output slot each round ran in.
+
+    A round is identified by the slot it writes into rather than by its position
+    in the launch order, so a test can assert on one pass of a round without
+    encoding how many passes precede it.
+
+    Args:
+        recorded: Launch records, each carrying the ``round_slot`` name the
+            subprocess doubles stamp on every round they see.
+
+    Returns:
+        dict[str, dict]: The last launch recorded per slot name.
+    """
+    return {launch["round_slot"]: launch for launch in recorded}
+
+
 def seed_target_analysis_marker(session_dir: Path) -> Path:
     """Write a ``no_target_gpu_configured`` marker JSON at the session dir."""
     from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
@@ -324,12 +361,97 @@ def suppression_window_s() -> float:
     return StallConfig().stall_timeout_s
 
 
-def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
-    """Put the executors in multi-node mode with a no-op per-round server restart."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+class _RayDoubleActorClass:
+    """The ``@ray.remote`` class: ``.options(...)`` then ``.remote()`` for a handle."""
 
-    async def _no_restart(*_args, **_kwargs) -> None:
-        return None
+    def __init__(self, cls: type) -> None:
+        self._cls = cls
+        self._options: dict = {}
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
-    monkeypatch.setattr(mnl, "restart_server_for_round", _no_restart)
+    def options(self, **opts):
+        self._options = dict(opts)
+        return self
+
+    def remote(self, *args, **kwargs) -> "_RayDoubleActorHandle":
+        return _RayDoubleActorHandle(self._cls(*args, **kwargs), self._options)
+
+
+class _RayDoubleActorHandle:
+    """An actor handle whose methods run in a pool sized like the real actor's.
+
+    ``max_concurrency`` is read from the options the production code passed, not
+    assumed: an actor left at Ray's single method slot gets a single-worker pool
+    here too, so a method that has to reach a call already running blocks behind
+    it exactly as it would on a real cluster.
+    """
+
+    def __init__(self, obj, options: dict) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._obj = obj
+        self._pool = ThreadPoolExecutor(max_workers=int(options.get("max_concurrency", 1) or 1))
+        self.killed = False
+
+    def __getattr__(self, name: str):
+        from types import SimpleNamespace
+
+        method = getattr(self._obj, name)
+        return SimpleNamespace(remote=lambda *a, **kw: self._pool.submit(method, *a, **kw))
+
+
+class RayDouble:
+    """A ``ray`` module stand-in that runs actor methods in real threads.
+
+    Ray is not a test dependency, and what these tests are about is what a lease
+    and its actor do to each other while work is in flight. So the transport is
+    the only thing faked: the actor is the real class, running real subprocesses,
+    and an ``ObjectRef`` is a :class:`~concurrent.futures.Future`.
+    """
+
+    class exceptions:  # noqa: N801 — mirrors the ray.exceptions namespace
+        class RayActorError(Exception):
+            pass
+
+        class RayTaskError(Exception):
+            pass
+
+        class GetTimeoutError(Exception):
+            pass
+
+    def __init__(self) -> None:
+        self.killed: list = []
+
+    def remote(self, cls: type) -> _RayDoubleActorClass:
+        return _RayDoubleActorClass(cls)
+
+    def cluster_resources(self) -> dict:
+        return {"CPU": 8.0, "GPU": 8.0, "serving_slot": 1.0}
+
+    def get(self, ref, timeout: float | None = None):
+        return ref.result(timeout)
+
+    def wait(self, refs: list, *, num_returns: int = 1, timeout: float | None = None):
+        from concurrent.futures import FIRST_COMPLETED
+        from concurrent.futures import wait as futures_wait
+
+        done, not_done = futures_wait(refs, timeout=timeout, return_when=FIRST_COMPLETED)
+        return list(done)[:num_returns], list(not_done)
+
+    def kill(self, actor) -> None:
+        actor.killed = True
+        self.killed.append(actor)
+
+
+@pytest.fixture
+def serving_lease_on_a_ray_double(monkeypatch):
+    """A real :class:`ServingLease` over :class:`RayDouble`, closed on teardown."""
+    import sys
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import _ray_backend as rb
+    from hyperloom.orchestrator.actions.executors import _ray_serving as rs
+
+    monkeypatch.setitem(sys.modules, "ray", RayDouble())
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
+    with rs.ServingLease(num_gpus=1) as lease:
+        yield lease

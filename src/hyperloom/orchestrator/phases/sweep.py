@@ -59,6 +59,16 @@ class SweepPhase(PhaseHandler):
                 auto_conc_sweep_skipped_validated_gain=cur_validated,
             )
             return
+        denied = self._time_budget_denial_for_action("conc_sweep")
+        if denied is not None:
+            log.info(
+                "SWEEP entry (from=%s): conc_sweep cannot fit the session budget "
+                "(%s); recording terminal skip.",
+                from_phase or "<unknown>",
+                denied,
+            )
+            self._record_session_budget_conc_sweep_skip(denied=denied)
+            return
         try:
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
@@ -166,6 +176,21 @@ class SweepPhase(PhaseHandler):
         # LLM full-workload ``sweep`` (conc_sweep already ran on SWEEP entry).
         self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
+
+    def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
+        """Stamp last_conc_sweep skipped when the session clock refused conc_sweep.
+
+        No-op when a conc_sweep result is already on the session: a later
+        over-budget cancel must not erase a measurement the phase can close on.
+        """
+        last = getattr(self.shared_state, "last_conc_sweep", None) or {}
+        if str(last.get("status") or "").strip():
+            return
+        self._record_terminal_conc_sweep_skip(
+            skip_reason="session_time_budget",
+            auto_conc_sweep_skipped="session_time_budget",
+            auto_conc_sweep_denied=str(denied),
+        )
 
     def _record_terminal_conc_sweep_skip(
         self,
