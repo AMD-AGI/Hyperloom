@@ -77,7 +77,7 @@ from ..bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
-from ..state.shared_state import SharedState, effective_closing_grace_sec
+from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
@@ -1444,6 +1444,49 @@ class Coordinator(metaclass=_CoordinatorMeta):
         await self._recipe_kb_t4_hook()
         self.db.close()
 
+    def _bind_session_deadline(
+        self,
+        *,
+        max_minutes: float | None,
+        closing_grace_sec: float | None,
+    ) -> tuple[float, float, float]:
+        """Stamp the persisted deadline once and size this process's loop clock.
+
+        Bounded sessions persist ``deadline_unix`` from ``start_ts + budget`` on
+        the first ``run()`` and keep it on resume, so this process cannot
+        reissue a full ``max_minutes``. Unbounded sessions keep the container
+        cap as a local monotonic deadline and do not persist one.
+
+        Args:
+            max_minutes: Operator wall-clock budget, or ``None``/0 for unbounded.
+            closing_grace_sec: Operator CLOSE window; ``None`` derives a default.
+
+        Returns:
+            ``(grace_sec, monotonic_deadline, max_minutes_value)``.
+        """
+        grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
+        self.shared_state.closing_grace_sec = closing_grace_sec
+        max_minutes_value = max_minutes if max_minutes is not None else 0
+        if max_minutes:
+            # Stamp from the float budget before persisting ``int(max_minutes)``.
+            # ``int(0.0001)`` is 0, and stamping after that truncation used to
+            # leave ``deadline_unix`` unset so remaining-time checks read unbounded.
+            self.shared_state.stamp_deadline_unix(budget_minutes=float(max_minutes))
+            self.shared_state.max_minutes = int(max_minutes)
+            self.shared_state.save(self.session_dir)
+            deadline = self.shared_state.monotonic_session_deadline_sec()
+            if deadline is None:
+                deadline = time.monotonic()
+        else:
+            self.shared_state.deadline_unix = 0.0
+            if max_minutes is not None:
+                self.shared_state.max_minutes = int(max_minutes)
+                self.shared_state.save(self.session_dir)
+            deadline = time.monotonic() + _phase_state.DEFAULT_LONGRUN_MAX_MINUTES * 60.0
+        self._run_started_monotonic = time.monotonic()
+        self._run_deadline = deadline
+        return grace_sec, deadline, float(max_minutes_value)
+
     async def _recipe_kb_t4_hook(self) -> None:
         """Finalize or retry on graceful teardown/Ctrl-C.
 
@@ -1665,27 +1708,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
-        grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
-        # Unbounded runs are capped at the container lifetime; bounded runs keep
-        # their explicit deadline.
-        effective_minutes = max_minutes if max_minutes else _phase_state.DEFAULT_LONGRUN_MAX_MINUTES
-        deadline = time.monotonic() + effective_minutes * 60.0
-        self._run_started_monotonic = time.monotonic()
-        self._run_deadline = deadline
         # Capture the live loop for the inline fast-action context tool.
         try:
             self._coordinator_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._coordinator_loop = None
-        # The reserve every unit of work holds back IS this window, so the
-        # admission gate has to see the operator's choice too, not only the
-        # closing phase that spends it.
-        self.shared_state.closing_grace_sec = closing_grace_sec
-        max_minutes_value = max_minutes if max_minutes is not None else 0
-        # Persist budget so prompts and Resume can see it.
-        if max_minutes is not None:
-            self.shared_state.max_minutes = int(max_minutes)
-            self.shared_state.save(self.session_dir)
 
         previous_handlers: dict[int, Any] = {}
         if install_signal_handlers:
@@ -1701,6 +1728,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 previous_handlers = {}
 
         await self._replay_resume_if_needed()
+        grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
+            max_minutes=max_minutes,
+            closing_grace_sec=closing_grace_sec,
+        )
 
         tick_n = 0
         stop_reason = ""
@@ -1881,7 +1912,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 except (NotImplementedError, RuntimeError):
                     # Teardown is best-effort; signal handlers may be unsupported.
                     pass
-            await self._close_backends()
+            with timed_teardown_step(self.shared_state, "close_backends"):
+                await self._close_backends()
+            self.shared_state.save(self.session_dir)
         return self.shared_state.stop_reason
 
     async def _close_backends(self) -> None:

@@ -555,6 +555,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # leg's CLOSE transition back the right to speak for this one.
         "resumed_ts",
         "max_minutes",
+        # Absolute session deadline. Forging it is the same as forging the
+        # budget: a value in the future reissues time the session already spent.
+        "deadline_unix",
         # Sizes the closing reserve, so it decides how much of ``max_minutes``
         # is still usable: locking the budget without locking this one leaves
         # the same forgery one field over -- a large value spends the session
