@@ -7752,6 +7752,10 @@ async def integrate_handler(
                     reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
                     if reapply.get("status") == "ok":
                         apply_result = reapply
+                        _checkpoint_collective_apply(
+                            str(payload.get("apply_checkpoint_path") or ""),
+                            apply_result,
+                        )
                         paired_pristine_revert = None  # patch is back
                         base_tput = paired_base_tput
                         gain_pct = paired_gain
@@ -7770,6 +7774,10 @@ async def integrate_handler(
                 reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
                 if reapply.get("status") == "ok":
                     apply_result = reapply
+                    _checkpoint_collective_apply(
+                        str(payload.get("apply_checkpoint_path") or ""),
+                        apply_result,
+                    )
                     paired_pristine_revert = None
                 paired_ab["status"] = "measurement_failed"
         except Exception as exc:  # noqa: BLE001 — never break integrate on paired-AB
@@ -7778,6 +7786,10 @@ async def integrate_handler(
                 reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
                 if reapply.get("status") == "ok":
                     apply_result = reapply
+                    _checkpoint_collective_apply(
+                        str(payload.get("apply_checkpoint_path") or ""),
+                        apply_result,
+                    )
                     paired_pristine_revert = None
             except Exception:  # noqa: BLE001
                 pass

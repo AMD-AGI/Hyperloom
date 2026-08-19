@@ -352,6 +352,66 @@ def _path_hash(path: Path) -> str:
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
+_MAX_BACKUP_DIR_ATTEMPTS = 500
+
+
+def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
+    """Create a backup directory no earlier apply can be holding.
+
+    ``kernel_id`` and the target path are not enough on their own: a lane that
+    passes a constant id (the fusion lane) or a caller that passes none reuses
+    one name for every attempt, and the second apply then overwrites the first's
+    pristine bytes and its manifest. A later revert reads that manifest and
+    restores the patch it was supposed to undo.
+
+    Suffixing keeps the first attempt's name unchanged, so an existing tree is
+    still found where it was. ``mkdir(exist_ok=False)`` makes the claim atomic
+    against a concurrent caller.
+
+    Args:
+        backup_root (Path): Directory the per-attempt backups live under.
+        kernel_id (str): Kernel identifier; falls back to the target's stem.
+        target (Path): File being replaced.
+
+    Returns:
+        Path: The newly created backup directory.
+
+    Raises:
+        RuntimeError: If every suffix is taken.
+    """
+    base = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    for suffix in range(1, _MAX_BACKUP_DIR_ATTEMPTS + 1):
+        candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"_claim_backup_dir: {base} still taken after {_MAX_BACKUP_DIR_ATTEMPTS} suffixes")
+
+
+def _discard_backup_payload(backup_dir: Path) -> None:
+    """Drop the copies a fully reverted attempt no longer needs.
+
+    The target is back to its pristine bytes, so the payload — the source copy,
+    every discovered artifact, and any JIT or cache tree captured with them — is
+    dead weight, and each attempt now keeps its own directory. The manifest
+    stays: recovery and the double-revert guards read its status.
+
+    Best-effort; a failure here must not turn a good revert into a bad one.
+
+    Args:
+        backup_dir (Path): The attempt's backup directory.
+    """
+    for child in backup_dir.iterdir() if backup_dir.is_dir() else ():
+        if child.name == "manifest.json":
+            continue
+        try:
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+        except OSError as exc:  # noqa: PERF203
+            log.debug("backup payload not discarded: %s: %r", child, exc)
+
+
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
     """Copy a file into the backup tree and return the manifest entry.
 
@@ -1908,6 +1968,8 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     if mn_revert:
         manifest["multinode_revert"] = mn_revert
     manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if not partial:
+        _discard_backup_payload(manifest_file.parent)
     result: dict[str, Any] = {
         "status": "partial" if partial else "ok",
         "manifest_path": str(manifest_file),
@@ -2153,7 +2215,7 @@ def apply_kernel_patch(
     except ValueError as exc:
         return {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
 
-    backup_dir = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     manifest_path = backup_dir / "manifest.json"
     source_backup = _copy_to_backup(target, backup_dir, "source")
     artifacts: list[dict[str, str]] = []
@@ -2479,7 +2541,7 @@ def _apply_kernel_patch_snapshot(
                 f"deploy root for target: {target}"
             ),
         }
-    backup_dir = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = backup_dir / "manifest.json"
 
