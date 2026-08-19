@@ -1278,6 +1278,31 @@ def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
 
 
 
+
+def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
+    """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"atom"},
+        dotenv=tmp_path / ".env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+    assert "neither sglang nor vllm" not in res.stderr
+
+
+def test_baremetal_profiler_hotfix_still_skipped_without_any_framework(tmp_path: Path):
+    res = _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "no serving framework importable" in res.stderr
+
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
