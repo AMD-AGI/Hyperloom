@@ -50,13 +50,10 @@ from patch_path_safety import (  # noqa: E402
 
 
 def _pod_backup_stem(kernel_id: str, target: Path, host: str) -> str:
-    """Name a pod-side backup so no two applies can land on the same file.
+    """Name a pod-side backup uniquely per target and per apply.
 
-    The pod namespace carries no manifest, so the sandbox manifest's recorded
-    path is the only handle a revert has. ``kernel_id`` alone does not separate
-    two targets — a lane passing a constant id snapshots every file it touches
-    under one name — and a whole-second stamp does not separate the files of a
-    single multi-file apply, which go out in the same tick.
+    A constant ``kernel_id`` does not separate two targets, and a whole-second
+    stamp does not separate the files of one multi-file apply.
 
     Args:
         kernel_id (str): Kernel identifier; falls back to the target's stem.

@@ -56,13 +56,10 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 }
 
 
-# Request ``kind`` -> the kernel-owned action it gates as. Derived from the two
+# Request ``kind`` -> the kernel-owned action it gates as, derived from the two
 # tables above so a new kind cannot fall out of sync with the catalogue.
-#
-# ``trace_analyze`` is deliberately absent: it has no owning action and no phase
-# membership, so there is nothing to gate it against. Mapping it onto an action
-# would deny it in every phase and break the live path ``run_optimization``
-# depends on.
+# ``trace_analyze`` is absent by design: it owns no action and no phase, and
+# mapping it onto one would deny it everywhere.
 REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
     {
         **{kind: action for action, kind in KERNEL_ACTION_REQUEST_KINDS.items()},
