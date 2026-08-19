@@ -74,13 +74,6 @@ def test_specialist_dispatch_counter_increments():
     assert s.bump_specialist_dispatched(3) == 4
 
 
-def test_specialist_dispatch_counter_resets():
-    s = SharedState()
-    s.bump_specialist_dispatched(5)
-    s.reset_specialist_dispatched()
-    assert s.explore_specialist_dispatched_count == 0
-
-
 # 4. Coordinator hook: explore KEEP → config; integrate_patch kept → code_patch
 def test_coordinator_intervention_hook_records_config_for_explore():
     from hyperloom.orchestrator.loop.coordinator import Coordinator

@@ -25,7 +25,7 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain     float — % over baseline
+    cumulative_gain_validated float — % over baseline at the last full-stack rebench
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -587,7 +587,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # One-shot guard for PRELUDE warm-kernel KB read/apply (resume can't re-fire).
     warm_kernel_kb_attempted: bool = False
     # Resolved prior-champion kernel columns (gemm/fusion/rewrite) loaded at
-    # PRELUDE from the Recipe ``value.kernel`` section, with file paths resolved.
+    # PRELUDE from the Recipe ``value.kernel``; read back by the combined promote.
     warm_kernel_kb_plan: list = field(default_factory=list)
     # Baseline COLD (warmup-round) full boot+bench wall-clock; the hard-cap
     # anchor from which ExploreExecutor derives the overtime-kill deadline.
@@ -634,13 +634,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
-    cumulative_gain: float = 0.0
-    # Validated cumulative gain: re-baselined fresh server with every KEEP (per-round gains don't compose linearly); standalone validate_stack denied by PolicyGate.
+    # Total gain over ``baseline_tput``, stamped only from a measurement taken
+    # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # Provenance/basis of the currently-recorded gain (provisional cross-harness
-    # vs same-harness-validated). Display/audit only; never gates scheduling.
-    cumulative_gain_provenance: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a
@@ -731,9 +728,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # kept or reverted whole.
     authored_framework_levers: list[dict[str, Any]] = field(default_factory=list)
 
-    # Roofline-v2 trace-analyze cache written by record_trace_analyze; ``roofline_snapshot_id`` mirrors the nested value for hot-path access.
+    # Roofline-v2 trace-analyze cache written by record_trace_analyze.
+    # roofline_snapshot_id is a property derived from this dict.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
-    roofline_snapshot_id: int = 0
     # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
@@ -843,7 +840,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
     # merged explore action snapshot (same schema as other ``last_<action>`` mirrors).
     last_explore: dict[str, Any] = field(default_factory=dict)
-    # Composite roofline action audit snapshot plus capped history.
     last_roofline: dict[str, Any] = field(default_factory=dict)
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -857,10 +853,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
     failures: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
-    kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
-    # Authoritative optimization history keyed by stable operator identity.
-    # ``kernel_opt_attempts`` remains the current ordinal compatibility index.
+    # Authoritative per-kernel optimization history keyed by stable task identity.
     kernel_opt_task_attempts: dict[str, Any] = field(default_factory=dict)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     # Their lifecycle is independent of trace-local kernel ordinals.
@@ -876,11 +869,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # dispatch / KEEP.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # Legacy session_steward slots (steward removed); kept only for resume back-compat, never written.
-    steward_continuation_used: bool = False
-    steward_infra_failures_by_round: dict[str, int] = field(
-        default_factory=dict,
-    )
     # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
     last_specialist: dict[str, Any] = field(default_factory=dict)
     # Per-specialist patch verdict ledger by task_id; Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
@@ -1015,8 +1003,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Recipe KB integration fields — Coordinator-only writers.
     # ``recipe_kb_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
     recipe_kb_session_id: str = ""
-    # Kept (always ``{}``) for resume back-compat.
-    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
@@ -1138,19 +1124,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else {}
         )
         serving_config = {
-            "engine": str(current_best.get("engine") or "").strip().lower(),
             "extra_server_args": str(
                 current_best.get("extra_server_args") or ""
             ).strip(),
             "extra_envs": extra_envs,
         }
-        if any(
-            (
-                serving_config["engine"],
-                serving_config["extra_server_args"],
-                extra_envs,
-            )
-        ):
+        if any((serving_config["extra_server_args"], extra_envs)):
             context["serving_config"] = serving_config
         return context
 
@@ -1383,36 +1362,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             )
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
-        if not isinstance(filtered.get("kernel_opt_attempts"), dict):
-            filtered["kernel_opt_attempts"] = {}
         if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
             filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
-        if incoming_version < 3:
-            for ledger_id, entry in filtered["kernel_opt_attempts"].items():
-                if not isinstance(entry, dict):
-                    continue
-                task_key = str(entry.get("task_group_key") or "").strip()
-                if not task_key:
-                    source = str(entry.get("last_source_file") or "")
-                    task_key = json.dumps(
-                        {
-                            "version": 1,
-                            "kind": "legacy-kernel",
-                            "kernel_id": str(ledger_id),
-                            "source_file": source,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                migrated = dict(entry)
-                migrated.setdefault("current_kernel_id", str(ledger_id))
-                migrated.setdefault("stable_task_key", task_key)
-                filtered["kernel_opt_task_attempts"].setdefault(
-                    task_key,
-                    migrated,
-                )
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
@@ -1688,7 +1641,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "stop_reason": self.stop_reason or "",
             "closing_phase": bool(self.closing_phase),
             "degraded_mode": bool(self.degraded_mode),
-            "cumulative_gain": round(float(self.cumulative_gain or 0.0), 2),
             "cumulative_gain_validated": round(
                 float(self.cumulative_gain_validated or 0.0),
                 2,
@@ -2567,6 +2519,54 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return _m.pending_kernel_integration_records(self)
 
     @property
+    def kernel_opt_attempts(self) -> dict[str, Any]:
+        """``kernel_opt_task_attempts`` re-indexed by the trace-local kernel id.
+
+        Returns:
+            A fresh dict; mutating it does not touch the ledger, but the entry
+            values are the ledger's own dicts.
+        """
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.index_attempts_by_kernel_id(self.kernel_opt_task_attempts)
+
+    @kernel_opt_attempts.setter
+    def kernel_opt_attempts(self, value: dict[str, Any]) -> None:
+        """Seed ``kernel_opt_task_attempts`` from an ordinal-keyed dict.
+
+        Args:
+            value: ``{kernel_id: attempt}``. Each attempt is stamped with its
+                ``current_kernel_id`` / ``stable_task_key`` and filed under the
+                stable key; an entry already filed under that key wins.
+        """
+        from ..kernel._kernel_decisions import _stable_kernel_task_key
+
+        if not isinstance(self.kernel_opt_task_attempts, dict):
+            object.__setattr__(self, "kernel_opt_task_attempts", {})
+        for kernel_id, entry in value.items():
+            if not isinstance(entry, dict):
+                continue
+            stamped = dict(entry)
+            stamped.setdefault("current_kernel_id", str(kernel_id))
+            task_key = stamped.get("stable_task_key") or _stable_kernel_task_key(
+                task_group_key=str(stamped.get("task_group_key") or ""),
+                kernel_id=str(kernel_id),
+                source_file=str(stamped.get("last_source_file") or ""),
+            )
+            stamped.setdefault("stable_task_key", task_key)
+            self.kernel_opt_task_attempts.setdefault(task_key, stamped)
+
+    @property
+    def roofline_snapshot_id(self) -> int:
+        """Counter of the newest roofline snapshot, or 0 before the first one.
+
+        Lives inside ``last_trace_analyze`` so clearing that cache resets the
+        counter with it — ``record_trace_analyze`` then restarts from 1.
+        """
+        raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
+        return int(raw) if isinstance(raw, int) else 0
+
+    @property
     def has_keep_pending_integrate(self) -> bool:
         """True when kernel KEEP results still await kernel ``integrate``.
 
@@ -3044,7 +3044,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` is previous + 1, resetting when the cache was cleared.
+        """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` increments from the previous nested value, restarting from 1 when the cache was cleared.
 
         Args:
             payload (dict[str, Any]): The trace_analyze task payload (supplies
@@ -3180,8 +3180,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             ),
             "ts": ts_iso,
         }
-        # Top-level mirror so PolicyGate/Coordinator skip the nested-dict lookup.
-        self.roofline_snapshot_id = snapshot_id
 
         self._append_roofline_snapshot_history(
             payload=payload,

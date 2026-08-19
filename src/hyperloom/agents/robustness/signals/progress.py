@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Progress-stagnation detectors (B2 / B3).
+"""Progress-stagnation detectors.
 
 Two stateful rules: ``gain_plateau`` (validated gain flat within
 ``epsilon_pct`` across ``window_ticks`` while still proposing actions →
@@ -102,7 +102,7 @@ class ProgressDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Update the gain history and evaluate the B2/B3 stagnation rules.
+        """Update the gain history and evaluate the stagnation rules.
 
         Appends one gain sample per new Coordinator tick, then runs the
         ``gain_plateau`` and ``no_levers_found`` checks. Short-circuits when the
@@ -142,7 +142,7 @@ class ProgressDetector:
         return out
 
     def _gain_plateau_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
-        """B2: build a ``gain_plateau`` symptom when validated gain has flatlined.
+        """Build a ``gain_plateau`` symptom when validated gain has flatlined.
 
         Args:
             snap (SharedStateSnapshot): Current shared-state snapshot.
@@ -193,7 +193,7 @@ class ProgressDetector:
         )
 
     def _no_levers_symptom(self, snap: SharedStateSnapshot) -> Symptom | None:
-        """B3: build a ``no_levers_found`` symptom for an empty, gainless run.
+        """Build a ``no_levers_found`` symptom for an empty, gainless run.
 
         Fires only after the explore phase has started and the configured
         elapsed-minute and tick floors are met, while no kernel_opt work is in
