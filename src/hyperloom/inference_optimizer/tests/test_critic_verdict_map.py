@@ -2077,9 +2077,12 @@ def test_specialist_prompt_renders_proposal_target_and_ceiling():
     text = _build_specialist_prompt_text()
     # Section 8 states both numbers; Section 1 repeats them so the target is
     # visible before the specialist starts working, not only at exit time.
-    assert "**target 4 entries, hard maximum 6.**" in text
-    assert "**aim for 4** ranked proposals" in text
-    assert "**6 is a hard ceiling, never a target**" in text
+    assert "**2 entries is the norm, 4 the hard cap.**" in text
+    assert "**2 proposals is the norm, 4 the hard" in text
+    # Both the padding and the keep-going pressures need a stated counterweight.
+    assert "``empty=true`` is better than one" in text
+    assert "stop once" in text and "not the only stop" in text
+    assert "a coin-flip proposal is worse than none" in text
     assert "reviews each surviving variant" in text
 
 
