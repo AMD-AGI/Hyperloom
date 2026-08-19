@@ -9,8 +9,8 @@ All offline (no Quark / Claude SDK / GPU):
 * Adapter    — ``run_quantization_prelude_async`` maps quantization_agent's
                QuantSkillRunResult status -> decision (return dir vs SystemExit(3)).
 * CLI hook   — ``cli_quantization._run_quantization_prelude`` is a no-op without the flag,
-               skipped on --resume, gated on $HYPERLOOM_QUANTIZE_ENABLED, and
-               rewrites args.model otherwise.
+               gated on $HYPERLOOM_QUANTIZE_ENABLED, and rewrites args.model
+               otherwise.
 
 ``hyperloom.agents.quantization.quantize_via_prompt`` is monkeypatched so nothing real runs.
 """
@@ -284,11 +284,10 @@ def test_adapter_failed_exits_3(tmp_path, monkeypatch):
 
 
 class _Args:
-    def __init__(self, *, model, quantize=None, quantize_scheme=None, resume=False, gpu_type=None):
+    def __init__(self, *, model, quantize=None, quantize_scheme=None, gpu_type=None):
         self.model = Path(model)
         self.quantize = quantize
         self.quantize_scheme = quantize_scheme
-        self.resume = resume
         self.gpu_type = gpu_type
 
 
@@ -301,20 +300,6 @@ def test_prelude_noop_without_flag(monkeypatch):
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
     args = _Args(model="/models/src", quantize=None)
-    asyncio.run(cli_quantization._run_quantization_prelude(args))
-    assert called["n"] == 0
-    assert str(args.model) == "/models/src"  # unchanged
-
-
-def test_prelude_skipped_on_resume(monkeypatch):
-    called = {"n": 0}
-
-    async def _should_not_run(**kwargs):  # pragma: no cover - asserts non-call
-        called["n"] += 1
-        return "x"
-
-    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
-    args = _Args(model="/models/src", quantize="fp8", resume=True)
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged

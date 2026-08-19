@@ -18,9 +18,8 @@ accepts on its ``coordinator_inbox`` shape::
         "raw_prompt": "=== Shared session state ===\\n...",
         "context":   {"tick_index": 0, "now_unix": 1700000000.0},
         "options":   {"session_dir": "/tmp/sess-1",
-                      "robustness_server_url": "http://...",
                       "llm_rca_enabled": false,
-                      "metrics_window_s": 300}
+                      "disable_local_probe": false}
     }
 
 ``raw_prompt`` is parsed by :func:`from_coordinator_prompt`; ``context``
@@ -62,11 +61,7 @@ from ..config import Config
 from ..factory import build_reactor_components
 from ..role.envelope import build_envelope_dict
 from ..role.postmortem import finalize_session
-from ..role.prompt_inputs import (
-    ReactorContext,
-    SharedStateSnapshot,
-    from_coordinator_prompt,
-)
+from ..role.prompt_inputs import from_coordinator_prompt
 
 
 log = logging.getLogger("robustness_agent.runtime.cli")
@@ -137,31 +132,13 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     context = dict(request.get("context") or {})
     options = dict(request.get("options") or {})
 
-    config = await Config.discover()
+    config = Config.discover()
     if "session_dir" in options:
         config.session_dir = Path(str(options["session_dir"]))
-    if "robustness_server_url" in options:
-        config.robustness_server_url = str(options["robustness_server_url"] or "")
     if "llm_rca_enabled" in options:
         config.llm_rca_enabled = bool(options["llm_rca_enabled"])
-    if "metrics_window_s" in options:
-        config.metrics_window_s = int(options["metrics_window_s"])
     if "disable_local_probe" in options:
         config.disable_local_probe = bool(options["disable_local_probe"])
-    if "enable_cluster_pod_metrics" in options:
-        config.enable_cluster_pod_metrics = bool(options["enable_cluster_pod_metrics"])
-    if "pod_metrics_categories" in options:
-        raw_cats = options["pod_metrics_categories"]
-        if isinstance(raw_cats, str):
-            cats = tuple(part.strip() for part in raw_cats.split(",") if part.strip())
-        elif isinstance(raw_cats, (list, tuple)):
-            cats = tuple(str(c).strip() for c in raw_cats if str(c).strip())
-        else:
-            cats = ()
-        if cats:
-            config.pod_metrics_categories = cats
-    if "workload_uid" in options:
-        config.workload_uid = str(options["workload_uid"] or "")
     if "nodes" in options:
         try:
             config.nodes = max(1, int(options["nodes"]))
@@ -177,7 +154,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert CI hosts.
     if "external_deps_enabled" in options:
         config.external_deps_enabled = bool(options["external_deps_enabled"])
-    # B3 ``no_levers_found`` floor knobs override the default window.
+    # ``no_levers_found`` floor knobs override the default window.
     if "progress_no_levers_min_minutes" in options:
         config.progress_no_levers_min_minutes = float(options["progress_no_levers_min_minutes"])
     if "progress_no_levers_min_ticks" in options:
@@ -199,25 +176,6 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         tick_index=tick_index,
         now_unix=now_unix,
     )
-    if not reactor_ctx.shared_state.session_id:
-        reactor_ctx = ReactorContext(
-            tick_index=reactor_ctx.tick_index,
-            shared_state=SharedStateSnapshot(
-                session_id=session_id,
-                model_name=reactor_ctx.shared_state.model_name,
-                model_class=reactor_ctx.shared_state.model_class,
-                baseline_tput=reactor_ctx.shared_state.baseline_tput,
-                cumulative_gain=reactor_ctx.shared_state.cumulative_gain,
-                crash_count=reactor_ctx.shared_state.crash_count,
-                current_action=reactor_ctx.shared_state.current_action,
-            ),
-            inbox=list(reactor_ctx.inbox),
-            now_unix=reactor_ctx.now_unix,
-            parse_warnings=list(reactor_ctx.parse_warnings),
-            phase=reactor_ctx.phase,
-            phase_budget=list(reactor_ctx.phase_budget),
-            conversation_progress=reactor_ctx.conversation_progress,
-        )
 
     bundle = build_reactor_components(config, session_id=session_id)
     try:
@@ -261,7 +219,7 @@ def _cmd_tick(args: argparse.Namespace) -> None:
 
 
 def _cmd_finalize(args: argparse.Namespace) -> None:
-    """Run the L1+L2 postmortem finalizer as a one-shot operator tool.
+    """Run the postmortem finalizer as a one-shot operator tool.
 
     Use when the reactor never observed ``stop_reason`` going
     non-empty (e.g. Coordinator killed by SIGKILL before the wind-down
@@ -332,7 +290,7 @@ def _build_parser() -> argparse.ArgumentParser:
     finalize = sub.add_parser(
         "finalize",
         help=(
-            "Run the L1+L2 postmortem finalizer post-hoc "
+            "Run the postmortem finalizer post-hoc "
             "(for sessions whose Coordinator died before stop_reason "
             "was written)."
         ),

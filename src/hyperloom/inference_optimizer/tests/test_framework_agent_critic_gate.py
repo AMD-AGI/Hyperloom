@@ -154,6 +154,19 @@ async def test_materialize_unknown_route_runs_both_tracks(coord: Coordinator, mo
     assert len(author) == 1
 
 
+@pytest.mark.asyncio
+async def test_enqueued_task_rides_the_decaying_keep_curve(coord: Coordinator) -> None:
+    """framework_agent grades against the same per-cycle bar as explore and integrate_patch."""
+    from hyperloom.orchestrator.phases.machine_state import decaying_keep_threshold_pct
+
+    coord.shared_state.macro_cycle = 2
+    await coord.phase_framework._enqueue_framework_agent_task(dict(_CANDIDATE))
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "framework_agent"]
+    assert len(queued) == 1
+    assert queued[0].params["keep_threshold_pct"] == pytest.approx(decaying_keep_threshold_pct(2))
+
+
 # -- verdict drives materialize/reject through _handle_single_verdict --------
 @pytest.mark.asyncio
 async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> None:

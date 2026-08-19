@@ -70,8 +70,7 @@ log = logging.getLogger(__name__)
 class Finding:
     """Persistent record describing one ladder firing.
 
-    Stored on disk by the FindingSink for later inspection / reporting
-    to robustness-server.
+    Stored on disk by the FindingSink for later inspection.
     """
 
     tick_index: int

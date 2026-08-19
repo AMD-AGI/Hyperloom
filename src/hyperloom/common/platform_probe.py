@@ -46,6 +46,7 @@ DEFAULT_ROOT = Path("/")
 
 _CPU_ROOT = "sys/devices/system/cpu"
 _NODE_ROOT = "sys/devices/system/node"
+_AMDGPU_DRIVER_ROOT = "sys/bus/pci/drivers/amdgpu"
 
 
 def read_kernel_file(path: Path | str, *, root: Path = DEFAULT_ROOT) -> str:
@@ -133,6 +134,25 @@ def cpu_model(*, root: Path = DEFAULT_ROOT) -> str:
 def kernel_release(*, root: Path = DEFAULT_ROOT) -> str:
     """Running kernel release, or ``"unknown"``."""
     return read_kernel_file("proc/sys/kernel/osrelease", root=root) or "unknown"
+
+
+def amdgpu_device_count(*, root: Path = DEFAULT_ROOT) -> int | None:
+    """PCI devices bound to ``amdgpu``, or ``None`` when none are readable.
+
+    Counts every PCI domain rather than ``0000`` alone. A host with more
+    devices than one domain can address puts its GPUs under ``0002:``,
+    ``0003:`` and so on -- which is the normal layout on an MI300/MI350-class
+    node -- and a ``0000:``-only match counts zero of them there, i.e. it fails
+    on exactly the hardware this record is written to describe.
+
+    The ``*:*:*.*`` shape is what separates a device entry from the driver's
+    own ``bind``/``unbind``/``module`` siblings, which share the directory and
+    are not PCI addresses.
+    """
+    try:
+        return len(list((root / _AMDGPU_DRIVER_ROOT).glob("*:*:*.*"))) or None
+    except OSError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -229,7 +249,7 @@ def platform_fingerprint(
                 # run could see. *_VISIBLE_DEVICES masking does not change this
                 # number, so it is named for the host to keep it from being read
                 # as the run's device count.
-                "host_count": len(list(Path("/sys/bus/pci/drivers/amdgpu").glob("0000:*"))) or None,
+                "host_count": amdgpu_device_count(),
                 # probe=False: gpu_type already answers this, and report
                 # generation runs in-process under unit tests that must not
                 # spawn rocminfo.
@@ -255,6 +275,7 @@ def platform_fingerprint(
 __all__ = [
     "CpuPlatform",
     "DEFAULT_ROOT",
+    "amdgpu_device_count",
     "boost_state",
     "cpu_model",
     "cpufreq_governor",

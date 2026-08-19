@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""E1 / E2 / E4 / E5 critic-health signal tests."""
+"""Critic-health signal tests."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from hyperloom.agents.robustness.sources.base import SourceData
 def _ctx(*, inbox=None) -> ReactorContext:
     return ReactorContext(
         tick_index=1,
-        shared_state=SharedStateSnapshot(session_id="sess-1"),
+        shared_state=SharedStateSnapshot(),
         inbox=list(inbox or []),
         now_unix=1.0,
     )

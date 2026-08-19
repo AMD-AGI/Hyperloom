@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""End-to-end reactor tests plus L1/L2 finalizer integration. The subprocess-transport JSON-IO contract is exercised in test_runtime_cli.py."""
+"""End-to-end reactor tests plus postmortem finalizer integration. The subprocess-transport JSON-IO contract is exercised in test_runtime_cli.py."""
 
 from __future__ import annotations
 
@@ -105,14 +105,12 @@ def _build_reactor_with_finalizer(
 def _ctx(
     crash_count: int = 0,
     *,
-    session_id: str = "sess-1",
     now_unix: float = 1.0,
     stop_reason: str = "",
 ) -> ReactorContext:
     return ReactorContext(
         tick_index=0,
         shared_state=SharedStateSnapshot(
-            session_id=session_id,
             crash_count=crash_count,
             stop_reason=stop_reason,
         ),
@@ -159,16 +157,18 @@ async def test_reactor_emits_alert_for_crash_count_and_persists_finding(tmp_path
 
 @pytest.mark.asyncio
 async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path):
-    primary = _FakeSource("server", SourceUnavailable("down"))
+    primary = _FakeSource("local-probe", SourceUnavailable("down"))
     fallback = _FakeSource(
-        "local",
+        "quiet-fallback",
         SourceData(
-            session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Failed"}],
-            sources_used=["local"],
+            local_log_errors=[{"pattern": "CUDA out of memory", "line": "boom"}],
+            sources_used=["quiet-fallback"],
         ),
     )
     reactor, _ = _build_reactor(primary=primary, fallback=fallback, tmp_path=tmp_path)
     intents = await reactor.tick(_ctx())
+    assert primary.calls == 1
+    assert fallback.calls == 1
     assert any(i.type is IntentType.ALERT for i in intents)
     assert any(i.payload.get("severity") == "high" for i in intents if i.type is IntentType.ALERT)
 

@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v3.0` when recorder fragments are present, else `…v2` (collector-only fallback). Same additive wire shape; gate consumers on the major version, not exact-string equality. See `breakdown/schema.py` (`SCHEMA_VERSION` / `SCHEMA_VERSION_V3`).
+- Schema:   `hyperloom.session_breakdown.v5.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
@@ -131,7 +131,7 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `session`            | `manifest.json` + `state.{session_id, stop_reason, stop_ts, max_minutes, tick, start_ts, resumed_ts}`                |
 | `workload`           | `manifest.{framework, model_*, gpu_type, tp, workload, objective}` + `state.{model_class, framework, gpu_type}`      |
 | `baseline`           | `state.{baseline_tput, baseline_accuracy, last_baseline.workspace, baseline_attempts}` + `<workspace>/benchmark_*/benchmark_report.json` |
-| `final`              | `state.{current_best, cumulative_gain, cumulative_gain_validated_*, optimization_stack}`                            |
+| `final`              | `state.{current_best, cumulative_gain_validated, cumulative_gain_validated_*, optimization_stack}`                  |
 | `phase_timeline`     | `state.{<action>_attempts, kernel_opt_attempts.history, kernel_integrate_attempts.attempts}` sorted by `ts`           |
 | `capability_summary` | Reduces invocations + per-action attempts + search ledgers into 8 rows: geak / forge / explore / sweep / specialist plus the backends / params / validate_stack compatibility rows |
 | `optimizations`      | The recorder's own streams only — `operations` / `adoptions` / `measurements` / `artifacts`, as the producers wrote them. Never rebuilt from `state.json`; when the records are absent the section reports `available: false` instead. |

@@ -3,9 +3,9 @@
 
 """Unit coverage for the unified GEMM-tuning result handling on Coordinator.
 
-Exercises ``_promote_gemm_tuning_keep`` guard rails plus the forge/geak
-promote branches, and the ``_handle_gemm_tuning_result`` routing that keeps
-forge results on the per-tuner E2E path while GEAK results promote inline.
+Exercises ``_gemm_e2e_candidates`` guard rails for both the forge and GEAK
+result shapes, and the ``_handle_gemm_tuning_result`` routing that puts every
+backend on the per-tuner E2E path so a promoted gain is always a measurement.
 """
 
 from __future__ import annotations
@@ -69,8 +69,8 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
     persisted.last_trace_analyze = {
         "trace_input": persisted.last_profile_trace,
         "steady_state_trace": selected_trace,
+        "roofline_snapshot_id": 3,
     }
-    persisted.roofline_snapshot_id = 3
     persisted.roofline_snapshots = [{"snapshot_id": 3}]
     persisted.baseline_eager_fallback = False
     persisted.save(tmp_path)
@@ -173,8 +173,8 @@ async def test_intent_router_gemm_roofline_survives_terminal_lifecycle_save(
             state.last_trace_analyze = {
                 "trace_input": state.last_profile_trace,
                 "steady_state_trace": selected_trace,
+                "roofline_snapshot_id": 7,
             }
-            state.roofline_snapshot_id = 7
             state.baseline_eager_fallback = False
             state.save(session_dir)
             return {
@@ -321,59 +321,12 @@ def _write_collective_recovery(
     return manifest, checkpoint_path
 
 
-class TestPromoteGemmTuningKeep:
-    def test_ignores_non_dict(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        coord._promote_gemm_tuning_keep("not-a-dict")  # type: ignore[arg-type]
-        assert coord.shared_state.optimization_stack == []
+class TestGemmE2eCandidates:
+    """Guard rails deciding which tuning results reach the E2E validator."""
 
-    def test_ignores_non_ok_status(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        coord._promote_gemm_tuning_keep({"status": "failed", "decision": "KEEP"})
-        assert coord.shared_state.optimization_stack == []
-
-    def test_ignores_non_keep_decision(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        coord._promote_gemm_tuning_keep({"status": "ok", "decision": "REVERT"})
-        assert coord.shared_state.optimization_stack == []
-
-    def test_ignores_unparseable_speedup(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        coord._promote_gemm_tuning_keep({"status": "ok", "decision": "KEEP", "best_speedup": object()})
-        assert coord.shared_state.optimization_stack == []
-
-    def test_ignores_low_speedup_or_baseline(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=0.0)
-        coord._promote_gemm_tuning_keep({"status": "ok", "decision": "KEEP", "best_speedup": 1.5})
-        assert coord.shared_state.optimization_stack == []
-
-        coord2 = _coord(tmp_path, baseline_tput=100.0)
-        coord2._promote_gemm_tuning_keep({"status": "ok", "decision": "KEEP", "best_speedup": 1.0})
-        assert coord2.shared_state.optimization_stack == []
-
-    def test_forge_backend_records_stack_and_current_best(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.25,
-                "backend": "forge",
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-                "workspace": str(tmp_path),
-            }
-        )
-        stack = coord.shared_state.optimization_stack
-        assert len(stack) == 1
-        assert stack[0]["variant_name"] == "forge_gemm_tuned"
-        assert stack[0]["backend"] == "forge"
-        assert coord.shared_state.current_best["engine"] == "forge"
-        assert coord.shared_state.cumulative_gain == pytest.approx(25.0)
-        assert coord.shared_state.cumulative_gain_validated == pytest.approx(25.0)
-
-    def test_geak_backend_uses_tuned_file(self, tmp_path):
+    def test_geak_result_yields_the_tuned_dispatch_csv(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=200.0)
-        coord._promote_gemm_tuning_keep(
+        cands = coord._gemm_e2e_candidates(
             {
                 "status": "ok",
                 "decision": "KEEP",
@@ -382,48 +335,76 @@ class TestPromoteGemmTuningKeep:
                 "tuned_file": "/tuned/gemm.csv",
             }
         )
-        stack = coord.shared_state.optimization_stack
-        assert len(stack) == 1
-        assert stack[0]["variant_name"] == "a8w8_blockscale_tuned_gemm"
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert envs["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == "/tuned/gemm.csv"
+        assert len(cands) == 1
+        assert cands[0]["tuner"] == "a8w8_blockscale_tuned_gemm"
+        assert cands[0]["envs"] == {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tuned/gemm.csv"}
+        assert cands[0]["micro_speedup"] == pytest.approx(1.1)
 
-    def test_geak_keep_writes_gemm_tuning_journal_event(self, tmp_path):
-        # Adopted GEMM-tuning run surfaces as a KIND_GEMM_TUNING KEEP journal row
-        # carrying the serving throughput and originating task_id.
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"status": "failed"},
+            {"decision": "REVERT"},
+            {"best_speedup": 1.0},
+            {"best_speedup": object()},
+            {"tuned_file": ""},
+        ],
+    )
+    def test_geak_result_yields_nothing_without_a_usable_keep(self, tmp_path, overrides):
         coord = _coord(tmp_path, baseline_tput=200.0)
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.1,
-                "backend": "geak",
-                "tuned_file": "/tuned/gemm.csv",
-                "task_id": "kernel_entry_gemm_tuning",
-            }
-        )
-        rows = [e for e in _journal_entries(tmp_path) if e.get("kind") == "gemm_tuning"]
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["outcome"] == "KEEP"
-        assert row["variant_name"] == "a8w8_blockscale_tuned_gemm"
-        assert row["throughput_after"] == pytest.approx(220.0)
-        assert row["task_id"] == "kernel_entry_gemm_tuning"
-        assert row["provenance"] == "gemm_tuning:geak"
-
-    def test_forge_keep_dedupes_same_tuned_file(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
         result = {
             "status": "ok",
             "decision": "KEEP",
-            "best_speedup": 1.2,
-            "backend": "forge",
-            "artifacts": {"cfg": "/cfg/tuned.json"},
-            "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
+            "best_speedup": 1.1,
+            "backend": "geak",
+            "tuned_file": "/tuned/gemm.csv",
         }
-        coord._promote_gemm_tuning_keep(result)
-        coord._promote_gemm_tuning_keep(result)
-        assert len(coord.shared_state.optimization_stack) == 1
+        result.update(overrides)
+        assert coord._gemm_e2e_candidates(result) == []
+
+    def test_non_dict_result_is_rejected(self, tmp_path):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        assert coord._gemm_e2e_candidates({}) == []
+
+    def test_forge_result_yields_one_candidate_per_improved_tuner(self, tmp_path):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "backend": "forge",
+                "tuners_run": [
+                    {
+                        "tuner": "fmoe_ck",
+                        "status": "ok",
+                        "candidate": True,
+                        "env_var": "AITER_CONFIG_FMOE",
+                        "env_value": "/cfg/fmoe.csv",
+                        "best_micro_speedup": 1.3,
+                    },
+                    {"tuner": "skipped_one", "status": "ok", "improved_shapes": 0},
+                    {"tuner": "failed_one", "status": "failed", "candidate": True},
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
+        assert cands[0]["envs"] == {"AITER_CONFIG_FMOE": "/cfg/fmoe.csv"}
+
+    def test_forge_result_ignores_a_tuned_file(self, tmp_path):
+        """tuned_file is the GEAK shape; forge must come from tuners_run."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        assert (
+            coord._gemm_e2e_candidates(
+                {
+                    "status": "ok",
+                    "decision": "KEEP",
+                    "best_speedup": 1.2,
+                    "backend": "forge",
+                    "tuned_file": "/tuned/gemm.csv",
+                }
+            )
+            == []
+        )
 
 
 class TestPromoteFusionIntegrateKeep:
@@ -431,7 +412,6 @@ class TestPromoteFusionIntegrateKeep:
         coord = _coord(
             tmp_path,
             baseline_tput=100.0,
-            cumulative_gain=20.0,
             cumulative_gain_validated=20.0,
             cumulative_gain_validated_stack_len=1,
             optimization_stack=[
@@ -479,11 +459,11 @@ class TestPromoteFusionIntegrateKeep:
         assert stack[1]["gain_pct"] == pytest.approx(50.0)
         assert stack[1]["extra_envs"]["SGLANG_USE_AITER"] == "1"
         assert stack[1]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
-        assert stack[1]["kernel_speedup"] == 3.05
         assert coord.shared_state.current_best["action"] == "fusion"
-        assert coord.shared_state.current_best["backend"] == "forge"
-        assert coord.shared_state.current_best["engine"] == "forge_fusion"
         assert coord.shared_state.current_best["tput"] == 180.0
+        # current_best is a config record; the forge labels live on the entry.
+        assert "engine" not in coord.shared_state.current_best
+        assert "backend" not in coord.shared_state.current_best
         assert coord.shared_state.cumulative_gain_validated == 80.0
         assert coord.shared_state.gain_per_stack_entry == [20.0, 80.0]
         assert coord.shared_state.cumulative_gain_validated_stack_len == 2
@@ -510,7 +490,8 @@ class TestPromoteFusionIntegrateKeep:
         phase._promote_fusion_integrate_keep(fusion, integ)
 
         assert len(coord.shared_state.optimization_stack) == 1
-        assert coord.shared_state.current_best["patch_path"] == "/tmp/fusion.patch"
+        assert coord.shared_state.optimization_stack[0]["patch_path"] == "/tmp/fusion.patch"
+        assert coord.shared_state.current_best["variant_name"] == "forge_fusion:fusion.patch"
 
     @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
@@ -595,7 +576,8 @@ class TestPromoteFusionIntegrateKeep:
         assert calls[0]["snapshot_dir"] == str(tmp_path / "snapshot")
         assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1", "ZAYA_FUSED": "1"}
         assert coord.shared_state.last_fusion_integrate["decision"] == "KEEP"
-        assert coord.shared_state.current_best["engine"] == "forge_fusion"
+        assert coord.shared_state.current_best["action"] == "fusion"
+        assert coord.shared_state.optimization_stack[-1]["engine"] == "forge_fusion"
         assert coord.bus.messages[-1].payload["kind"] == "fusion_integrate_done"
 
     @pytest.mark.asyncio
@@ -712,12 +694,15 @@ class TestCollectiveIntegratePromotion:
         }
 
         phase._promote_collective_integrate_keep(collective, integrate)
-        assert coord.shared_state.current_best["engine"] == "forge_collective"
+        # current_best is a pure config record; the engine that produced the
+        # winner is stack-entry provenance.
+        assert coord.shared_state.current_best["action"] == "collective"
+        assert coord.shared_state.current_best["variant_name"] == "forge_collective"
+        assert coord.shared_state.optimization_stack[0]["engine"] == "forge_collective"
         coord.shared_state.current_best = {
             "engine": "later_lane",
             "tput": 150.0,
         }
-        coord.shared_state.cumulative_gain = 50.0
         coord.shared_state.cumulative_gain_validated = 50.0
         phase._promote_collective_integrate_keep(collective, integrate)
 
@@ -1597,7 +1582,6 @@ class TestCollectiveIntegratePromotion:
             tmp_path,
             baseline_tput=100.0,
             current_best={"engine": "existing", "tput": 110.0},
-            cumulative_gain=10.0,
             cumulative_gain_validated=10.0,
         )
         coord.bus = _Bus()
@@ -1984,7 +1968,7 @@ class TestForgeGemmRuntimeConfigMerge:
             ],
         }
 
-        await phase._validate_forge_gemm_tuning_e2e(result)
+        await phase._validate_gemm_tuning_e2e(result)
 
         assert fake.calls == []
         assert result["e2e_results"]["reverted"][0]["reason"] == (
@@ -2021,12 +2005,67 @@ class TestForgeGemmRuntimeConfigMerge:
             ],
         }
 
-        await phase._validate_forge_gemm_tuning_e2e(result)
+        await phase._validate_gemm_tuning_e2e(result)
 
         assert fake.calls == []
         assert result["e2e_results"]["reverted"][0]["reason"] == (
             "candidate_artifact_missing"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_run_leaves_its_tuners_unjudged(self, tmp_path, monkeypatch):
+        """A clock that ran out is not a verdict on the tuners it interrupted."""
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+        first = tmp_path / "fmoe.csv"
+        second = tmp_path / "dense.csv"
+        first.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        second.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            calls.append(payload)
+            return {
+                "status": "failed",
+                "error_class": "session_time_exhausted",
+                "decision": "NEEDS_REVIEW",
+            }
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setattr(
+            phase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _env_var, env_value: env_value,
+        )
+
+        result = {
+            "backend": "forge",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "fmoe_ck",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": str(first),
+                },
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(second),
+                },
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert len(calls) == 1
+        assert result["e2e_results"]["kept"] == []
+        assert result["e2e_results"]["reverted"] == []
+        assert coord.shared_state.optimization_stack == []
+
 
     @pytest.mark.asyncio
     async def test_stacks_keeps_and_reverts(self, tmp_path, monkeypatch):
@@ -2089,7 +2128,7 @@ class TestForgeGemmRuntimeConfigMerge:
             ],
         }
 
-        await phase._validate_forge_gemm_tuning_e2e(result)
+        await phase._validate_gemm_tuning_e2e(result)
 
         assert [c["kernel_id"] for c in calls] == [
             "gemm_tune_fmoe_ck",
@@ -2106,9 +2145,10 @@ class TestForgeGemmRuntimeConfigMerge:
             "AITER_CONFIG_FMOE": str(fmoe_candidate),
             "AITER_CONFIG_DENSE": str(dense_candidate),
         }
-        assert coord.shared_state.current_best["engine"] == "forge"
+        assert coord.shared_state.current_best["variant_name"] == "forge_fmoe_ck"
         assert coord.shared_state.current_best["tput"] == 130.0
         assert coord.shared_state.optimization_stack[0]["variant_name"] == "forge_fmoe_ck"
+        assert coord.shared_state.optimization_stack[0]["backend"] == "forge"
         assert result["decision"] == "KEEP"
         assert result["recommended_env"] == {
             "AITER_CONFIG_FMOE": str(fmoe_candidate)
@@ -2136,7 +2176,7 @@ class TestForgeGemmRuntimeConfigMerge:
             ],
         }
 
-        await phase._validate_forge_gemm_tuning_e2e(result)
+        await phase._validate_gemm_tuning_e2e(result)
 
         assert result["recommended_env"] == {"AITER_CONFIG": "/raw.csv"}
         assert coord.shared_state.optimization_stack == []
@@ -2171,7 +2211,7 @@ class TestForgeGemmRuntimeConfigMerge:
             ],
         }
 
-        await phase._validate_forge_gemm_tuning_e2e(result)
+        await phase._validate_gemm_tuning_e2e(result)
 
         assert result["decision"] == "REVERT"
         assert result["micro_decision"] == "candidate_no_e2e_gain"
@@ -2486,117 +2526,76 @@ class TestCkBlockscaleSwitchEligible:
         assert coord._ck_blockscale_switch_eligible("nope") is False  # type: ignore[arg-type]
 
 
-class TestPromoteInjectsCkBlockscaleEnv:
-    """Inline-promote safety net: an eligible forge result that reaches
-    ``_promote_gemm_tuning_keep`` (without the validator) injects
-    ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M=256``. The GEAK path never injects the
-    un-validated CK switch."""
+class TestCkBlockscaleCandidateInjection:
+    """The fp8 block-scale CK switch enters as its own candidate to be measured."""
+
+    def _forge_result(self, **overrides):
+        result = {
+            "status": "ok",
+            "decision": "KEEP",
+            "best_speedup": 1.2,
+            "backend": "forge",
+            "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
+        }
+        result.update(overrides)
+        return result
+
+    def _ck_candidates(self, coord, result):
+        return [c for c in coord._gemm_e2e_candidates(result) if c["env_var"] == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"]
 
     def test_injects_for_forge_eligible_keep(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "forge",
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
-        stack_envs = coord.shared_state.optimization_stack[0]["extra_envs"]
-        assert stack_envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "256"
+        cands = self._ck_candidates(coord, self._forge_result())
+        assert len(cands) == 1
+        assert cands[0]["envs"] == {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"}
+        assert cands[0]["tuner"] == "ck_blockscale_backend_switch"
 
     def test_does_not_inject_for_geak_backend(self, tmp_path, monkeypatch):
-        # GEAK is not forge, so the CK switch is never stamped inline.
         coord = _eligible_coord(tmp_path, monkeypatch)
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "geak",
-                "tuned_file": "/tuned/gemm.csv",
-            }
-        )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert envs["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == "/tuned/gemm.csv"
-        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+        result = {
+            "status": "ok",
+            "decision": "KEEP",
+            "best_speedup": 1.2,
+            "backend": "geak",
+            "tuned_file": "/tuned/gemm.csv",
+        }
+        assert self._ck_candidates(coord, result) == []
+        assert [c["tuner"] for c in coord._gemm_e2e_candidates(result)] == ["a8w8_blockscale_tuned_gemm"]
 
     def test_does_not_inject_for_bf16_precision(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "forge",
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+        assert self._ck_candidates(coord, self._forge_result()) == []
 
     def test_does_not_inject_for_non_sglang_framework(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch, framework="vllm")
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "forge",
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+        assert self._ck_candidates(coord, self._forge_result()) == []
 
     def test_does_not_inject_for_non_gfx942_gpu(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch, gpu_type="mi355x")
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "forge",
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+        assert self._ck_candidates(coord, self._forge_result()) == []
 
     def test_does_not_inject_for_non_block_scale_fp8(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
         monkeypatch.setattr(mcu_mod, "_fp8_is_block_scale", lambda _p: False)
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "forge",
-                "extra_envs": {"AITER_CONFIG": "/cfg/tuned.json"},
-            }
-        )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" not in envs
+        assert self._ck_candidates(coord, self._forge_result()) == []
 
-    def test_respects_preset_value_setdefault(self, tmp_path, monkeypatch):
+    def test_does_not_double_inject_when_a_tuner_already_carries_the_switch(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)
-        coord._promote_gemm_tuning_keep(
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "best_speedup": 1.2,
-                "backend": "forge",
-                "extra_envs": {
-                    "AITER_CONFIG": "/cfg/tuned.json",
-                    "SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "512",
-                },
-            }
+        result = self._forge_result(
+            tuners_run=[
+                {
+                    "tuner": "blockscale",
+                    "status": "ok",
+                    "candidate": True,
+                    "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
+                    "env_value": "512",
+                    "best_micro_speedup": 1.4,
+                }
+            ]
         )
-        envs = coord.shared_state.current_best["extra_envs"]
-        assert envs["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"] == "512"
+        cands = self._ck_candidates(coord, result)
+        assert len(cands) == 1
+        assert cands[0]["env_value"] == "512"
 
 
 class TestHandleGemmTuningResult:
@@ -2608,7 +2607,7 @@ class TestHandleGemmTuningResult:
         async def _fake_validate(result):
             called["result"] = result
 
-        coord.phase_kernel._validate_forge_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
+        coord.phase_kernel._validate_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
 
         await coord._handle_gemm_tuning_result(
             {
@@ -2671,7 +2670,7 @@ class TestHandleGemmTuningResult:
         async def _fake_validate(result):
             called["result"] = result
 
-        coord.phase_kernel._validate_forge_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
+        coord.phase_kernel._validate_gemm_tuning_e2e = _fake_validate  # type: ignore[assignment]
 
         await coord._handle_gemm_tuning_result(
             {
@@ -2687,8 +2686,17 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
-    async def test_non_forge_routes_to_inline_promote(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
+    async def test_geak_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        tuned = tmp_path / "gemm.csv"
+        tuned.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 150.0, "gain_pct": 50.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        monkeypatch.setattr(
+            KernelPhase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _self, _env_var, env_value: env_value,
+        )
 
         await coord._handle_gemm_tuning_result(
             {
@@ -2696,12 +2704,45 @@ class TestHandleGemmTuningResult:
                 "decision": "KEEP",
                 "best_speedup": 1.4,
                 "backend": "geak",
-                "tuned_file": "/tuned/gemm.csv",
+                "tuned_file": str(tuned),
             }
         )
 
-        assert len(coord.shared_state.optimization_stack) == 1
-        assert coord.shared_state.current_best["engine"] == "geak"
+        assert len(fake.calls) == 1
+        stack = coord.shared_state.optimization_stack
+        assert len(stack) == 1
+        assert stack[0]["variant_name"] == "geak_a8w8_blockscale_tuned_gemm"
+        assert stack[0]["backend"] == "geak"
+        # 150.0 measured, not baseline * best_speedup (140.0).
+        assert stack[0]["tput"] == pytest.approx(150.0)
+        assert coord.shared_state.current_best["tput"] == pytest.approx(150.0)
+        assert coord.shared_state.cumulative_gain_validated == pytest.approx(50.0)
+
+    @pytest.mark.asyncio
+    async def test_geak_promotes_nothing_when_the_measurement_reverts(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        tuned = tmp_path / "gemm.csv"
+        tuned.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        monkeypatch.setattr(
+            KernelPhase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _self, _env_var, env_value: env_value,
+        )
+
+        await coord._handle_gemm_tuning_result(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.4,
+                "backend": "geak",
+                "tuned_file": str(tuned),
+            }
+        )
+
+        assert coord.shared_state.optimization_stack == []
+        assert not coord.shared_state.current_best
 
 
 class TestValidateForgeGemmTuningE2E:
@@ -2722,7 +2763,7 @@ class TestValidateForgeGemmTuningE2E:
                 {"status": "ok", "improved_shapes": 3, "env_var": "", "env_value": ""},
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert fake.calls == []
         assert result["requires_e2e_validation"] is True
@@ -2769,7 +2810,7 @@ class TestValidateForgeGemmTuningE2E:
             ],
         }
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert len(fake.calls) == 1
         assert fake.calls[0]["extra_envs"] == {
@@ -2827,7 +2868,7 @@ class TestValidateForgeGemmTuningE2E:
             ],
         }
 
-        await phase._validate_forge_gemm_tuning_e2e(result)
+        await phase._validate_gemm_tuning_e2e(result)
 
         assert set(merge_calls) == {
             ("AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", str(dense)),
@@ -2858,6 +2899,7 @@ class TestValidateForgeGemmTuningE2E:
 
         result = {
             "workspace": str(tmp_path),
+            "backend": "forge",
             "recommended_env": {
                 "AITER_CONFIG_FMOE": str(fmoe_candidate),
                 "AITER_DENSE": "/dense.json",
@@ -2886,7 +2928,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         # fmoe_ck on sglang carries the aiter MoE runner arg; dense does not.
         assert fake.calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
@@ -2910,10 +2952,14 @@ class TestValidateForgeGemmTuningE2E:
             "gemm_tune_e2e_dense_gemm",
         }
         cb = coord.shared_state.current_best
-        assert cb["engine"] == "forge"
+        assert cb["variant_name"] == "forge_dense_gemm"
         assert cb["tput"] == pytest.approx(132.0)
         assert cb["extra_server_args"] == "--moe-runner-backend aiter"
-        assert coord.shared_state.cumulative_gain == pytest.approx(32.0)
+        # Both tuners' envs accumulate onto current_best, one lift each.
+        assert cb["extra_envs"] == {
+            "AITER_CONFIG_FMOE": str(fmoe_candidate),
+            "AITER_DENSE": "/dense.json",
+        }
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(32.0)
 
         # Result rewritten to the E2E-validated outcome.
@@ -2955,7 +3001,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert len(fake.calls) == 1
         assert fake.calls[0]["extra_envs"] == {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"}
@@ -2993,7 +3039,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert fake.calls == []
         assert coord.shared_state.optimization_stack == []
@@ -3020,7 +3066,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert coord.shared_state.optimization_stack == []
         assert result["decision"] == "REVERT"
@@ -3047,7 +3093,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert coord.shared_state.optimization_stack == []
         assert result["decision"] == "REVERT"
@@ -3080,7 +3126,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert result["decision"] == "REVERT"
         reverted = result["e2e_results"]["reverted"]
@@ -3119,7 +3165,7 @@ class TestValidateForgeGemmTuningE2E:
                 },
             ],
         }
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         # Fallback budget is 15 minutes.
         assert captured["budget"] == 15

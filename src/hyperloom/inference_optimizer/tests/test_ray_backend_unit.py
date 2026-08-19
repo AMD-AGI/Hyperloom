@@ -28,6 +28,9 @@ from hyperloom.orchestrator.actions.executors._ray_serving import (
     ServingLease,
     maybe_serving_lease,
 )
+from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+)
 
 
 # ── flag gate ────────────────────────────────────────────────────────────────
@@ -397,8 +400,10 @@ def test_strip_visible_devices_noop_when_absent(tmp_path: Path):
 class _FakeMethod:
     def __init__(self, ret):
         self._ret = ret
+        self.calls: list[dict] = []
 
-    def remote(self, *_a, **_k):
+    def remote(self, *_a, **kw):
+        self.calls.append(dict(kw))
         return self._ret
 
 
@@ -597,6 +602,113 @@ def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monk
     # server.log is pinned into the task slot for the watchdogs.
     assert lease.calls[0]["server_log_path"] == str(out_dir / "server.log")
     assert lease.calls[0]["timeout"] == 10
+
+
+# ── the session budget across the Ray process boundary ───────────────────────
+class TestTheSessionBudgetReachesTheRayWorker:
+    """Production takes the Ray path on a single node; the local path is the test default.
+
+    So the session reaper has to be carried across the boundary explicitly, and
+    as a duration: the absolute deadline is a ``time.monotonic()`` instant, and
+    the worker is another process whose clock starts somewhere else. Without it
+    the hard timeout is the only thing left, and a run that ran out of time gets
+    recorded as a variant that timed out.
+    """
+
+    def test_run_magpie_converts_the_deadline_before_handing_it_over(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n", encoding="utf-8")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        monkeypatch.setattr(gr, "build_benchmark_command", lambda **_kw: ["magpie"])
+        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+
+        lease = _RecordingLease()
+        gr._run_magpie(
+            magpie_python="python3",
+            config_path=cfg,
+            output_dir=out_dir,
+            timeout_sec=10,
+            cwd=str(tmp_path),
+            serving_lease=lease,
+            session_deadline_sec=1250.0,
+        )
+
+        assert lease.calls[0]["session_remaining_sec"] == pytest.approx(250.0)
+        assert "session_deadline_sec" not in lease.calls[0], (
+            "an absolute monotonic instant is meaningless in the actor's process"
+        )
+
+    def test_an_unbounded_budget_reaches_the_lease_as_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n", encoding="utf-8")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        monkeypatch.setattr(gr, "build_benchmark_command", lambda **_kw: ["magpie"])
+
+        lease = _RecordingLease()
+        gr._run_magpie(
+            magpie_python="python3",
+            config_path=cfg,
+            output_dir=out_dir,
+            timeout_sec=10,
+            cwd=str(tmp_path),
+            serving_lease=lease,
+        )
+
+        assert lease.calls[0]["session_remaining_sec"] is None
+
+    def test_the_lease_forwards_the_budget_to_its_actor(self, monkeypatch: pytest.MonkeyPatch):
+        """The lease is the last in-process hop; dropping it here loses the reaper."""
+        monkeypatch.setitem(sys.modules, "ray", _LeaseFakeRay())
+        lease = ServingLease(num_gpus=1)
+        lease._actor = _FakeActor((0, "ok", ""))  # pre-set so ensure() is a no-op
+
+        lease.run_session_kill(["echo", "hi"], timeout=5, session_remaining_sec=42.0)
+
+        assert lease._actor.run_blocking.calls[0]["session_remaining_sec"] == pytest.approx(42.0)
+
+    def test_the_worker_reaps_a_child_whose_budget_is_already_spent(self):
+        """End of the chain: the duration becomes a deadline on the worker's own clock."""
+        start = time.monotonic()
+        rc, _out, _err = rb._run_subprocess_worker(
+            cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
+            env=None,
+            cwd=None,
+            timeout_s=60,
+            soft_deadline_sec=None,
+            server_log_path=None,
+            server_already_ready=False,
+            session_remaining_sec=-1.0,
+        )
+        assert rc == SESSION_TIME_EXHAUSTED_RETURNCODE
+        assert time.monotonic() - start < 10.0
+
+    def test_the_worker_leaves_a_child_with_budget_left_alone(self):
+        rc, out, _err = rb._run_subprocess_worker(
+            cmd=["echo", "still-running"],
+            env=None,
+            cwd=None,
+            timeout_s=60,
+            soft_deadline_sec=None,
+            server_log_path=None,
+            server_already_ready=False,
+            session_remaining_sec=3600.0,
+        )
+        assert rc == 0
+        assert "still-running" in out
 
 
 # ── P2: ManagedServerProcess.exit_code (real subprocess) ─────────────────────
@@ -815,9 +927,9 @@ def test_gpu_specialist_lease_is_alive_false_before_start():
 
 
 def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
-    """§3.3 non-blocking start: start_async submits without blocking; poll_started
-    returns None while pending (ray.wait empty) and the pid once ready;
-    pending_seconds is > 0 while pending and 0 after the pid is obtained."""
+    """§3.3 non-blocking start: start_async submits without blocking, and
+    poll_started returns None while pending (ray.wait empty) and the pid once
+    ready."""
 
     class _FakeRayWait(_FakeRayP2):
         def __init__(self):
@@ -841,13 +953,11 @@ def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.M
     assert lease._start_ref is not None
     assert lease.poll_started() is None
     assert lease.pid() is None
-    assert lease.pending_seconds() >= 0.0
 
-    # Scheduled: wait reports ready -> pid resolves, pending resets to 0.
+    # Scheduled: wait reports ready -> pid resolves.
     fake.ready = True
     assert lease.poll_started() == 4242
     assert lease.pid() == 4242
-    assert lease.pending_seconds() == 0.0
     lease.close()
 
 
@@ -1532,6 +1642,27 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
     lease = rs.ServingLease(num_gpus=1)
     lease._actor = object()
     lease.close()  # except path swallowed
+    assert lease._actor is None
+
+
+def test_releasing_a_lease_reaps_the_served_process(serving_lease_on_a_ray_double):
+    """``ray.kill`` skips ``__ray_terminate__``, so the actor must be asked first.
+
+    The served process is deliberately started in its own POSIX session, which
+    is exactly what a process-group teardown does not reach, so a lease released
+    without asking can leave a GPU held by a process nothing owns any more.
+    """
+    lease = serving_lease_on_a_ray_double
+    lease.ensure()
+    pid = lease._actor.start.remote(["sleep", "60"]).result(timeout=10)
+    assert _pid_alive(pid)
+
+    lease.close()
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline and _pid_alive(pid):
+        time.sleep(0.05)
+    assert not _pid_alive(pid), "the served process outlived the lease that owned it"
     assert lease._actor is None
 
 

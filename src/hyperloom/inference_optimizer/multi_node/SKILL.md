@@ -220,14 +220,17 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   by `state.backend`; on infera GEAK runs on a GPU pod over SSH, installed once
   per cluster via `install-geak`). The integrate path auto-restarts the server
   after `apply-patch` — do not restart manually.
-* **Robustness auto-downgrades to mock on `nodes >= 2`.** The agent's
-  LocalProbe only sees sandbox-local resources, so on multi-node every probe
-  (`ray_head_dead`, `local_server_unreachable`, `gpu_memory_leaked`, …) is a
-  false positive. The CLI forces `--robustness-mock` (heartbeat-only; warns only
-  if `--robustness-agent` was explicit) — unless a robustness server is
-  configured (`--robustness-server-url` / `$ROBUSTNESS_SERVER_URL`), which keeps
-  the agent backend on its cluster-wide signal. Shell-level health monitoring
-  (`optimizer_runs/robustness_monitor.sh`, auto-resume on terminal
+* **Robustness runs the real agent on `nodes >= 2`, with LocalProbe off.** The
+  probe only sees sandbox-local resources, so on multi-node every probe-derived
+  symptom (`ray_head_dead`, `local_server_unreachable`, `gpu_memory_leaked`, …)
+  would be a false positive; `disable_local_probe` defaults to True there and
+  swaps the probe for a silent stub. What remains is the node-agnostic set the
+  agent reads straight off the Coordinator prompt and inbox: the deadline /
+  budget ladder, `gain_plateau`, `no_levers_found`, crash escalation,
+  `phase_budget_nearly_exhausted`, `conversation_no_progress`, plus the
+  inbox-driven `agent_stall` / `repeated_failure` / `repeated_policy_denied`
+  family. Pass `--robustness-mock` for heartbeat-only. Shell-level health
+  monitoring (`optimizer_runs/robustness_monitor.sh`, auto-resume on terminal
   `stop_reason`) is unaffected.
 
 ## Exit Codes

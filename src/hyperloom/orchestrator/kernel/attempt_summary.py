@@ -3,11 +3,12 @@
 
 """Aggregate kernel-optimization attempts into a single forensic report.
 
-Combines the per-kernel ledger (:attr:`SharedState.kernel_opt_attempts`) and
-the collective campaign history (:attr:`SharedState.collective_attempts`) with
-the kernel-agent run results to explain why the kernel-agent did not produce an
-optimized kernel. All public helpers are pure functions over ``SharedState`` +
-``session_dir`` returning JSON-ready dicts; never raise on missing files.
+Combines the per-kernel ledger (:attr:`SharedState.kernel_opt_task_attempts`)
+and the collective campaign history (:attr:`SharedState.collective_attempts`)
+with the kernel-agent run results to explain why the kernel-agent did not
+produce an optimized kernel. All public helpers are pure functions over
+``SharedState`` + ``session_dir`` returning JSON-ready dicts; never raise on
+missing files.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ UNATTEMPTED_BELOW_MIN_GPU_PCT = "below_min_gpu_pct"
 UNATTEMPTED_NEVER_DISPATCHED = "never_dispatched"
 UNATTEMPTED_UNKNOWN = "unknown"
 
-#: ``kernel_opt_attempts`` rejection reasons we surface verbatim into
+#: ``kernel_opt_task_attempts`` rejection reasons we surface verbatim into
 #: ``rejection_breakdown`` totals (anything else falls into ``other``).
 KNOWN_REJECTION_REASONS = (
     "revert_decision",
@@ -909,9 +910,7 @@ def build_kernel_optimization_summary(
     )
 
     raw_attempts: dict[str, dict[str, Any]] = dict(
-        getattr(state, "kernel_opt_task_attempts", {})
-        or getattr(state, "kernel_opt_attempts", {})
-        or {}
+        getattr(state, "kernel_opt_task_attempts", {}) or {}
     )
     attempts_map: dict[str, dict[str, Any]] = {}
     for ledger_id, attempt in raw_attempts.items():

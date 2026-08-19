@@ -4,8 +4,8 @@
 """Coordinator resume tests.
 
 Covers resume detection, ``replay_for_resume`` rebuilding undecided
-pending_proposals, pruned_families preservation, and lazy replay on the first
-``tick()``.
+pending_proposals, pruned_families preservation, lazy replay on the first
+``tick()``, and reopening the phase machine for a session that stopped in CLOSE.
 """
 
 from __future__ import annotations
@@ -60,6 +60,110 @@ async def test_existing_state_json_triggers_resume(session_dir):
         assert c.resumed_from["state_json_present"] is True
     finally:
         await c.stop()
+
+
+class TestAClosedSessionIsReopenedOnResume:
+    """CLOSE has no way out, so a leg that loads it would tick in it to the end.
+
+    The machine's only terminal phase, and the run loop stops on ``stop_reason``
+    rather than on the phase. A resumed leg that keeps CLOSE therefore spends its
+    whole new clock in a phase admitting nothing but ``report``,
+    ``session_breakdown`` and ``recover``. Every design that stops early on the
+    promise of "resume with more budget" rests on this being reopened.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_session_stopped_in_close_starts_the_next_leg_at_the_entrance(
+        self,
+        session_dir,
+    ):
+        SharedState(session_id="closed", phase="CLOSE").save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.phase == "PRELUDE"
+        finally:
+            await coordinator.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_reopening_is_recorded_as_the_transition_it_is(self, session_dir):
+        """A phase the run did not reach by working its way there needs saying so."""
+        SharedState(session_id="closed", phase="CLOSE").save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            latest = coordinator.shared_state.phase_history[-1]
+        finally:
+            await coordinator.stop()
+
+        assert latest["from_phase"] == "CLOSE"
+        assert latest["to_phase"] == "PRELUDE"
+        assert latest["evidence"]["trigger"] == "resumed_from_close"
+
+    @pytest.mark.asyncio
+    async def test_the_earlier_legs_close_sequence_does_not_count_for_this_one(
+        self,
+        session_dir,
+    ):
+        """The flag means "the sequencer already wrote the breakdown".
+
+        Carried into a leg that then never reaches CLOSE, it silences the
+        end-of-run safety net that would have written one, and the leg finishes
+        with no breakdown at all.
+        """
+        SharedState(session_id="closed", phase="CLOSE", close_sequence_done=True).save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.close_sequence_done is False
+        finally:
+            await coordinator.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_session_stopped_anywhere_else_resumes_where_it_stopped(self, session_dir):
+        """Only the phase with no exit is reopened; the rest can still make progress."""
+        SharedState(session_id="mid", phase="EXPLORE").save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.phase == "EXPLORE"
+            assert coordinator.shared_state.phase_history == []
+        finally:
+            await coordinator.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_reopened_leg_may_actually_measure_the_baseline_it_reopened_for(
+        self,
+        session_dir,
+    ):
+        """Reopening the phase is only half of it; the round has to be admissible.
+
+        A cold anchor is a positive ``baseline_tput``, which is what the singleton
+        rule refuses repeats on -- so the leg would reopen at PRELUDE, decline to
+        finish while the mark is set, decline to close while the clock is healthy,
+        and have the one round that clears the mark denied on its way in. This is
+        the last link in the chain the whole cold-anchor design rests on, and
+        nothing above it can tell whether it holds.
+        """
+        SharedState(
+            session_id="cold",
+            phase="CLOSE",
+            baseline_tput=1000.0,
+            baseline_measure_round_dropped=True,
+        ).save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert coordinator.shared_state.phase == "PRELUDE"
+            coordinator.policy.validate_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.DELEGATE,
+                    payload={"action_name": "baseline", "params": {}},
+                ),
+            )
+        finally:
+            await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -327,7 +431,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
 
 
 class TestN23ResumePerSession:
-    """``--resume`` understands the N17 per-session layout, exercising ``find_latest_per_session_dir``."""
+    """``--resume-from`` addresses a session inside the N17 per-session layout."""
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch, tmp_path):
@@ -335,20 +439,6 @@ class TestN23ResumePerSession:
 
         monkeypatch.setenv(_paths.ENV_USER_DATA_PATH, str(tmp_path))
         monkeypatch.delenv(_paths.ENV_CURRENT_SESSION_DIR, raising=False)
-
-    def test_resume_picks_latest_subdir_after_two_launches(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
-
-        sd1 = _paths.make_session_dir(model_name="DeepSeek-R1-0528")
-        assert _paths.find_latest_per_session_dir() == sd1
-        assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd1
-
-        later_ts = "29990101T000000Z"
-        sd2 = tmp_path / "DeepSeek-R1-0528" / later_ts
-        sd2.mkdir(parents=True)
-
-        assert _paths.find_latest_per_session_dir() == sd2
-        assert _paths.find_latest_per_session_dir(model_name="DeepSeek-R1-0528") == sd2
 
     def test_resume_does_not_mutate_user_data_path(self, tmp_path):
         from hyperloom.inference_optimizer.session import paths as _paths
@@ -360,11 +450,6 @@ class TestN23ResumePerSession:
         assert _os.environ[_paths.ENV_CURRENT_SESSION_DIR] == str(sd)
         assert _paths.workspace_root() == tmp_path
         assert tmp_path in sd.parents
-
-    def test_resume_falls_back_to_flat_when_no_per_session_subdir(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
-
-        assert _paths.find_latest_per_session_dir() is None
 
     def test_resume_from_explicit_path_must_be_under_workspace_root(
         self,
@@ -384,36 +469,22 @@ class TestN23ResumePerSession:
         except ValueError:
             pass
 
-    def test_latest_picks_across_models_when_model_name_omitted(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["optimize", "--resume"],
+            # The command line already-deployed robustness monitor copies send.
+            ["optimize", "--resume", "--resume-from", "/tmp/sess"],
+        ],
+    )
+    def test_no_session_can_be_resumed_without_naming_it(self, argv):
+        """``--resume`` cannot start a run; it exits instead of choosing a session."""
+        from hyperloom.inference_optimizer.cli.parser import _build_parser
 
-        (tmp_path / "ModelA").mkdir()
-        (tmp_path / "ModelA" / "20260101T000000Z").mkdir()
-        (tmp_path / "ModelB").mkdir()
-        (tmp_path / "ModelB" / "20260520T000000Z").mkdir()
-        (tmp_path / "ModelC").mkdir()
-        (tmp_path / "ModelC" / "20260315T000000Z").mkdir()
+        with pytest.raises(SystemExit) as exc:
+            _build_parser().parse_args(argv)
+        assert exc.value.code == 2
 
-        picked = _paths.find_latest_per_session_dir()
-        assert picked is not None
-        assert picked.parent.name == "ModelB"
-        assert picked.name == "20260520T000000Z"
-
-    def test_workspace_shared_dirs_never_picked_as_session(self, tmp_path):
-        from hyperloom.inference_optimizer.session import paths as _paths
-
-        (tmp_path / "runtime").mkdir()
-        (tmp_path / "runtime" / "20990101T000000Z").mkdir()
-        (tmp_path / "logs").mkdir()
-        (tmp_path / "logs" / "20990101T000000Z").mkdir()
-        (tmp_path / "RealModel").mkdir()
-        (tmp_path / "RealModel" / "20260518T100000Z").mkdir()
-
-        picked = _paths.find_latest_per_session_dir()
-        assert picked is not None
-        assert picked.parent.name == "RealModel"
-        assert "runtime" not in str(picked)
-        assert "logs" not in str(picked)
 
 
 # _load_kernel_agent_env_fallback hard-fails on bad state

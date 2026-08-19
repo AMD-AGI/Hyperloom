@@ -752,7 +752,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
   "final": {
     "throughput_tok_s_per_gpu": 150.0,
     "cumulative_gain_pct_validated": 50.0,
-    "cumulative_gain_pct_per_round_sum": 50.0,
     "validated_at_stack_len": 4,
     "validated_ts": "2026-05-17T13:48:01Z",
     "stack_changed_after_validation": false,

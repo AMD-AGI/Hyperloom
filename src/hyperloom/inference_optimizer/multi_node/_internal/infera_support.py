@@ -161,73 +161,6 @@ def _classify_pod_role(
     return None
 
 
-def discover_role_pods(
-    workload: dict[str, Any],
-    *,
-    pd_mode: str = "aggregated",
-    ssh_port_base: int = DEFAULT_SSH_PORT,
-) -> dict[str, list[dict[str, Any]]]:
-    """Group a SaFE GetWorkloadResponse's pods by role.
-
-    ``pd_mode`` selects the positional serviceRoles used to map a pod's slot
-    index (resourceId / ``-role<N>-``) to its role. Returns
-    ``{"frontend": [...], "prefill": [...], "decode": [...], "worker": [...]}``;
-    each entry is ``{"podId", "podIP", "role", "lwsIndex", "sshPort"}`` for pods
-    with a non-empty ``podIP``, sorted by LWS ordinal (leader = 0) for
-    deterministic rank order.
-
-    Args:
-        workload: A SaFE GetWorkloadResponse mapping with a ``pods`` list.
-        pd_mode: Deployment topology selecting the positional service roles.
-        ssh_port_base: Base SSH port the pods were deployed with.
-
-    Returns:
-        A mapping of role to its list of pod SSH target dicts, sorted by LWS
-        ordinal then pod id.
-    """
-    service_roles = _service_roles_for(pd_mode)
-    groups: dict[str, list[dict[str, Any]]] = {
-        "frontend": [],
-        "prefill": [],
-        "decode": [],
-        "worker": [],
-    }
-    for p in workload.get("pods") or []:
-        if not isinstance(p, dict):
-            continue
-        pod_ip = str(p.get("podIP") or "").strip()
-        if not pod_ip:
-            continue
-        # Skip terminal / dead pods. A IDEP role pod that crashed during early
-        # scheduling lingers in GetWorkload.pods with a stale podIP but no sshd
-        # (phase=Failed/Succeeded). Including it makes restart-server SSH-fan-out
-        # to a dead replica -> "Connection refused" rc=1 -> baseline_failed.
-        # The live replacement replica (same role index) is the one we want.
-        pod_phase = str(p.get("phase") or "").strip().lower()
-        if pod_phase in ("failed", "succeeded", "terminating"):
-            continue
-        pod_id = str(p.get("podId") or "")
-        role = _classify_pod_role(pod_id, p.get("resourceId"), service_roles)
-        if role is None:
-            continue
-        lws_idx = _parse_lws_ordinal(pod_id)
-        groups[role].append(
-            {
-                "podId": pod_id,
-                "podIP": pod_ip,
-                "role": role,
-                "lwsIndex": lws_idx,
-                "sshPort": ssh_port_for_pod(role, lws_idx, ssh_port_base=ssh_port_base),
-            }
-        )
-    for role in groups:
-        groups[role].sort(
-            key=lambda d: (
-                d["lwsIndex"] if isinstance(d["lwsIndex"], int) else 1 << 30,
-                d["podId"],
-            )
-        )
-    return groups
 
 
 def pod_targets_from_lists(
@@ -296,47 +229,6 @@ def _parse_lws_ordinal(pod_id: str) -> int | None:
     return int(tail) if tail.isdigit() else None
 
 
-def frontend_service_url(
-    workload_id: str,
-    namespace: str,
-    service_info: dict[str, Any] | None = None,
-    *,
-    port: int = INFERA_FRONTEND_PORT,
-) -> str:
-    """Resolve the Infera frontend base URL for benchmarks.
-
-    Prefers the live service info (clusterIp / dns) when present; falls
-    back to the conventional ``http://<wid>.<namespace>.svc.cluster.local:<port>``.
-
-    Args:
-        workload_id: The Infera workload id.
-        namespace: The Kubernetes namespace the workload runs in.
-        service_info: Optional live service info (internalDomain / dns /
-            clusterIp / port).
-        port: Default frontend HTTP port used when none is in ``service_info``.
-
-    Returns:
-        The resolved frontend base URL.
-    """
-    if service_info:
-        # Prefer the ready-made internalDomain.
-        internal = str(service_info.get("internalDomain") or "").strip()
-        if internal:
-            internal = internal.split("://", 1)[-1].rstrip("/")
-            return f"http://{internal}"
-        # ``port`` may be a nested object {protocol, port, targetPort} or a bare int.
-        raw_port = service_info.get("port")
-        if isinstance(raw_port, dict):
-            svc_port = raw_port.get("port") or raw_port.get("targetPort") or port
-        else:
-            svc_port = raw_port or port
-        dns = str(service_info.get("dns") or service_info.get("dnsName") or "").strip()
-        cluster_ip = str(service_info.get("clusterIp") or "").strip()
-        host = dns or cluster_ip
-        if host:
-            host = host.split("://", 1)[-1].rstrip("/")
-            return f"http://{host}:{svc_port}"
-    return f"http://{workload_id}.{namespace}.svc.cluster.local:{port}"
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).

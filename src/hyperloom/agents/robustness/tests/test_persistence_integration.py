@@ -60,7 +60,7 @@ def _fresh_classifier(
             "progress": ProgressConfig(
                 gain_window_ticks=3,
                 gain_epsilon_pct=0.1,
-                no_levers_min_minutes=10_000.0,  # disable B3 in this test
+                no_levers_min_minutes=10_000.0,  # disable no_levers_found in this test
             ),
             "aiter_jit": AiterJitConfig(),
         },
@@ -77,7 +77,6 @@ def _ctx_with_tick(
     return ReactorContext(
         tick_index=tick,
         shared_state=SharedStateSnapshot(
-            session_id="sess-int",
             tick=tick,
             cumulative_gain_validated=cumulative_gain_validated,
             optimization_stack_size=optimization_stack_size,

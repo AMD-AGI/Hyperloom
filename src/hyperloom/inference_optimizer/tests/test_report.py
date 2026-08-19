@@ -63,7 +63,6 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
             "report_generated_at": "2026-06-23T00:00:00+00:00",
             "baseline_tput": 100.0,
             "current_best": {"action": "warm_replay", "tput": 136.146},
-            "cumulative_gain": 36.146,
             "cumulative_gain_validated": 36.146,
             "cumulative_gain_validated_ts": "",
             "cumulative_gain_validated_stack_len": 1,
@@ -274,6 +273,15 @@ def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
     assert "did not run" in rp._explain_stop_reason("conc_sweep_done", state)
 
 
+def test_a_session_budget_skip_is_described_as_a_sweep_that_did_not_run():
+    state = _SweepState(
+        {"status": "skipped", "was_skipped": True, "skip_reason": "session_time_budget"}
+    )
+    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    assert "did not run" in msg
+    assert "session_time_budget" in msg
+
+
 def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran(tmp_path):
     """The budget path records was_skipped for a sweep that ran its whole ladder."""
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -311,7 +319,6 @@ def test_format_md_renders_stop_explanation():
             "framework": "sglang",
             "current_best": {},
             "baseline_tput": 100.0,
-            "cumulative_gain": 0.0,
             "cumulative_gain_validated": 0.0,
             "cumulative_gain_validated_stack_len": 0,
             "optimization_stack_len": 0,

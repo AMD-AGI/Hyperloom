@@ -46,14 +46,8 @@ class Recovery(TypedDict, total=False):
         crash_timestamps (list[str]): ISO UTC timestamps of recent crashes
             (bounded tail).
         degraded_mode (bool): Whether the run entered degraded operation.
-        steward_continuation_used (bool): The steward continued the run after an
-            interruption / budget event.
         resume_pending_revalidation (bool): Accepted stack awaits post-resume
             revalidation (validated gain not yet re-trusted).
-        steward_infra_failures_total (int): Sum of steward-observed infra
-            failures across rounds.
-        steward_infra_failures_by_round (dict[str, int]): Per-round infra
-            failure counts.
         last_tick_exception (dict[str, Any] | None): Compact summary of the last
             Coordinator tick exception (tick / stage / type / message), traceback
             omitted.
@@ -63,10 +57,7 @@ class Recovery(TypedDict, total=False):
     crash_count: int
     crash_timestamps: list[str]
     degraded_mode: bool
-    steward_continuation_used: bool
     resume_pending_revalidation: bool
-    steward_infra_failures_total: int
-    steward_infra_failures_by_round: dict[str, int]
     last_tick_exception: dict[str, Any] | None
 
 
@@ -331,7 +322,6 @@ class Final(TypedDict, total=False):
     Attributes:
         throughput_tok_s_per_gpu (float | None): Final throughput (tok/s/GPU), or None.
         cumulative_gain_pct_validated (float): Validated cumulative gain percent.
-        cumulative_gain_pct_per_round_sum (float): Sum of per-round gain percents.
         validated_at_stack_len (int): Stack depth at which validation occurred.
         validated_ts (str): ISO UTC timestamp of the validation.
         stack_changed_after_validation (bool): Whether the stack changed post-validation.
@@ -351,7 +341,6 @@ class Final(TypedDict, total=False):
     throughput_tok_s_per_gpu: float | None
     throughput_unit: str  # "tok/s" (serving) or "img/s" (scriptable xDiT)
     cumulative_gain_pct_validated: float
-    cumulative_gain_pct_per_round_sum: float
     validated_at_stack_len: int
     validated_ts: str
     stack_changed_after_validation: bool
@@ -1566,8 +1555,6 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
-    # Retired field, kept (always empty) for backward compatibility with existing readers.
-    kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
     transcripts: list[SpecialistTranscriptRef]
@@ -2916,15 +2903,13 @@ class SessionBreakdown(TypedDict, total=False):
             Empty {} on non-transformers models or pre-field sessions.
         baseline (Baseline): Pre-optimization reference performance.
         final (Final): Final validated optimization state.
-        phase_timeline (list[PhaseEvent]): Flat per-action timeline (v1-reader compat).
+        phase_timeline (list[PhaseEvent]): Flat per-action timeline.
         phase_segments (list[PhaseSegment]): Phase-boundary view.
-        action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
         capability_summary (CapabilitySummary): Per-capability roll-up.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
-        param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
-        explore_search (ParamSearch): Merged explore-search ledger.
+        param_search (ParamSearch): Merged explore-search ledger.
         sweep (Sweep): Concurrency/shape sweep results.
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.

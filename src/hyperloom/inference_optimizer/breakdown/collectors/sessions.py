@@ -671,10 +671,9 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     """Project SharedState's crash / interruption / resume signals.
 
-    Folds crash / steward-continuation / degraded-mode / pending-revalidation
-    signals into the ``session.recovery`` block so a resumed run is not read as
-    a clean monotonic one. Pure / best-effort: unparseable fields are skipped,
-    never raised.
+    Folds crash / degraded-mode / pending-revalidation signals into the
+    ``session.recovery`` block so a resumed run is not read as a clean monotonic
+    one. Pure / best-effort: unparseable fields are skipped, never raised.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
@@ -705,30 +704,15 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
             "message": (str(lte.get("message") or "")[:500] or None),
         }
 
-    infra = state.get("steward_infra_failures_by_round")
-    infra_by_round: dict[str, int] = {}
-    infra_total = 0
-    if isinstance(infra, dict):
-        for k, v in infra.items():
-            iv = _to_int(v)
-            if iv is None:
-                continue
-            infra_by_round[str(k)] = iv
-            infra_total += iv
-
-    steward_continuation = bool(state.get("steward_continuation_used"))
     resume_pending = bool(state.get("resume_pending_revalidation"))
     degraded = bool(state.get("degraded_mode"))
-    recovered = bool(crash_count > 0 or crash_ts_iso or steward_continuation or resume_pending or last_exc)
+    recovered = bool(crash_count > 0 or crash_ts_iso or resume_pending or last_exc)
     return {
         "recovered": recovered,
         "crash_count": crash_count,
         "crash_timestamps": crash_ts_iso,
         "degraded_mode": degraded,
-        "steward_continuation_used": steward_continuation,
         "resume_pending_revalidation": resume_pending,
-        "steward_infra_failures_total": infra_total,
-        "steward_infra_failures_by_round": infra_by_round,
         "last_tick_exception": last_exc,
     }
 
@@ -1225,9 +1209,9 @@ def collect_final(
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
-        dict[str, Any]: The final section (throughput, validated/per-round
-        cumulative gain, stack-length bookkeeping, action path, ttft / e2el,
-        invocation, and closing-phase markers).
+        dict[str, Any]: The final section (throughput, validated cumulative
+        gain, stack-length bookkeeping, action path, ttft / e2el, invocation,
+        and closing-phase markers).
     """
     cb = state.get("current_best") or {}
     stack = state.get("optimization_stack") or []
@@ -1304,10 +1288,6 @@ def collect_final(
         # Which field holds the primary result (e2el_mean_ms vs throughput).
         "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
-        "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
-        # Provenance/basis of the recorded gain (same-harness validated vs
-        # cross-harness PROVISIONAL). Empty on native/legacy sessions.
-        "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),
         "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
         # A GEAK e2e candidate whose self-reported win is not yet confirmed by a
         # main-flow rebench; surfaced as an audit-only note and EXCLUDED from the

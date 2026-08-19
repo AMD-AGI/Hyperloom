@@ -53,6 +53,9 @@ class RcaEngine(Protocol):
             str: Root-cause summary text, or an empty string when none.
         """
 
+    async def aclose(self) -> None:
+        """Release any provider client the engine owns."""
+
 
 @dataclass
 class NoopRcaEngine:
@@ -74,6 +77,9 @@ class NoopRcaEngine:
     def drain_usage(self) -> dict[str, Any] | None:
         """No LLM is ever contacted, so there is never any usage to drain."""
         return None
+
+    async def aclose(self) -> None:
+        """No client is ever created, so there is nothing to close."""
 
 
 @dataclass

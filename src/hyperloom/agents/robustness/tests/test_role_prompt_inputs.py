@@ -29,7 +29,6 @@ def _prompt(shared: str, inbox: str, *, time_budget: str | None = None) -> str:
 def test_empty_prompt_returns_empty_context():
     ctx = from_coordinator_prompt("")
     assert isinstance(ctx, ReactorContext)
-    assert ctx.shared_state.session_id == ""
     assert ctx.inbox == []
     assert ctx.parse_warnings == ["empty prompt"]
 
@@ -41,7 +40,7 @@ def test_no_new_messages_yields_empty_inbox():
             session_id=sess-1
             model=qwen3-8b  class=qwen3
             baseline_tput=10.5  baseline_acc=0.8
-            cumulative_gain=12.5%
+            cumulative_gain_validated=12.5%
             crash_count=0
             current_action=(idle)
             """
@@ -56,11 +55,10 @@ def test_no_new_messages_yields_empty_inbox():
     ctx = from_coordinator_prompt(prompt, tick_index=3, now_unix=100.0)
     assert ctx.tick_index == 3
     assert ctx.now_unix == 100.0
-    assert ctx.shared_state.session_id == "sess-1"
     assert ctx.shared_state.model_name == "qwen3-8b"
     assert ctx.shared_state.model_class == "qwen3"
     assert ctx.shared_state.baseline_tput == 10.5
-    assert ctx.shared_state.cumulative_gain == 12.5
+    assert ctx.shared_state.cumulative_gain_validated == 12.5
     assert ctx.shared_state.crash_count == 0
     assert ctx.shared_state.current_action == ""
     assert ctx.inbox == []
@@ -88,7 +86,6 @@ def test_inbox_parses_multiple_messages_with_python_repr_payload():
         ),
     )
     ctx = from_coordinator_prompt(prompt)
-    assert ctx.shared_state.session_id == "sess-2"
     assert ctx.shared_state.model_name == ""
     assert ctx.shared_state.crash_count == 2
     assert ctx.shared_state.current_action == "baseline"
@@ -99,6 +96,35 @@ def test_inbox_parses_multiple_messages_with_python_repr_payload():
     assert first.payload == {"action_name": "baseline", "predicted_gain_pct": 0.0}
     assert second.payload["verdict"] == "approve"
     assert third.payload["task_id"] == "t-1"
+    assert ctx.parse_warnings == []
+
+
+def test_inbox_parses_per_topic_summary_fields_without_a_payload():
+    """``delegated_result`` renders ``kind=/state=/error=`` and no ``payload=``;
+    the repeated-failure signal reads those keys, so they must survive."""
+    prompt = _prompt(
+        "session_id=sess-2b\ncrash_count=0\n",
+        textwrap.dedent(
+            """\
+            === Inbox for robustness (newest last) ===
+              seq=1 msg_id=abc from=coordinator topic=delegated_result kind='baseline' state='succeeded' gain=4.875 kept=True
+              seq=2 from=coordinator topic=delegated_result kind='explore' state='failed' error='exited -8: run_1stage = False, k=v inside'
+              seq=3 msg_id=ghi from=coordinator topic=observation kind='retry' payload={'kind': 'retry', 'task_id': 't-1'}
+            """
+        ),
+    )
+    ctx = from_coordinator_prompt(prompt)
+    first, second, third = ctx.inbox
+    assert first.payload == {"kind": "baseline", "state": "succeeded", "gain": 4.875, "kept": True}
+    # A quoted value owns its inner ``k=v``; splitting there would corrupt the
+    # error text and invent a bogus ``k`` key.
+    assert second.msg_id == ""
+    assert second.payload == {
+        "kind": "explore",
+        "state": "failed",
+        "error": "exited -8: run_1stage = False, k=v inside",
+    }
+    assert third.payload == {"kind": "retry", "task_id": "t-1"}
     assert ctx.parse_warnings == []
 
 
@@ -141,15 +167,14 @@ def test_payload_with_non_dict_repr_is_preserved_as_raw():
 def test_kb_section_is_ignored_for_robustness_role():
     prompt = (
         "=== Shared session state ===\n"
-        "session_id=sess-kb\n"
-        "crash_count=0\n"
+        "crash_count=4\n"
         "=== Knowledge base hints ===\n"
         "kb-hint-do-not-parse\n"
         "=== Inbox for robustness ===\n"
         "(no new messages)\n"
     )
     ctx = from_coordinator_prompt(prompt)
-    assert ctx.shared_state.session_id == "sess-kb"
+    assert ctx.shared_state.crash_count == 4
     assert ctx.inbox == []
 
 

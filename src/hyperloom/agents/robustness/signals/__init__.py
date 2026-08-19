@@ -14,7 +14,6 @@ from .aiter_jit import (
 )
 from .budget import BudgetConfig, evaluate_budget_signals
 from .classifier import Classifier, SignalSpec
-from .cluster_fault import evaluate_cluster_fault_signals
 from .conversation_progress import (
     ConversationProgressConfig,
     evaluate_conversation_progress_signals,
@@ -38,7 +37,6 @@ from .gpu_leak import (
     GpuLeakConfig,
     GpuLeakDetector,
 )
-from .health import evaluate_health_signals
 from .kernel_pipeline import (
     KernelPipelineConfig,
     RayPendingDetector,
@@ -97,7 +95,6 @@ __all__ = [
     "SymptomSeverity",
     "TraceLensCliFiredOnce",
     "evaluate_budget_signals",
-    "evaluate_cluster_fault_signals",
     "evaluate_cold_start_signals",
     "evaluate_conversation_progress_signals",
     "evaluate_crash_signals",
@@ -105,7 +102,6 @@ __all__ = [
     "evaluate_decision_audit_signals",
     "evaluate_event_signals",
     "evaluate_external_deps_signals",
-    "evaluate_health_signals",
     "evaluate_kernel_pipeline_signals",
     "evaluate_local_health_signals",
     "evaluate_phase_budget_signals",
