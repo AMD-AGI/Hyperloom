@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,14 @@ def _args(**overrides):
     )
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def _state_with_stamp(*, elapsed_h: float, remaining_h: float) -> SharedState:
+    now = time.time()
+    start = datetime.fromtimestamp(now - elapsed_h * 3600.0, tz=timezone.utc).isoformat()
+    state = SharedState(session_id="s", start_ts=start, max_minutes=int((elapsed_h + remaining_h) * 60))
+    state.deadline_unix = now + remaining_h * 3600.0
+    return state
 
 
 def test_seed_shared_state_populates_geak_and_cli_overrides(
@@ -432,6 +441,41 @@ def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
     assert state.crash_count == 1
     assert state.deadline_unix == 1_700_000_000.0
     assert state.teardown_timings_sec == {"total": 1.5}
+
+
+def test_clean_stop_resume_notes_follow_the_stamp_not_a_larger_cli_budget() -> None:
+    """Raising --max-hours on a clean-stop resume must not be reported as time left."""
+    state = _state_with_stamp(elapsed_h=2.0, remaining_h=1.0)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
+    text = "\n".join(lines)
+    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
+    assert match is not None
+    assert abs(float(match.group(1)) - 2.0) < 0.05
+    assert abs(float(match.group(2)) - 1.0) < 0.05
+    assert "this invocation's --max-hours 8.00 does not extend or shrink that stamp" in text
+    assert "raise --max-hours or start a fresh session" not in text
+
+
+def test_clean_stop_resume_notes_do_not_tell_the_operator_to_raise_max_hours() -> None:
+    state = _state_with_stamp(elapsed_h=3.5, remaining_h=-0.5)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
+    text = "\n".join(lines)
+    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
+    assert match is not None
+    assert abs(float(match.group(1)) - 3.5) < 0.05
+    assert abs(float(match.group(2)) - 0.0) < 0.05
+    assert "WARNING: the stamped deadline is already spent" in text
+    assert "start a fresh session" in text
+    assert "does not extend the stamp" in text
+    assert "raise --max-hours or start a fresh session" not in text
+
+
+def test_clean_stop_resume_notes_omit_the_cli_mismatch_when_hours_match_the_stamp() -> None:
+    state = _state_with_stamp(elapsed_h=1.0, remaining_h=2.0)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=3.0)
+    text = "\n".join(lines)
+    assert "does not extend or shrink that stamp" not in text
+    assert "WARNING:" not in text
 
 
 def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
