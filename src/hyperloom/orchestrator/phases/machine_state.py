@@ -398,12 +398,9 @@ DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
-# EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
-# Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
-# HOURS_REMAINING is a leave-behind for later phases on long runs. When it is
-# not strictly smaller than the session, the hours gate is ignored so a 3h
-# smoke does not skip EXPLORE the moment the phase starts.
-DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
+# EXPLORE hard force-exit (overrides plateau). Fires on the unspent fraction of
+# EXPLORE's own charge-back budget, which already reserves the later phases'
+# share, so no session-remaining floor belongs beside it.
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
 # FRAMEWORK plateau knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT.
@@ -1304,30 +1301,6 @@ def phase_cap_exceeded(
     return phase_cumulative_seconds(state, now_unix=now_unix) >= cap
 
 
-# EXPLORE hard force-exit (HARD time gate)
-def _explore_hours_leavebehind_applies(state: Any, *, threshold_hours: float) -> bool:
-    """Whether IR-6's hours-remaining gate can fire for this session.
-
-    Remaining starts at ``max_hours``, so a leave-behind that is not strictly
-    smaller than the session fires the moment EXPLORE starts. The 3h default
-    is for long runs; a 3h session (the CI smoke, the 3h example) must not
-    inherit it.
-
-    Args:
-        state (Any): Frozen SharedState view.
-        threshold_hours (float): Configured hours-remaining leave-behind.
-
-    Returns:
-        bool: ``True`` when the hours gate may fire.
-    """
-    if float(threshold_hours) <= 0.0:
-        return False
-    session_hours = _max_minutes(state) / 60.0
-    if session_hours <= 0.0:
-        return False
-    return float(threshold_hours) < session_hours
-
-
 def session_remaining_seconds(
     state: Any,
     *,
@@ -1372,22 +1345,18 @@ def session_remaining_seconds(
 def should_force_exit_explore(
     state: Any,
     *,
-    hours_remaining_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     budget_pct_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires (IR-6).
+    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires.
 
-    Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
-    pct ≤ budget_pct_threshold; ``evidence`` records which fired. The hours
-    gate is ignored when the leave-behind is not strictly smaller than the
-    session (it would otherwise fire the moment EXPLORE starts).
+    Fires when the unspent fraction of EXPLORE's own charge-back budget drops
+    to ``budget_pct_threshold`` or below. A freshly entered phase always reads
+    1.0, however little of the session is left.
 
     Args:
         state (Any): Frozen SharedState view.
-        hours_remaining_threshold (float): Session-hours-remaining gate;
-            non-positive disables it. Also ignored when it covers the session.
         budget_pct_threshold (float): Phase-budget-fraction gate; non-positive
             disables the force-exit entirely.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
@@ -1398,54 +1367,17 @@ def should_force_exit_explore(
         tuple[bool, dict[str, Any]]: ``(fired, evidence)`` — whether HARD
         force-exit fires, and the measurements behind that verdict.
     """
-    evidence: dict[str, Any] = {
-        "hours_remaining_threshold": float(hours_remaining_threshold),
-        "budget_pct_threshold": float(budget_pct_threshold),
-    }
-    fired = False
-    fired_reasons: list[str] = []
-
-    # Non-positive threshold = disabled; both disabled turns force-exit off.
-    # A leave-behind that covers the whole session is also disabled: remaining
-    # starts at max_hours, so it would fire the moment EXPLORE starts.
-    hours_threshold_enabled = _explore_hours_leavebehind_applies(
-        state, threshold_hours=hours_remaining_threshold
-    )
-    pct_threshold_enabled = float(budget_pct_threshold) > 0.0
-    if float(hours_remaining_threshold) > 0.0 and not hours_threshold_enabled:
-        session_hours = _max_minutes(state) / 60.0
-        if session_hours > 0.0:
-            evidence["hours_remaining_gate"] = "disabled_leavebehind_covers_session"
-
-    session_remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if session_remaining is not None and hours_threshold_enabled:
-        evidence["session_remaining_seconds"] = round(session_remaining, 2)
-        threshold_sec = float(hours_remaining_threshold) * 3600.0
-        if session_remaining <= threshold_sec:
-            fired = True
-            fired_reasons.append("session_remaining")
-
-    phase_remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if phase_remaining is not None:
-        # Fraction of the phase's EFFECTIVE total budget — same helper that
-        # produced phase_remaining, so numerator and denominator stay in the same
-        # units (charge-back against the session for short runs, against the
-        # cycle-window-capped base for long bounded runs, flat per-window for
-        # unbounded runs).
-        phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
-        if phase_total_sec and phase_total_sec > 0:
-            remaining_pct = phase_remaining / phase_total_sec
-            evidence["phase_remaining_pct"] = round(remaining_pct, 4)
-            evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
-            if pct_threshold_enabled and remaining_pct <= float(budget_pct_threshold):
-                fired = True
-                fired_reasons.append("phase_remaining_pct")
-
-    evidence["fired_reasons"] = fired_reasons
+    evidence: dict[str, Any] = {"budget_pct_threshold": float(budget_pct_threshold)}
+    phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    if not phase_total_sec:
+        evidence["fired_reasons"] = []
+        return False, evidence
+    phase_remaining = max(0.0, phase_total_sec - phase_cumulative_seconds(state, now_unix=now_unix))
+    remaining_pct = phase_remaining / phase_total_sec
+    evidence["phase_remaining_pct"] = round(remaining_pct, 4)
+    evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
+    fired = float(budget_pct_threshold) > 0.0 and remaining_pct <= float(budget_pct_threshold)
+    evidence["fired_reasons"] = ["phase_remaining_pct"] if fired else []
     return fired, evidence
 
 
@@ -2507,7 +2439,6 @@ def exit_normal_explore(
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
     plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit.
@@ -2527,8 +2458,6 @@ def exit_normal_explore(
             which the plateau gain arm is active.
         plateau_empty_streak_threshold: Consecutive empty specialist rounds
             required for the plateau streak arm.
-        force_exit_hours_remaining (float): Session-hours-remaining force-exit
-            leave-behind; ignored when it covers the whole session.
         force_exit_budget_pct (float): Phase-budget-fraction force-exit
             threshold.
 
@@ -2538,7 +2467,6 @@ def exit_normal_explore(
     """
     forced, force_ev = should_force_exit_explore(
         state,
-        hours_remaining_threshold=force_exit_hours_remaining,
         budget_pct_threshold=force_exit_budget_pct,
         budget_pct=budget_pct,
         now_unix=now_unix,
