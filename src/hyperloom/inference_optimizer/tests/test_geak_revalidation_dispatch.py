@@ -317,6 +317,73 @@ async def test_cleared_pending_without_resume_flag_rejects_result(coordinator) -
     assert not any(e.get("action") == "geak_e2e" for e in st.optimization_stack)
 
 
+@pytest.mark.asyncio
+async def test_settle_preserves_candidate_audit_fields(coordinator) -> None:
+    """Settling must not discard the self-reported numbers the report shows."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.geak_result = {"status": "ok"}
+    c.phase_kernel._record_geak_candidate(
+        {
+            "status": "ok",
+            "final_throughput_tok_s": 116.0,
+            "throughput_speedup": 1.16,
+            "accepted_config": {"flags": "--foo", "env": ""},
+        }
+    )
+    st.geak_pending = {**st.geak_pending, "revalidation_task_id": "gone-task"}
+    assert st.geak_pending["self_reported_gain_pct"] == pytest.approx(16.0)
+
+    settled = await gr.settle_dangling_geak_pending(c.tasks, st, reason="close_sequence")
+
+    assert settled is True
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert st.geak_pending["revalidation_error"] == "close_sequence"
+    # The audit numbers survive so the report can name what was dropped.
+    assert st.geak_pending["self_reported_gain_pct"] == pytest.approx(16.0)
+    assert st.geak_pending["self_reported_tput"] == pytest.approx(116.0)
+    # The id of a task that will never land must not outlive the slot.
+    assert "revalidation_task_id" not in st.geak_pending
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_closing_stops_rebench_and_settles(coordinator) -> None:
+    """The wall-clock closing path never reaches ``_on_enter_close``.
+
+    It cancels queued work but left the slot at ``awaiting_rebench`` and a
+    running rebench alive, so the report claimed a rebench was still coming
+    while the task had already been cancelled.
+    """
+    c = coordinator
+    st = c.shared_state
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok"}
+
+    queued = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="queued-at-timeout",
+    )
+    running = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0, 1),
+        task_id="running-at-timeout",
+    )
+    await c.tasks.transition(running.task_id, "running")
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": running.task_id}
+    st.resume_pending_revalidation = True
+
+    await c._enter_closing_phase(grace_sec=30.0)
+
+    assert (await c.tasks.get(queued.task_id)).state == "cancelled"
+    assert (await c.tasks.get(running.task_id)).state == "cancelled"
+    assert st.geak_pending["status"] == "rebench_cancelled"
+    assert st.resume_pending_revalidation is False
+
+
 def _render_final(geak_pending: dict) -> tuple[list[str], list[str]]:
     from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
 

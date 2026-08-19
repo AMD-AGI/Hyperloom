@@ -161,46 +161,54 @@ class ClosePhase(PhaseHandler):
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
-    async def _drain_geak_rebench_for_close(self) -> None:
-        """Stop any GEAK 2b rebench and close its pending slot before CLOSE runs.
+    async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
+        """Stop any GEAK 2b rebench and close its pending slot as the run winds down.
 
-        CLOSE only writes reports, so a rebench cannot contribute a headline any
-        more and a running one would hold the GPU lane against the post-opt
-        roofline. The phase boundary already cancelled the queued case; running
-        work and the pending slot are settled here.
+        Shared by both wind-down paths: the CLOSE sequencer and the wall-clock
+        closing phase. Neither can still turn a rebench into a headline, and a
+        running one holds the GPU lane against the post-opt roofline, so the task
+        is cancelled and the slot settled.
+
+        Args:
+            reason: Stamped on the cancellations and the settled slot.
         """
         try:
             dropped = await _geak_rebench.cancel_geak_rebench_tasks(
                 self.tasks,
-                reason="close_sequence",
+                reason=reason,
                 include_running=True,
             )
             if dropped:
-                log.info("CLOSE: cancelled %d in-flight GEAK rebench task(s)", len(dropped))
+                log.info(
+                    "%s: cancelled %d in-flight GEAK rebench task(s)",
+                    reason,
+                    len(dropped),
+                )
             settled = await _geak_rebench.settle_dangling_geak_pending(
                 self.tasks,
                 self.shared_state,
-                reason="close_sequence",
+                reason=reason,
             )
             if not (dropped or settled):
                 return
             if settled:
-                log.info("CLOSE: settled a GEAK revalidation slot that can no longer land")
+                log.info("%s: settled a GEAK revalidation slot that can no longer land", reason)
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001
-                log.exception("CLOSE: geak_pending settle save failed")
+                log.exception("%s: geak_pending settle save failed", reason)
             await self._record_observation(
                 "coordinator",
                 "observation",
                 {
                     "kind": "geak_rebench_close_drain",
+                    "reason": reason,
                     "cancelled_task_ids": dropped,
                     "pending_settled": bool(settled),
                 },
             )
-        except Exception:  # noqa: BLE001 — close must proceed even if this fails
-            log.exception("CLOSE: GEAK rebench drain failed (non-fatal)")
+        except Exception:  # noqa: BLE001 — wind-down must proceed even if this fails
+            log.exception("%s: GEAK rebench drain failed (non-fatal)", reason)
             await self._record_close_step(
                 "geak_rebench_drain",
                 status="failed",
@@ -775,6 +783,12 @@ class ClosePhase(PhaseHandler):
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
+
+        # The wall-clock path never reaches ``_on_enter_close``, so it owns the
+        # same wind-down: a rebench left running would keep writing back during
+        # the grace window, and an unsettled slot makes the report promise a
+        # rebench whose task the loop above has already cancelled.
+        await self._drain_geak_rebench_for_close(reason="closing_phase")
 
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task, _existing = await self.tasks.create_or_return_existing(

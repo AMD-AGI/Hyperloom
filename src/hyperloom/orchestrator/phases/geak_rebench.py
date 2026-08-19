@@ -195,6 +195,10 @@ async def settle_dangling_geak_pending(tasks: TaskRegistry, state: Any, *, reaso
     boundary into CLOSE already cancels the queued rebench, so the CLOSE
     sequencer finds nothing left to cancel yet still has to close the slot. A
     rebench still in flight is left alone so its result can arrive.
+
+    Only the verdict fields change. The candidate's self-reported numbers are
+    what the report uses to say *what* was dropped, so they are kept; the id of
+    a task that will never land is not.
     """
     pending = getattr(state, "geak_pending", None) or {}
     if not isinstance(pending, dict):
@@ -203,10 +207,11 @@ async def settle_dangling_geak_pending(tasks: TaskRegistry, state: Any, *, reaso
         return False
     if await find_inflight_geak_rebench_task(tasks) is not None:
         return False
-    state.geak_pending = {
-        "status": "rebench_cancelled",
-        "revalidation_error": str(reason)[:500],
-    }
+    settled = dict(pending)
+    settled["status"] = "rebench_cancelled"
+    settled["revalidation_error"] = str(reason)[:500]
+    settled.pop("revalidation_task_id", None)
+    state.geak_pending = settled
     state.resume_pending_revalidation = False
     return True
 
