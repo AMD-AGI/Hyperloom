@@ -723,17 +723,23 @@ def _worked_from_stack(stack: list[dict[str, Any]], gains: list[Any]) -> list[di
 
 
 def has_new_keep(state: Any) -> bool:
-    """True when the promoted KEEP-only stack has a non-replay entry.
+    """True when the promoted KEEP-only stack has a performance optimization entry.
 
     ``optimization_stack`` is the accepted stack, not the attempt ledger;
     individual rows therefore do not carry a redundant KEEP decision.
+    Pre-baseline enablement KEEPs (``baseline_enablement``) establish a runnable
+    anchor but are not performance optimizations; they alone do not qualify for
+    KB writeback.
     """
     for raw in getattr(state, "optimization_stack", []) or []:
         if not isinstance(raw, Mapping):
             continue
         action = str(raw.get("action") or "").strip().lower()
-        if action not in _IGNORED_ACTIONS:
-            return True
+        if action in _IGNORED_ACTIONS:
+            continue
+        if raw.get("baseline_enablement"):
+            continue
+        return True
     return False
 
 

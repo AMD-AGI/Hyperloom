@@ -342,8 +342,9 @@ async def test_run_closing_phase_skips_reactor(session_dir):
             closing_grace_sec=5.0,
             tick_interval_sec=0.0,
         )
-        assert spy.calls >= 1
         assert calls_at_closing, "expected closing phase to be entered"
+        # A spent bound cancels phase-enter and skips reactors on the tick
+        # that trips CLOSE. CLOSE itself must still not add LLM turns.
         assert spy.calls == calls_at_closing[0]
     finally:
         await c.stop()

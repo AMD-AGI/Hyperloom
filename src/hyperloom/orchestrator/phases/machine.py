@@ -35,6 +35,9 @@ class MachinePhase(PhaseHandler):
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
+        if current == _phase_state.PHASE_CLOSE:
+            self._reopen_a_session_that_was_left_closed()
+            current = _phase_state.PHASE_PRELUDE
         if current in _phase_state.PHASE_NAMES:
             # Already initialised; keep the CLI-side budget override authoritative.
             state.phase_budget_pct = dict(self._phase_budget_pct)
@@ -53,6 +56,47 @@ class MachinePhase(PhaseHandler):
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: save after phase init failed")
+
+    def _reopen_a_session_that_was_left_closed(self) -> None:
+        """Put a session persisted in CLOSE back at the phase machine's entrance.
+
+        CLOSE is terminal -- the machine has no transition out of it -- so a
+        resumed session that loads it stays there for the whole leg. The run loop
+        does not stop on CLOSE either, so what such a leg actually does is tick
+        in a phase that admits only ``report``, ``session_breakdown`` and
+        ``recover``: it spends its new clock on none of the work it was resumed
+        for.
+
+        Reopened at PRELUDE rather than at the phase CLOSE was entered from,
+        because PRELUDE is the phase that works out where a session belongs. It
+        exits on its first evaluation when the anchor the run needs is already
+        measured, and it measures one when it is not. A session stopped for a
+        cold anchor is the second case, and re-measuring is the whole reason its
+        stop was worth resuming from.
+
+        A session that still cannot fund the work is not kept open by this: the
+        PRELUDE exits price the new clock and route it back to CLOSE, this time
+        against the budget it actually has.
+
+        Reached only from the constructor, so a session cannot reopen itself
+        mid-run -- within one leg, CLOSE is entered long after this has run.
+        """
+        state = self.shared_state
+        log.info(
+            "Coordinator: session resumed in CLOSE, a phase with no way out; "
+            "reopening at PRELUDE so the new budget can be spent on the work "
+            "the earlier leg stopped short of."
+        )
+        state.record_phase_transition(
+            to_phase=_phase_state.PHASE_PRELUDE,
+            reason="phase_entered",
+            evidence={"trigger": "resumed_from_close"},
+        )
+        # Locked True by the CLOSE sequencer and read by the end-of-run safety
+        # nets as "the sequencer already wrote the breakdown". Carried into a leg
+        # that then never reaches CLOSE, it suppresses the write that would have
+        # stood in for it, and the leg produces no breakdown at all.
+        state.close_sequence_done = False
 
     def _ensure_recipe_kb_t0_anchored(self) -> None:
         """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when recipe_kb is None or recipe_kb_session_id set."""
@@ -223,6 +267,15 @@ class MachinePhase(PhaseHandler):
         prior = state.phase
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
+            state.consume_pending_escalate_hint()
+        elif (
+            str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
+            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
+            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
+        ):
+            # SWEEP already had an honest closeout, so skip_to_close was
+            # suppressed. Drop it here or the next phase inherits it and
+            # becomes robustness_escalated.
             state.consume_pending_escalate_hint()
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (

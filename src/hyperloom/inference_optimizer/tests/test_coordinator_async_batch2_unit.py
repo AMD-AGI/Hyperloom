@@ -189,6 +189,22 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
+def test_every_delegated_name_resolves_on_its_collaborator(coord: Coordinator) -> None:
+    """A map entry naming a method its collaborator never defined is a crash at first call, not at import.
+
+    A field run lost every EXPLORE variant-failure record to exactly that: the
+    entry was there, the method was not, and ``__getattr__`` raised only once
+    the reap loop reached for it.
+    """
+    unresolved = []
+    for name in Coordinator._DELEGATED:
+        try:
+            getattr(coord, name)
+        except AttributeError as exc:
+            unresolved.append(f"{name}: {exc}")
+    assert unresolved == []
+
+
 # -- _context_inbox_reader --------------------------------------------------
 def test_context_inbox_reader_empty(coord: Coordinator) -> None:
     out = coord._context_inbox_reader()

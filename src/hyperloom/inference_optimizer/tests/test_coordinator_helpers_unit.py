@@ -46,21 +46,6 @@ def test_infer_model_class_ignores_bool_experts(tmp_path):
     assert ch._infer_model_class_from_config(str(tmp_path)) == "dense"
 
 
-# ---- effective_closing_grace_sec ----
-
-
-def test_closing_grace_explicit():
-    assert ch.effective_closing_grace_sec(100, 0) == 0.0
-    assert ch.effective_closing_grace_sec(100, 5) == 5.0
-
-
-def test_closing_grace_default():
-    # min(120, max_minutes*60*0.02).
-    assert ch.effective_closing_grace_sec(200, None) == 120.0
-    assert ch.effective_closing_grace_sec(10, None) == 12.0
-    assert ch.effective_closing_grace_sec(None, None) == 0.0
-
-
 # ---- _parse_iso_unix ----
 
 

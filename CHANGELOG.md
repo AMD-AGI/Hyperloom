@@ -7,6 +7,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
+  `--max-iters` this repository put on every `forge-loop` and
+  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
+  are bounded by `--max-hours`, and the flag had already been documented there
+  as accepted-and-ignored. The compiled/ASM fellow cap those variables fed was
+  therefore a no-op that logged a cap it never applied. `--max-hours` and the
+  hard-kill timeout remain the only budget controls, exactly as before.
+
+### Changed
+
+- **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
+  KernelForge renamed the option to match the spelling the rest of its CLI
+  already used, and `forge-fuse` rejects an unknown option outright rather than
+  ignoring it, so every fusion run was exiting 2 before it started and
+  surfacing as a missing `fusion_manifest.json`. The `llm_model` key in the
+  wrapper's own input JSON is unchanged.
+
+### Fixed
+
+- **`best_result.json` is read again.** `_validated_forge_best_result` gated on
+  `schema_version == 1`; KernelForge has stamped `2` into that file since
+  2026-08-13. Every published best was therefore rejected and the kernel
+  backend fell through to the caller checkpoint or the stdout sentinel, losing
+  the one record that survives a hard kill — the case it exists for. The gate
+  now names the producer's constant, and a test pins the two together so the
+  next bump cannot drift silently. The eight tests that already covered this
+  salvage path were passing only because their fixtures carried the same wrong
+  version; they now publish what the producer publishes.
+
+## [v1.0.0b2] - 2026-08-19
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2)
+for the user-facing summary.
+
+### Removed
+
 - **BREAKING — `kernel_optimization.py` no longer accepts `--test-command` or
   `--test-harness-path`.** The unittest-harness contract they fed had no
   reachable caller; an external invoker still passing either flag now fails in
@@ -52,26 +89,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `run_fusion` is no longer registered in `KERNEL_REQUEST_HANDLERS`. It is
   invoked directly by `KernelPhase`, so no request ever carried that kind.
 
-- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
-  `--max-iters` this repository put on every `forge-loop` and
-  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
-  are bounded by `--max-hours`, and the flag had already been documented there
-  as accepted-and-ignored. The compiled/ASM fellow cap those variables fed was
-  therefore a no-op that logged a cap it never applied. `--max-hours` and the
-  hard-kill timeout remain the only budget controls, exactly as before.
-
 - The `KERNEL_OPT_BACKENDS` environment variable is gone. No production code
   read it; `KERNEL_OPT_BACKEND_ORDER` is the sole backend switch, and only an
   exact `forge` opts out of the default GEAK phase.
 
 ### Changed
 
-- **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
-  KernelForge renamed the option to match the spelling the rest of its CLI
-  already used, and `forge-fuse` rejects an unknown option outright rather than
-  ignoring it, so every fusion run was exiting 2 before it started and
-  surfacing as a missing `fusion_manifest.json`. The `llm_model` key in the
-  wrapper's own input JSON is unchanged.
+- The recommended vLLM container image is now the official upstream
+  `vllm/vllm-openai-rocm:v0.27.1` instead of
+  `rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`, because AMD deprecated `rocm/vllm`
+  and `rocm/vllm-dev`. The tag is a 1:1 replacement, but its entrypoint is
+  `vllm serve`, so a long-running Hyperloom container has to override it (for
+  example `--entrypoint tail`). SGLang images are unchanged.
 
 - The default Magpie benchmark dependency is upgraded from v0.1.0 to v0.2.0.
   Both the installer and runtime preflight remain pinned to the immutable
@@ -93,21 +122,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   single source of truth for the kernel backend on a resume as well. The field
   itself is unchanged and still feeds the session breakdown.
 
-### Fixed
-
-- **`best_result.json` is read again.** `_validated_forge_best_result` gated on
-  `schema_version == 1`; KernelForge has stamped `2` into that file since
-  2026-08-13. Every published best was therefore rejected and the kernel
-  backend fell through to the caller checkpoint or the stdout sentinel, losing
-  the one record that survives a hard kill — the case it exists for. The gate
-  now names the producer's constant, and a test pins the two together so the
-  next bump cannot drift silently. The eight tests that already covered this
-  salvage path were passing only because their fixtures carried the same wrong
-  version; they now publish what the producer publishes.
-
 ## [v1.0.0b1] - 2026-08-11
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
 for the user-facing summary.
 
@@ -392,7 +408,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0b1...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0b2...HEAD
+[v1.0.0b2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2
 [v1.0.0b1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1
 [v1.0.0a3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3
 [v1.0.0a2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2
