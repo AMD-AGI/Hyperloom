@@ -499,8 +499,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "exacts), `attn_*,vllm_aiter_*` (globs). Exported into "
         "the internal SKIP_VARIANTS handoff so all executors and the multi-node orchestrator "
         "subprocess see the same value. Dropped variants surface in "
-        "state.json under each action's `dropped_variants` field tagged "
-        "`source=user_skip`.",
+        "state.json under `explore_search.last_round.skipped_dup`, and in the "
+        "action's per-variant outcomes, tagged `user_skip`.",
     )
     opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
     opt.add_argument(
