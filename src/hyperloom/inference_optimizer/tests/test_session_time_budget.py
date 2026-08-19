@@ -1385,6 +1385,19 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert stamped == pytest.approx(start + 3600.0, abs=2.0)
 
     @pytest.mark.asyncio
+    async def test_run_stamps_a_fractional_budget_before_int_truncation(
+        self, coord: Coordinator
+    ):
+        from hyperloom.common.coerce import to_unix
+
+        try:
+            await coord.run(max_ticks=1, max_minutes=0.0001, closing_grace_sec=0.0)
+        finally:
+            await coord.stop()
+        start = to_unix(coord.shared_state.start_ts)
+        assert coord.shared_state.deadline_unix == pytest.approx(start + 0.006, abs=0.05)
+
+    @pytest.mark.asyncio
     async def test_run_keeps_a_deadline_stamped_before_this_process(self, coord: Coordinator):
         from datetime import datetime, timedelta, timezone
 

@@ -138,6 +138,13 @@ def test_session_remaining_seconds() -> None:
         )
         == 600.0
     )
+    assert (
+        ps.session_remaining_seconds(
+            SimpleNamespace(max_minutes=0, deadline_unix=2000.0),
+            now_unix=1400.0,
+        )
+        == 600.0
+    )
 
 
 def test_post_prelude_target() -> None:

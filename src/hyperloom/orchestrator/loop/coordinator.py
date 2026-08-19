@@ -1466,10 +1466,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
         self.shared_state.closing_grace_sec = closing_grace_sec
         max_minutes_value = max_minutes if max_minutes is not None else 0
-        if max_minutes is not None:
-            self.shared_state.max_minutes = int(max_minutes)
         if max_minutes:
-            self.shared_state.stamp_deadline_unix()
+            # Stamp from the float budget before persisting ``int(max_minutes)``.
+            # ``int(0.0001)`` is 0, and stamping after that truncation used to
+            # leave ``deadline_unix`` unset so remaining-time checks read unbounded.
+            self.shared_state.stamp_deadline_unix(budget_minutes=float(max_minutes))
+            self.shared_state.max_minutes = int(max_minutes)
             self.shared_state.save(self.session_dir)
             deadline = self.shared_state.monotonic_session_deadline_sec()
             if deadline is None:
@@ -1477,6 +1479,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         else:
             self.shared_state.deadline_unix = 0.0
             if max_minutes is not None:
+                self.shared_state.max_minutes = int(max_minutes)
                 self.shared_state.save(self.session_dir)
             deadline = time.monotonic() + _phase_state.DEFAULT_LONGRUN_MAX_MINUTES * 60.0
         self._run_started_monotonic = time.monotonic()

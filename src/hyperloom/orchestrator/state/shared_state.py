@@ -3669,36 +3669,53 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         delta = (now_dt - start).total_seconds() / 60.0
         return max(0.0, delta)
 
-    def stamp_deadline_unix(self, *, now_unix: float | None = None) -> float:
+    def stamp_deadline_unix(
+        self,
+        *,
+        now_unix: float | None = None,
+        budget_minutes: float | None = None,
+    ) -> float:
         """Persist the absolute session deadline if a bounded session has none.
 
         A resume must not reissue a full ``max_minutes`` from the moment
         ``Coordinator.run`` is entered. The first stamp — ``start_ts`` plus the
         budget — is what every remaining-time check reads.
 
+        ``budget_minutes`` is the run() argument before it is stored as
+        ``int(max_minutes)``. Tests pass fractional minutes; truncating first
+        would make this a no-op and leave the loop with no persisted deadline.
+
         Args:
             now_unix: Clock used only when ``start_ts`` cannot be parsed;
                 defaults to ``time.time()``.
+            budget_minutes: Minutes to add to ``start_ts``; ``None`` uses
+                :attr:`max_minutes`.
 
         Returns:
             The unix deadline, or ``0.0`` when the session is unbounded.
         """
-        if not self.max_minutes:
+        minutes = float(self.max_minutes or 0) if budget_minutes is None else float(budget_minutes)
+        existing = float(self.deadline_unix or 0.0)
+        if minutes <= 0:
+            # A truncated stored budget must not erase a stamp this process or
+            # an earlier one already wrote.
+            if existing > 0.0:
+                return existing
             self.deadline_unix = 0.0
             return 0.0
-        existing = float(self.deadline_unix or 0.0)
         if existing > 0.0:
             return existing
         start = to_unix(self.start_ts, None)
         origin = float(start) if start else float(now_unix if now_unix is not None else time.time())
-        self.deadline_unix = origin + float(self.max_minutes) * 60.0
+        self.deadline_unix = origin + minutes * 60.0
         return self.deadline_unix
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
-        """Minutes left in the wall-clock budget; ``None`` when ``max_minutes`` unset (unbounded), else clamped at 0.
+        """Minutes left in the wall-clock budget; ``None`` when unbounded, else clamped at 0.
 
         When :attr:`deadline_unix` is stamped, remaining time is derived from
-        it so the Coordinator loop, admission, and the grid cannot disagree.
+        it so the Coordinator loop, admission, and the grid cannot disagree —
+        including when the persisted ``max_minutes`` was truncated to 0.
         Otherwise this falls back to ``max_minutes - elapsed`` so tests that
         inject elapsed without a stamp keep working.
 
@@ -3708,16 +3725,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         Returns:
             float | None: Minutes remaining in the budget (clamped at 0.0), or
-                ``None`` when ``max_minutes`` is unset.
+                ``None`` when the session is unbounded.
         """
-        if not self.max_minutes:
-            return None
         deadline = float(self.deadline_unix or 0.0)
         if deadline > 0.0:
             now_dt = now or datetime.now(timezone.utc)
             if now_dt.tzinfo is None:
                 now_dt = now_dt.replace(tzinfo=timezone.utc)
             return max(0.0, (deadline - now_dt.timestamp()) / 60.0)
+        if not self.max_minutes:
+            return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
     def monotonic_session_deadline_sec(self) -> float | None:
