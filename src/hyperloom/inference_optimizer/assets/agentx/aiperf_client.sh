@@ -25,6 +25,9 @@
 #   AGENTX_WARMUP_REQUESTS_PER_LANE (default 10),
 #   AGENTX_WARMUP_GRACE_PERIOD (max drain wait; default 1800),
 #   AGENTX_FAILED_REQUEST_THRESHOLD (error-rate abort ratio; default 0.10),
+#   AGENTX_UNSAFE_OVERRIDE (opt into a sub-900s smoke; forces the run
+#     non-submittable -- see the smoke note below),
+#   AGENTX_REALTIME_METRICS (rolling stats block; default true),
 #   AGENTX_DATASET_CONFIG_TIMEOUT (default 1800), AGENTX_LIVE_ASSISTANT,
 #   AGENTX_MMAP_CACHE_DIR (dataset mmap cache; defaults under $HF_HUB_CACHE),
 #   AGENTX_MAX_CTX (explicit opt-in client-side context cap; NEVER inferred
@@ -201,6 +204,12 @@ export AIPERF_DATASET_CONFIGURATION_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-18
 export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
 # Pre-canned assistant replay (recorded responses drive later turns).
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES="${AGENTX_LIVE_ASSISTANT:-0}"
+# Headless realtime metrics are opt-in on current aiperf, and the scrub above
+# would drop an inherited copy anyway. Without it the rolling TTFT/ITL/throughput
+# block is skipped entirely, which makes --stats-interval inert: a 60-minute
+# measurement window then emits nothing until it ends, so a run that is merely
+# slow is indistinguishable from one that has wedged. Upstream exports it too.
+export AIPERF_UI_REALTIME_METRICS_ENABLED="${AGENTX_REALTIME_METRICS:-true}"
 # Content-addressed mmap cache: on a hit this skips loader + tokenizer +
 # composer entirely, turning that 4-14 min into ~0 for every run after the
 # first. Soft default -- never required, so a bare environment still works.
@@ -216,6 +225,18 @@ AIPERF="${AIPERF_BIN:-aiperf}"
 # server/client context mismatch into an honest failure instead of a fabricated
 # win on the surviving short sessions. Matches upstream's 0.10.
 FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
+
+# The scenario enforces a 900s minimum benchmark duration, so a shortened
+# AGENTX_DURATION is a hard startup abort rather than a quick run -- there would
+# be no way to smoke-test this path at all. Upstream opts into --unsafe-override
+# below the floor; the scenario then stamps metadata.submission_valid false,
+# which benchmark_result.py rejects, so a smoke can never be mistaken for a
+# leaderboard measurement. AGENTX_ prefix because the scrub eats AIPERF_ names.
+SMOKE_ARGS=()
+if [ "$DURATION" -lt 900 ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then
+  SMOKE_ARGS+=(--unsafe-override)
+  log "SMOKE: --unsafe-override (duration=${DURATION}s); submission_valid will be false and the result cannot KEEP"
+fi
 
 log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} duration=${DURATION}s warmup=${WARMLANE}/lane grace=${WARMGRACE}s fail-thresh=${FRT}${AGENTX_MAX_CTX:+ maxctx=${AGENTX_MAX_CTX}}"
 
@@ -254,6 +275,7 @@ run_aiperf() {
     --slice-duration 1.0 \
     --no-gpu-telemetry \
     ${CTX_ARGS[@]+"${CTX_ARGS[@]}"} \
+    ${SMOKE_ARGS[@]+"${SMOKE_ARGS[@]}"} \
     --artifact-dir "$ART" --ui simple
 }
 
