@@ -76,7 +76,33 @@ def test_short_context_model_warns_before_the_round_starts(tmp_path, monkeypatch
     val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=short)))
     assert (val, src) == (short, "agentx-native-context")  # still runs
     err = capsys.readouterr().err
-    assert "native context" in err and str(AGENTX_CAPPED_CORPUS_PEAK_TOKENS) in err
+    assert "below the replay corpus peak" in err
+    assert str(AGENTX_CAPPED_CORPUS_PEAK_TOKENS) in err
+
+
+def test_explicit_flag_below_the_corpus_peak_still_warns(tmp_path, monkeypatch, capsys):
+    """``--max-model-len 8192`` is the likeliest way to get this wrong.
+
+    The warning used to live inside the auto-resolve branch, so it stayed silent
+    for exactly the two configurations that override the native context by hand.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    args = _args(_model_dir(tmp_path))
+    args.max_model_len = 8192
+    val, src = _resolve_run_max_model_len(args)
+    assert (val, src) == (8192, "--max-model-len")
+    assert "below the replay corpus peak" in capsys.readouterr().err
+
+
+def test_stale_env_below_the_corpus_peak_still_warns(tmp_path, monkeypatch, capsys):
+    """Same for an inherited ``$MAX_MODEL_LEN`` left over from a synthetic run."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("MAX_MODEL_LEN", "6144")
+    val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path)))
+    assert (val, src) == (6144, "$MAX_MODEL_LEN")
+    assert "below the replay corpus peak" in capsys.readouterr().err
 
 
 def test_long_context_model_does_not_warn(tmp_path, monkeypatch, capsys):
@@ -84,14 +110,14 @@ def test_long_context_model_does_not_warn(tmp_path, monkeypatch, capsys):
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     _resolve_run_max_model_len(_args(_model_dir(tmp_path)))  # 262144 > peak
-    assert "native context" not in capsys.readouterr().err
+    assert "below the replay corpus peak" not in capsys.readouterr().err
 
 
 def test_short_context_model_is_silent_on_the_synthetic_path(tmp_path, monkeypatch, capsys):
     """The corpus does not exist off the AgentX path; warning there is noise."""
     _clear(monkeypatch)
     _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=4096)))
-    assert "native context" not in capsys.readouterr().err
+    assert "below the replay corpus peak" not in capsys.readouterr().err
 
 
 def test_max_model_len_agentx_uses_native_context(tmp_path, monkeypatch):
@@ -111,12 +137,21 @@ def test_max_model_len_operator_override_still_wins(tmp_path, monkeypatch):
     assert (val, src) == (131072, "$MAX_MODEL_LEN")
 
 
-def test_max_model_len_agentx_falls_back_when_config_unreadable(tmp_path, monkeypatch):
-    """An uncached model must not hard-fail; the client re-resolves later."""
+def test_max_model_len_agentx_falls_back_when_config_unreadable(tmp_path, monkeypatch, capsys):
+    """An uncached model must not hard-fail -- but nothing re-resolves it later.
+
+    The client deliberately emits no context cap and the server phase is a bare
+    delegation, so this fallback really is the width the server gets. It is a
+    synthetic-shape derivation that does not describe the agentic workload, so
+    the corpus-fit warning has to fire on it too.
+    """
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=None)))
     assert (val, src) == (1024 + 1024 + 4096, "auto")
+    err = capsys.readouterr().err
+    assert "could not be read" in err
+    assert "below the replay corpus peak" in err  # 6144 << the corpus peak
 
 
 # --- sglang --context-length --------------------------------------------------
