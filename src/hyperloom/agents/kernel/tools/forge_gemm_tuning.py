@@ -19,12 +19,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy  # noqa: E402
-
-sys.path.pop(0)
-
 
 def _load_input_json(path: str) -> dict[str, Any]:
     if not path:
