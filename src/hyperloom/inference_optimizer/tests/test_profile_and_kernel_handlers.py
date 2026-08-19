@@ -1061,6 +1061,118 @@ def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
     assert "shape-discovery" not in extra, extra
 
 
+def test_materialize_profile_sglang_drops_annotations_when_patch_fails(
+    tmp_path,
+    monkeypatch,
+):
+    """A failed patch also clears the annotation-only capture options.
+
+    Without the server-side patch the trace carries no ``kernel_shape_profiler``
+    events, so requesting shape discovery / detailed annotations only pays the
+    capture cost. The vLLM branch already drops its equivalent flag."""
+    import json
+
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert body["shape_discovery"] is False, body
+    assert body["detailed_annotations"] is False, body
+
+
+def test_materialize_profile_sglang_keeps_annotations_when_patch_succeeds(
+    tmp_path,
+    monkeypatch,
+):
+    """The healthy path is untouched: annotations stay on when the patch lands."""
+    import json
+
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert body["shape_discovery"] is True, body
+    assert body["detailed_annotations"] is True, body
+
+
+def test_materialize_profile_sglang_keeps_annotations_when_patch_not_attempted(
+    tmp_path,
+    monkeypatch,
+):
+    """HYPERLOOM_ENABLE_PATCH=0 must not degrade the capture options.
+
+    Patching disabled is not the same as patching failed: the image may ship the
+    TraceLens patch already applied, in which case the annotations still work."""
+    import json
+
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert counts == {"vllm": 0, "sglang": 0}, counts
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert body["shape_discovery"] is True, body
+    assert body["detailed_annotations"] is True, body
+
+
+def test_materialize_profile_sglang_drops_graph_capture_flag_when_eager(
+    tmp_path,
+    monkeypatch,
+):
+    """``--disable-cuda-graph`` and ``--enable-profile-cuda-graph`` contradict.
+
+    The eager flag arrives via ``extra_server_args`` while the graph-capture
+    profiling flag comes from the profile YAML, so the two only meet after the
+    merges. An eager server captures no graph, leaving nothing to profile."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(
+        tmp_path,
+        "sglang",
+        {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
+    )
+    out = _materialize_config_with_envs(src, tmp_path, extra_server_args="--disable-cuda-graph")
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--disable-cuda-graph" in extra.split(), extra
+    assert "--enable-profile-cuda-graph" not in extra.split(), extra
+
+
+def test_materialize_profile_sglang_keeps_graph_capture_flag_without_eager(
+    tmp_path,
+    monkeypatch,
+):
+    """Graph-mode profiling keeps the capture flag (the healthy path)."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(
+        tmp_path,
+        "sglang",
+        {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--enable-profile-cuda-graph" in extra.split(), extra
+
+
 def test_materialize_profile_kill_switch_skips_patcher_entirely(
     tmp_path,
     monkeypatch,

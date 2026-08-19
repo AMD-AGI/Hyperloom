@@ -57,6 +57,25 @@ def optimizer_lock_path(session_dir: Path) -> Path:
     return Path(session_dir) / "runtime" / "optimizer.lock"
 
 
+def pod_history_path(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/pod_history.jsonl`` — the optimizer-owner ledger.
+
+    ``optimizer.lock`` holds only the *current* owner: each acquirer truncates
+    and rewrites it, so a session whose sandbox was rebuilt mid-run keeps no
+    record of the pods that came before. ``manifest.json`` pins the first owner
+    and the lock pins the last, which makes a multi-rebuild session read like a
+    single-pod one in post-mortem. This append-only ledger records one line per
+    acquisition so the whole ownership chain survives.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runtime/pod_history.jsonl``.
+    """
+    return Path(session_dir) / "runtime" / "pod_history.jsonl"
+
+
 # Phases (from the catalogue ``pipeline_phase`` field) whose executors own
 # a per-task ``runs/<action>/<task_id>/`` workspace.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
