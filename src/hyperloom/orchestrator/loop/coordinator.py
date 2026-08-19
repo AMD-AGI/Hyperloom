@@ -948,6 +948,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_derive_close_stop_reason": "phase_close",
         "_session_integrated_kernel_patch": "phase_close",
         "_maybe_run_close_post_opt_roofline": "phase_close",
+        "_drain_geak_rebench_for_close": "phase_close",
         "_on_enter_close": "phase_close",
         "_enqueue_runnable_internal_task": "phase_close",
         "_enqueue_internal_report_task": "phase_close",

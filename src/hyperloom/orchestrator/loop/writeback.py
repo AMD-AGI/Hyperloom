@@ -870,9 +870,13 @@ class WritebackCollaborator:
         any_changed = False
         params = task.params or {}
         if task.kind == "explore" and bool(params.get("geak_fallback")):
-            pending = getattr(self.shared_state, "geak_pending", None) or {}
-            pending_task_id = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
-            if not pending_task_id or pending_task_id == task.task_id:
+            from ..phases.geak_rebench import geak_rebench_should_apply_result
+
+            if geak_rebench_should_apply_result(
+                self.shared_state,
+                task,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            ):
                 geak_result = (
                     dict(self.shared_state.geak_result)
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -3523,7 +3527,47 @@ class WritebackCollaborator:
                             prev_best_envs=cb_now.get("extra_envs") or {},
                         ):
                             decision = "no_material"
-                if decision == "validated":
+                pending = getattr(self.shared_state, "geak_pending", None) or {}
+                pending_tid = (
+                    str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
+                )
+                from ..phases.geak_rebench import geak_rebench_should_apply_result
+
+                macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+                if not geak_rebench_should_apply_result(
+                    self.shared_state, task, macro_cycle=macro_cycle
+                ):
+                    # The slot either names another task or already carries a
+                    # verdict, so this result is orphaned or late. Record it:
+                    # silently dropping a measured rebench is hard to diagnose.
+                    log.warning(
+                        "geak 2b: ignoring %s result from rebench task %s not tracked by "
+                        "geak_pending (pending_task=%s status=%s)",
+                        decision,
+                        task.task_id,
+                        pending_tid or "<unset>",
+                        pending_status or "<unset>",
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_rebench_result_ignored",
+                                "decision": decision,
+                                "task_id": task.task_id,
+                                "idempotency_key": str(task.idempotency_key or ""),
+                                "pending_task_id": pending_tid,
+                                "pending_status": pending_status,
+                                "measured_tput": (
+                                    float(measured) if isinstance(measured, (int, float)) else None
+                                ),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak orphan rebench: observation emit failed")
+                elif decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
                     # validated gain and clear geak_pending.
@@ -4965,8 +5009,9 @@ class WritebackCollaborator:
         delta becomes the validated cumulative gain. Tagged
         ``source=resume_stack_revalidate`` so ``_promote_to_shared_state``
         reconciles ``cumulative_gain_validated_stack_len`` + clears
-        ``resume_pending_revalidation`` from the measured throughput. Idempotent
-        via a fixed idempotency key.
+        ``resume_pending_revalidation`` from the measured throughput. GEAK 2b
+        revalidations are idempotent per macro-cycle via
+        ``geak_revalidate_idempotency_key``.
 
         Args:
             reason: Human-readable reason stamped on the task params.
@@ -5021,10 +5066,16 @@ class WritebackCollaborator:
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
+                from ..phases.geak_rebench import resolve_geak_revalidate_idempotency_key
+
+                idempotency_key = await resolve_geak_revalidate_idempotency_key(
+                    self.tasks,
+                    int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                )
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
-                    idempotency_key="geak-revalidate",
+                    idempotency_key=idempotency_key,
                 )
                 try:
                     from hyperloom.inference_optimizer.breakdown.recorder import instrument
