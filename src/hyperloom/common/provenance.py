@@ -21,9 +21,9 @@ Design:
 * **stdlib-only**: any package may import it without an import cycle.
 
 ``session/manifest.py`` and the TraceShapeManifest producer both call
-``build_provenance`` for gfx/EP/graph-mode/server-args, but ``manifest.py``
-still keeps its own ``_detect_stack_fingerprint`` / ``_detect_image`` /
-``_git_revision`` for the fields it writes directly, so those detectors are
+``build_provenance`` for gfx/EP/graph-mode/server-args and the stack
+fingerprint. ``manifest.py`` still keeps its own ``_detect_image`` /
+``_git_revision`` for the fields it writes directly, so those two detectors are
 currently duplicated here.
 """
 
