@@ -2000,27 +2000,32 @@ class PreludePhase(PhaseHandler):
 
         measured = result.get("accuracy")
         eval_ran = isinstance(measured, (int, float))
+        eval_error = ""
         if not eval_ran:
             measured = None
             root = self._replay_eval_search_root(result)
-            if root is not None:
+            if root is None:
+                eval_error = "replay result names no round directory"
+            else:
                 try:
                     eval_out = parse_eval_results(root)
-                except Exception:  # noqa: BLE001 — an unreadable eval is "no verdict"
-                    eval_out = {"error": "eval parse raised"}
+                except Exception as exc:  # noqa: BLE001 — an unreadable eval is "no verdict"
+                    eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
                 parsed = eval_out.get("accuracy")
                 if isinstance(parsed, (int, float)):
                     measured = float(parsed)
                     eval_ran = True
                 else:
+                    eval_error = str(
+                        eval_out.get("error") or "no accuracy in eval output"
+                    )
                     # A results file that exists but cannot be scored means the
                     # eval ran and produced nothing usable, which is a different
                     # state from an eval that never ran.
-                    eval_ran = not str(
-                        eval_out.get("error") or ""
-                    ).startswith("no results")
+                    eval_ran = not eval_error.startswith("no results")
 
         outcome["eval_ran"] = bool(eval_ran)
+        outcome["eval_error"] = eval_error or None
         outcome["replay_accuracy"] = float(measured) if measured is not None else None
         outcome["baseline_accuracy"] = (
             baseline_accuracy if baseline_accuracy > 0 else None
@@ -2031,14 +2036,15 @@ class PreludePhase(PhaseHandler):
             return True
         if measured is None:
             # A measurement that failed is not evidence the config broke the
-            # model, and rejecting a sound replay costs more than admitting an
-            # unverified one. ``eval_ran`` records which of the two happened so
-            # the choice can be revisited against real data.
+            # model, so it must not stop the run: the replay is admitted and the
+            # reason it could not be judged is recorded instead. ``eval_ran``
+            # says whether an eval produced nothing or never ran at all.
             log.warning(
                 "warm-replay admitted without an accuracy verdict "
-                "(eval_ran=%s, baseline %.4f)",
+                "(eval_ran=%s, baseline %.4f): %s",
                 eval_ran,
                 baseline_accuracy,
+                eval_error or "no reason recorded",
             )
             return True
         if accuracy_passed(baseline_accuracy, float(measured)):

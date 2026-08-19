@@ -1437,6 +1437,11 @@ class WarmReplayOutcome(TypedDict, total=False):
     a config that was checked and passed is a different record from one that
     was never checked. ``eval_ran`` is what separates "the model scored 0.0"
     from "no score exists", which are otherwise both a null accuracy.
+
+    A measurement that fails never stops the run. The replay is admitted and
+    ``eval_error`` carries why no score could be read, so an unjudged promotion
+    is visible after the fact rather than silently indistinguishable from a
+    judged one.
     """
 
     status: str
@@ -1444,6 +1449,7 @@ class WarmReplayOutcome(TypedDict, total=False):
     actual_gain_pct: float
     throughput_after: float
     eval_ran: bool
+    eval_error: str | None
     replay_accuracy: float | None
     baseline_accuracy: float | None
     warm_recipe_tier: str

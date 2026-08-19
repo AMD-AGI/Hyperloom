@@ -121,6 +121,7 @@ class TestScoreIsFoundWhereTheDoubleRunWritesIt:
         outcome = coord.shared_state.warm_replay_outcome
         assert outcome["eval_ran"] is False
         assert outcome["replay_accuracy"] is None
+        assert "no results" in outcome["eval_error"]
 
 
 class TestWarmReplayRejectsBrokenConfigs:
@@ -186,7 +187,8 @@ class TestEveryReplayIsJudged:
 
 
 class TestAbsentEvidenceDoesNotBlock:
-    """Rejecting on a failed measurement would block every double-run replay,
+    """A failed measurement never stops the run. It is not evidence the config
+    broke the model, and rejecting on it would block every double-run replay,
     since the deciding round never carries a score of its own."""
 
     def test_a_missing_verdict_still_promotes_and_is_marked(self, tmp_path):
@@ -199,6 +201,34 @@ class TestAbsentEvidenceDoesNotBlock:
         outcome = coord.shared_state.warm_replay_outcome
         assert outcome["eval_ran"] is False
         assert outcome["replay_accuracy"] is None
+        assert outcome["eval_error"]
+
+    def test_an_unscorable_results_file_promotes_and_records_why(self, tmp_path):
+        """The eval ran and produced a file with no metric this parser knows —
+        a different state from an eval that never ran, and still not a reason
+        to stop."""
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        result = _double_run_dirs(tmp_path, warmup_score=None)
+        bench = Path(result["output_dir"]).parent / "warmup_round" / "benchmark_vllm_1"
+        (bench / "results_2026-08-19T00-00-00.json").write_text(
+            json.dumps({"results": {"gsm8k": {"unknown_metric": 1.0}}}),
+            encoding="utf-8",
+        )
+        coord._promote_warm_replay(result, task=_risky_task())
+
+        assert _promoted(coord) is True
+        outcome = coord.shared_state.warm_replay_outcome
+        assert outcome["eval_ran"] is True
+        assert outcome["replay_accuracy"] is None
+        assert "no recognized metric" in outcome["eval_error"]
+
+    def test_a_passing_replay_records_no_eval_error(self, tmp_path):
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        coord._promote_warm_replay(
+            {"status": "succeeded", "output_throughput": 738.0, "accuracy": 0.89},
+            task=_risky_task(),
+        )
+        assert coord.shared_state.warm_replay_outcome["eval_error"] is None
 
     def test_no_baseline_accuracy_means_no_reference_to_judge_against(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, 0.0)
