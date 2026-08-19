@@ -177,6 +177,28 @@ class TestDeadlineUnix:
         now = datetime.fromtimestamp(500.0, tz=timezone.utc)
         assert state.remaining_minutes(now=now) == 0.0
 
+    def test_a_stamp_survives_a_max_minutes_truncated_to_zero(self):
+        from datetime import datetime, timezone
+
+        from hyperloom.common.coerce import to_unix
+
+        state = SharedState(session_id="s")
+        stamped = state.stamp_deadline_unix(budget_minutes=0.0001)
+        start = to_unix(state.start_ts)
+        assert stamped == pytest.approx(start + 0.006, abs=0.001)
+        assert state.remaining_minutes() == pytest.approx(0.0001, abs=0.00005)
+        state.max_minutes = 0
+        now = datetime.fromtimestamp(stamped - 6.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == pytest.approx(0.1)
+
+    def test_remaining_minutes_reads_a_stamp_when_max_minutes_is_zero(self):
+        from datetime import datetime, timezone
+
+        state = SharedState(session_id="s", max_minutes=0)
+        state.deadline_unix = 2_000.0
+        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+
     def test_teardown_timings_accumulate_and_keep_a_total(self):
         state = SharedState(session_id="s")
         state.record_teardown_timing("final_json", 1.25)
