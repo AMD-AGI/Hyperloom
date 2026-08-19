@@ -4,15 +4,10 @@
 """IR-6 — EXPLORE HARD force-exit gate tests.
 
 Covers ``phase_state.should_force_exit_explore`` and its integration via
-``exit_normal_explore`` / ``compute_next_phase``. The gate fires when:
-
-* total session wall-clock remaining drops below
-  ``force_exit_hours_remaining`` hours, OR
-* EXPLORE phase remaining budget pct drops below
-  ``force_exit_budget_pct``.
-
-Either gate alone is sufficient. Both gates feed evidence into the
-phase_history audit row regardless of which (or both) fired.
+``exit_normal_explore`` / ``compute_next_phase``. The gate fires when the
+unspent fraction of EXPLORE's own charge-back budget drops to
+``force_exit_budget_pct`` or below; there is no session-wall-clock arm, which
+``test_force_exit_is_blind_to_session_length`` guards.
 """
 
 from __future__ import annotations
@@ -66,42 +61,28 @@ def _make_explore_state(
     return state
 
 
-def test_force_exit_total_remaining_below_threshold():
-    """7.5h elapsed of a 10h budget -> 2.5h remaining < 3h threshold."""
-    state = _make_explore_state(
-        max_minutes=600,
-        started_hours_ago=7.5,
-        phase_started_hours_ago=4.0,
-    )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0,
-        budget_pct_threshold=0.20,
-    )
-    assert fired is True
-    assert "session_remaining" in evidence["fired_reasons"]
-    assert evidence["session_remaining_seconds"] < 3 * 3600 + 60
-    assert evidence["hours_remaining_threshold"] == 3.0
-
-
 def test_force_exit_phase_pct_below_threshold():
-    """Phase elapsed close to its slice; session_remaining still OK."""
-    # EXPLORE slice nearly exhausted (~5% left <= 20%) while session
-    # remaining (4h) stays above the 3h threshold.
+    """A phase that has spent nearly its whole slice force-exits."""
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=6.0,
         phase_started_hours_ago=5.7,
     )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0,
-        budget_pct_threshold=0.20,
-    )
+    fired, evidence = phase_state.should_force_exit_explore(state, budget_pct_threshold=0.20)
     assert fired is True
-    assert "phase_remaining_pct" in evidence["fired_reasons"]
     assert evidence["phase_remaining_pct"] <= 0.20
-    assert evidence["session_remaining_seconds"] > 3 * 3600
+
+
+def test_force_exit_late_in_session_still_covered_by_pct_arm():
+    """An EXPLORE that overran its slice still force-exits 7.5h into a 10h run."""
+    state = _make_explore_state(
+        max_minutes=600,
+        started_hours_ago=7.5,
+        phase_started_hours_ago=4.0,
+    )
+    fired, evidence = phase_state.should_force_exit_explore(state)
+    assert fired is True
+    assert evidence["phase_remaining_pct"] == 0.0
 
 
 def test_force_exit_neither_trigger_fires():
@@ -111,39 +92,27 @@ def test_force_exit_neither_trigger_fires():
         started_hours_ago=1.0,
         phase_started_hours_ago=0.5,
     )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0,
-        budget_pct_threshold=0.20,
-    )
+    fired, evidence = phase_state.should_force_exit_explore(state, budget_pct_threshold=0.20)
     assert fired is False
-    assert evidence["fired_reasons"] == []
-    # Evidence still populated for diagnostics.
-    assert evidence["session_remaining_seconds"] > 3 * 3600
     assert evidence["phase_remaining_pct"] > 0.20
 
 
-def test_force_exit_both_triggers_fire():
-    """Both gates trigger; evidence lists both reasons."""
+@pytest.mark.parametrize("max_minutes", [60, 120, 180, 600])
+def test_force_exit_is_blind_to_session_length(max_minutes):
+    """A freshly entered EXPLORE never force-exits, however short the run."""
     state = _make_explore_state(
-        max_minutes=600,
-        started_hours_ago=7.6,
-        phase_started_hours_ago=5.7,
+        max_minutes=max_minutes,
+        started_hours_ago=0.1,
+        phase_started_hours_ago=0.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0,
-        budget_pct_threshold=0.20,
-    )
-    assert fired is True
-    assert set(evidence["fired_reasons"]) >= {
-        "session_remaining",
-        "phase_remaining_pct",
-    }
+    fired, evidence = phase_state.should_force_exit_explore(state)
+    assert fired is False
+    assert evidence["phase_remaining_pct"] == pytest.approx(1.0)
+    assert phase_state.exit_normal_explore(state) is None
 
 
 def test_force_exit_unlimited_run_never_fires():
-    """max_minutes=0 -> unlimited; gate cannot fire on session_remaining."""
+    """max_minutes=0 -> unlimited; the phase keeps its flat per-window slice."""
     state = _make_explore_state(
         max_minutes=0,
         started_hours_ago=100.0,
@@ -151,64 +120,38 @@ def test_force_exit_unlimited_run_never_fires():
     )
     fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is False
-    # Without max_minutes nothing is computable.
     assert "session_remaining_seconds" not in evidence
-    assert "hours_remaining_gate" not in evidence
 
 
-def test_force_exit_hours_leavebehind_cannot_cover_the_session():
-    """IR-6's 3h default on a 3h session must not skip EXPLORE at first tick.
+@pytest.mark.parametrize("started_hours_ago", [0.0, 1.12])
+def test_force_exit_leaves_a_short_session_its_explore_phase(started_hours_ago):
+    """A 3h run must reach EXPLORE with grids left, at entry and after PRELUDE.
 
-    Remaining starts at max_hours, so remaining <= 3h is true as soon as any
-    time has been spent. CI's 3h smoke (and the 3h example) would otherwise
-    leave EXPLORE with 0 grids.
+    The phase is graded on its own charge-back budget, which is rebuilt from
+    the time left when it starts, so entering late shrinks the allotment
+    instead of spending it.
     """
     state = _make_explore_state(
         max_minutes=180,
-        started_hours_ago=0.0,
+        started_hours_ago=started_hours_ago,
         phase_started_hours_ago=0.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0,
-        budget_pct_threshold=0.20,
-    )
+    fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is False
-    assert "session_remaining" not in evidence["fired_reasons"]
-    assert evidence["hours_remaining_gate"] == "disabled_leavebehind_covers_session"
+    assert evidence["fired_reasons"] == []
+    assert evidence["phase_remaining_pct"] == pytest.approx(1.0)
 
 
-def test_force_exit_hours_leavebehind_disabled_after_prelude_on_three_hour_session():
-    """CI shape: ~67 min spent before EXPLORE on a 3h budget."""
+def test_force_exit_fires_once_the_phase_has_spent_its_own_budget():
+    """The unspent fraction is the only thing that fires the hard gate."""
     state = _make_explore_state(
-        max_minutes=180,
-        started_hours_ago=1.12,
-        phase_started_hours_ago=0.0,
+        max_minutes=600,
+        started_hours_ago=7.6,
+        phase_started_hours_ago=4.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0,
-        budget_pct_threshold=0.20,
-    )
-    assert fired is False
-    assert "session_remaining" not in evidence["fired_reasons"]
-    assert evidence["hours_remaining_gate"] == "disabled_leavebehind_covers_session"
-
-
-def test_force_exit_explicit_hours_leavebehind_still_fires_on_short_session():
-    """An operator-set leave-behind smaller than the session still fires."""
-    state = _make_explore_state(
-        max_minutes=180,
-        started_hours_ago=2.96,
-        phase_started_hours_ago=0.01,
-    )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=0.05,
-        budget_pct_threshold=0.0,
-    )
+    fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is True
-    assert "session_remaining" in evidence["fired_reasons"]
+    assert evidence["fired_reasons"] == ["phase_remaining_pct"]
 
 
 def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
@@ -270,11 +213,8 @@ def test_force_exit_thresholds_routed_through_overrides():
         started_hours_ago=2.0,
         phase_started_hours_ago=1.0,
     )
-    state.plateau_overrides = {
-        "force_exit_hours_remaining": 9.0,
-        "force_exit_budget_pct": 0.95,
-    }
-    # With absurd thresholds, any in-progress session triggers.
+    state.plateau_overrides = {"force_exit_budget_pct": 0.95}
+    # With an absurd threshold, any in-progress phase triggers.
     nxt = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert nxt is not None
     target, reason, _ = nxt

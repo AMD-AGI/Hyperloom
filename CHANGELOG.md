@@ -34,6 +34,18 @@ for the user-facing summary.
 
 ### Removed
 
+- **BREAKING — the robustness agent's remote cluster data path is gone**, along
+  with the flags that fed it: `--robustness-server-url`,
+  `--robustness-workload-uid`, `--robustness-enable-cluster-pod-metrics` /
+  `--no-...`, and `--robustness-pod-metrics-categories`. Callers still passing
+  any of them now fail in argparse. `$ROBUSTNESS_SERVER_URL` and
+  `$ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS` are no longer read, and the startup
+  probe that tried `http://robustness-server:8000` and `http://localhost:8000`
+  on every tick is gone. No robustness-server is deployed and none of the five
+  workload-uid env keys was ever set, so the endpoints could only 404; the
+  `cluster_fault` and `pod_not_running` symptoms went with them, having had no
+  other producer.
+
 - **BREAKING — `kernel_optimization.py` no longer accepts `--test-command` or
   `--test-harness-path`.** The unittest-harness contract they fed had no
   reachable caller; an external invoker still passing either flag now fails in
@@ -83,7 +95,33 @@ for the user-facing summary.
   read it; `KERNEL_OPT_BACKEND_ORDER` is the sole backend switch, and only an
   exact `forge` opts out of the default GEAK phase.
 
+- `agents/kernel/tools/parallel_e2e_runner.py` is gone. It was the
+  self-validation harness written alongside the original kernel-agent, back when
+  no KERNEL phase existed to prove the toolkit end to end; its own first step
+  (running the SGLang baseline) was removed in May, leaving a driver with no
+  caller whose `--backends` default was empty, so it raised on any plain
+  invocation. Its `load_env_file` duplicated the credential-alias derivation that
+  `tools/backends/ray_runtime.py` still performs under wider test coverage.
+
 ### Changed
+
+- **Multi-node runs now use the real robustness agent instead of the heartbeat
+  mock.** `--nodes >= 2` previously forced `--robustness-mock`, which produced
+  no symptoms at all — including `deadline_imminent`, the signal that drives the
+  `delegate(report)` wind-down. The downgrade guarded against LocalProbe false
+  positives, but `disable_local_probe` already defaults to True on multi-node
+  and swaps the probe for a silent stub, so the signals the agent reads straight
+  off the Coordinator prompt and inbox were being discarded for no reason. Those
+  now fire: the deadline and budget ladder, `gain_plateau`, `no_levers_found`,
+  crash escalation, `phase_budget_nearly_exhausted`,
+  `conversation_no_progress`, and the inbox-driven `agent_stall` /
+  `repeated_failure` / `repeated_policy_denied` family. Expect alerts on
+  multi-node where there were none; pass `--robustness-mock` for the old
+  behaviour.
+
+- `ReactorBundle.aclose()` now closes the RCA engine's provider client. It
+  previously closed only the robustness-server client, leaking the HTTP client
+  the LLM RCA engine owns.
 
 - The recommended vLLM container image is now the official upstream
   `vllm/vllm-openai-rocm:v0.27.1` instead of

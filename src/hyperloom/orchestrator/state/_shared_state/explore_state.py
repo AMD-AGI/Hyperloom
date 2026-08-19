@@ -351,10 +351,6 @@ class _ExploreStateMixin:
         self.explore_specialist_dispatched_count = int(self.explore_specialist_dispatched_count or 0) + int(n)
         return self.explore_specialist_dispatched_count
 
-    def reset_specialist_dispatched(self) -> None:
-        """Zero the per-EXPLORE specialist dispatch counter (on fresh EXPLORE entry)."""
-        self.explore_specialist_dispatched_count = 0
-
     def bump_research_scout_runs(self, n: int = 1) -> int:
         """Increment the research-scout dispatch counter; return new total.
 
@@ -763,22 +759,6 @@ class _ExploreStateMixin:
                 return True
             return False
         return False
-
-    def framework_levers_by_state(self, *, default_on: bool) -> list[dict[str, Any]]:
-        """Return registered levers filtered by whether they are currently on.
-
-        Args:
-            default_on: Select levers that are on (``True``) or dormant
-                (``False``).
-
-        Returns:
-            The matching lever rows, in registration order.
-        """
-        return [
-            row
-            for row in (getattr(self, "authored_framework_levers", None) or [])
-            if isinstance(row, dict) and bool(row.get("default_on")) is bool(default_on)
-        ]
 
     def record_discovered_flags(
         self,

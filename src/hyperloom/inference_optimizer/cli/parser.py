@@ -245,7 +245,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Model path (required for new runs; ignored when "
-        "--resume is set — model is read from manifest.json/"
+        "--resume-from is set — model is read from manifest.json/"
         "state.json)",
     )
     opt.add_argument(
@@ -258,7 +258,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "optimization loop: it drives AMD Quark PTQ from this prompt, "
         "then rewrites --model to the exported quantized model so the "
         "rest of the run optimizes the quantized model. Ignored on "
-        "--resume.",
+        "--resume-from.",
     )
     from hyperloom.orchestrator.phases.quantization_schemes import QUANT_SCHEME_CHOICES
 
@@ -573,7 +573,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     grp = opt.add_mutually_exclusive_group()
-    grp.add_argument("--target-gain", type=float, default=None, help="Stop when cumulative_gain >= N%% over baseline")
+    grp.add_argument(
+        "--target-gain",
+        type=float,
+        default=None,
+        help="Stop when cumulative_gain_validated >= N%% over baseline",
+    )
     grp.add_argument(
         "--target-tput",
         type=float,
@@ -584,40 +589,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
     )
     opt.add_argument(
-        "--resume",
-        action="store_true",
-        default=False,
-        help="Resume an existing session. Without --resume-from, "
-        "auto-picks the latest per-session subdir under "
-        "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
-        "falls back to $USER_DATA_PATH. "
-        "USER_DATA_PATH MUST stay at workspace level "
-        "(/shared/hyperloom-sessions, not the per-session subdir) "
-        "so runtime/ resolution works. Skips the SharedState "
-        "seed and lets the Coordinator replay the prior "
-        "event log + state.json.",
-    )
-    opt.add_argument(
         "--resume-from",
         type=str,
         default=None,
-        help="Explicit per-session subdir to resume from. Use "
-        "when multiple per-launch ts dirs exist under the "
-        "same model and the latest is not what you want. "
-        "Must be an absolute path under $USER_DATA_PATH "
-        "(workspace_root). Implies --resume.",
+        help="Per-session subdir to resume; the only way to resume a session. "
+        "Skips the SharedState seed and lets the Coordinator replay the "
+        "prior event log + state.json. Must be an absolute path under "
+        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
+        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
+        "runtime/ resolution works.",
     )
     opt.add_argument(
         "--force-resume",
         action="store_true",
         default=False,
         help=(
-            "Allow ``--resume`` to push past a terminal "
+            "Allow ``--resume-from`` to push past a terminal "
             "``stop_reason='target_reached'``. "
             "Without this flag the resume aborts (Issue-G guard, per "
             "SKILL.md 'Run-time signals': that terminal requires an "
             "operator-side workload / strategy change before resuming). "
-            "No-op outside ``--resume``."
+            "No-op without ``--resume-from``."
         ),
     )
     opt.add_argument(
@@ -841,15 +833,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "or a sibling $REPO_ROOT/robustness-agent/ directory.",
     )
     opt.add_argument(
-        "--robustness-server-url",
-        dest="robustness_server_url",
-        type=str,
-        default=None,
-        help="Override the robustness-server base URL forwarded into "
-        "request.options. Honoured only when --robustness-agent is "
-        "selected.",
-    )
-    opt.add_argument(
         "--robustness-llm-rca",
         dest="robustness_llm_rca",
         action="store_true",
@@ -863,16 +846,6 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="robustness_llm_rca",
         action="store_false",
         help="Forward llm_rca_enabled=false into request.options.",
-    )
-    opt.add_argument(
-        "--robustness-workload-uid",
-        dest="robustness_workload_uid",
-        type=str,
-        default=None,
-        help="Forward workload_uid into request.options. The robustness-server "
-        "resolves it to every pod (head + workers) backing the RayJob via "
-        "the cluster/workloads/{uid}/hierarchy endpoint. Falls back to "
-        "$CLAW_WORKLOAD_UID / $WORKLOAD_UID / $RAY_JOB_ID when unset.",
     )
     opt.add_argument(
         "--robustness-disable-local-probe",
@@ -911,30 +884,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
         "/health auto-probe even in multi-node mode).",
-    )
-    opt.add_argument(
-        "--robustness-enable-cluster-pod-metrics",
-        dest="robustness_enable_cluster_pod_metrics",
-        action="store_true",
-        default=None,
-        help="Force enable_cluster_pod_metrics=true so the robustness-agent "
-        "fans out per-pod metrics through robustness-server and feeds "
-        "the local_health rules with cluster-decoded GPU snapshots.",
-    )
-    opt.add_argument(
-        "--no-robustness-enable-cluster-pod-metrics",
-        dest="robustness_enable_cluster_pod_metrics",
-        action="store_false",
-        help="Force enable_cluster_pod_metrics=false.",
-    )
-    opt.add_argument(
-        "--robustness-pod-metrics-categories",
-        dest="robustness_pod_metrics_categories",
-        type=str,
-        default=None,
-        help="Comma-separated metric categories forwarded into "
-        "pod_metrics_categories (e.g. 'gpu,memory'). Default 'gpu' is "
-        "applied by the runtime when this flag is omitted.",
     )
     opt.add_argument(
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
@@ -1403,16 +1352,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # IR-6 — EXPLORE hard force-exit thresholds (either condition fires; locked at start).
-    opt.add_argument(
-        "--explore-force-exit-hours-remaining",
-        dest="explore_force_exit_hours_remaining",
-        type=float,
-        default=None,
-        help="EXPLORE force-exit: total wall-clock remaining (hours) "
-        "below which EXPLORE exits immediately to the next phase, "
-        "regardless of plateau / steward. Default 3.0 (IR-6).",
-    )
+    # IR-6 — EXPLORE hard force-exit threshold (locked at start).
     opt.add_argument(
         "--explore-force-exit-budget-pct",
         dest="explore_force_exit_budget_pct",

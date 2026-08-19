@@ -26,6 +26,7 @@ import yaml
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
+    BLOCKED_EXTERNAL_ENV_NAMES,
     _ENV_KEY_RE,
     is_python_package_root,
     redact_secret_values,
@@ -595,7 +596,8 @@ def _build_variant_yaml(
     Args:
         base_yaml_path (Path): Path to the base Magpie YAML to template from.
         base_extra_args (str): Server args merged ahead of the variant's args.
-        variant (GridVariant): The variant whose flags/envs are applied.
+        variant (GridVariant): The variant whose flags/envs are applied; its
+            ``unset_envs`` may not remove a workload pin.
         output_subdir (Path): Directory the per-variant ``config.yaml`` is
             written into.
         model_path (str | None): Overrides ``benchmark.model`` when set.
@@ -646,6 +648,10 @@ def _build_variant_yaml(
     elif extra_args_env in envs:
         envs.pop(extra_args_env, None)
     for k in getattr(variant, "unset_envs", []) or []:
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
+        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
+            continue
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
@@ -2737,9 +2743,6 @@ def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Vari
     )
 
 
-SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
-MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
-
 
 def _existing_log_path(path: Path) -> str | None:
     """Return ``path`` as a string when it exists, else ``None``.
@@ -2868,12 +2871,10 @@ def _write_variant_abort_marker_impl(
 __all__ = [
     "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
-    "MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "ORCHESTRATOR_CANCELLED_CLASS",
     "SESSION_TIME_EXHAUSTED_CLASS",
     "StoppedByTheRun",
     "SGLANG_WATCHDOG_TIMEOUT_ENV",
-    "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_multi_node_invalid_variants",
     "apply_aiter_moe_pin_filter",

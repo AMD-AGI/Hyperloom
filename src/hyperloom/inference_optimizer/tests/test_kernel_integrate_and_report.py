@@ -1434,7 +1434,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
         assert result["decision"] == "KEEP"
         assert result["new_tput"] == 900.0
         assert c.shared_state.current_best["action"] == "integrate"
-        assert c.shared_state.current_best["kernel_id"] == "k1"
+        assert c.shared_state.current_best["variant_name"] == "k1"
         assert any(
             item.get("action") == "integrate" and item.get("kernel_id") == "k1"
             for item in c.shared_state.optimization_stack
@@ -1535,7 +1535,7 @@ async def test_report_executor_writes_md_and_json(session_dir):
         session_id=session_dir.name,
         model_name="Qwen-Qwen3-8B",
         model_path="/path/models/Qwen-Qwen3-8B",
-        cumulative_gain=12.5,
+        cumulative_gain_validated=12.5,
         current_best={
             "action": "backends",
             "tput": 900.0,
@@ -1600,7 +1600,7 @@ async def test_report_executor_writes_md_and_json(session_dir):
     summary = json.loads(js.read_text())
     assert summary["session_id"] == session_dir.name
     assert summary["baseline_tput"] == 800.0
-    assert summary["cumulative_gain"] == 12.5
+    assert summary["cumulative_gain_validated"] == 12.5
     assert summary["stop_reason"] == "target_reached"
     assert summary["event_counts_by_topic"].get("proposal", 0) >= 2
     assert summary["event_counts_by_topic"].get("alert", 0) >= 1

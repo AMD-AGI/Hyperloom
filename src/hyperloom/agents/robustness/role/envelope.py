@@ -99,7 +99,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "stop_reason",
         "stop_ts",
         "last_tick_exception",
-        "cumulative_gain",
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
@@ -120,7 +119,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "schema_version",
         # Recipe KB integration.
         "recipe_kb_session_id",
-        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",
@@ -202,7 +200,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_trace_analyze",
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
-        "kernel_opt_attempts",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
         "last_collective",
