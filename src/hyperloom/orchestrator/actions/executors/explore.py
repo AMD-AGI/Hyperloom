@@ -47,6 +47,12 @@ from ...state.failure_evidence import (
     tail_excerpt,
 )
 from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
+from ..stop_attribution import (
+    SESSION_TIME_EXHAUSTED_CLASS,
+    STOPPED_BY_THE_RUN,
+    StoppedByTheRun,
+    stopped_by_the_run_class,
+)
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -66,6 +72,7 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
@@ -978,7 +985,7 @@ class ExploreExecutor:
             search.setdefault(key, default)
 
         tested_dict = search.get("tested") or {}
-        name_index = dict(search.get("name_index") or {})
+        inherited_name_index: dict[str, Any] = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
         # loop needn't recompute.
@@ -1057,7 +1064,13 @@ class ExploreExecutor:
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
         keep_unstable: list[dict[str, Any]] = []
-        tested_update: dict[str, dict[str, Any]] = dict(tested_dict)
+        # This round's own ledger writes, kept apart from the ledger it inherited
+        # and merged over it once the loop is done. A variant whose confirmation
+        # round the run reaps has to be rolled back, and a fingerprint may be
+        # re-run across rounds -- so rolling back against a merged dict deletes
+        # the earlier round's measured row along with this round's write.
+        round_tested: dict[str, dict[str, Any]] = {}
+        round_name_index: dict[str, Any] = {}
         rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
         winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
 
@@ -1112,13 +1125,88 @@ class ExploreExecutor:
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
         # Stop testing further variants once the session wall-clock budget runs
         # out; untested variants stay out of the ledger so a resume can retry them.
-        _ss = extra.get("shared_state") or extra.get("state")
-        session_deadline_sec = _ss.grid_session_deadline_sec() if _ss is not None else None
+        #
+        # What a normally-behaving round needs, as opposed to ``timeout_sec``,
+        # which is the catastrophic backstop (``baseline x (kill_ratio + margin)``
+        # ~= baseline x 2). Gating on the backstop abandons the tail of the budget
+        # to variants that would have finished comfortably: with a 20-min baseline
+        # it refuses to start with 30 min left, for a round that needs ~20. The
+        # params values win over the session's because an operator may override
+        # them per task; ``None`` when neither is known, which leaves the stricter
+        # backstop check in place rather than guessing.
+        #
+        # The two rounds are estimated separately because they cost different
+        # amounts: the warmup pass pays a cold server boot and is discarded, while
+        # the decision round is client-only against the hot server -- which is
+        # exactly the split ``decision_anchor_sec`` already draws for the overtime
+        # kill.
+        session_deadline_sec, session_expected_sec = session_grid_bounds(
+            extra.get("shared_state") or extra.get("state")
+        )
+        warmup_expected_sec = (baseline_runtime_sec if baseline_runtime_sec > 0 else None) or session_expected_sec
+        decision_expected_sec = (decision_anchor_sec if decision_anchor_sec > 0 else None) or session_expected_sec
+        # Set when the loop stops because the run stopped it -- the budget ran
+        # out, or the orchestrator cancelled the action -- so the round can say
+        # so instead of reporting a bare, unattributed failure: a variant that
+        # never ran is not a variant that failed. ``run_stop_detail`` is the
+        # lead clause, which differs by whether a round was already under way.
+        run_stop: StoppedByTheRun | None = None
+        run_stop_detail = ""
+        session_budget_untested = 0
+
+        def _stopped_by_the_run(result: Any, *, variant: GridVariant, idx: int, round_label: str) -> bool:
+            """Whether the run stopped this round, and record it if it did.
+
+            A reaped round measured nothing, so the variant is left out of every
+            ledger exactly as an unadmitted one is: writing it as ``FAILED``
+            would make a resume skip a variant nothing ever measured, and would
+            teach the KB that these knobs are bad because a clock ran out.
+
+            Args:
+                result: The round's :class:`VariantResult`, or ``None``.
+                variant: The variant the round was measuring, for the log line.
+                idx: Its index in ``runnable``, for the untested count.
+                round_label: Which round was stopped, for the log line.
+
+            Returns:
+                bool: ``True`` when the caller must stop testing variants.
+            """
+            nonlocal run_stop, run_stop_detail, session_budget_untested
+            stopped = stopped_by_the_run_class(getattr(result, "error_class", "") if result is not None else "")
+            if stopped is None:
+                return False
+            run_stop = stopped
+            run_stop_detail = stopped.interrupted
+            session_budget_untested = len(runnable) - idx
+            log.warning(
+                "explore: the %s round of variant %s was stopped by the run (%s); it and the "
+                "%d variant(s) after it stay out of the ledger so a resume can retry them",
+                round_label,
+                variant.name,
+                stopped.error_class,
+                session_budget_untested - 1,
+            )
+            return True
+
         try:
             for idx, gv in enumerate(runnable):
-                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < float(timeout_sec):
+                # A warm-decision variant pays for both rounds, so admitting it on
+                # the decision round alone would let it in and then strand it
+                # mid-variant with a discarded warmup and no measurement.
+                if decision_expected_sec is not None:
+                    fit_required_sec = float(decision_expected_sec) + (
+                        float(warmup_expected_sec or 0.0) if use_warm_decision else 0.0
+                    )
+                else:
+                    fit_required_sec = float(timeout_sec)
+                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
+                    run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+                    run_stop_detail = run_stop.never_started
+                    session_budget_untested = len(runnable) - idx
                     log.warning(
-                        "explore: session budget cannot fit another variant; stopping after %d/%d variant(s)",
+                        "explore: session budget cannot fit another variant "
+                        "(needs %.0fs); stopping after %d/%d variant(s)",
+                        fit_required_sec,
                         idx,
                         len(runnable),
                     )
@@ -1205,8 +1293,12 @@ class ExploreExecutor:
                             server_lifecycle=round1_lifecycle,
                             base_args_mode=stack_base_args_mode,
                             serving_lease=variant_lease,
+                            session_deadline_sec=session_deadline_sec,
+                            variant_expected_sec=warmup_expected_sec,
                         )
                         w = warmup_results[0] if warmup_results else None
+                        if _stopped_by_the_run(w, variant=gv, idx=idx, round_label="warmup"):
+                            break
                         if w is None or getattr(w, "status", "") != "succeeded":
                             werr = (getattr(w, "error", "") or "")[-200:] if w is not None else "no_result"
                             log.warning(
@@ -1214,7 +1306,7 @@ class ExploreExecutor:
                                 gv.name,
                                 werr,
                             )
-                            tested_update[fp] = {
+                            round_tested[fp] = {
                                 "fingerprint": fp,
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
@@ -1240,7 +1332,7 @@ class ExploreExecutor:
                                 "raw_result_path": w.raw_result_path if w is not None else None,
                             }
                             if gv.name:
-                                name_index[gv.name] = fp
+                                round_name_index[gv.name] = fp
                             rejected_update.append(
                                 {
                                     "fingerprint": fp,
@@ -1296,6 +1388,8 @@ class ExploreExecutor:
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                         serving_lease=variant_lease,
+                        session_deadline_sec=session_deadline_sec,
+                        variant_expected_sec=decision_expected_sec,
                     )
                     if not results:
                         # run_grid returns one result per grid entry.
@@ -1305,6 +1399,8 @@ class ExploreExecutor:
                         )
                         continue
                     r = results[0]
+                    if _stopped_by_the_run(r, variant=gv, idx=idx, round_label="decision"):
+                        break
 
                     # Overtime gate fired: record a ``KILLED_OVERTIME`` row (no
                     # faked tput/gain), skip downstream gates, leave the stack
@@ -1318,7 +1414,7 @@ class ExploreExecutor:
                         # Informational only: ``tput`` stays None so this never
                         # enters winner selection or gain math.
                         est_tput = getattr(r, "estimated_output_throughput", None)
-                        tested_update[fp] = {
+                        round_tested[fp] = {
                             "fingerprint": fp,
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
@@ -1354,7 +1450,7 @@ class ExploreExecutor:
                             "error_class": "killed_overtime",
                         }
                         if gv.name:
-                            name_index[gv.name] = fp
+                            round_name_index[gv.name] = fp
                         rejected_update.append(
                             {
                                 "fingerprint": fp,
@@ -1466,7 +1562,7 @@ class ExploreExecutor:
                             outcome = "KEEP"
 
                     decision_tput = r.output_throughput
-                    tested_update[fp] = {
+                    round_tested[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
@@ -1491,7 +1587,7 @@ class ExploreExecutor:
                         "stage": FAILURE_STAGE_DECISION,
                     }
                     if gv.name:
-                        name_index[gv.name] = fp
+                        round_name_index[gv.name] = fp
 
                     # ---- KEEP path (with warm round-2 rebench) ----
                     if outcome == "KEEP":
@@ -1606,7 +1702,21 @@ class ExploreExecutor:
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
                                 serving_lease=variant_lease,
+                                session_deadline_sec=session_deadline_sec,
+                                variant_expected_sec=decision_expected_sec,
                             )
+                            # A confirmation the run stopped is not a failed
+                            # confirmation: grading it would evict a variant as
+                            # unstable on the strength of a round that never
+                            # measured it. Undo the stack fold and drop the
+                            # decision-round entry too, so a resume re-measures
+                            # the variant and its confirmation together.
+                            if _stopped_by_the_run(rebench, variant=gv, idx=idx, round_label="stack rebench"):
+                                in_batch_keeps.pop()
+                                round_tested.pop(fp, None)
+                                if gv.name:
+                                    round_name_index.pop(gv.name, None)
+                                break
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
                             stack_rebench_warnings = rebench.warnings
@@ -1623,10 +1733,10 @@ class ExploreExecutor:
                                     running_base_tput,
                                     stack_stable_threshold_pct,
                                 )
-                                tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
-                                tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
-                                tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                                tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
+                                round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
+                                round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
+                                round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                                 keep_unstable.append(
                                     {
                                         **keep_entry,
@@ -1671,11 +1781,11 @@ class ExploreExecutor:
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_workspace"] = stack_rebench_workspace
                                 keep_entry["stack_rebench_warnings"] = stack_rebench_warnings
-                                tested_update[fp]["tput"] = stack_rebench_tput
-                                tested_update[fp]["gain_pct"] = gain
-                                tested_update[fp]["stack_rebench_tput"] = stack_rebench_tput
-                                tested_update[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                                tested_update[fp]["stack_rebench_warnings"] = stack_rebench_warnings
+                                round_tested[fp]["tput"] = stack_rebench_tput
+                                round_tested[fp]["gain_pct"] = gain
+                                round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
+                                round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
                             # measurement, advance the running baseline naively.
@@ -1757,6 +1867,11 @@ class ExploreExecutor:
                 round_serving_lease.close()
 
         # ----- Ledger compaction (per-fingerprint last-wins) ----------------
+        # This round's writes over the ledger it inherited: a re-run fingerprint
+        # replaces its earlier row, which is what a fresh measurement means, and a
+        # variant this round rolled back leaves the earlier row standing.
+        tested_update: dict[str, dict[str, Any]] = {**tested_dict, **round_tested}
+        name_index: dict[str, Any] = {**inherited_name_index, **round_name_index}
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")
@@ -1914,9 +2029,24 @@ class ExploreExecutor:
             if t.get("round_id") == round_id
         )
         status = "succeeded" if produced_measurement or winners else "failed"
+        # A round that measured nothing because the run stopped it is not the
+        # same as one whose variants failed, and it used to be reported as a bare
+        # ``failed`` with no error_class at all -- nothing downstream could tell
+        # the two apart, so the KB could learn that these variants are bad.
+        budget_error: dict[str, Any] = {}
+        if status == "failed" and run_stop is not None:
+            budget_error = {
+                "error_class": run_stop.error_class,
+                "error": (
+                    f"{run_stop_detail}; {session_budget_untested} variant(s) went unmeasured "
+                    "and stay out of the ledger so a resume can retry them"
+                ),
+            }
 
         return {
             "status": status,
+            **budget_error,
+            "session_budget_untested": session_budget_untested,
             "base_tput": base_tput,
             "running_base_tput": running_base_tput,
             "output_throughput": output_throughput,

@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pending slot still reconcile validated gain. CLOSE entry finalizes dangling
   ``geak_pending`` after cancelling queued rebench tasks.
 
-## [v1.0.0b2] - 2026-08-18
+## [v1.0.0b2] - 2026-08-19
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2)

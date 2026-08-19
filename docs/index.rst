@@ -7,9 +7,9 @@ Hyperloom documentation
 ***********************
 
 ROCm Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
-(targeting both host code and GPU kernels) on AMD GPUs. Using advanced AI agents and profiling tools,
-Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
-and validates the performance and correctness of the optimizations without requiring manual intervention.
+on AMD GPUs. It uses advanced AI agents and profiling tools to analyze a workload, identify performance
+bottlenecks, implement targeted optimizations, and validate the performance and correctness of the
+optimizations - all without requiring manual intervention.
  
 The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyperloom <https://github.com/AMD-AGI/Hyperloom>`_.
 

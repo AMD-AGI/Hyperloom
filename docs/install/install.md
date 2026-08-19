@@ -2,13 +2,13 @@
 myst:
     html_meta:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
-        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, Install, ROCm"
+        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Claude, Dev Containers, Install, ROCm"
 ---
 # Hyperloom Installation Instructions
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
-dedicated workspace, open that directory in Cursor, Claude Code, or Codex, and
+dedicated workspace, open that directory in Claude Code and
 install the wheel into the current directory with `pip install --target .`. The
 source-clone path is kept at the end for developers and manual debugging.
 
@@ -16,8 +16,8 @@ source-clone path is kept at the end for developers and manual debugging.
 
 This is the recommended path to install and get started with Hyperloom. The
 current directory is both the install target and the agent workspace. Prepare a
-dedicated clean directory first, then open that directory in Cursor, Claude Code,
-or Codex before running the install command.
+dedicated clean directory first, then open that directory in Claude Code before
+running the install command.
 
 > **Recommended run mode: Docker.** Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
@@ -52,9 +52,6 @@ With the agent still opened in the same workspace, run:
 ```text
 /hyperloom-setup
 ```
-
-In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
-`$hyperloom-setup`.
 
 This command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../../src/hyperloom/skills/hyperloom-setup/SKILL.md).
@@ -113,13 +110,14 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 ```
 
-The backend runs `install_baremetal.sh` in four phases:
+The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **Credentials**: resolves LLM gateway credentials into `.env`.
-4. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
+3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
+4. **Credentials**: resolves LLM gateway credentials into `.env`.
+5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
 ### Scenario B: Bare metal + Docker
@@ -258,9 +256,8 @@ must never be printed.
 - The current workspace contains many package folders after `pip install
   --target .` - this is the expected behavior.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
-  (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
-  `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`;
+  restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
   framework torch wheel expects different ROCm user-space libraries; align
   `ROCM_PATH` and `LD_LIBRARY_PATH`.

@@ -7,6 +7,11 @@ myst:
 
 # What is Hyperloom?
 
+ROCm Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
+(targeting both host code and GPU kernels) on AMD GPUs. Using advanced AI agents and profiling tools,
+Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
+and validates the performance and correctness of the optimizations without requiring manual intervention.
+
 The system operates through a sophisticated multi-stage pipeline. First TraceLens, the profiling brain of
 the workload understanding stage, consumes traces collected by Magpie (which in turn relies on IntelliKit
 for some low-level GPU profiling tools), captures bottlenecks, and derives the roofline targets that seed

@@ -12,6 +12,7 @@ import os
 import subprocess
 import time
 import tempfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -4412,7 +4413,9 @@ class FrameworkPhase(PhaseHandler):
 
         A succeeded build no longer synthesises status='kept' directly. Instead
         it enqueues an integrate_patch launch probe so the runtime must actually
-        boot the model before KEEP is declared.
+        boot the model before KEEP is declared. Each row is read once, except that
+        a build whose probe was cancelled before it ran is read again: nothing
+        launched the runtime, so nothing has decided anything about that build.
         """
         try:
             all_tasks = []
@@ -4425,45 +4428,23 @@ class FrameworkPhase(PhaseHandler):
             # Pick the most recent terminal row (by updated_at).
             task = sorted(all_tasks, key=lambda t: str(getattr(t, "updated_at", "") or ""))[-1]
             task_id = str(getattr(task, "task_id", "") or "")
-            # Skip rows already accounted for (tracked by enablement_build_manifest).
+            # Skip rows already accounted for (tracked by enablement_build_manifest),
+            # unless what they were routed to was cancelled before it ran, which
+            # leaves the build no more launched than an unrouted one.
             state = self.shared_state
-            manifest = list(state.enablement.build_manifest or [])
-            seen_ids = {str(m.get("task_id") or "") for m in manifest if isinstance(m, dict)}
-            if task_id in seen_ids:
+            routed = self._build_routing_record(task_id)
+            if routed is not None and not await self._build_probe_was_cancelled(routed):
                 return
-            # Mark as seen immediately so we don't process the same row twice.
-            manifest.append({"task_id": task_id, "routed": True})
-            state.enablement.build_manifest = manifest
 
-            fc = ""
             if task.state == "succeeded":
-                # Load the BuildResult from result.json for the rich runtime.
-                attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
-                # The build's attempt_root is resolved at pump time and is NOT
-                # written back into the task params (they keep the enqueue-time
-                # default ""). Fall back to the deterministic build path keyed by
-                # task_id so a *successful* build is not wrongly rejected as
-                # ``artifact_unreadable`` (mirrors BuildLifecycle._attempt_root).
-                if not attempt_root and task_id:
-                    attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
-                br = None
-                if attempt_root:
-                    from ..framework.targeted_build import _load_result_json
-
-                    br = _load_result_json(attempt_root)
-
-                # If the runtime can't be read, it can't be launched → reverted.
-                if br is None or not br.ok or not br.runtime.to_runtime_override():
-                    res: dict = {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
-                    log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-                    self._maybe_rearm_enablement(res)
-                    return
-
-                # Enqueue a launch probe; KEEP is declared by the probe result.
-                log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
-                await self._enqueue_build_launch_probe(task_id, br)
+                await self._route_succeeded_build(task, routed)
                 return
 
+            # A failed build is accounted for the moment it is read: the rearm
+            # below is the whole outcome, so re-reading the row would charge the
+            # stall streak twice for one build.
+            self._note_build_routed(task_id)
+            fc = ""
             # failed row — read failure_class from history or last_build_failure
             history = getattr(task, "history", None) or []
             if isinstance(history, (list, tuple)) and history:
@@ -4519,7 +4500,128 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
-    async def _enqueue_build_launch_probe(self, build_task_id: str, br: Any) -> None:
+    async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
+        """Turn a succeeded targeted build into a launch probe, or a no-progress round.
+
+        KEEP is declared by the probe, never here: an artifact that builds is not
+        a runtime that boots. So this either opens a probe -- and remembers which
+        one, because a probe cancelled before it ran leaves the build unlaunched
+        and worth another -- or, when the built runtime cannot even be read, ends
+        the round as a revert.
+
+        The build is recorded as accounted for only once there is something to
+        account for. A probe the budget refused leaves it unrouted on purpose: it
+        is still a verified build nothing has launched, and the manifest saying
+        otherwise is what would strand it for the rest of the session.
+
+        Args:
+            task: The succeeded ``targeted_build`` row.
+            routed: What this build was routed to before, when it is being routed
+                again after its probe was cancelled; ``None`` on the first pass.
+        """
+        task_id = str(getattr(task, "task_id", "") or "")
+        attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
+        # The build's attempt_root is resolved at pump time and is NOT written
+        # back into the task params (they keep the enqueue-time default ""). Fall
+        # back to the deterministic build path keyed by task_id so a *successful*
+        # build is not wrongly rejected as ``artifact_unreadable`` (mirrors
+        # BuildLifecycle._attempt_root).
+        if not attempt_root and task_id:
+            attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
+        br = None
+        if attempt_root:
+            from ..framework.targeted_build import _load_result_json
+
+            br = _load_result_json(attempt_root)
+
+        # If the runtime can't be read, it can't be launched → reverted.
+        if br is None or not br.ok or not br.runtime.to_runtime_override():
+            self._note_build_routed(task_id)
+            log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
+            self._maybe_rearm_enablement(
+                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
+            )
+            return
+
+        log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
+        probe_tid, generation = await self._enqueue_build_launch_probe(
+            task_id,
+            br,
+            generation=int((routed or {}).get("probe_generation") or 0),
+        )
+        if not probe_tid:
+            return
+        self._note_build_routed(task_id, probe_task_id=probe_tid, probe_generation=generation)
+
+    def _build_routing_record(self, build_task_id: str) -> dict[str, Any] | None:
+        """The record of what a build's outcome was already routed to, if any.
+
+        Only the routing sentinels carry a ``task_id``; the build attempts the
+        lifecycle appends to the same manifest carry ``ok`` instead.
+
+        Args:
+            build_task_id: The ``targeted_build`` row to look for.
+
+        Returns:
+            The sentinel dict, or ``None`` when this build has not been routed.
+        """
+        for entry in reversed(list(self.shared_state.enablement.build_manifest or [])):
+            if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
+                return entry
+        return None
+
+    def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
+        """Record that a build's outcome has been routed, and to what.
+
+        Args:
+            build_task_id: The ``targeted_build`` row that was routed.
+            fields: What it was routed to, for a build whose outcome is a probe.
+        """
+        manifest = list(self.shared_state.enablement.build_manifest or [])
+        for idx, entry in enumerate(manifest):
+            if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
+                manifest[idx] = {**entry, **fields}
+                break
+        else:
+            manifest.append({"task_id": build_task_id, "routed": True, **fields})
+        self.shared_state.enablement.build_manifest = manifest
+
+    async def _build_probe_was_cancelled(self, routed: dict[str, Any]) -> bool:
+        """Whether the probe a build was routed to was stopped before it ran.
+
+        A cancelled probe is no evidence about the build: the queue scan drops a
+        queued row the wall-clock budget can no longer fit, and a phase boundary
+        drops one the new phase does not allow. Either way the built runtime was
+        never launched, so the build is still owed a probe -- and without noticing
+        that, the manifest entry written when the first one was opened keeps this
+        build accounted for permanently, across resumes included.
+
+        Args:
+            routed: The build's routing record.
+
+        Returns:
+            ``True`` when the recorded probe exists and was cancelled.
+        """
+        from ..state.task_registry import TaskNotFound
+
+        probe_tid = str(routed.get("probe_task_id") or "").strip()
+        if not probe_tid:
+            return False
+        try:
+            probe = await self.tasks.get(probe_tid)
+        except TaskNotFound:
+            # Pruned rather than cancelled; re-probing on a row that is gone
+            # would re-probe on every later tick too.
+            return False
+        return str(getattr(probe, "state", "") or "") == "cancelled"
+
+    async def _enqueue_build_launch_probe(
+        self,
+        build_task_id: str,
+        br: Any,
+        *,
+        generation: int = 0,
+    ) -> tuple[str, int]:
         """Enqueue an integrate_patch launch probe for a verified build.
 
         Runs the built runtime through the enablement runnable gate without
@@ -4528,9 +4630,34 @@ class FrameworkPhase(PhaseHandler):
         _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
         genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
         acquired via _framework_gpu_params.
+
+        The probe is what declares KEEP for a build, so it must not be opened
+        into a session that cannot run it: the queue scan drops a queued row the
+        wall-clock budget can no longer fit, and a probe cancelled that way
+        leaves the build verified but never launched. So the same gate the scan
+        asks is asked here first, and a denial enqueues nothing -- the build
+        stays unrouted, and the tick or resume that can afford a probe opens one.
+
+        Args:
+            build_task_id: The verified build this probe launches.
+            br: Its ``BuildResult``, read for the runtime override.
+            generation: The probe generation to try first, from what this build
+                was routed to before.
+
+        Returns:
+            The probe ``task_id`` and the generation it sits on; the id is empty
+            when nothing was enqueued.
         """
         from hyperloom.agents.framework.enablement import classify_failure
 
+        denied = self._time_budget_denial_for_action("integrate_patch")
+        if denied is not None:
+            log.info(
+                "ENABLEMENT: build launch probe held for build=%s, not enqueued -- %s",
+                build_task_id,
+                denied,
+            )
+            return "", generation
         state = self.shared_state
         runtime_override = br.runtime.to_runtime_override()
         launch_log = str(state.enablement.launch_log or "")
@@ -4552,22 +4679,27 @@ class FrameworkPhase(PhaseHandler):
         )
         if cfg:
             params["config_path"] = cfg
-        idem = f"build_launch_probe:{build_task_id}"
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
-        probe_task, existing = await self.tasks.create_or_return_existing(
+        probe_task, generation = await self._open_row_past_spent_generations(
             kind="integrate_patch",
             params=params,
-            idempotency_key=idem,
+            key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",
+            generation=generation,
+            label="build launch probe",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )
+        if probe_task is None:
+            return "", generation
         probe_tid = str(getattr(probe_task, "task_id", "") or "")
         log.info(
-            "ENABLEMENT: build launch probe %s task=%s (existing=%s)",
-            "re-used" if existing else "enqueued",
+            "ENABLEMENT: build launch probe task=%s gen%d state=%s (build=%s)",
             probe_tid,
-            existing,
+            generation,
+            getattr(probe_task, "state", ""),
+            build_task_id,
         )
+        return probe_tid, generation
 
     async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
@@ -4592,6 +4724,17 @@ class FrameworkPhase(PhaseHandler):
                         return tracked_tid
             except Exception:  # noqa: BLE001 — defensive
                 pass
+        # Do not open a row the dispatcher would cancel on sight. A revalidation
+        # is a full baseline, and the queue scan drops a queued one the session
+        # budget can no longer fit -- which leaves a cancelled row owning this
+        # window's idempotency key, and a row cancelled at dispatch never
+        # produces a result to route, so nothing would advance the generation
+        # past it. Holding the window shut for now costs nothing: it stays open,
+        # and the resume that has budget again enqueues it.
+        denied = self._time_budget_denial_for_action("baseline")
+        if denied is not None:
+            log.info("ENABLEMENT revalidation: window held open, not enqueued -- %s", denied)
+            return ""
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": ENABLEMENT_REVALIDATION_REASON,
@@ -4617,14 +4760,9 @@ class FrameworkPhase(PhaseHandler):
             rt_override = rt_obj.to_runtime_override()
             if rt_override:
                 params["runtime_override"] = rt_override
-        # Use generation in the idempotency key so each revalidation window gets
-        # a fresh row even when a prior window's row is in a terminal state.
-        gen = int(state.enablement.revalidation_generation or 0)
-        task, _existing = await self.tasks.create_or_return_existing(
-            kind="baseline",
-            params=params,
-            idempotency_key=f"enablement_revalidation:gen{gen}",
-        )
+        task = await self._open_revalidation_row(params)
+        if task is None:
+            return ""
         task_id = str(getattr(task, "task_id", "") or "")
         # Persist the task_id so _promote_baseline can verify identity.
         if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
@@ -4634,6 +4772,87 @@ class FrameworkPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — defensive
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
+
+    async def _open_revalidation_row(self, params: dict[str, Any]) -> "Task | None":
+        """Resolve this revalidation window's task row, on a generation it can use.
+
+        Args:
+            params: The baseline params for the revalidation row.
+
+        Returns:
+            The row to track, or ``None`` when this tick found only spent
+            generations -- the window stays open and the next tick tries again.
+        """
+        state = self.shared_state
+        task, generation = await self._open_row_past_spent_generations(
+            kind="baseline",
+            params=params,
+            key_for=lambda gen: f"enablement_revalidation:gen{gen}",
+            generation=int(state.enablement.revalidation_generation or 0),
+            label="revalidation",
+        )
+        state.enablement.revalidation_generation = generation
+        return task
+
+    async def _open_row_past_spent_generations(
+        self,
+        *,
+        kind: str,
+        params: dict[str, Any],
+        key_for: Callable[[int], str],
+        generation: int,
+        label: str,
+        attempts: int = 2,
+        **create_kwargs: Any,
+    ) -> tuple["Task | None", int]:
+        """Create or re-use a task row, skipping generations already spent.
+
+        A generation in the idempotency key is what lets one piece of work get a
+        fresh row after an earlier attempt at it went terminal. That only holds if
+        a key resolving to a terminal row is recognised as a spent generation
+        rather than an enqueue: a row cancelled at dispatch -- which is what the
+        queue scan does to work the wall-clock budget can no longer fit -- never
+        produces a result to route, so nothing downstream advances the generation
+        past it, and every later attempt resolves to a row that measured nothing.
+
+        Args:
+            kind: The task kind to create.
+            params: The task params.
+            key_for: Builds the idempotency key for a generation number.
+            generation: The generation to try first.
+            label: How this work is named in the log when a generation is spent.
+            attempts: How many generations to try before giving up this pass.
+            **create_kwargs: Passed through to
+                :meth:`TaskRegistry.create_or_return_existing` (lanes, TTL).
+
+        Returns:
+            The row to use and the generation it sits on, or ``None`` with the
+            generation to try next when every attempt this pass found a spent
+            one. The caller persists the generation, since only the caller knows
+            where it lives.
+        """
+        from ..state.task_registry import TERMINAL_STATES
+
+        for _attempt in range(max(1, attempts)):
+            task, _existing = await self.tasks.create_or_return_existing(
+                kind=kind,
+                params=params,
+                idempotency_key=key_for(generation),
+                **create_kwargs,
+            )
+            if str(getattr(task, "state", "") or "") not in TERMINAL_STATES:
+                return task, generation
+            log.warning(
+                "ENABLEMENT %s: gen%d resolves to terminal task %s (%s); opening "
+                "generation %d so the work is not stuck on it",
+                label,
+                generation,
+                getattr(task, "task_id", ""),
+                getattr(task, "state", ""),
+                generation + 1,
+            )
+            generation += 1
+        return None, generation
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.

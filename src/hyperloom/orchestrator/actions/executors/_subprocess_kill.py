@@ -28,11 +28,40 @@ from typing import Callable, NamedTuple
 
 from .bypass_analysis import parse_server_log_throughput
 
+from ..cancel_channel import CancelScope, cancel_scope_listener
+
 log = logging.getLogger(__name__)
 
 
-# Grace window between SIGTERM and SIGKILL.
-_TERM_GRACE_SECONDS = 5.0
+# Grace window between SIGTERM and SIGKILL, here and for a driver-side teardown
+# of a server a round left behind: the same signal, the same thing being waited
+# for.
+TERM_GRACE_SECONDS: float = 5.0
+
+# How long the reaper waits to collect the SIGKILL'd child before giving up on it.
+_REAP_COLLECT_SECONDS: float = 1.0
+
+# How long draining a reaped child's capture threads is given.
+_CAPTURE_DRAIN_SECONDS: float = 2.0
+
+# How often the blocking side looks up from the child to check its stop gates --
+# the session deadline and the cancel scope among them. Short enough that the
+# check costs a stop almost nothing on top of the reap, long enough not to spin.
+STOP_GATE_POLL_SECONDS: float = 0.5
+
+# What stopping a running round costs, end to end, from the moment something asks
+# it to: noticing at the poll, SIGTERM'ing the tree, waiting out the grace before
+# SIGKILL, collecting the child, and draining its pipes.
+#
+# Every window that waits for a round to stop itself is derived from this rather
+# than picked next to it -- the Ray submitter's grace and the dispatcher's
+# cooperative window both are. A window shorter than what stopping costs looks
+# generous in isolation and still expires every time, and what it discards is the
+# honest sentinel the round was about to return, replacing it with a hard kill
+# and an unattributed failure.
+COOPERATIVE_REAP_BUDGET_SEC: float = (
+    STOP_GATE_POLL_SECONDS + TERM_GRACE_SECONDS + _REAP_COLLECT_SECONDS + _CAPTURE_DRAIN_SECONDS
+)
 
 
 def new_session_kwargs() -> dict:
@@ -97,7 +126,7 @@ def _signal_group(pgid: int, sig: int) -> None:
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
-    grace_seconds: float = _TERM_GRACE_SECONDS,
+    grace_seconds: float = TERM_GRACE_SECONDS,
 ) -> None:
     """Tear down the entire process tree rooted at ``proc``.
 
@@ -169,18 +198,26 @@ def kill_my_spawned_server(
         _signal_group(pgid, signal.SIGKILL)
 
     try:
-        proc.wait(timeout=1.0)
+        proc.wait(timeout=_REAP_COLLECT_SECONDS)
     except subprocess.TimeoutExpired:
         log.warning(
-            "_subprocess_kill: proc.wait() did not return within 1s "
+            "_subprocess_kill: proc.wait() did not return within %.0fs "
             "after SIGKILL'ing pgid=%d (pid=%d). The reaper may be "
             "wedged; leaving the zombie for init to collect.",
+            _REAP_COLLECT_SECONDS,
             pgid,
             proc.pid,
         )
     except OSError:
         pass
 
+
+# Sentinel ``returncode`` allocation. This module is not the only owner of the
+# space -- ``_ray_serving`` hands out Ray-actor codes from it too, and both
+# arrive at their consumer as a bare ``returncode`` carrying no other tag. A
+# number claimed by a second cause therefore makes attribution a coin flip, so
+# allocate an unused one; ``test_every_sentinel_returncode_names_exactly_one_cause``
+# enumerates both modules and fails on reuse.
 
 # Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an
 # elapsed ``soft_deadline_sec`` (vs the ``timeout=`` hard cap, which raises
@@ -252,6 +289,25 @@ AGENTX_PREFLIGHT_RETURNCODE: int = -912
 # ``error_class="eval_probe_unpatchable"`` -- the same class the baseline arm
 # already fails with, so a bounds gap reads identically on both arms.
 EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
+
+# Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and
+# the tree was reaped. Deliberately distinct from ``OVERTIME_KILL_RETURNCODE``:
+# that one says "this variant ran far longer than the baseline", which is a
+# judgement about the variant, while this one says "the run was out of time",
+# which says nothing about the variant at all. Sharing a code would teach the KB
+# that a variant is slow whenever a session happened to end during it.
+SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
+
+# -916 is ``_ray_serving._ACTOR_TIMEOUT_RC``.
+
+# Sentinel ``returncode`` when the orchestrator cancelled the action this child
+# was launched for -- a shutdown, or a budget that is spent. Distinct from
+# ``SESSION_TIME_EXHAUSTED_RETURNCODE`` because the two causes are told apart at
+# the source: that one is the round's own deadline elapsing where it runs, this
+# one is a decision taken outside it, and only one of them is still true when the
+# same session resumes. Distinct from ``OVERTIME_KILL_RETURNCODE`` for the reason
+# that one already carries: neither says anything about the variant.
+ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
@@ -533,6 +589,144 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     return None
 
 
+# Name of the stamp written beside the caller's ``server.log`` the moment the
+# server first reports ready.
+_READY_STAMP_NAME = "server_ready_at"
+
+
+def _ready_stamp_path(server_log_path: str) -> Path:
+    """Return where a round's ready stamp lives, given its ``server.log`` path."""
+    return Path(server_log_path).parent / _READY_STAMP_NAME
+
+
+def _stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
+    """Record, beside ``server_log_path``, that the server just reported ready.
+
+    Two numbers, because they answer two questions and one clock cannot answer
+    both. ``boot_sec`` is how long the round took to come up, measured from spawn
+    to this moment on one ``time.monotonic()`` reading in the process that
+    spawned the child. The wall-clock instant beside it only ever says *which
+    round* the stamp belongs to.
+
+    Keeping the boot a duration is what makes it safe to read across a process
+    boundary. On the Ray path the round runs inside an actor, possibly on another
+    host; subtracting the actor's wall-clock from the driver's would charge the
+    boot for whatever the two clocks disagree by, and a positive disagreement
+    inflates the boot and makes the budget gates refuse rounds that fit. A
+    duration crosses the boundary meaning the same thing on both sides -- the
+    same reason ``session_remaining_sec`` is passed to the actor as a duration
+    rather than as a deadline.
+
+    A file is used because it crosses that boundary without widening the round's
+    return value, and the round's output directory is already how post-mortem
+    evidence gets back (the caller reads the same directory's ``server.log`` to
+    classify server deaths).
+
+    Best effort: a round whose stamp cannot be written loses a measurement, which
+    callers already have to handle, and must not lose the round.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+        boot_sec: Seconds from spawn to this moment, on the spawning process's
+            monotonic clock. Required rather than defaulted: a caller that
+            omitted it would write a well-formed stamp claiming the round booted
+            instantly, which reads as a whole round of benchmark and is the one
+            wrong answer the two-field format exists to make impossible.
+    """
+    try:
+        _ready_stamp_path(server_log_path).write_text(
+            f"{time.time():.3f} {max(0.0, float(boot_sec)):.3f}\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning("_subprocess_kill: could not stamp server-ready time (%s)", exc)
+
+
+def clear_server_ready_stamp(server_log_path: str) -> None:
+    """Drop any ready stamp an earlier round left in this output directory.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+    """
+    try:
+        _ready_stamp_path(server_log_path).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("_subprocess_kill: could not clear stale server-ready stamp (%s)", exc)
+
+
+def _read_ready_stamp(server_log_path: str) -> tuple[float, float] | None:
+    """Return a round's ``(ready_unix, boot_sec)``, or ``None`` when unrecorded.
+
+    Both fields are required. A stamp missing its boot is reported as no stamp at
+    all rather than as a boot of zero: zero is a legitimate boot, so it cannot
+    also stand for "not recorded", and reading it that way would hand the whole
+    round to the benchmark -- the figure every later variant is then admitted on.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Returns:
+        tuple[float, float] | None: The wall-clock instant the stamp was written
+        and the boot it measured, or ``None`` when no readable stamp exists.
+    """
+    try:
+        fields = _ready_stamp_path(server_log_path).read_text(encoding="utf-8").split()
+        ready_unix = float(fields[0])
+        boot_sec = float(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return (ready_unix, max(0.0, boot_sec)) if ready_unix > 0.0 else None
+
+
+def server_ready_unix(server_log_path: str) -> float | None:
+    """Return when the server reported ready, or ``None`` when nothing recorded it.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Returns:
+        float | None: The wall-clock instant, or ``None`` when no stamp exists or
+        it is unreadable.
+    """
+    stamp = _read_ready_stamp(server_log_path)
+    return None if stamp is None else stamp[0]
+
+
+def post_ready_runtime_sec(
+    server_log_path: str,
+    *,
+    started_unix: float,
+    runtime_sec: float,
+) -> float | None:
+    """Return how long a round ran *after* its server was ready.
+
+    This is the part of a round's wall-clock that is the benchmark itself, with
+    boot, weight load, compile and graph capture excluded. It is what makes two
+    rounds comparable when one paid for a cold start and the other re-attached to
+    a server already up.
+
+    The round's wall-clock less the boot the stamp measured. The boot is a
+    duration taken on one clock, so this holds however far apart the writer and
+    the reader are; ``started_unix`` is only compared against the stamp's own
+    instant, to tell this round's stamp from one an earlier round left behind.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+        started_unix: When the round was spawned.
+        runtime_sec: The round's full wall-clock.
+
+    Returns:
+        float | None: Seconds after ready, bounded by the round's own runtime, or
+        ``None`` when the round never reported ready or the only stamp present
+        predates it (an earlier round's, left behind by a failed clear -- reading
+        it would report a cold round as though it had never booted).
+    """
+    stamp = _read_ready_stamp(server_log_path)
+    if stamp is None or stamp[0] < started_unix:
+        return None
+    return max(0.0, min(float(runtime_sec), float(runtime_sec) - stamp[1]))
+
+
 def _resolve_scan_logs(server_log_path: str) -> list[str]:
     """Return the log files to scan for markers, newest-nesting first.
 
@@ -584,6 +778,40 @@ class _LogScan(NamedTuple):
     saw_eval_start: bool
     grew: bool
     child_spoke: bool
+
+
+def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
+    """Current byte length of each nested log that already exists at spawn.
+
+    Seeded as starting offsets so such a log contributes only what it grows by,
+    never what a previous attempt left in it.
+
+    Only the nested ``benchmark_*/`` workspaces, not the path the caller named.
+    That one the caller owns: it clears it when it means this round to start
+    clean, and a caller that means to attach to a server already up says so with
+    ``server_already_ready``. The nested ones are found by globbing a directory
+    the caller reuses, so nothing in them was asserted by anyone -- and a stale
+    ready line there would otherwise latch on the first poll and report a boot
+    that took minutes as one that took none.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Returns:
+        dict[str, int]: Per-path byte lengths; a path whose size cannot be read
+        is left out, so it is scanned from the start as an absent one would be.
+    """
+    owned_dir = Path(server_log_path).parent
+    sizes: dict[str, int] = {}
+    for path in _resolve_scan_logs(server_log_path):
+        candidate = Path(path)
+        if candidate.parent == owned_dir:
+            continue
+        try:
+            sizes[path] = candidate.stat().st_size
+        except OSError:
+            continue
+    return sizes
 
 
 def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogScan:
@@ -666,6 +894,51 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
     return size, saw_ready, saw_progress, saw_eval_start
 
 
+def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> float | None:
+    """Convert an in-process session deadline into seconds still left on it.
+
+    The pair of this and :func:`session_remaining_to_deadline_sec` is how a
+    session deadline crosses a process boundary. ``time.monotonic()`` has an
+    unspecified, per-process origin, so the absolute instant means nothing to a
+    reader in another process; a duration means the same thing everywhere.
+
+    Args:
+        session_deadline_sec: Absolute ``time.monotonic()`` instant at which the
+            session budget expires, or ``None`` when the budget is unbounded.
+
+    Returns:
+        Seconds left on the budget, or ``None`` when unbounded. Non-positive
+        when the deadline has already passed, which the receiving side is meant
+        to act on immediately rather than treat as "no budget given".
+    """
+    if session_deadline_sec is None:
+        return None
+    return float(session_deadline_sec) - time.monotonic()
+
+
+def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> float | None:
+    """Re-anchor a remaining session budget onto this process's monotonic clock.
+
+    The inverse of :func:`session_deadline_to_remaining_sec`. Whatever the trip
+    itself cost is forgiven: no clock is shared across the boundary to measure it
+    with, so the receiver starts a fresh window of the full duration. The
+    receiver can therefore run marginally past the sender's deadline, which is
+    the safe direction -- the alternative is guessing at the transit and charging
+    a round for time it never had.
+
+    Args:
+        session_remaining_sec: Seconds left on the session budget as measured by
+            the sender, or ``None`` when the budget is unbounded.
+
+    Returns:
+        An absolute ``time.monotonic()`` deadline usable in this process, or
+        ``None`` when unbounded.
+    """
+    if session_remaining_sec is None:
+        return None
+    return time.monotonic() + float(session_remaining_sec)
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
@@ -679,13 +952,32 @@ def run_with_session_kill(
     detok_stall_grace_sec: float | None = None,
     server_already_ready: bool = False,
     on_output: Callable[[], None] | None = None,
+    session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own session and reap descendants on every exit path.
+
+    ``session_deadline_sec`` is an absolute ``time.monotonic()`` instant, unlike
+    ``soft_deadline_sec`` which is a relative duration. It is the session's own
+    wall-clock budget and is enforced in every phase, including the accuracy
+    eval -- the phase that retires ``soft_deadline_sec``. That distinction is the
+    reason it is a separate channel rather than a reuse of the soft deadline: the
+    eval-start boundary is meaningful for "is this variant abnormally slow" and
+    meaningless for "is the run out of time".
+
+    The cancel scope published by the dispatcher (:mod:`..cancel_channel`) is
+    watched for as long as the child lives, so an orchestrator that cancels the
+    action reaches the tree rather than just the coroutine awaiting this call.
+    Every cause that reaps the tree is reported as its own sentinel
+    ``returncode``, which is all a caller of a subprocess gets to tell them apart
+    by.
 
     Args:
         on_output: Called from a reader thread each time the child produces
             output, so a caller can report a long step alive on the child's own
             activity rather than on a timer.
+        session_deadline_sec: Absolute ``time.monotonic()`` instant at which the
+            session budget expires. Reaps the tree and returns
+            ``SESSION_TIME_EXHAUSTED_RETURNCODE``.
     """
     if server_dead_grace_sec is None:
         try:
@@ -710,104 +1002,146 @@ def run_with_session_kill(
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
     try:
-        proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=text,
-            env=env,
-            cwd=cwd,
-            **new_session_kwargs(),
-        )
-        capture = _StreamCapture(proc, text=text, on_output=on_output)
-        capture.start()
-        try:
-            stdout, stderr = _communicate_with_soft_deadline(
-                proc,
-                hard_timeout=timeout,
-                soft_deadline_sec=soft_deadline_sec,
-                server_log_path=server_log_path,
-                server_dead_grace_sec=server_dead_grace_sec,
-                detok_stall_grace_sec=detok_stall_grace_sec,
-                capture=capture,
-                server_already_ready=server_already_ready,
+        with cancel_scope_listener() as cancel_scope:
+            proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=text,
+                env=env,
+                cwd=cwd,
+                **new_session_kwargs(),
             )
-        except subprocess.TimeoutExpired:
-            kill_my_spawned_server(proc)
-            if capture is not None:
-                capture.finish(timeout=2.0)
-            raise
-        except _ServerDeadDetected as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.warning(
-                "_subprocess_kill: server-liveness watchdog reaped tree — "
-                "engine/worker init died but parent hung (marker=%r, "
-                "grace=%.1fs, elapsed=%.1fs); returncode=%d.",
-                exc.marker,
-                exc.grace_sec,
-                exc.elapsed_sec,
-                SERVER_DEAD_RETURNCODE,
-            )
+            capture = _StreamCapture(proc, text=text, on_output=on_output)
+            capture.start()
+            try:
+                stdout, stderr = _communicate_with_soft_deadline(
+                    proc,
+                    hard_timeout=timeout,
+                    soft_deadline_sec=soft_deadline_sec,
+                    server_log_path=server_log_path,
+                    server_dead_grace_sec=server_dead_grace_sec,
+                    detok_stall_grace_sec=detok_stall_grace_sec,
+                    capture=capture,
+                    server_already_ready=server_already_ready,
+                    session_deadline_sec=session_deadline_sec,
+                    cancel_scope=cancel_scope,
+                )
+            except subprocess.TimeoutExpired:
+                kill_my_spawned_server(proc)
+                if capture is not None:
+                    capture.finish(timeout=_CAPTURE_DRAIN_SECONDS)
+                raise
+            except _ReapedByWatchdog as exc:
+                kill_my_spawned_server(proc)
+                stdout, stderr = _finish_capture(capture, text=text)
+                log.log(
+                    exc.log_level,
+                    "_subprocess_kill: %s; reaped the tree with sentinel returncode=%d.",
+                    exc,
+                    exc.returncode,
+                )
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=exc.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            empty: str | bytes = "" if text else b""
             return subprocess.CompletedProcess(
                 args=cmd,
-                returncode=SERVER_DEAD_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
+                returncode=proc.returncode,
+                stdout=stdout if stdout is not None else empty,
+                stderr=stderr if stderr is not None else empty,
             )
-        except _ServerStalledDetected as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.warning(
-                "_subprocess_kill: detokenizer-stall watchdog reaped tree — "
-                "server reported ready but emitted no log output (grace=%.1fs, "
-                "elapsed=%.1fs); returncode=%d.",
-                exc.grace_sec,
-                exc.elapsed_sec,
-                DETOKENIZER_STALL_RETURNCODE,
-            )
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=DETOKENIZER_STALL_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
-            )
-        except _SoftDeadlineExceeded as exc:
-            kill_my_spawned_server(proc)
-            stdout, stderr = (
-                capture.finish(timeout=2.0) if capture is not None else ("" if text else b"", "" if text else b"")
-            )
-            log.info(
-                "_subprocess_kill: soft_deadline_sec=%.1fs exceeded "
-                "(elapsed=%.1fs); reaped tree with sentinel returncode=%d.",
-                exc.deadline_sec,
-                exc.elapsed_sec,
-                OVERTIME_KILL_RETURNCODE,
-            )
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=OVERTIME_KILL_RETURNCODE,
-                stdout=stdout if stdout is not None else ("" if text else b""),
-                stderr=stderr if stderr is not None else ("" if text else b""),
-            )
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=proc.returncode,
-            stdout=stdout if stdout is not None else ("" if text else b""),
-            stderr=stderr if stderr is not None else ("" if text else b""),
-        )
     finally:
         kill_my_spawned_server(proc)
 
 
-class _SoftDeadlineExceeded(Exception):
-    """Internal sentinel for an elapsed soft deadline. Never bubbles
-    past :func:`run_with_session_kill` (converted to a ``CompletedProcess``).
+def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str | bytes, str | bytes]:
+    """Drain the capture threads of a reaped child, never returning ``None``.
+
+    Args:
+        capture: The stream capture to finish, or ``None`` when the child's
+            output was not captured.
+        text: Whether the streams are ``str`` (``True``) or ``bytes``, which
+            decides what an absent stream reads as.
+
+    Returns:
+        tuple[str | bytes, str | bytes]: The captured ``(stdout, stderr)``.
     """
+    empty: str | bytes = "" if text else b""
+    if capture is None:
+        return empty, empty
+    stdout, stderr = capture.finish(timeout=_CAPTURE_DRAIN_SECONDS)
+    return (
+        stdout if stdout is not None else empty,
+        stderr if stderr is not None else empty,
+    )
+
+
+class _ReapedByWatchdog(Exception):
+    """Internal base for a cause that reaps the tree and names itself.
+
+    None of these bubble past :func:`run_with_session_kill`: each is converted
+    to a ``CompletedProcess`` carrying the subclass's own ``returncode``, since
+    a returncode is the only thing that survives the trip back to a caller of a
+    subprocess. Subclasses build their own message and declare how much the
+    event is worth logging.
+    """
+
+    returncode: int = -1
+    log_level: int = logging.WARNING
+
+
+class _SessionDeadlineExceeded(_ReapedByWatchdog):
+    """Internal sentinel: the session wall-clock budget ran out mid-round."""
+
+    returncode = SESSION_TIME_EXHAUSTED_RETURNCODE
+
+    def __init__(self, *, overrun_sec: float, elapsed_sec: float) -> None:
+        """Record how far past the session deadline the round got.
+
+        Args:
+            overrun_sec (float): Seconds past the session deadline at trip time.
+            elapsed_sec (float): Wall-clock elapsed for this round at trip time.
+        """
+        super().__init__(
+            f"the session wall-clock budget was exhausted {overrun_sec:.1f}s ago (round elapsed={elapsed_sec:.1f}s)"
+        )
+        self.overrun_sec = float(overrun_sec)
+        self.elapsed_sec = float(elapsed_sec)
+
+
+class _OrchestratorCancelled(_ReapedByWatchdog):
+    """Internal sentinel: the orchestrator cancelled the action this child serves.
+
+    The cause is a decision taken outside the round -- a shutdown, or a budget
+    the dispatcher found spent -- which is why it carries the caller's reason
+    rather than a measurement of its own.
+    """
+
+    returncode = ORCHESTRATOR_CANCELLED_RETURNCODE
+
+    def __init__(self, *, reason: str, elapsed_sec: float) -> None:
+        """Record who asked for the stop and how far the round had got.
+
+        Args:
+            reason (str): Short cause from the canceller, e.g. ``shutdown_requested``.
+            elapsed_sec (float): Wall-clock elapsed for this round at trip time.
+        """
+        super().__init__(
+            f"the orchestrator cancelled this action ({reason or 'no reason given'}; round elapsed={elapsed_sec:.1f}s)"
+        )
+        self.reason = str(reason)
+        self.elapsed_sec = float(elapsed_sec)
+
+
+class _SoftDeadlineExceeded(_ReapedByWatchdog):
+    """Internal sentinel for an elapsed soft deadline."""
+
+    returncode = OVERTIME_KILL_RETURNCODE
+    log_level = logging.INFO
 
     def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
         """Record the deadline and actual elapsed time on the sentinel.
@@ -816,17 +1150,17 @@ class _SoftDeadlineExceeded(Exception):
             deadline_sec (float): The soft deadline that was exceeded.
             elapsed_sec (float): The actual wall-clock elapsed at trip time.
         """
-        super().__init__(f"soft deadline {deadline_sec:.1f}s elapsed (actual={elapsed_sec:.1f}s)")
+        super().__init__(f"soft_deadline_sec={deadline_sec:.1f}s elapsed (actual={elapsed_sec:.1f}s)")
         self.deadline_sec = float(deadline_sec)
         self.elapsed_sec = float(elapsed_sec)
 
 
-class _ServerDeadDetected(Exception):
+class _ServerDeadDetected(_ReapedByWatchdog):
     """Internal sentinel: the server-liveness watchdog saw a terminal engine /
-    worker init marker that persisted past the grace window. Never bubbles past
-    :func:`run_with_session_kill` (converted to a ``CompletedProcess`` carrying
-    ``SERVER_DEAD_RETURNCODE``).
+    worker init marker that persisted past the grace window.
     """
+
+    returncode = SERVER_DEAD_RETURNCODE
 
     def __init__(
         self,
@@ -843,7 +1177,7 @@ class _ServerDeadDetected(Exception):
             elapsed_sec: Actual wall-clock elapsed at trip time.
         """
         super().__init__(
-            f"server init died (marker={marker!r}) and parent hung past "
+            f"server init died (marker={marker!r}) and the parent hung past "
             f"grace {grace_sec:.1f}s (elapsed={elapsed_sec:.1f}s)"
         )
         self.marker = marker
@@ -851,12 +1185,12 @@ class _ServerDeadDetected(Exception):
         self.elapsed_sec = float(elapsed_sec)
 
 
-class _ServerStalledDetected(Exception):
+class _ServerStalledDetected(_ReapedByWatchdog):
     """Internal sentinel: the detokenizer-stall watchdog saw the server report
-    ready and then produce no generation progress for the grace window. Never
-    bubbles past :func:`run_with_session_kill` (converted to a
-    ``CompletedProcess`` carrying ``DETOKENIZER_STALL_RETURNCODE``).
+    ready and then produce no generation progress for the grace window.
     """
+
+    returncode = DETOKENIZER_STALL_RETURNCODE
 
     def __init__(
         self,
@@ -890,6 +1224,8 @@ def _communicate_with_soft_deadline(
     detok_stall_grace_sec: float | None = None,
     capture: _StreamCapture | None = None,
     server_already_ready: bool = False,
+    session_deadline_sec: float | None = None,
+    cancel_scope: CancelScope | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Communicate with a child while enforcing soft and server-log watchdogs."""
     watchdog_active = bool(server_log_path) and (
@@ -897,9 +1233,14 @@ def _communicate_with_soft_deadline(
     )
     stall_active = bool(server_log_path) and (detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0)
     soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
-    if capture is None and not soft_active and not watchdog_active and not stall_active:
+    session_active = session_deadline_sec is not None
+    # A cancel scope is polled like any other gate, so its presence rules out the
+    # single-wait fast paths below: a call that blocks until the child exits
+    # cannot notice a cancel that arrives while it is blocked.
+    gated = soft_active or watchdog_active or stall_active or session_active or cancel_scope is not None
+    if capture is None and not gated:
         return proc.communicate(timeout=hard_timeout)
-    if capture is not None and not soft_active and not watchdog_active and not stall_active:
+    if capture is not None and not gated:
         proc.wait(timeout=hard_timeout)
         return capture.finish()
 
@@ -921,13 +1262,15 @@ def _communicate_with_soft_deadline(
         not in {"0", "false", "no", "off"}
     )
     # The log increment scan feeds the stall watchdog, the from-ready
-    # soft-deadline anchor and the eval-start boundary; run it once per slice
-    # when any of them needs it. Broader than ``soft_from_ready``: a warm-reuse
-    # round (``server_already_ready``) still needs the eval-start boundary, so
-    # any soft deadline with a log present scans.
-    soft_watches_log = soft_active and bool(server_log_path)
-    scan_active = stall_active or soft_watches_log
-    poll_interval = 0.5
+    # soft-deadline anchor, the eval-start boundary and the ready timestamp the
+    # caller prices later work off; run it once per slice whenever a log is
+    # present. Not narrowed to the watchdogs that consume it: tying it to
+    # ``stall_active`` let an unrelated knob
+    # (``INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC=0``) silently withdraw the
+    # boot/benchmark split for a whole session. It costs nothing where it did not
+    # already run, since without a gate this call never enters the loop at all.
+    scan_active = bool(server_log_path) and gated
+    poll_interval = STOP_GATE_POLL_SECONDS
     start = time.monotonic()
     dead_marker_since: float | None = None
     # Detokenizer-stall watchdog state: per-log byte offsets consumed so far,
@@ -935,6 +1278,12 @@ def _communicate_with_soft_deadline(
     # new output (seeded to the ready time). The gate only arms once
     # ``server_ready_since`` is set.
     scan_offsets: dict[str, int] = {}
+    if scan_active:
+        # A reused output_dir can still hold a prior attempt's nested workspace,
+        # whose markers are not this round's. The workspace this round creates
+        # does not exist yet, so it is discovered later at offset zero, which is
+        # correct: all of its bytes are this round's.
+        scan_offsets.update(_stale_scan_log_sizes(server_log_path))  # type: ignore[arg-type]
     server_ready_since: float | None = None
     last_activity_at: float | None = None
     # Latched once the accuracy eval starts: the soft deadline bounds the
@@ -943,6 +1292,25 @@ def _communicate_with_soft_deadline(
     while True:
         now = time.monotonic()
         elapsed = now - start
+        # Session budget. Checked before every other gate and never suspended:
+        # unlike the soft deadline it makes no claim about the variant, so the
+        # eval-start boundary that retires the soft deadline does not apply. An
+        # accuracy eval that starts one minute before the run is out of time still
+        # has to stop.
+        if session_active and session_deadline_sec is not None and now >= session_deadline_sec:
+            raise _SessionDeadlineExceeded(
+                overrun_sec=now - float(session_deadline_sec),
+                elapsed_sec=elapsed,
+            )
+        # Orchestrator cancellation. Checked after the session deadline so a
+        # round that was already out of time keeps that reason: the budget is a
+        # fact about the run, while the cancel is only the dispatcher acting on
+        # it, and the more specific of the two is the one worth recording.
+        if cancel_scope is not None and cancel_scope.cancelled:
+            raise _OrchestratorCancelled(
+                reason=cancel_scope.reason,
+                elapsed_sec=elapsed,
+            )
         # Advance the log scan, latching the server-ready, last-activity
         # and eval-start signals.
         if scan_active:
@@ -953,6 +1321,12 @@ def _communicate_with_soft_deadline(
             if scan.saw_ready and server_ready_since is None:
                 server_ready_since = now
                 last_activity_at = now  # start the silence clock at ready
+                # Recorded for the caller, which prices later work off the
+                # post-ready segment rather than the whole round: a pass that
+                # re-attaches to this server pays none of the boot. Taken as
+                # ``now - start`` so the boot is measured end to end on this
+                # process's own clock, whatever host the caller reads it on.
+                _stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
             if scan.saw_eval_start and not soft_deadline_suspended:
                 soft_deadline_suspended = True
                 log.info(
@@ -1016,6 +1390,8 @@ def _communicate_with_soft_deadline(
         # Slice bounded by every active remaining window so the right gate
         # fires first; the child can still finish inside any slice.
         slice_sec = poll_interval
+        if session_active and session_deadline_sec is not None:
+            slice_sec = min(slice_sec, float(session_deadline_sec) - now)
         if soft_active and deadline_sec is not None and not soft_deadline_suspended:
             if soft_from_ready:
                 if server_ready_since is not None:
@@ -1039,12 +1415,22 @@ def _communicate_with_soft_deadline(
 
 __all__ = [
     "AGENTX_PREFLIGHT_RETURNCODE",
+    "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
+    "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
+    "SESSION_TIME_EXHAUSTED_RETURNCODE",
+    "STOP_GATE_POLL_SECONDS",
+    "TERM_GRACE_SECONDS",
+    "clear_server_ready_stamp",
     "kill_my_spawned_server",
     "new_session_kwargs",
+    "post_ready_runtime_sec",
     "run_with_session_kill",
     "server_log_death_excerpt",
+    "server_ready_unix",
+    "session_deadline_to_remaining_sec",
+    "session_remaining_to_deadline_sec",
 ]
