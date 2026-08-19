@@ -56,6 +56,21 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 }
 
 
+# Request ``kind`` -> the kernel-owned action it gates as. Derived from the two
+# tables above so a new kind cannot fall out of sync with the catalogue.
+#
+# ``trace_analyze`` is deliberately absent: it has no owning action and no phase
+# membership, so there is nothing to gate it against. Mapping it onto an action
+# would deny it in every phase and break the live path ``run_optimization``
+# depends on.
+REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
+    {
+        **{kind: action for action, kind in KERNEL_ACTION_REQUEST_KINDS.items()},
+        **KERNEL_REQUEST_KIND_ALIASES,
+    }
+)
+
+
 # Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
 # rejects them from an LLM, which would bypass the lane's gate and accounting.
 # Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
@@ -480,5 +495,6 @@ __all__ = [
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KERNEL_REQUEST_KIND_ALIASES",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
+    "REQUEST_KIND_TO_OWNED_ACTION",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]
