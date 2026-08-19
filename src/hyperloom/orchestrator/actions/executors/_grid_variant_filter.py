@@ -306,7 +306,7 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 # xDiT (diffusion) do-not-set blacklist — env knobs that crash or regress on
 # FLUX.2-class DiT models with Ulysses SP. Each entry maps an env key to the
 # set of forbidden values (``"*"`` = any truthy value) and a short reason.
-# Enforced for the ``xdit`` framework only, in :func:`apply_compatibility_filter`.
+# Applied for the ``xdit`` framework only, by :func:`apply_compatibility_filter`.
 _XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
     "XDIT_ATTENTION_BACKEND": (
         frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
@@ -490,31 +490,41 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
 
 def apply_compatibility_filter(
     grid: list["GridVariant"],
+    *,
+    framework: str = "",
+    model_path: str = "",
 ) -> tuple[list["GridVariant"], list[dict]]:
-    """Skip variants known to be incompatible with current model/sglang.
+    """Skip variants known to be incompatible with current model/framework.
 
-    Two dimensions, each conservative (assume compatible) on probe failure:
-    model class (MLA / MoE flags dropped when ``$MODEL_PATH`` lacks the family
-    keyword), and sglang version (flags absent from ``launch_server --help``
-    dropped). Returns the ``(kept, dropped)`` shape of ``apply_user_skip_list``.
+    Three dimensions, each conservative (assume compatible) when it cannot
+    tell: the xDiT do-not-set list, model class (MLA / MoE flags dropped when
+    the model path lacks the family keyword), and framework version (flags
+    absent from the server's ``--help`` dropped). Returns the ``(kept,
+    dropped)`` shape of ``apply_user_skip_list``.
+
+    The caller passes what it already resolved. Reading the environment here
+    instead would disagree with it whenever the two differ, and the explore
+    path resolves the framework from the materialized YAML rather than $FRAMEWORK.
 
     Args:
         grid (list[GridVariant]): The candidate variants to filter.
+        framework (str): Framework the grid will run against; falls back to
+            ``$FRAMEWORK`` then sglang.
+        model_path (str): Model the grid will run against; falls back to
+            ``$MODEL_PATH``.
 
     Returns:
         tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
         entries carry ``name``/``source``/``reason``.
     """
-    model_path = os.environ.get("MODEL_PATH", "")
+    model_path = model_path or os.environ.get("MODEL_PATH", "")
     if model_path:
         is_mla, is_moe = _detect_model_class(model_path)
     else:
-        # No MODEL_PATH set -> can't detect -> assume compatible.
+        # Cannot detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    # Live framework's --help text; defaults to sglang for fixtures/callers
-    # that don't thread ``benchmark.framework``.
-    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    fw = (framework or os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     help_text = _probe_server_help_text(fw)
     help_available = bool(help_text)
 

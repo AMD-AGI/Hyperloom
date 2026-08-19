@@ -67,8 +67,11 @@ from ._grid_runner import (
     _num_gpus_for_config,
     _resolve_session_dir,
     apply_aiter_moe_pin_filter,
+    apply_compatibility_filter,
     apply_multi_node_invalid_variants,
+    apply_user_skip_list,
     reorder_grid_for_multi_node,
+    resolve_skip_spec,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -376,9 +379,9 @@ def _atom_default_grid(
 
     Covers the atom CLI surface (compile/cudagraph bracket, prefix cache,
     KV fp8, MoE EP, MLA DP-attention, MTP), each gated on model_class.
-    ``apply_compatibility_filter`` is the second-line drop for flags not in
-    ``atom --help``. Variant names are ``atom_``-prefixed for cross-session
-    disambiguation.
+    ``apply_compatibility_filter`` drops any that the installed ``atom`` does
+    not list in its ``--help``. Variant names are ``atom_``-prefixed for
+    cross-session disambiguation.
 
     Args:
         model_class: Model-class label that gates which variants are emitted.
@@ -463,9 +466,9 @@ def _xdit_default_grid(
     """xDiT (diffusion) EXPLORE default grid, seeded from the empirical KB.
 
     Only BF16-safe knobs are emitted (precision is locked). Known-regression /
-    crash knobs are omitted here and additionally enforced by
-    ``xdit_blacklist_reason`` in ``_grid_runner.py``. Variant names are
-    ``xdit_``-prefixed for cross-session disambiguation.
+    crash knobs are omitted here, and ``xdit_blacklist_reason`` drops them from
+    a proposal that reintroduces one. Variant names are ``xdit_``-prefixed for
+    cross-session disambiguation.
 
     Args:
         model_class: Model-class label (reserved for future DiT gating).
@@ -951,10 +954,6 @@ class ExploreExecutor:
             }
         grid = _grid_variants_from_payload(grid_payload)
 
-        # ----- workload-spec compatibility filter (production drop) ---------
-        # `apply_compatibility_filter` is only exercised in tests; the live
-        # explore dispatch path assembles `grid` here from LLM/specialist
-        # proposals (params.grid) or the programmatic seed and never re-runs it.
         if framework == "custom":
             grid, _mc_dropped = filter_operator_pinned_envs(grid, _yaml_envs)
             for _nm, _reason in _mc_dropped:
@@ -1044,7 +1043,22 @@ class ExploreExecutor:
             # would re-enable the (hang-prone) aiter MoE runner. No-op unless
             # the pin is set. Self-gates, so safe to run in any mode.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            for _d in (*_mn_dropped, *_aiter_dropped):
+            # Workload compatibility: the xDiT do-not-set list, plus flags the
+            # model class or the installed server does not support. Proposals
+            # reach here unfiltered, and a flag the server rejects costs a full
+            # doomed restart; an xDiT precision knob is worse than that, because
+            # the variant runs and wins with the precision no longer locked.
+            runnable, _compat_dropped = apply_compatibility_filter(
+                runnable,
+                framework=framework,
+                model_path=resolved_model,
+            )
+            # Operator-supplied --skip-variants patterns.
+            runnable, _skip_dropped = apply_user_skip_list(
+                runnable,
+                skip_spec=resolve_skip_spec(params),
+            )
+            for _d in (*_mn_dropped, *_aiter_dropped, *_compat_dropped, *_skip_dropped):
                 skipped_dup.append(
                     {
                         "name": _d.get("name", ""),
