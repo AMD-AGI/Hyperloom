@@ -185,9 +185,10 @@ phases' goals are omitted because you cannot act on them from here.
 
 **Decision priority**: pick the next action by reading facts in this order:
 (a) current phase + `allowed_actions`, (b) gaps / KB sub-graph / recent
-winners / specialist proposal_set, (c) mandatory ordering (baseline first;
-`explore` revalidates the stack inline — no separate rebench step),
-(d) `phase_budget_remaining_pct` as the urgency signal.
+winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
+ordering (baseline first; `explore` revalidates the stack inline — no
+separate rebench step), (d) `phase_budget_remaining_pct` as the urgency
+signal.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
@@ -212,6 +213,16 @@ top-K gaps in parallel in the same tick — they fan out up to
 provide KB/PR/source evidence for `explore` grids and may produce patches for
 `integrate_patch`. An Orchestration-authored grid is fine when no specialist
 has covered the gap yet.
+
+**Where a grid comes from.** `=== Untested proposals (current cycle) ===`
+carries every executable specialist proposal this cycle that no explore round
+has benched, ranked by gap severity, with the ones already benched removed.
+Draw from it first and copy an entry's fields verbatim — an entry marked
+ATOMIC is a coupled set that must go in as one variant, never split or
+re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
+on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
+finish is truncated from the end. Top up from the idea-generation moves only
+after the queue holds nothing else worth running.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
