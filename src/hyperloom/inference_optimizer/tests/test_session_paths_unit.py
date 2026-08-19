@@ -92,12 +92,13 @@ def test_trace_paths():
 def test_enablement_paths():
     assert sp.enablement_dir(SD) == SD / "reports" / "enablement"
     assert sp.enablement_round_dir(SD, "abc123") == SD / "reports" / "enablement" / "abc123"
-    assert sp.enablement_round_dir(SD, "").name == "unknown"
 
 
-def test_enablement_round_dir_rejects_traversal():
+@pytest.mark.parametrize("task_id", ["../evil", ""])
+def test_enablement_round_dir_refuses_an_unusable_id(task_id):
+    """A blank id would put every round in one directory; the caller skips those."""
     with pytest.raises(ValueError):
-        sp.enablement_round_dir(SD, "../evil")
+        sp.enablement_round_dir(SD, task_id)
 
 
 def test_research_and_competitor_paths():

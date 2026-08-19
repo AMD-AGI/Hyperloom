@@ -101,7 +101,7 @@ def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
         "skip_reason": "session_time_budget",
     }
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st, max_hours=3.0)
+    nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
@@ -115,7 +115,7 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     st.last_sweep = {}
     st.last_conc_sweep = {}
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st, max_hours=3.0)
+    nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, _evidence = nxt
     assert target == ps.PHASE_CLOSE
@@ -124,7 +124,7 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
 
 def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
     """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
-    st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     st.last_sweep = {}
     st.last_conc_sweep = {
         "status": "skipped",
@@ -132,7 +132,7 @@ def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
         "skip_reason": "session_time_budget",
     }
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st, max_hours=96.0)
+    nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_EXPLORE
