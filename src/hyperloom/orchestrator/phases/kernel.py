@@ -53,12 +53,21 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 # pending revalidation while the enqueue is in flight.
 _GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
 
-# Which table each aiter config env var is resolved under at serving time. The
-# file we deploy carries the candidate's name, so this is what lets the apply
-# check recognise our artifact in the runtime's own lookup lines. Kept in step
-# with ``_merge_gemm_candidate_with_runtime``'s map and with KernelForge's
-# TUNER_ENV_VARS -- a name that drifts here reads as "the artifact never
-# arrived", which reverts the candidate.
+# Which table each aiter config env var is resolved under at serving time. Two
+# callers need it: the merge step, which has to find the runtime table to merge
+# our candidate into, and the apply check, which has to recognise our artifact
+# in the runtime's own lookup lines (the deployed file carries the candidate's
+# name, not the table's). They were separate copies until one of them was
+# almost edited alone -- and a name that drifts reads as "the artifact never
+# arrived", which reverts a candidate that was fine.
+#
+# A third copy lives in KernelForge's TUNER_ENV_VARS and cannot be shared
+# across repositories; ``test_aiter_env_table_matches_kernelforge`` asserts the
+# two agree wherever forge is importable.
+#
+# Note AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant: aiter reads
+# fp4/mxfp4 (gfx950-only) configs under that name (jit/core.py), and the
+# suffixed key was a dead one that silently dropped every tuned fp4 GEMM.
 _AITER_ENV_TO_TABLE: dict[str, str] = {
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
@@ -1801,19 +1810,7 @@ class KernelPhase(PhaseHandler):
         if not candidate_path.is_file():
             return None
 
-        env_var_to_tuned_name = {
-            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
-            # aiter reads fp4/mxfp4 (gfx950-only) configs via AITER_CONFIG_GEMM_A4W4,
-            # not the "_BLOCKSCALE" variant (aiter jit/core.py). Must match KernelForge's
-            # TUNER_ENV_VARS or tuned fp4 GEMM CSVs are silently ignored at serving.
-            "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
-            "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
-        }
-        runtime_filename = env_var_to_tuned_name.get(env_var)
+        runtime_filename = _AITER_ENV_TO_TABLE.get(env_var)
         if not runtime_filename:
             return None
         tuned_stem = Path(runtime_filename).stem

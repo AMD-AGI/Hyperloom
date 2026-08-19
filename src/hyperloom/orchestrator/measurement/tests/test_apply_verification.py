@@ -60,7 +60,14 @@ def parser(request, monkeypatch):
     so the decision logic stays under test on a machine that has no forge.
     """
     if request.param == "real_forge":
-        pytest.importorskip("forge_gemm_tune", reason="real parser unavailable")
+        # Skip on the submodule production actually imports, not the top-level
+        # package. A box can have forge_gemm_tune installed without
+        # ``evidence`` in it, and then the top-level check passes, the parser
+        # comes back None, every verdict is "unknown", and eleven cases fail on
+        # a developer machine for a reason that has nothing to do with them.
+        pytest.importorskip(
+            "forge_gemm_tune.evidence", reason="real parser unavailable"
+        )
         return None
 
     import re
@@ -221,3 +228,47 @@ class TestDegraded:
             p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16
         ).to_dict()
         assert d["verdict"] == "served" and d["blocks_keep"] is False
+
+
+class TestTheEnvToTableMapDoesNotDrift:
+    """The same mapping exists here and in KernelForge, and cannot be shared.
+
+    A name that drifts makes the apply check compare our deployed file against
+    the wrong runtime table, conclude the artifact never arrived, and revert a
+    candidate that was fine. The two same-repo copies are now one constant;
+    this covers the copy that lives in the other repository.
+    """
+
+    def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
+        forge_utils = pytest.importorskip(
+            "forge_gemm_tune.utils", reason="KernelForge not installed here"
+        )
+        from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
+
+        forge_env_vars = set(getattr(forge_utils, "TUNER_ENV_VARS", {}).values())
+        aiter_only = {v for v in forge_env_vars if v.startswith("AITER_CONFIG")}
+
+        missing = aiter_only - set(_AITER_ENV_TO_TABLE)
+        assert not missing, (
+            f"KernelForge writes {sorted(missing)} but the apply check has no "
+            "table for them, so artifacts under those names read as never "
+            "having arrived"
+        )
+
+    def test_the_fp4_key_is_the_one_aiter_actually_reads(self):
+        # AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant. The suffixed
+        # name was a dead key that silently dropped every tuned fp4 GEMM.
+        from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
+
+        assert "AITER_CONFIG_GEMM_A4W4" in _AITER_ENV_TO_TABLE
+        assert "AITER_CONFIG_GEMM_A4W4_BLOCKSCALE" not in _AITER_ENV_TO_TABLE
+
+    def test_the_merge_step_and_the_apply_check_read_one_map(self):
+        # They were separate copies until one was almost edited alone.
+        import inspect
+
+        from hyperloom.orchestrator.phases import kernel
+
+        src = inspect.getsource(kernel.KernelPhase._merge_gemm_candidate_with_runtime)
+        assert "_AITER_ENV_TO_TABLE" in src
+        assert "a8w8_blockscale_tuned_gemm.csv" not in src

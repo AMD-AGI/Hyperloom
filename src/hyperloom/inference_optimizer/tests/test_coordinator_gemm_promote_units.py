@@ -3226,7 +3226,7 @@ class TestForgeGemmE2EApplyGate:
         )
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         # +30% was measured, and is still refused: the server was running its
         # bundled default table, so the delta is drift, not tuning.
@@ -3253,7 +3253,7 @@ class TestForgeGemmE2EApplyGate:
         )
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert coord.shared_state.optimization_stack == []
         assert result["decision"] == "REVERT"
@@ -3275,7 +3275,7 @@ class TestForgeGemmE2EApplyGate:
         )
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         reason = result["e2e_results"]["reverted"][0]["reason"]
         assert "artifact_table_not_consulted+not_merged" in reason
@@ -3295,7 +3295,7 @@ class TestForgeGemmE2EApplyGate:
         )
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert result["decision"] == "KEEP"
         assert len(coord.shared_state.optimization_stack) == 1
@@ -3316,7 +3316,7 @@ class TestForgeGemmE2EApplyGate:
         )
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert result["decision"] == "KEEP"
         kept = result["e2e_results"]["kept"]
@@ -3330,7 +3330,7 @@ class TestForgeGemmE2EApplyGate:
         self._wire(monkeypatch, coverage=None, verdict=None)
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert result["decision"] == "KEEP"
         assert len(coord.shared_state.optimization_stack) == 1
@@ -3389,7 +3389,7 @@ class TestForgeGemmPairedConfirmation:
         )
         fake = self._run_e2e(coord, monkeypatch, [130.0])
 
-        await coord._validate_forge_gemm_tuning_e2e(self._result())
+        await coord._validate_gemm_tuning_e2e(self._result())
 
         # One integrate call: the confirmation pass did not run.
         assert len(fake.calls) == 1
@@ -3412,7 +3412,7 @@ class TestForgeGemmPairedConfirmation:
         fake = self._run_e2e(coord, monkeypatch, [130.0, 100.0, 130.0, 101.0, 131.0])
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert len(fake.calls) == 5
         # The confirmation pass alternates env-free and env-carrying runs.
@@ -3437,7 +3437,7 @@ class TestForgeGemmPairedConfirmation:
         self._run_e2e(coord, monkeypatch, [130.0, 100.0, 130.0, 140.0, 120.0])
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         assert result["paired_confirmation"]["reason"] == "sign_disagreement"
         assert result["paired_confirmation"]["decisive"] is False
@@ -3464,7 +3464,7 @@ class TestForgeGemmPairedConfirmation:
         monkeypatch.setattr(KernelPhase, "_gemm_apply_verdict", lambda self, *a, **k: None)
         result = self._result()
 
-        await coord._validate_forge_gemm_tuning_e2e(result)
+        await coord._validate_gemm_tuning_e2e(result)
 
         # A confirmation that could not run must not revert the artifact, and
         # must not claim to have confirmed anything either.
