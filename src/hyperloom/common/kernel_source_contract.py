@@ -23,17 +23,16 @@ nothing downstream.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
 SOURCE_RESOLUTION_SCHEMA_VERSION = "1.0.0"
 
-#: Canonical artifact name, relative to the analysis run directory.
+#: Canonical artifact name, relative to the analysis run directory. Mirrored by
+#: ``tracelens_analysis._SOURCE_RESOLUTION_NAME`` for the standalone path.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 
 #: How a location was decided, best evidence first. ``llm_review`` outranks the
@@ -272,10 +271,3 @@ def path_is_acceptable(path: str, roots: tuple[str, ...]) -> bool:
     """Whether a rewriting tier may write ``path`` as a resolved location."""
     return bool(canonical_source_path(path, roots))
 
-
-def read_document(path: Path | str) -> dict[str, Any] | None:
-    """Load the artifact, or ``None`` when it is absent or unreadable."""
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None

@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
+from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -1781,7 +1782,7 @@ class IntegratePatchExecutor:
                     "patches_reverted": [],
                     "config_changes_applied": {},
                 }
-            task_id = str(getattr(ctx.task, "task_id", "") or "build_launch_probe")
+            task_id = ctx.task.task_id
             scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
             scratch.mkdir(parents=True, exist_ok=True)
             ctx._ip_specialist_task_id = task_id  # type: ignore[attr-defined]
@@ -2038,7 +2039,7 @@ class IntegratePatchExecutor:
                 f"localization touches path(s) outside the allowlist: {outside[:8]}",
             )
 
-        loc_dir = runs_dir(self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "") or "localize"))
+        loc_dir = runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id)
         loc_dir = loc_dir / "localization"
         loc_dir.mkdir(parents=True, exist_ok=True)
         gap_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", action.gap_id or "localization")
@@ -2077,9 +2078,7 @@ class IntegratePatchExecutor:
                 setup_result = _run_setup_commands(
                     setup_cmds,
                     cwd=self.session_dir,
-                    log_dir=runs_dir(
-                        self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "") or "setup")
-                    ),
+                    log_dir=runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id),
                 )
 
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
@@ -2998,7 +2997,7 @@ class IntegratePatchExecutor:
         gate_evidence: dict[str, Any],
         ctx: Any,
     ) -> dict[str, Any]:
-        """Throughput KEEP / REVERT decision with optional stack rebench."""
+        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it."""
         base_tput = float(params.get("base_tput") or 0.0)
         # Grade against the current live anchor, not a stale task snapshot.
         live_anchor = resolve_grading_anchor_tput(shared_state)
@@ -3012,6 +3011,29 @@ class IntegratePatchExecutor:
             base_tput = live_anchor
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+
+        stopped = stopped_by_the_run_class(bench_result.get("error_class"))
+        if stopped is not None:
+            artifacts_reverted = self._revert_artifacts(applied_artifacts)
+            reverted = self._revert_patches(framework_root, applied)
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "failed",
+                    "error_class": stopped.error_class,
+                    "error": stopped.interrupted,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "config_changes_applied": {},
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                },
+            )
+
         new_tput = bench_result.get("output_throughput")
         delta_pct = None
         if isinstance(new_tput, (int, float)) and new_tput > 0 and base_tput > 0:
@@ -4127,6 +4149,7 @@ class IntegratePatchExecutor:
                 # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
+                "error_class": getattr(r, "error_class", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
                 # Materialized config used for this bench; needed by revalidation.
                 "materialized_config": str(config_path),

@@ -43,14 +43,14 @@ def _sym(
 async def test_low_severity_yields_observation_send_message():
     ladder = ActionLadder()
     out = await ladder.decide(
-        [_sym("pod_no_metrics", SymptomSeverity.LOW)],
+        [_sym("inbox_bloat", SymptomSeverity.LOW)],
         tick_index=0,
         now_unix=1.0,
     )
     assert len(out.intents) == 1
     assert out.intents[0].type is IntentType.SEND_MESSAGE
     assert out.intents[0].payload["topic"] == "observation"
-    assert out.findings and out.findings[0].symptom_name == "pod_no_metrics"
+    assert out.findings and out.findings[0].symptom_name == "inbox_bloat"
 
 
 async def test_medium_severity_yields_alert_only():
@@ -82,17 +82,17 @@ async def test_high_crash_emits_alert_only():
     assert alert.payload["detail"]["suggestion"] == "revert"
 
 
-async def test_high_cluster_fault_emits_alert_only():
-    """Cluster faults are diagnostic — alert + suggestion only."""
+async def test_high_diagnostic_symptom_emits_alert_only():
+    """Diagnostic symptoms are alert + suggestion only."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
             _sym(
-                "cluster_fault",
+                "log_error_pattern",
                 SymptomSeverity.HIGH,
-                summary="cluster fault on g53",
-                subject={"node": "g53", "fault": "g53-gpu_ecc"},
-                suggestion="drain g53",
+                summary="CUDA out of memory in server.log",
+                subject={"pattern": "CUDA out of memory"},
+                suggestion="lower the batch size",
             )
         ],
         tick_index=0,
@@ -103,18 +103,18 @@ async def test_high_cluster_fault_emits_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
     alert = next(i for i in out.intents if i.type is IntentType.ALERT)
     assert alert.payload["severity"] == "high"
-    assert alert.payload["detail"]["suggestion"] == "drain g53"
+    assert alert.payload["detail"]["suggestion"] == "lower the batch size"
 
 
-async def test_medium_cluster_fault_emits_alert_only():
+async def test_medium_diagnostic_symptom_emits_alert_only():
     ladder = ActionLadder()
     out = await ladder.decide(
         [
             _sym(
-                "cluster_fault",
+                "log_error_pattern",
                 SymptomSeverity.MEDIUM,
-                summary="cluster fault on g53",
-                subject={"node": "g53", "fault": "g53-gpu_ecc"},
+                summary="RuntimeError in server.log",
+                subject={"pattern": "RuntimeError"},
             )
         ],
         tick_index=0,
@@ -378,7 +378,7 @@ async def test_coordinator_zombie_alert_only():
 
 
 async def test_gateway_auth_outage_alert_only():
-    """J1: HIGH alert — the operator has to rotate the gateway key."""
+    """HIGH alert — the operator has to rotate the gateway key."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -398,7 +398,7 @@ async def test_gateway_auth_outage_alert_only():
 
 
 async def test_wekafs_degraded_alert_only():
-    """J2: HIGH alert — operator decides wait vs remount."""
+    """HIGH alert — operator decides wait vs remount."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -419,7 +419,7 @@ async def test_wekafs_degraded_alert_only():
 
 
 async def test_tracelens_cli_missing_alert_only():
-    """J3: HIGH alert — the operator has to re-run install.sh."""
+    """HIGH alert — the operator has to re-run install.sh."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("tracelens_cli_missing", SymptomSeverity.HIGH, evidence={"cli_names": ["a", "b"]}, subject={})],
@@ -470,7 +470,7 @@ async def test_critic_runtime_stuck_alert_only():
 
 
 async def test_ray_pending_starvation_alert_only():
-    """F1: kernel pipeline is wedged — alert + suggestion only.
+    """Kernel pipeline is wedged — alert + suggestion only.
     The auto prune_branch was dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
@@ -505,7 +505,7 @@ async def test_geak_budget_starvation_emits_alert_plus_prune_kernel_opt():
 
 
 async def test_kernel_opt_no_progress_emits_alert_plus_prune_kernel_opt():
-    """F5: pipeline structurally cannot optimise — prune kernel_opt toward params/sweep."""
+    """Pipeline structurally cannot optimise — prune kernel_opt toward params/sweep."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("kernel_opt_no_progress", SymptomSeverity.HIGH, evidence={"kernel_count": 3}, subject={})],
@@ -520,7 +520,7 @@ async def test_kernel_opt_no_progress_emits_alert_plus_prune_kernel_opt():
 
 
 async def test_critic_prune_stuck_falls_to_medium_alert():
-    """E4 — MEDIUM severity → alert only, no destructive action."""
+    """MEDIUM severity → alert only, no destructive action."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("critic_prune_stuck", SymptomSeverity.MEDIUM, subject={})],

@@ -44,7 +44,6 @@ class _StubSharedState:
     explore_search: dict = field(default_factory=dict)
     optimization_stack: list = field(default_factory=list)
     gain_per_stack_entry: list = field(default_factory=list)
-    cumulative_gain: float = 0.0
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
     cumulative_gain_validated_stack_len: int = 0
@@ -58,6 +57,13 @@ class _StubSharedState:
 
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
+
+    def append_stack_gain_entry(self, *, action, variant_name, new_tput, extra_server_args="", ts=None):
+        from hyperloom.common.gain_math import gain_pct
+
+        entry_gain_pct = gain_pct(float(new_tput or 0.0), float(self.baseline_tput or 0.0))
+        self.gain_per_stack_entry.append(entry_gain_pct)
+        return entry_gain_pct
 
     def set_stop_reason(self, reason: str) -> None:
         self.stop_reason = reason
@@ -856,7 +862,7 @@ async def test_warm_replay_falls_back_to_recipe_when_context_not_hit(tmp_path):
 def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     tmp_path,
 ):
-    """When measured gain ≥ expected × min_reproduce, push the warm config onto the stack and bump cumulative_gain."""
+    """When measured gain ≥ expected × min_reproduce, push the warm config onto the stack and bump the validated gain."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -886,11 +892,10 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert entry["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
     assert entry["tput"] == 738.0
     assert coord.shared_state.gain_per_stack_entry == [23.0]
-    assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
     assert coord.shared_state.cumulative_gain_validated_ts
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
@@ -923,7 +928,7 @@ def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
         "replay_warm_recipe",
     ]
     assert coord.shared_state.gain_per_stack_entry == [None, 23.0]
-    assert coord.shared_state.cumulative_gain == 23.0
+    assert coord.shared_state.cumulative_gain_validated == 23.0
     assert coord.shared_state.cumulative_gain_validated_stack_len == 2
 
 
@@ -965,7 +970,7 @@ def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
     assert outcome["quality_gate"]["passed"] is False
     assert coord.shared_state.optimization_stack == []
     assert coord.shared_state.current_best == {}
-    assert coord.shared_state.cumulative_gain == 0.0
+    assert coord.shared_state.cumulative_gain_validated == 0.0
 
 
 @pytest.mark.parametrize(
@@ -1033,7 +1038,7 @@ def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
     outcome = coord.shared_state.warm_replay_outcome
     assert outcome["status"] == "reproduced"
     assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
 def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
@@ -1063,16 +1068,16 @@ def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
     coord._promote_warm_replay(result, task=task)
 
     cb = coord.shared_state.current_best
-    assert cb["action"] == "warm_replay"
+    assert cb["action"] == "replay_warm_recipe"
     assert cb["tput"] == 738.0
-    assert cb["hot_tput"] == 738.0
-    assert cb["cold_tput"] == 690.0
+    # The measured rounds are audit metadata on the stack entry, not config.
+    assert "hot_tput" not in cb
+    assert "cold_tput" not in cb
     entry = coord.shared_state.optimization_stack[0]
     assert entry["tput"] == 738.0
     assert entry["hot_tput"] == 738.0
     assert entry["cold_tput"] == 690.0
     assert entry["gain_pct"] == 23.0
-    assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
 
 
@@ -1099,7 +1104,7 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     assert outcome["actual_gain_pct"] == 10.0
     assert outcome.get("below_historical_reproduce_pct") is True
     assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
 def test_promote_warm_replay_no_gain_is_drift(tmp_path):
@@ -1122,7 +1127,7 @@ def test_promote_warm_replay_no_gain_is_drift(tmp_path):
     outcome = coord.shared_state.warm_replay_outcome
     assert outcome["status"] == "drift"
     assert coord.shared_state.optimization_stack == []
-    assert coord.shared_state.cumulative_gain == 0.0
+    assert coord.shared_state.cumulative_gain_validated == 0.0
 
 
 def test_promote_warm_replay_succeeded_but_zero_gain_is_drift(tmp_path):
@@ -1709,7 +1714,6 @@ def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):
     # baseline 600, measured 738 -> gain = 23% via tput ratio.
     result = {"status": "succeeded", "output_throughput": 738.0}
     coord._promote_warm_replay(result, task=task)
-    assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
 
 

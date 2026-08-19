@@ -1038,23 +1038,6 @@ def _read_baseline_yaml_conc(state: Any) -> int:
     )
 
 
-def _resolve_effective_concurrency(state: Any) -> int:
-    """Resolve the concurrency the actual benchmark ran with (returns int >= 1; on-disk baseline yaml CONC wins, since ``state.conc`` can stay stale and under-count the ceiling 8x).
-
-    Args:
-        state: Shared run state (baseline yaml CONC preferred over ``conc``).
-
-    Returns:
-        The effective concurrency, always ``>= 1``.
-    """
-    yaml_conc = _read_baseline_yaml_conc(state)
-    if yaml_conc > 0:
-        return yaml_conc
-    conc = int(getattr(state, "conc", 0) or 0)
-    if conc > 0:
-        return conc
-    return 1
-
 
 @dataclass(frozen=True)
 class RooflineBreakdown:

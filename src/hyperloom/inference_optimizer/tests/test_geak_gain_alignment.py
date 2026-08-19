@@ -213,7 +213,6 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
     # Validated == the MEASURED same-harness total (≈+8.8%), NOT the hot A/B (+13.29%).
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct, abs=1e-6)
     assert ss.cumulative_gain_validated != pytest.approx(13.29, abs=0.05)
-    assert ss.cumulative_gain_provenance == "geak_same_harness_geak"
     assert ss.resume_pending_revalidation is False
     # Rebench-first writes the headline HERE: current_best.tput == measured, and
     # the geak_e2e stack entry now exists.
@@ -322,23 +321,18 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     )
     repeated = assemble_parts(tmp_path)["kernel_journey"]["kernels"]
     assert len(repeated) == 2
-    adoption = rejected["adoptions"][0]
-    assert adoption["decision"] == "REVERT"
-    assert adoption["validated"] is False
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
 
 
-def _final_breakdown(*, provenance: str, pending: bool, gain_v: float, gain_round: float) -> dict:
+def _final_breakdown(*, pending: bool, gain_v: float) -> dict:
     return {
         "session": {"image": ""},
         "baseline": {"throughput_tok_s_per_gpu": 2844.2},
         "final": {
             "throughput_tok_s_per_gpu": 3236.5,
             "cumulative_gain_pct_validated": gain_v,
-            "cumulative_gain_pct_per_round_sum": gain_round,
-            "cumulative_gain_provenance": provenance,
             "revalidation_pending": pending,
             "validated_at_stack_len": 2,
             "validated_ts": "",
@@ -351,16 +345,13 @@ def test_report_shows_provisional_not_zero_validated() -> None:
     """A cross-harness provisional (validated pending) must not read as +0.00%."""
     sec = render_final(
         _final_breakdown(
-            provenance="geak_cross_harness_provisional",
             pending=True,
             gain_v=0.0,  # collectors coerces a pending/unstamped validated to 0.0
-            gain_round=13.79,
         )
     )
     facts = " ".join(sec.key_facts)
     warns = " ".join(sec.warnings)
-    assert "Provisional" in facts
-    assert "13.79" in facts or "13.8" in facts
+    assert "PENDING same-harness revalidation" in facts
     assert "Validated cumulative gain" not in facts  # must NOT claim validation
     assert "+0.00%" not in facts  # must NOT read as no-op
     assert "PROVISIONAL" in warns and "cross-harness" in warns
@@ -370,10 +361,8 @@ def test_report_shows_validated_when_same_harness_confirmed() -> None:
     """A same-harness validated gain renders as authoritative, no provisional tag."""
     sec = render_final(
         _final_breakdown(
-            provenance="geak_orch_harness_validated",
             pending=False,
             gain_v=13.5,
-            gain_round=13.5,
         )
     )
     facts = " ".join(sec.key_facts)
@@ -403,7 +392,7 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
     """decision==validated → validated == (measured − baseline)/baseline, same harness."""
     base, measured = 2844.209, 3270.0  # ~+14.97%, engaged + identity matches
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
 
     # Guard: the GEAK-harness fallback must NOT be taken on the validated path.
@@ -422,7 +411,6 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct, abs=1e-6)
-    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert ss.resume_pending_revalidation is False
     assert ss.cumulative_gain_validated_stack_len == 1
 
@@ -432,7 +420,7 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     """decision==fallback (config drift) → NO validated stamp; 2a is invoked."""
     base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.geak_pending = {
         "status": "awaiting_rebench",
@@ -458,7 +446,6 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     # 2b did NOT stamp validated (still 0); it deferred to the GEAK harness (2a).
     assert called["n"] == 1
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
     assert not ss.geak_pending
     assert ss.resume_pending_revalidation is False
     assert ss.geak_result["revalidation_status"] == "fallback_failed"
@@ -488,7 +475,6 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.resume_pending_revalidation is False
     assert not ss.geak_pending
@@ -523,7 +509,6 @@ def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
     ss = coord.shared_state
     # Headline is UNCHANGED — no premature promote.
     assert ss.current_best == before_best
-    assert ss.cumulative_gain == pytest.approx(0.0)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     # The candidate is recorded as pending with audit-only self-reported numbers.
@@ -548,7 +533,6 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     coord._promote_geak_from_candidate(
         result,
         measured_tput=measured,
-        provenance="geak_orch_harness_validated",
     )
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -557,8 +541,6 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.current_best["extra_server_args"] == "--max-num-batched-tokens 24576"
     assert ss.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER") == "0"
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
-    assert ss.cumulative_gain == pytest.approx(expected_pct)
-    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert ss.resume_pending_revalidation is False
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert not ss.geak_pending
@@ -573,8 +555,6 @@ def test_report_shows_pending_candidate_excluded_from_headline() -> None:
         "final": {
             "throughput_tok_s_per_gpu": 2844.2,
             "cumulative_gain_pct_validated": 0.0,
-            "cumulative_gain_pct_per_round_sum": 0.0,
-            "cumulative_gain_provenance": "",
             "revalidation_pending": False,
             "action_path": [],
             "geak_pending": {"status": "awaiting_rebench", "self_reported_gain_pct": 13.79},
@@ -631,7 +611,6 @@ async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.resume_pending_revalidation is False
     assert not ss.geak_pending
@@ -681,7 +660,6 @@ async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
     expected_pct = (measured - base) / base * 100.0
     assert ss.current_best["tput"] == pytest.approx(measured)
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
-    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert not ss.geak_pending
 
@@ -715,7 +693,6 @@ async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path:
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.resume_pending_revalidation is False
     assert not ss.geak_pending
@@ -878,7 +855,7 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
     (the material was proven in the original KERNEL cycle)."""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": current_best}]
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": current_best}]
     coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.geak_result = {}  # lost on resume
 
@@ -897,7 +874,6 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
-    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert ss.resume_pending_revalidation is False
 
 
@@ -917,7 +893,7 @@ async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: 
     coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
     coord.shared_state.optimization_stack = [
         {"action": "explore", "variant_name": "kv-cache-fp8", "tput": 8900.0},
-        {"action": "geak_e2e", "tput": current_best},
+        {"action": "geak_e2e", "variant_name": "geak_e2e", "tput": current_best},
         {"action": "integrate_patch", "variant_name": "kernel-x", "tput": current_best},
     ]
     coord.shared_state.resume_pending_revalidation = True
@@ -947,6 +923,5 @@ async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
-    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert ss.resume_pending_revalidation is False
     assert ss.geak_result.get("revalidation_status") != "no_material"

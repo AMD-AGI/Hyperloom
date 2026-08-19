@@ -18,12 +18,10 @@ from hyperloom.agents.robustness.signals import (
     SymptomSeverity,
     evaluate_crash_signals,
     evaluate_event_signals,
-    evaluate_health_signals,
     evaluate_stall_signals,
 )
 from hyperloom.agents.robustness.signals.crash import CrashConfig
 from hyperloom.agents.robustness.signals.event import EventConfig
-from hyperloom.agents.robustness.signals.health import HealthConfig
 from hyperloom.agents.robustness.signals.stall import StallConfig
 from hyperloom.agents.robustness.sources.base import SourceData
 
@@ -38,7 +36,6 @@ def _ctx(
     return ReactorContext(
         tick_index=1,
         shared_state=SharedStateSnapshot(
-            session_id="sess-1",
             crash_count=crash_count,
             current_action=current_action,
         ),
@@ -423,81 +420,6 @@ def test_event_handles_combined_inbox_and_coordinator_events():
     assert any(s.name == "repeated_policy_denied" for s in out)
 
 
-# Health
-
-
-def test_health_flags_failed_pod_as_high_severity():
-    data = SourceData(
-        session_pods=[
-            {
-                "pod": {"namespace": "ns", "name": "brain-0"},
-                "role": "brain",
-                "phase": "Failed",
-                "assignment_id": "a1",
-            },
-        ],
-    )
-    out = evaluate_health_signals(_ctx(), data)
-    assert out and out[0].severity is SymptomSeverity.HIGH
-    assert out[0].name == "pod_not_running"
-
-
-def test_health_flags_unknown_phase_as_medium():
-    data = SourceData(
-        session_pods=[
-            {
-                "pod": {"namespace": "ns", "name": "hands-0"},
-                "role": "hands",
-                "phase": "CrashLoopBackOff",
-            },
-        ],
-    )
-    out = evaluate_health_signals(_ctx(), data)
-    assert out and out[0].severity is SymptomSeverity.MEDIUM
-
-
-def test_health_silent_when_pods_running():
-    data = SourceData(
-        session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Running"}],
-    )
-    assert evaluate_health_signals(_ctx(), data) == []
-
-
-def test_health_warns_no_metrics_after_threshold():
-    now = 10_000.0
-    data = SourceData(
-        session_summary={
-            "pods": [
-                {
-                    "pod": {"namespace": "ns", "name": "p1"},
-                    "role": "hands",
-                    "t_start": now - 1200.0,
-                    "available_metrics": [],
-                }
-            ]
-        }
-    )
-    out = evaluate_health_signals(_ctx(now_unix=now), data, config=HealthConfig(no_metrics_warn_s=600))
-    assert any(s.name == "pod_no_metrics" for s in out)
-
-
-def test_health_does_not_flag_recently_started_pods_with_no_metrics():
-    now = 10_000.0
-    data = SourceData(
-        session_summary={
-            "pods": [
-                {
-                    "pod": {"namespace": "ns", "name": "p2"},
-                    "role": "hands",
-                    "t_start": now - 60.0,
-                    "available_metrics": [],
-                }
-            ]
-        }
-    )
-    assert evaluate_health_signals(_ctx(now_unix=now), data, config=HealthConfig(no_metrics_warn_s=600)) == []
-
-
 # Classifier
 
 
@@ -544,16 +466,12 @@ def test_classifier_runs_all_default_rules():
         for i in range(3)
     ]
     ctx = _ctx(crash_count=2, inbox=inbox)
-    data = SourceData(
-        session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Failed"}],
-        coordinator_events=[],
-    )
+    data = SourceData(coordinator_events=[])
     classifier = Classifier(configs={"crash": CrashConfig(medium_threshold=2)})
     out = classifier.classify(data, ctx)
     names = {s.name for s in out}
     assert "crash_count_rising" in names
     assert "repeated_policy_denied" in names
-    assert "pod_not_running" in names
 
 
 # ---------------------------------------------------------------------------
@@ -571,10 +489,8 @@ def test_signal_registry_order_is_pinned():
         "stall",
         "crash",
         "event",
-        "health",
         "local_health",
         "gpu_leak",
-        "cluster_fault",
         "budget",
         "phase_budget",
         "conversation_progress",

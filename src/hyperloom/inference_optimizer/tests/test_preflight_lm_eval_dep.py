@@ -256,7 +256,7 @@ def test_lm_eval_skipped_under_no_eval(monkeypatch):
 
 # --- _resolved_eval_disabled: preflight runs before the resume block --------
 def _args(**kw):
-    return SimpleNamespace(**{"no_eval": False, "resume": False, "resume_from": "", **kw})
+    return SimpleNamespace(**{"no_eval": False, "resume_from": "", **kw})
 
 
 def test_resolved_eval_disabled_reads_the_flag():
@@ -266,11 +266,22 @@ def test_resolved_eval_disabled_reads_the_flag():
 
 def test_resolved_eval_disabled_reads_the_resumed_session(tmp_path):
     (tmp_path / "state.json").write_text('{"eval_disabled": true}', encoding="utf-8")
-    assert preflight._resolved_eval_disabled(_args(resume=True, resume_from=str(tmp_path))) is True
+    assert preflight._resolved_eval_disabled(_args(resume_from=str(tmp_path))) is True
 
 
 def test_resolved_eval_disabled_without_a_readable_state(tmp_path):
-    assert preflight._resolved_eval_disabled(_args(resume=True, resume_from=str(tmp_path))) is False
+    assert preflight._resolved_eval_disabled(_args(resume_from=str(tmp_path))) is False
+
+
+def test_resolved_eval_disabled_reads_nothing_without_a_named_session(tmp_path, monkeypatch):
+    """No session dir named means no session state is consulted, whatever sits in the workspace."""
+    from hyperloom.inference_optimizer.session import paths
+
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    foreign = tmp_path / "SomeOtherModel" / "29990101T000000Z"
+    foreign.mkdir(parents=True)
+    (foreign / "state.json").write_text('{"eval_disabled": true}', encoding="utf-8")
+    assert preflight._resolved_eval_disabled(_args()) is False
 
 
 def test_unprobeable_interpreter_is_left_untouched(monkeypatch, capsys):
