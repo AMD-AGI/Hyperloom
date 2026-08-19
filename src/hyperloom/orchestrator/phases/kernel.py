@@ -47,6 +47,28 @@ log = _logging.getLogger(__name__)
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
+# Idempotency key of the same-harness GEAK rebench enqueued by
+# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
+# ``geak_pending`` before the task row exists, so the phase guard already sees a
+# pending revalidation while the enqueue is in flight.
+_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
+
+# Which table each aiter config env var is resolved under at serving time. The
+# file we deploy carries the candidate's name, so this is what lets the apply
+# check recognise our artifact in the runtime's own lookup lines. Kept in step
+# with ``_merge_gemm_candidate_with_runtime``'s map and with KernelForge's
+# TUNER_ENV_VARS -- a name that drifts here reads as "the artifact never
+# arrived", which reverts the candidate.
+_AITER_ENV_TO_TABLE: dict[str, str] = {
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
+    "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
+}
+
 
 def _paired_measurement_basis(verdict: Any) -> str:
     """How the promoted gain was measured, so the ledger cannot overstate it.
@@ -1606,6 +1628,7 @@ class KernelPhase(PhaseHandler):
         *,
         baseline_tput: float,
         budget_minutes: int,
+        extra_server_args: str = "",
     ):
         """Re-measure baseline and tuned stack interleaved, and judge the pairs.
 
@@ -1635,6 +1658,11 @@ class KernelPhase(PhaseHandler):
         pending: float | None = None
         for idx, side in enumerate(interleaved_plan(n_pairs)):
             envs = {} if side == "A" else dict(stacked_envs)
+            # The B leg has to be served the same way the KEEP was: fmoe_ck only
+            # takes effect under --moe-runner-backend aiter, and without it the
+            # tuned table is never read, so B measures the same thing as A and
+            # the confirmation reports within_noise for a gain that is real.
+            side_args = extra_server_args if side == "B" else ""
             try:
                 res = await integrate_handler(
                     {
@@ -1642,6 +1670,7 @@ class KernelPhase(PhaseHandler):
                         "kernel_id": f"gemm_paired_{side}{idx}",
                         "source": "forge_gemm_paired",
                         "base_tput": baseline_tput,
+                        "extra_server_args": side_args,
                         "extra_envs": envs,
                         # Measure, do not decide: the verdict comes from the
                         # pairs, so a per-round KEEP/REVERT here would be noise
@@ -1695,11 +1724,36 @@ class KernelPhase(PhaseHandler):
             key=lambda p: p.stat().st_mtime if p.exists() else 0,
         )
         if not logs:
+            # Say so. This whole change exists to stop checks from failing
+            # quietly, and a missing log is the one way this one can.
+            log.warning(
+                "forge gemm E2E: no server.log under %s; apply verification "
+                "cannot run for %s", run_dir, tuner_name,
+            )
             return None
+
+        # The deployed file is named after the candidate, so the runtime's own
+        # table name has to travel with it or the arrival check compares
+        # merged_tuned_dense_bf16.csv against bf16_tuned_gemm.csv and concludes
+        # the artifact never landed.
+        table_names = [
+            name for key in envs
+            if (name := _AITER_ENV_TO_TABLE.get(key))
+        ]
+        # aiter prints a hit line only under this flag; every serving run now
+        # sets it by default, but an operator value in the candidate env wins,
+        # and then a zero-hit result means nothing.
+        raw_flag = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
+        hit_logging = raw_flag not in ("", "0", "false", "no", "off")
+
         try:
-            return verify_applied(logs[-1], csv_paths).to_dict()
+            return verify_applied(
+                logs[-1], csv_paths,
+                hit_logging=hit_logging,
+                runtime_table_names=table_names,
+            ).to_dict()
         except Exception:  # noqa: BLE001 - verification must never fail the run
-            log.debug("apply verification failed for %s", tuner_name, exc_info=True)
+            log.warning("apply verification failed for %s", tuner_name, exc_info=True)
             return None
 
     def _merge_gemm_candidate_with_runtime(
@@ -2573,6 +2627,11 @@ class KernelPhase(PhaseHandler):
                 stacked_envs,
                 baseline_tput=baseline_tput,
                 budget_minutes=per_tuner_budget_minutes,
+                extra_server_args=(
+                    "--moe-runner-backend aiter"
+                    if "AITER_CONFIG_FMOE" in stacked_envs
+                    else ""
+                ),
             )
             if paired is not None:
                 result["paired_confirmation"] = paired.to_dict()

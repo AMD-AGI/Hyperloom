@@ -83,17 +83,23 @@ def _parse(server_log: Path) -> dict | None:
 def verify_applied(
     server_log: Path | str,
     artifact_paths: list[str] | None = None,
+    *,
+    hit_logging: bool | None = None,
+    runtime_table_names: list[str] | None = None,
 ) -> ApplyVerdict:
     """Decide whether the tuned artifacts were merged and read.
 
     Args:
         server_log: The serving log written by the run under test.
-        artifact_paths: Tuned CSVs that were supposed to be deployed. Checked by
-            basename against the merge line, because the server copies tables
-            into its own config directory before loading them.
+        artifact_paths: Tuned CSVs that were supposed to be deployed.
+        hit_logging: Whether ``AITER_LOG_TUNED_CONFIG`` was on for this run.
+            ``None`` means unknown, which keeps a zero-hit result inconclusive.
+        runtime_table_names: Canonical table names the runtime resolves these
+            artifacts under (e.g. ``bf16_tuned_gemm.csv``). Needed because the
+            file we deploy is named after the candidate, not after the table.
 
     Returns:
-        A verdict. ``blocks_keep`` is true only for the two cases that are
+        A verdict. ``blocks_keep`` is true only for the cases that are
         positively wrong; everything else, including "cannot tell", leaves the
         decision to the caller.
     """
@@ -109,44 +115,63 @@ def verify_applied(
     hits = int(av.get("hit") or 0)
     misses = int(av.get("miss") or 0)
     merged = [str(m) for m in (report.get("merged_tables") or [])]
+    consulted = [str(c) for c in (report.get("consulted_tables") or [])]
 
-    # 1. Did the artifact reach the server at all? Compare basenames: the merge
-    #    step copies tables into the server's own config dir, so the deployed
-    #    path is not the path we wrote.
+    # 1. Did the artifact reach the server at all?
+    #
+    #    Judge by the tables the lookups actually named, not by the merge line.
+    #    Setting AITER_CONFIG_* -- which is exactly what a candidate run does --
+    #    makes aiter skip the merge step entirely: it prints no merge line and
+    #    resolves against the override, so the lookup is the only place the path
+    #    appears. Reading an absent merge line as "not merged" would have
+    #    reverted every candidate.
+    #
+    #    Both names are accepted because both are legitimate: the deployed file
+    #    is named after the candidate when it is an override, and after the
+    #    table when the server merged it into its own config directory.
     wanted = [str(a) for a in (artifact_paths or []) if str(a).strip()]
-    if wanted and merged:
-        merged_names = {Path(m).name for m in merged}
-        missing = [a for a in wanted if Path(a).name not in merged_names]
-        if missing:
-            return ApplyVerdict(
-                "not_merged", hits, misses, merged, missing,
-                detail=(
-                    f"{len(missing)} tuned table(s) absent from the server's merge list; "
-                    "the server loaded its bundled defaults"
-                ),
-            )
+    if wanted and (consulted or merged):
+        seen = {Path(p).name for p in consulted} | {Path(m).name for m in merged}
+        canonical = {str(n).strip() for n in (runtime_table_names or []) if str(n).strip()}
+        if not (seen & (canonical or set())) :
+            missing = [a for a in wanted if Path(a).name not in seen]
+            if len(missing) == len(wanted):
+                return ApplyVerdict(
+                    "not_merged", hits, misses, merged, missing,
+                    detail=(
+                        f"none of the {len(wanted)} tuned table(s) appear in what the "
+                        f"runtime consulted ({sorted(seen)}); the server loaded its "
+                        "bundled defaults"
+                    ),
+                )
 
     # 2. Was anything read? Hit lines are gated behind AITER_LOG_TUNED_CONFIG,
-    #    so their absence is only informative when misses were logged too.
+    #    so their absence is only informative when the flag was on.
     if hits > 0:
         return ApplyVerdict(
             "served", hits, misses, merged,
             detail=f"{hits} lookup(s) hit the tuned table",
         )
     if misses > 0:
-        # Misses logged, no hits: either genuinely nothing matched, or hit
-        # logging was off. Only the parser knows which, and it says so.
-        if str(av.get("verdict")) == "inconclusive_no_hit_logging":
+        # Misses logged and no hits. With hit logging on, that is a real zero --
+        # the case this gate exists for. Without it, "never read" and "not
+        # recorded" are the same picture, and a scan of 60 production logs found
+        # the flag set in none of them, so the default has to stay inconclusive.
+        if hit_logging:
             return ApplyVerdict(
-                "inconclusive_no_hit_logging", hits, misses, merged,
+                "zero_hit", hits, misses, merged,
                 detail=(
-                    "misses logged but hit logging was off; cannot distinguish "
-                    "'never read' from 'not recorded' -- set AITER_LOG_TUNED_CONFIG=1"
+                    f"{misses} lookup(s) with hit logging on, none matched the "
+                    "tuned table"
                 ),
             )
         return ApplyVerdict(
-            "zero_hit", hits, misses, merged,
-            detail=f"{misses} lookup(s), none matched the tuned table",
+            "inconclusive_no_hit_logging", hits, misses, merged,
+            detail=(
+                "misses logged but hit logging was off or unknown; cannot "
+                "distinguish 'never read' from 'not recorded' -- set "
+                "AITER_LOG_TUNED_CONFIG=1"
+            ),
         )
 
     return ApplyVerdict(
