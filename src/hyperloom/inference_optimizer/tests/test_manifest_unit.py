@@ -30,64 +30,6 @@ def test_utc_now_compact_and_session_id():
     assert mf.build_session_id("").startswith("session_")
 
 
-def test_read_first_line(tmp_path):
-    assert mf._read_first_line(tmp_path / "missing.txt") == ""
-    f = tmp_path / "v.txt"
-    f.write_text("\n\n  hello \nworld\n", encoding="utf-8")
-    assert mf._read_first_line(f) == "hello"
-
-
-def test_read_first_line_blank_only(tmp_path):
-    f = tmp_path / "blank.txt"
-    f.write_text("\n\n   \n", encoding="utf-8")
-    assert mf._read_first_line(f) == ""
-
-
-def test_read_first_line_oserror(tmp_path):
-    assert mf._read_first_line(tmp_path) == ""
-
-
-def test_detect_stack_fingerprint_package_imports(monkeypatch):
-    import sys
-
-    for var in (
-        "SGLANG_VERSION",
-        "SGL_VERSION",
-        "VLLM_VERSION",
-        "AITER_COMMIT",
-        "AITER_VERSION",
-        "ROCM_VERSION",
-        "HIP_VERSION",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(mf, "_read_first_line", lambda p: "")
-    monkeypatch.setitem(sys.modules, "sglang", SimpleNamespace(__version__="0.5"))
-    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(__version__="0.7"))
-    monkeypatch.setitem(sys.modules, "aiter", SimpleNamespace(__commit__="cafe"))
-    out = mf._detect_stack_fingerprint()
-    assert out["sglang"] == "0.5"
-    assert out["vllm"] == "0.7"
-    assert out["aiter"] == "cafe"
-
-
-# ---- stack fingerprint ----------------------------------------------------
-def test_detect_stack_fingerprint_env_and_marker(monkeypatch, tmp_path):
-    monkeypatch.setenv("SGLANG_VERSION", "0.4.1")
-    monkeypatch.setenv("VLLM_VERSION", "0.6.0")
-    monkeypatch.delenv("ROCM_VERSION", raising=False)
-    monkeypatch.delenv("HIP_VERSION", raising=False)
-    monkeypatch.delenv("AITER_COMMIT", raising=False)
-    monkeypatch.delenv("AITER_VERSION", raising=False)
-    marker = tmp_path / "version"
-    marker.write_text("6.2.0\n", encoding="utf-8")
-    monkeypatch.setattr(mf, "_read_first_line", lambda p: "6.2.0" if "version" in str(p) else "")
-    out = mf._detect_stack_fingerprint()
-    assert out["sglang"] == "0.4.1"
-    assert out["vllm"] == "0.6.0"
-    assert out["rocm"] == "6.2.0"
-    assert out["aiter"] == "unknown"
-
-
 # ---- git helpers ----------------------------------------------------------
 def test_git_revision_at_success(monkeypatch):
     monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: _Proc(0, "abc1234\n"))
@@ -290,7 +232,6 @@ def test_build_manifest_without_args(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["schema_version"] == mf.SCHEMA_VERSION
     assert m["framework"] == "sglang"
@@ -301,7 +242,6 @@ def test_build_manifest_with_args(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     for v in ("ISL", "OSL", "CONC", "TP", "MAX_MODEL_LEN"):
         monkeypatch.delenv(v, raising=False)
     args = argparse.Namespace(
@@ -336,7 +276,6 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     monkeypatch.setattr(mf, "build_provenance", lambda *a, **k: {
         "gfx_arch": "gfx950", "ep": 8, "graph_mode": "graph_capture",
         "server_args": ["--tp", "1"], "server_args_hash": "abc123",
@@ -350,11 +289,32 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
     assert m["server_args_hash"] == "abc123"
 
 
+def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tmp_path):
+    """``--framework-env isolated`` is the default for vLLM, so the framework is
+    installed where the orchestrator's interpreter cannot see it. The manifest is
+    the copy the KB row, the specialist prompt and resume all read, and each of
+    them drops ``unknown`` -- so a fingerprint that degrades here is absent from
+    all three, not just from the run report.
+    """
+    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
+    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_detect_image", lambda: None)
+    venv_root = tmp_path / "vllm-venv"
+    info = venv_root / "lib" / "python3.12" / "site-packages" / "vllm-0.27.1+rocm723.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.4\nName: vllm\nVersion: 0.27.1+rocm723\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    m = mf.build_manifest(Path("/tmp/sd"))
+    assert m["stack_fingerprint"]["vllm"] == "0.27.1+rocm723"
+
+
 def test_build_manifest_snapshots_user_data_path_from_env(monkeypatch, tmp_path):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(tmp_path / "ud"))
     m = mf.build_manifest(tmp_path / "ud" / "sess")
     assert m["user_data_path"] == str(tmp_path / "ud")
@@ -364,7 +324,6 @@ def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch)
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["user_data_path"] == str(mf._paths.workspace_root())
@@ -375,7 +334,6 @@ def test_write_and_load_manifest_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     written = mf.write_manifest(tmp_path, session_id="sid-x")
     loaded = mf.load_manifest(tmp_path)
     assert loaded["session_id"] == "sid-x"
