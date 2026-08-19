@@ -358,16 +358,13 @@ def xdit_blacklist_reason(
 
 _HELP_TEXT_CACHE: dict[str, str] = {}
 
-# Framework -> monotonic deadline before which the probe is not retried.
-# ``inf`` for a failure that cannot resolve itself inside one session.
+# Framework -> monotonic deadline before which a failed probe is not retried.
 _HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
 _HELP_PROBE_RETRY_SEC: float = 300.0
 
 # Per-framework ``--help`` extraction commands. Each is a single-shot
 # ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
-# Argv *tails*: the interpreter is resolved per framework at call time, because
-# vLLM may live in its own venv and a bare python3 off $PATH is not necessarily
-# the install the benchmark server loads.
+# Argv tails; the interpreter is resolved per framework at call time.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "sglang": (
         "-c",
@@ -394,12 +391,9 @@ def _probe_server_help_text(framework: str) -> str:
     Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
     fall through to NOT filtering.
 
-    A failure is cached too, or a box without the framework installed re-pays a
-    ten-second import on every variant. A missing interpreter or an absent
-    module will not fix itself within a session and is cached outright; a
-    timeout or a crash might, so it is cached only briefly. Either way the first
-    one is logged: a silently empty probe means compatibility rules stopped
-    running with nothing to say so.
+    A failure is held off for ``_HELP_PROBE_RETRY_SEC`` rather than re-paying a
+    ten-second import on every variant, and is logged once: a silently empty
+    probe means the flag rules stopped running with nothing to say so.
 
     Args:
         framework (str): Framework name; matched case-insensitively.
@@ -420,7 +414,6 @@ def _probe_server_help_text(framework: str) -> str:
     # Deferred: _grid_runner imports this module at module scope.
     from ._grid_runner import _resolve_probe_python
 
-    permanent = False
     try:
         interpreter = _resolve_probe_python(fw)
         proc = subprocess.run(
@@ -433,10 +426,7 @@ def _probe_server_help_text(framework: str) -> str:
         # traceback, and treating that as help makes every flag look absent,
         # which drops the variants carrying them rather than sparing them.
         out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
-        permanent = proc.returncode != 0
         reason = f"exit={proc.returncode}"
-    except FileNotFoundError as exc:
-        out, permanent, reason = "", True, repr(exc)
     except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
         out, reason = "", repr(exc)
     if out:
@@ -449,9 +439,7 @@ def _probe_server_help_text(framework: str) -> str:
             fw,
             reason,
         )
-    _HELP_PROBE_FAILED_UNTIL[fw] = (
-        float("inf") if permanent else time.monotonic() + _HELP_PROBE_RETRY_SEC
-    )
+    _HELP_PROBE_FAILED_UNTIL[fw] = time.monotonic() + _HELP_PROBE_RETRY_SEC
     return ""
 
 
@@ -491,8 +479,8 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
-    framework: str = "",
-    model_path: str = "",
+    framework: str,
+    model_path: str,
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework.
 
@@ -502,29 +490,23 @@ def apply_compatibility_filter(
     absent from the server's ``--help`` dropped). Returns the ``(kept,
     dropped)`` shape of ``apply_user_skip_list``.
 
-    The caller passes what it already resolved. Reading the environment here
-    instead would disagree with it whenever the two differ, and the explore
-    path resolves the framework from the materialized YAML rather than $FRAMEWORK.
-
     Args:
         grid (list[GridVariant]): The candidate variants to filter.
-        framework (str): Framework the grid will run against; falls back to
-            ``$FRAMEWORK`` then sglang.
-        model_path (str): Model the grid will run against; falls back to
-            ``$MODEL_PATH``.
+        framework (str): Framework the grid will run against.
+        model_path (str): Model the grid will run against; ``""`` means unknown,
+            which keeps every model-class-gated flag.
 
     Returns:
         tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
         entries carry ``name``/``source``/``reason``.
     """
-    model_path = model_path or os.environ.get("MODEL_PATH", "")
     if model_path:
         is_mla, is_moe = _detect_model_class(model_path)
     else:
         # Cannot detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    fw = (framework or os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    fw = framework.strip().lower()
     help_text = _probe_server_help_text(fw)
     help_available = bool(help_text)
 

@@ -1043,11 +1043,8 @@ class ExploreExecutor:
             # would re-enable the (hang-prone) aiter MoE runner. No-op unless
             # the pin is set. Self-gates, so safe to run in any mode.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            # Workload compatibility: the xDiT do-not-set list, plus flags the
-            # model class or the installed server does not support. Proposals
-            # reach here unfiltered, and a flag the server rejects costs a full
-            # doomed restart; an xDiT precision knob is worse than that, because
-            # the variant runs and wins with the precision no longer locked.
+            # xDiT do-not-set list, plus flags the model class or the installed
+            # server does not support. Proposals reach here unfiltered.
             runnable, _compat_dropped = apply_compatibility_filter(
                 runnable,
                 framework=framework,

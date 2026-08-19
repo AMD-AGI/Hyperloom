@@ -73,8 +73,7 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-# Half the robustness stall threshold, so a single dropped beat cannot trip an
-# accusation against an agent that is blocked on a running kernel step.
+# Half the robustness stall threshold, so one dropped beat cannot trip it.
 _KERNEL_HEARTBEAT_SEC: float = 150.0
 
 
@@ -657,11 +656,8 @@ class IntentRouter:
     async def _kernel_step_heartbeat(self, kind: str, started: float):
         """Keep orchestration's bus timestamp moving through an inline step.
 
-        Kernel handlers are awaited inline in the Coordinator tick, so for the
-        length of a forge run nothing advances orchestration's last-seen time
-        and stall detection accuses the very agent that dispatched the work.
-        The task-progress heartbeat cannot cover it: that reads the ``tasks``
-        table, and an inline request never becomes a row.
+        The task-progress heartbeat cannot cover these: it reads the ``tasks``
+        table, and an inline kernel request never becomes a row.
 
         Args:
             kind (str): Request kind, echoed so an operator can tell what the

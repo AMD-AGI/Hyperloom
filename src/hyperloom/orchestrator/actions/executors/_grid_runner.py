@@ -239,10 +239,7 @@ def _resolve_probe_python(framework: str = "vllm") -> str:
     the SAME framework install the benchmark server loads, so a bare ``python3``
     off ``$PATH`` is deliberately NOT a fallback.
 
-    vLLM is the one framework the installer may place in its own venv, because
-    its ROCm wheel pins a torch that would clash with the shared stack; sglang
-    and atom are always in the shared one. So the isolated venv leads only for
-    vLLM, matching how the installer and preflight resolve the same question.
+    Only vLLM may live in its own venv, so that one leads for vLLM alone.
 
     Resolution order:
     1. ``$VLLM_VENV_ROOT/bin/python`` when probing vLLM and it is executable.

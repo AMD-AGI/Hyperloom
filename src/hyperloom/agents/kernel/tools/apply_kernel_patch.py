@@ -352,21 +352,15 @@ def _path_hash(path: Path) -> str:
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
-_MAX_BACKUP_DIR_ATTEMPTS = 500
+_MAX_BACKUP_DIR_ATTEMPTS: int = 200
 
 
 def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
-    """Create a backup directory no earlier apply can be holding.
+    """Create a backup directory this apply alone owns.
 
-    ``kernel_id`` and the target path are not enough on their own: a lane that
-    passes a constant id (the fusion lane) or a caller that passes none reuses
-    one name for every attempt, and the second apply then overwrites the first's
-    pristine bytes and its manifest. A later revert reads that manifest and
-    restores the patch it was supposed to undo.
-
-    Suffixing keeps the first attempt's name unchanged, so an existing tree is
-    still found where it was. ``mkdir(exist_ok=False)`` makes the claim atomic
-    against a concurrent caller.
+    Suffixes ``-2``, ``-3``, … when an earlier attempt already claimed the name,
+    which a constant or absent ``kernel_id`` would otherwise reuse.
+    ``mkdir(exist_ok=False)`` makes the claim atomic against a concurrent caller.
 
     Args:
         backup_root (Path): Directory the per-attempt backups live under.
@@ -388,28 +382,6 @@ def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
         except FileExistsError:
             continue
     raise RuntimeError(f"_claim_backup_dir: {base} still taken after {_MAX_BACKUP_DIR_ATTEMPTS} suffixes")
-
-
-def _discard_backup_payload(backup_dir: Path) -> None:
-    """Drop the copies a fully reverted attempt no longer needs.
-
-    The target is back to its pristine bytes, so the payload — the source copy,
-    every discovered artifact, and any JIT or cache tree captured with them — is
-    dead weight, and each attempt now keeps its own directory. The manifest
-    stays: recovery and the double-revert guards read its status.
-
-    Best-effort; a failure here must not turn a good revert into a bad one.
-
-    Args:
-        backup_dir (Path): The attempt's backup directory.
-    """
-    for child in backup_dir.iterdir() if backup_dir.is_dir() else ():
-        if child.name == "manifest.json":
-            continue
-        try:
-            shutil.rmtree(child) if child.is_dir() else child.unlink()
-        except OSError as exc:  # noqa: PERF203
-            log.debug("backup payload not discarded: %s: %r", child, exc)
 
 
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
@@ -1968,8 +1940,6 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     if mn_revert:
         manifest["multinode_revert"] = mn_revert
     manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if not partial:
-        _discard_backup_payload(manifest_file.parent)
     result: dict[str, Any] = {
         "status": "partial" if partial else "ok",
         "manifest_path": str(manifest_file),

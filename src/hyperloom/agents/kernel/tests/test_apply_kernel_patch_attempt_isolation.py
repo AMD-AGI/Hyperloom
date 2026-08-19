@@ -73,17 +73,3 @@ def test_a_blank_kernel_id_still_separates_attempts(tmp_path: Path) -> None:
     apk.revert_kernel_patch(second["manifest_path"])
     apk.revert_kernel_patch(first["manifest_path"])
     assert _first_line(target) == "# PRISTINE"
-
-
-def test_a_clean_revert_drops_the_payload_and_keeps_the_manifest(tmp_path: Path) -> None:
-    target = tmp_path / "fused_moe.py"
-    target.write_text(f"# PRISTINE\n{_BODY}", encoding="utf-8")
-
-    applied = _apply(tmp_path, target, "PATCH_A", "k001")
-    backup_dir = Path(applied["manifest_path"]).parent
-    assert any(c.name != "manifest.json" for c in backup_dir.iterdir())
-
-    apk.revert_kernel_patch(applied["manifest_path"])
-    assert [c.name for c in backup_dir.iterdir()] == ["manifest.json"]
-    status = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))["status"]
-    assert status == "reverted"

@@ -1105,8 +1105,8 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
     """A failure surfaces as ``""`` and is held off rather than re-paid at once.
 
     Re-probing on every variant costs a ten-second import each time on a box
-    that does not have the framework. A crash might still resolve, so the
-    hold-off expires; a missing interpreter will not, and does not.
+    that does not have the framework; the hold-off expires so a box that gains
+    it is picked back up.
     """
     raised = {"n": 0}
 
@@ -1123,24 +1123,6 @@ def test_probe_server_help_text_atom_returns_empty_on_failure(
     _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] = 0.0
     assert _grid_runner._probe_server_help_text("atom") == ""
     assert raised["n"] == 2
-
-
-def test_probe_server_help_text_missing_interpreter_is_not_retried(
-    _reset_help_cache,
-    monkeypatch,
-):
-    """An absent interpreter cannot fix itself inside one session."""
-    raised = {"n": 0}
-
-    def fake_run(*args, **kwargs):
-        raised["n"] += 1
-        raise FileNotFoundError("no such interpreter")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert _grid_runner._probe_server_help_text("atom") == ""
-    assert _grid_runner._probe_server_help_text("atom") == ""
-    assert raised["n"] == 1
-    assert _grid_variant_filter._HELP_PROBE_FAILED_UNTIL["atom"] == float("inf")
 
 
 def test_probe_server_help_text_ignores_a_failed_runs_stderr(
@@ -1263,6 +1245,8 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     )
     kept, dropped = _grid_runner.apply_compatibility_filter(
         [kept_variant, dropped_variant],
+        framework="atom",
+        model_path="",
     )
     assert [v.name for v in kept] == ["atom_compatible"]
     assert len(dropped) == 1
