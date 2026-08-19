@@ -272,7 +272,6 @@ omit = [
     "src/hyperloom/agents/kernel/tools/tracelens_analysis.py",
     "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
     "src/hyperloom/agents/kernel/tools/apply_kernel_patch.py",
-    "src/hyperloom/agents/kernel/tools/geak_prompt_patcher.py",
     # Kernel-agent tool backends (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
     "src/hyperloom/agents/kernel/tools/_collective_names.py",
