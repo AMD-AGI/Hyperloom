@@ -12,11 +12,14 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_padded_m_coarse,
     aiter_padded_m_fine,
     align_shapes_to_aiter_keys,
+    fmoe_dispatch_key,
+    fmoe_tuned_config_coverage,
     load_shapes_json,
     parse_aiter_consulted_tables,
     parse_aiter_shape_lookups,
     tuned_config_coverage,
     tuned_csv_shapes,
+    tuned_fmoe_csv_keys,
     write_shapes_json,
 )
 
@@ -191,3 +194,72 @@ class TestTunedCsvCoverage:
         report = tuned_config_coverage([(1, 2, 3)], [])
         assert report["requested"] == 0
         assert report["coverage_pct"] is None
+
+
+class TestFmoeCoverage:
+    HEADER = (
+        "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+        "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelName"
+    )
+    DISPATCH = {
+        "token": "256",
+        "model_dim": "4096",
+        "inter_dim": "512",
+        "expert": "256",
+        "topk": "6",
+        "act_type": "ActivationType.Silu",
+        "dtype": "torch.bfloat16",
+        "q_dtype_a": "torch.float8_e4m3fn",
+        "q_dtype_w": "torch.float4_e2m1fn_x2",
+        "q_type": "QuantType.per_1x32",
+        "use_g1u1": "True",
+        "doweight_stage1": "False",
+    }
+
+    def _csv(self, tmp_path, rows):
+        path = tmp_path / "tuned_fmoe.csv"
+        body = []
+        for row in rows:
+            fields = {**self.DISPATCH, **row}
+            body.append(
+                ",".join(
+                    fields[name]
+                    for name in (
+                        "token",
+                        "model_dim",
+                        "inter_dim",
+                        "expert",
+                        "topk",
+                        "act_type",
+                        "dtype",
+                        "q_dtype_a",
+                        "q_dtype_w",
+                        "q_type",
+                        "use_g1u1",
+                        "doweight_stage1",
+                    )
+                )
+                + ",kernel_a"
+            )
+        path.write_text(f"{self.HEADER}\n" + "\n".join(body) + "\n", encoding="utf-8")
+        return path
+
+    def test_reads_fmoe_dispatch_keys_with_boolean_normalization(self, tmp_path):
+        path = self._csv(tmp_path, [{"use_g1u1": "1", "doweight_stage1": "0"}])
+        keys = tuned_fmoe_csv_keys(path)
+        assert keys == {fmoe_dispatch_key(self.DISPATCH)}
+
+    def test_dense_reader_does_not_parse_fmoe_csv(self, tmp_path):
+        path = self._csv(tmp_path, [{}])
+        assert tuned_csv_shapes(path) == set()
+
+    def test_fmoe_coverage_flags_missing_dispatch_rows(self, tmp_path):
+        path = self._csv(tmp_path, [{"inter_dim": "999"}])
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [self.DISPATCH])
+        assert report["covered"] == 0
+        assert report["coverage_pct"] == 0.0
+
+    def test_fmoe_coverage_matches_runtime_dispatch(self, tmp_path):
+        path = self._csv(tmp_path, [{}])
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [self.DISPATCH])
+        assert report["coverage_pct"] == 100.0

@@ -2013,7 +2013,64 @@ class TestForgeGemmRuntimeConfigMerge:
         )
 
     @pytest.mark.asyncio
-    async def test_a_stopped_run_leaves_its_tuners_unjudged(self, tmp_path, monkeypatch):
+    async def test_integrate_bench_fault_not_recorded_as_zero_gain_revert(
+        self, tmp_path, monkeypatch
+    ):
+        """A server that never booted is an integrate fault, not a 0% REVERT."""
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+        fmoe_candidate = tmp_path / "fmoe.csv"
+        dense_candidate = tmp_path / "dense.csv"
+        fmoe_candidate.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        dense_candidate.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            calls.append(payload)
+            if payload["kernel_id"] == "gemm_tune_fmoe_ck":
+                return {
+                    "status": "failed",
+                    "error_class": "bench_exception",
+                    "decision": "REVERT",
+                    "error": "re-baseline did not succeed",
+                }
+            return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setattr(
+            phase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _env_var, env_value: env_value,
+        )
+
+        result = {
+            "backend": "forge",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "fmoe_ck",
+                    "improved_shapes": 2,
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": str(fmoe_candidate),
+                },
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(dense_candidate),
+                },
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert len(calls) == 2
+        assert result["e2e_results"]["faults"][0]["reason"] == "integrate_fault:bench_exception"
+        assert result["e2e_results"]["reverted"] == []
+        assert result["e2e_results"]["kept"][0]["tuner"] == "dense_bf16"
+        assert result["decision"] == "KEEP"
         """A clock that ran out is not a verdict on the tuners it interrupted."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
@@ -2182,7 +2239,7 @@ class TestForgeGemmRuntimeConfigMerge:
         assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
-    async def test_records_integrate_exception_as_revert(self, tmp_path, monkeypatch):
+    async def test_records_integrate_exception_as_fault(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
         dense_candidate = tmp_path / "dense.csv"
@@ -2213,9 +2270,13 @@ class TestForgeGemmRuntimeConfigMerge:
 
         await phase._validate_gemm_tuning_e2e(result)
 
-        assert result["decision"] == "REVERT"
-        assert result["micro_decision"] == "candidate_no_e2e_gain"
-        assert "integrate failed" in result["e2e_results"]["reverted"][0]["reason"]
+        assert result["status"] == "failed"
+        assert result["micro_decision"] == "integrate_fault"
+        assert result["e2e_gain_pct"] is None
+        fault = result["e2e_results"]["faults"][0]
+        assert fault["reason"] == "integrate_fault:handler_exception"
+        assert fault["fault"] is True
+        assert result["e2e_results"]["reverted"] == []
 
 
 class TestBf16DenseFallback:
@@ -3103,7 +3164,7 @@ class TestValidateForgeGemmTuningE2E:
         assert result["requires_e2e_validation"] is False
 
     @pytest.mark.asyncio
-    async def test_integrate_exception_reverts_tuner(self, tmp_path, monkeypatch):
+    async def test_integrate_exception_records_fault_not_revert(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
 
         async def _boom(payload, *, session_dir):
@@ -3128,10 +3189,13 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_gemm_tuning_e2e(result)
 
-        assert result["decision"] == "REVERT"
-        reverted = result["e2e_results"]["reverted"]
-        assert len(reverted) == 1
-        assert reverted[0]["reason"].startswith("RuntimeError")
+        assert result["status"] == "failed"
+        assert result["micro_decision"] == "integrate_fault"
+        assert result["e2e_gain_pct"] is None
+        faults = result["e2e_results"]["faults"]
+        assert len(faults) == 1
+        assert faults[0]["reason"] == "integrate_fault:handler_exception"
+        assert result["e2e_results"]["reverted"] == []
 
     @pytest.mark.asyncio
     async def test_timeout_fallback_when_explore_helper_raises(self, tmp_path, monkeypatch):

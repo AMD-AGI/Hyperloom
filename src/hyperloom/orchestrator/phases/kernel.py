@@ -1531,11 +1531,14 @@ class KernelPhase(PhaseHandler):
         Replaying the lookup against the round's ``server.log`` separates the two.
         """
         from ..kernel.gemm_shape_coverage import (
+            fmoe_tuned_config_coverage,
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
             tuned_config_coverage,
             tuned_csv_shapes,
+            tuned_fmoe_csv_keys,
         )
+        from ..kernel.request_handlers import _aiter_fused_moe_dispatch_keys
 
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
@@ -1548,6 +1551,22 @@ class KernelPhase(PhaseHandler):
             log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
+
+        if tuner_name == "fmoe_ck" or any("FMOE" in key for key in envs):
+            requested_keys = _aiter_fused_moe_dispatch_keys(str(logs[-1]))
+            if not requested_keys:
+                return None
+            tuned: set[tuple[str, ...]] = set()
+            for path in csv_paths:
+                tuned |= tuned_fmoe_csv_keys(path)
+            report = fmoe_tuned_config_coverage(tuned, requested_keys)
+            report["server_log"] = str(logs[-1])
+            report["schema"] = "fmoe"
+            report["artifact_applied"] = bool(report.get("covered"))
+            if not report["artifact_applied"]:
+                report["not_applied_reason"] = "no_fmoe_dispatch_key_matched"
+            return report
+
         missed, hit = parse_aiter_shape_lookups(log_text)
         requested = missed | hit
         if not requested:
@@ -2166,6 +2185,7 @@ class KernelPhase(PhaseHandler):
         stacked_envs: dict[str, str] = {}
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
+        faults: list[dict[str, Any]] = []
         try:
             from ..actions.executors.explore import _compute_explore_variant_timeout
 
@@ -2285,11 +2305,19 @@ class KernelPhase(PhaseHandler):
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "gemm E2E: integrate failed for %s: %s",
+                    "gemm E2E: integrate raised for %s: %s",
                     tuner_name,
                     exc,
                 )
-                reverted.append({**cand, "reason": repr(exc)})
+                faults.append(
+                    {
+                        **cand,
+                        "reason": "integrate_fault:handler_exception",
+                        "fault": True,
+                        "error_class": "handler_exception",
+                        "error": repr(exc),
+                    }
+                )
                 continue
 
             stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
@@ -2301,6 +2329,25 @@ class KernelPhase(PhaseHandler):
                     stopped.interrupted,
                 )
                 break
+
+            if self.shared_state._is_integrate_fault(integrate_result):
+                error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
+                log.warning(
+                    "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, not a REVERT verdict",
+                    tuner_name,
+                    error_class,
+                )
+                faults.append(
+                    {
+                        **cand,
+                        "reason": f"integrate_fault:{error_class}",
+                        "fault": True,
+                        "error_class": error_class,
+                        "integrate_status": integrate_result.get("status"),
+                        "error": integrate_result.get("error"),
+                    }
+                )
+                continue
 
             decision = str(integrate_result.get("decision") or "").upper()
             new_tput = float(integrate_result.get("new_tput") or 0.0)
@@ -2394,6 +2441,13 @@ class KernelPhase(PhaseHandler):
                 total_gain,
                 len(reverted),
             )
+        elif faults:
+            stacked_envs = {}
+            total_gain = 0.0
+            log.info(
+                "gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict",
+                len(faults),
+            )
         else:
             stacked_envs = {}
             total_gain = 0.0
@@ -2404,17 +2458,28 @@ class KernelPhase(PhaseHandler):
 
         # Rewrite the stored result to the E2E-validated outcome so Orchestration
         # never sees the raw combined recommended_env and issues a bundled integrate.
-        result["e2e_results"] = {"kept": kept, "reverted": reverted}
+        result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
         result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
         result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
         result["recommended_env"] = dict(stacked_envs)
         result["extra_envs"] = dict(stacked_envs)
-        result["e2e_gain_pct"] = round(float(total_gain), 4)
+        if faults and not kept and not reverted:
+            result["e2e_gain_pct"] = None
+        else:
+            result["e2e_gain_pct"] = round(float(total_gain), 4)
         result["e2e_validated"] = True
         result["requires_e2e_validation"] = False
         if kept:
             result["status"] = "complete"
             result["decision"] = "KEEP"
+        elif reverted:
+            result["status"] = "complete"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "candidate_no_e2e_gain"
+        elif faults:
+            result["status"] = "failed"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "integrate_fault"
         else:
             result["status"] = "complete"
             result["decision"] = "REVERT"
