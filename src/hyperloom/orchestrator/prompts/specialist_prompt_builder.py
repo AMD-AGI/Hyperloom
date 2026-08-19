@@ -1030,8 +1030,8 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
-        "scored over quantity: cap your final ``proposal_set`` at the",
-        "**top-6** ranked picks (see Section 8).",
+        "scored over quantity: **aim for 4** ranked proposals in your final",
+        "``proposal_set``. **6 is a hard ceiling, never a target** (Section 8).",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -2227,11 +2227,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "coupling across several proposals."
         ),
         (
-            "- ``proposal_set`` MUST contain AT MOST **6** entries. You are a "
-            "curator, not a brainstormer: rank candidates by expected gain x "
+            "- ``proposal_set``: **target 4 entries, hard maximum 6.** You are "
+            "a curator, not a brainstormer: rank candidates by expected gain x "
             "your confidence, drop everything that contradicts ``kb_subgraph`` "
-            "/ ``pr_evidence`` already in your prompt, and only emit the "
-            "surviving top 6. Fewer is better than padding."
+            "/ ``pr_evidence`` already in your prompt, and cut at 4. Emit a 5th "
+            "or 6th ONLY if it still beats the median of the four you already "
+            "have. Filling the ceiling is a failure, not thoroughness: every "
+            "weak entry costs a Critic reject and a slot on the serial "
+            "benchmark queue."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
