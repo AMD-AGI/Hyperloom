@@ -36,6 +36,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess  # nosec B404 - invokes c++filt with a fixed, non-shell argv.
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,16 +184,42 @@ def latency_report() -> dict[str, Any]:
 # Symbol normalization
 # ----------------------------------------------------------------------------
 @functools.lru_cache(maxsize=8192)
-def _demangle_itanium(mangled: str) -> str:
+def _cxxfilt_base(mangled: str) -> str:
+    """Demangle via ``c++filt`` when available (``""`` on failure).
+
+    Fallback for when ``itanium-demangler`` is not installed.  Cached: the same
+    mangled symbols recur across candidates, so subprocess spawn cost is paid at
+    most once per symbol.
+    """
+    if not shutil.which("c++filt"):
+        return ""
+    try:
+        proc = subprocess.run(  # nosec B603 B607 - fixed argv, no shell.
+            ["c++filt", mangled],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        result = proc.stdout.strip()
+        # c++filt returns the input unchanged on failure — treat that as no result.
+        return result if result != mangled else ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("c++filt demangle failed for %r: %s", mangled, exc)
+        return ""
+
+
+@functools.lru_cache(maxsize=8192)
+def _demangle(mangled: str) -> str:
     """Demangle an Itanium-mangled symbol via ``itanium-demangler``.
 
-    Returns the demangled string on success, ``""`` on parse failure or when
-    the package is not installed.  Unlike ``c++filt``, this is pure-Python (no
-    subprocess) and handles deeply-nested CK template instantiations that
-    exceed ``c++filt``'s recursion limits.
+    Returns the demangled string on success, ``""`` on parse failure.  Unlike
+    ``c++filt``, this is pure-Python (no subprocess) and handles deeply-nested
+    CK template instantiations that exceed ``c++filt``'s recursion limits.
+
+    Falls back to ``_cxxfilt_base`` when ``itanium-demangler`` is not installed.
     """
     if _itanium_parse is None:
-        return ""
+        return _cxxfilt_base(mangled)
     try:
         node = _itanium_parse(mangled)
         return str(node) if node is not None else ""
@@ -267,7 +295,7 @@ def base_symbol(device_kernel_name: str) -> str:
     if not raw:
         return ""
     if raw.startswith("_Z"):
-        demangled = _demangle_itanium(raw)
+        demangled = _demangle(raw)
         if demangled and demangled != raw:
             return _base_from_demangled(demangled)
         return _base_from_mangled(raw)
@@ -302,7 +330,7 @@ def _non_patchable_kind(device_kernel_name: str, *, op_name: str = "") -> str:
     if "miopen" in (op_name or "").lower():
         return "miopen_precompiled"
     if raw.startswith("_Z"):
-        demangled = _demangle_itanium(raw)
+        demangled = _demangle(raw)
         if demangled:
             return "aiter_ck" if _CK_DEMANGLED_RE.search(demangled.lower()) else ""
         # Demangling failed: classify from the mangled namespace prefix instead.
