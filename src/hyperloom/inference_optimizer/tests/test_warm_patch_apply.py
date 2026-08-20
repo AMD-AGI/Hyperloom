@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +25,12 @@ def fake_repo(tmp_path):
     repo = tmp_path / "inferencex"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=str(repo),
+        capture_output=True,
+        check=True,
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=str(repo),
@@ -65,6 +73,11 @@ index 0000000..1111111 100644
  original = True
 +patched = True
 """
+
+
+def _require_patch_cli() -> None:
+    if not shutil.which("patch"):
+        pytest.skip("patch CLI unavailable")
 
 
 def test_apply_single_patch(fake_repo, output_dir):
@@ -120,6 +133,10 @@ def test_required_recipe_patch_fails_when_active_framework_root_is_missing(
     output_dir,
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors.baseline.resolve_session_framework_root",
         lambda: "",
@@ -387,6 +404,12 @@ def test_required_patch_uses_three_way_after_checks_fail(
     def _run(command, **_kwargs):
         calls.append(command)
         if "rev-parse" in command:
+            if "--is-inside-work-tree" in command:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="true\n",
+                    stderr="",
+                )
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"0123456789abcdef\n",
@@ -540,12 +563,13 @@ def test_snapshot_revert_rejects_head_mismatch(
     assert result["errors"][0].startswith("head_mismatch:")
 
 
-def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
+def test_required_patch_applies_via_nogit_when_repo_has_no_head(tmp_path, output_dir):
+    _require_patch_cli()
     repo = tmp_path / "unborn"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     target = repo / "vllm" / "fp8.py"
-    target.parent.mkdir()
+    target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
 
     result = _apply_warm_patches(
@@ -557,9 +581,34 @@ def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
         output_dir,
     )
 
-    assert result["status"] == "failed"
-    assert result["failure"] == "missing_git_head"
-    assert "patched = True" not in target.read_text()
+    assert result["status"] == "prepared"
+    assert "patched = True" in target.read_text()
+
+
+def test_nogit_applies_to_non_git_install_tree(tmp_path, output_dir):
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+
+    result = _apply_warm_patches(
+        {
+            "patches": [
+                {
+                    "patch_file": "vllm/fp8.py",
+                    "patch_content": VALID_PATCH,
+                }
+            ],
+            "required_patch_timeline": True,
+        },
+        str(install_root),
+        output_dir,
+    )
+
+    assert result["status"] == "prepared"
+    assert "patched = True" in target.read_text()
+    assert (output_dir / "warm_patches" / "patch_backups").is_dir()
 
 
 def test_legacy_patch_skips_when_rollback_snapshot_fails(
@@ -733,10 +782,20 @@ diff --git a/missing.py b/missing.py
     assert target.read_text() == "# fp8 module\noriginal = True\npatched = True\n"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="git apply --3way merge baseline is validated on Linux CI/pod",
+)
 def test_real_git_three_way_merge_succeeds(tmp_path, output_dir):
     repo = tmp_path / "threeway"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=repo,

@@ -1282,11 +1282,63 @@ def _verify_three_way_clean(
     return True, ""
 
 
+def _patch_paths_from_warm_params(params: dict[str, Any]) -> list[Path]:
+    """Collect diff-header targets from warm-replay patch payloads."""
+    from ...specialists.patch_safety import patch_file_targets
+
+    patch_paths: list[Path] = []
+    seen: set[str] = set()
+    for patch in params.get("patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        content = str(patch.get("patch_content") or "")
+        patch_ref = str(patch.get("patch_ref") or "")
+        if not content and patch_ref:
+            try:
+                content = Path(patch_ref).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+        if not content:
+            continue
+        for old_raw, new_raw in patch_file_targets(content):
+            raw = new_raw if new_raw and new_raw not in {"/dev/null", ""} else old_raw
+            if not raw or raw == "/dev/null" or raw in seen:
+                continue
+            seen.add(raw)
+            patch_paths.append(Path(raw))
+    return patch_paths
+
+
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the active framework root for Explore/Framework Recipe patches."""
+    """Return the framework root whose tree holds the warm-replay patch targets."""
     if not params.get("patches"):
         return ""
+    from .integrate_patch import _resolve_framework_root
+
+    patch_paths = _patch_paths_from_warm_params(params)
+    root = _resolve_framework_root(None, patch_paths=patch_paths or None)
+    if root is not None:
+        return str(root)
     return resolve_session_framework_root()
+
+
+def _revert_warm_patch_state(
+    target_repo: str,
+    *,
+    pre_sha: str = "",
+    snapshot_manifest: Any = None,
+    nogit_backups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Restore warm-replay patch mutations via git snapshot or nogit backups."""
+    if nogit_backups:
+        from ._nogit_patch import _revert_patches_no_git
+
+        try:
+            _revert_patches_no_git(list(nogit_backups))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "errors": [repr(exc)], "channel": "nogit"}
+        return {"ok": True, "errors": [], "channel": "nogit"}
+    return _revert_patches(target_repo, pre_sha, snapshot_manifest)
 
 
 def _apply_warm_patches(
@@ -1300,7 +1352,8 @@ def _apply_warm_patches(
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
-    via ``git apply`` in the target repo, skipping blocklisted patches.
+    via ``git apply`` when the target is a git work-tree, otherwise via the
+    shared nogit ``patch`` CLI path used by integrate_patch.
 
     Legacy patch lists return the list of successfully applied patch metadata
     dicts (best-effort skip semantics). Current-contract timelines set
@@ -1331,19 +1384,13 @@ def _apply_warm_patches(
     statuses: list[dict[str, Any]] = []
     patch_log_dir = output_dir / "warm_patches"
     patch_log_dir.mkdir(parents=True, exist_ok=True)
-    pre_sha = _git_head_sha(target_repo)
-    if required_timeline and not pre_sha:
-        return {
-            "required": True,
-            "status": "failed",
-            "patches": [],
-            "applied": [],
-            "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-            "failure": "missing_git_head",
-            "pre_sha": "",
-            "target_repo": target_repo,
-            "rolled_back": False,
-        }
+    from ._nogit_patch import _apply_patch_no_git, _is_git_tree
+
+    target_path = Path(target_repo)
+    git_tree = _is_git_tree(target_path)
+    pre_sha = _git_head_sha(target_repo) if git_tree else ""
+    use_nogit = not git_tree or not pre_sha
+    nogit_backups: list[dict[str, Any]] = []
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
     resolved_contents: dict[int, str] = {}
@@ -1404,7 +1451,7 @@ def _apply_warm_patches(
         resolved_contents[idx] = content
         snapshot_contents.append(content)
     snapshot_manifest: dict[str, Any] | None = None
-    if snapshot_contents:
+    if snapshot_contents and not use_nogit:
         try:
             snapshot_manifest = _create_patch_snapshot(
                 target_repo,
@@ -1550,85 +1597,99 @@ def _apply_warm_patches(
 
         method = ""
         try:
-            checked = subprocess.run(
-                ["git", "apply", "--check", str(patch_path)],
-                cwd=target_repo,
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-            if checked.returncode == 0:
-                subprocess.run(
-                    ["git", "apply", str(patch_path)],
-                    cwd=target_repo,
-                    capture_output=True,
-                    timeout=30,
-                    check=True,
+            if use_nogit:
+                backup_root = patch_log_dir / "patch_backups"
+                ok, err, backups, _feedback = _apply_patch_no_git(
+                    target_path,
+                    patch_path,
+                    backup_root,
+                    seq_offset=len(nogit_backups),
                 )
-                method = "applied"
-            elif required_timeline:
-                reverse = subprocess.run(
-                    ["git", "apply", "-R", "--check", str(patch_path)],
+                if not ok:
+                    raise RuntimeError(err or "nogit patch apply failed")
+                nogit_backups.extend(backups)
+                method = "applied_nogit"
+            else:
+                checked = subprocess.run(
+                    ["git", "apply", "--check", str(patch_path)],
                     cwd=target_repo,
                     capture_output=True,
                     timeout=30,
                     check=False,
                 )
-                if reverse.returncode == 0:
-                    method = (
-                        "already_present"
-                        if _patch_present_in_committed_head(
-                            target_repo,
-                            patch_path,
-                        )
-                        else "present_in_dirty_worktree"
+                if checked.returncode == 0:
+                    subprocess.run(
+                        ["git", "apply", str(patch_path)],
+                        cwd=target_repo,
+                        capture_output=True,
+                        timeout=30,
+                        check=True,
                     )
-                else:
-                    touched = _patch_touched_paths(patch_content)
-                    before_residue = _three_way_residue_snapshot(
-                        target_repo,
-                        touched,
-                    )
-                    three_way = subprocess.run(
-                        ["git", "apply", "--3way", str(patch_path)],
+                    method = "applied"
+                elif required_timeline:
+                    reverse = subprocess.run(
+                        ["git", "apply", "-R", "--check", str(patch_path)],
                         cwd=target_repo,
                         capture_output=True,
                         timeout=30,
                         check=False,
                     )
-                    if three_way.returncode == 0:
-                        clean, residue = _verify_three_way_clean(
+                    if reverse.returncode == 0:
+                        method = (
+                            "already_present"
+                            if _patch_present_in_committed_head(
+                                target_repo,
+                                patch_path,
+                            )
+                            else "present_in_dirty_worktree"
+                        )
+                    else:
+                        touched = _patch_touched_paths(patch_content)
+                        before_residue = _three_way_residue_snapshot(
                             target_repo,
                             touched,
-                            before_residue,
                         )
-                        if not clean:
-                            raise RuntimeError(residue)
-                        method = "applied_3way"
-                    else:
-                        detail = (
-                            three_way.stderr.decode(errors="replace")[:500]
-                            if three_way.stderr
-                            else "git apply --3way failed"
+                        three_way = subprocess.run(
+                            ["git", "apply", "--3way", str(patch_path)],
+                            cwd=target_repo,
+                            capture_output=True,
+                            timeout=30,
+                            check=False,
                         )
-                        raise RuntimeError(detail)
-            else:
-                detail = (
-                    checked.stderr.decode(errors="replace")[:500]
-                    if checked.stderr
-                    else "git apply --check failed"
-                )
-                raise RuntimeError(detail)
+                        if three_way.returncode == 0:
+                            clean, residue = _verify_three_way_clean(
+                                target_repo,
+                                touched,
+                                before_residue,
+                            )
+                            if not clean:
+                                raise RuntimeError(residue)
+                            method = "applied_3way"
+                        else:
+                            detail = (
+                                three_way.stderr.decode(errors="replace")[:500]
+                                if three_way.stderr
+                                else "git apply --3way failed"
+                            )
+                            raise RuntimeError(detail)
+                else:
+                    detail = (
+                        checked.stderr.decode(errors="replace")[:500]
+                        if checked.stderr
+                        else "git apply --check failed"
+                    )
+                    raise RuntimeError(detail)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
             log.warning(
-                "baseline_executor: git apply failed for patch %s: %s",
+                "baseline_executor: warm patch apply failed for %s: %s",
                 patch_file,
                 exc,
             )
-            status.update(status="failed", reason="git_apply_failed", detail=str(exc)[:500])
+            reason = "nogit_apply_failed" if use_nogit else "git_apply_failed"
+            status.update(status="failed", reason=reason, detail=str(exc)[:500])
             statuses.append(status)
             if required_timeline:
-                failed_ref, failure = patch_file, "git_apply_failed"
+                failed_ref, failure = patch_file, reason
                 break
             continue
 
@@ -1641,12 +1702,16 @@ def _apply_warm_patches(
         status["status"] = method
         statuses.append(status)
 
+    if nogit_backups:
+        params["_warm_patch_nogit_backups"] = nogit_backups
+
     if required_timeline:
         if failed_ref:
-            restore = _revert_patches(
+            restore = _revert_warm_patch_state(
                 target_repo,
-                pre_sha,
-                snapshot_manifest,
+                pre_sha=pre_sha,
+                snapshot_manifest=snapshot_manifest,
+                nogit_backups=nogit_backups,
             )
             return {
                 "required": True,
@@ -3299,13 +3364,16 @@ class BaselineExecutor:
                     )
                 return result
             finally:
-                if applied_patches and _pre_patch_sha and not isinstance(
-                    patch_application, dict
+                if applied_patches and (
+                    _pre_patch_sha or params.get("_warm_patch_nogit_backups")
                 ):
-                    _revert_patches(
+                    _revert_warm_patch_state(
                         patch_target,
-                        _pre_patch_sha,
-                        params.get("_warm_patch_snapshot_manifest"),
+                        pre_sha=_pre_patch_sha,
+                        snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
+                        nogit_backups=list(
+                            params.get("_warm_patch_nogit_backups") or []
+                        ),
                     )
                 if bench_lease is not None:
                     bench_lease.close()
@@ -3609,13 +3677,16 @@ class BaselineExecutor:
             # subsequent tasks that reuse the same InferenceX checkout.
             if (
                 applied_patches
-                and _pre_patch_sha
-                and not isinstance(patch_application, dict)
+                and (
+                    _pre_patch_sha
+                    or params.get("_warm_patch_nogit_backups")
+                )
             ):
-                _revert_patches(
+                _revert_warm_patch_state(
                     patch_target,
-                    _pre_patch_sha,
-                    params.get("_warm_patch_snapshot_manifest"),
+                    pre_sha=_pre_patch_sha,
+                    snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
+                    nogit_backups=list(params.get("_warm_patch_nogit_backups") or []),
                 )
             if bench_lease is not None:
                 bench_lease.close()
