@@ -34,8 +34,6 @@ TOPIC_ALLOWLIST = frozenset(
         "delegated_result",
         "intent_emitted",
         "rca_done",
-        # Robustness KILL_TASK audit broadcast (write-only; must be allow-listed).
-        "kill",
         # Storage-layer events
         "lease_expired",
         "lease_acquire_failed",

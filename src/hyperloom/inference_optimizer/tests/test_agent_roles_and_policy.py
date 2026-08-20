@@ -16,13 +16,14 @@ from hyperloom.orchestrator.roles.agent_role import (
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
+    IntentValidationError,
+    validate_envelope,
 )
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     DELEGATE_ACTION_REQUIRED_PAYLOAD,
     DELEGATE_ACTION_SOURCE_ALLOWLIST,
     KERNEL_AGENT_OWNED_ACTIONS,
-    KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
     PolicyGate,
     REQUEST_ROUTING,
@@ -79,7 +80,6 @@ def test_orchestration_permissions():
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
-    assert IntentType.KILL_TASK in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
 
 
@@ -92,13 +92,11 @@ def test_critic_review_only_codex_no_tools():
     assert IntentType.DELEGATE not in role.allowed_intents
     assert IntentType.REQUEST not in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
-    assert IntentType.KILL_TASK not in role.allowed_intents
 
 
 def test_robustness_scheduling_police():
     role = default_role_registry()["robustness"]
     assert role.backend_type == BackendType.CLAUDE
-    assert IntentType.KILL_TASK in role.allowed_intents
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
@@ -129,8 +127,7 @@ def test_review_verdict_critic_only():
     assert "objection" not in REVIEW_VERDICTS
 
 
-def test_kill_and_robustness_only_renamed():
-    assert KILL_TASK_SOURCE_ALLOWLIST == frozenset({"robustness", "orchestration"})
+def test_robustness_only_intents():
     assert ROBUSTNESS_ONLY_SOURCE_ALLOWLIST == frozenset({"robustness"})
     assert ROBUSTNESS_ONLY_INTENTS == frozenset(
         {
@@ -138,6 +135,14 @@ def test_kill_and_robustness_only_renamed():
             IntentType.ESCALATE_STRATEGY_CHANGE,
         }
     )
+
+
+def test_kill_task_is_not_a_valid_intent_type():
+    """kill_task left the vocabulary; an envelope carrying it must be rejected."""
+    assert "kill_task" not in {member.value for member in IntentType}
+    envelope = {"intents": [{"intent_type": "kill_task", "payload": {"task_id": "t1", "reason": "stalled"}}]}
+    with pytest.raises(IntentValidationError, match="not in allowed set"):
+        validate_envelope(envelope)
 
 
 def test_core_state_fields_includes_current_best():
@@ -496,50 +501,6 @@ def test_gate_critic_delegate_rejected_by_role(gate):
             ),
         )
     assert exc.value.rule == "role"
-
-
-def test_gate_robustness_kill_task_ok(gate):
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.KILL_TASK,
-            payload={"task_id": "t1", "reason": "stalled", "scope": "task"},
-        ),
-    )
-
-
-def test_gate_orchestration_kill_task_allowed(gate):
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.KILL_TASK,
-            payload={"task_id": "t1", "reason": "stalled"},
-        ),
-    )
-
-
-def test_gate_orchestration_kill_task_process_scope_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.KILL_TASK,
-                payload={"task_id": "t1", "reason": "stalled", "scope": "process"},
-            ),
-        )
-    assert exc.value.rule == "kill_scope"
-
-
-def test_gate_robustness_kill_task_process_scope_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(
-                type=IntentType.KILL_TASK,
-                payload={"task_id": "t1", "reason": "stalled", "scope": "process"},
-            ),
-        )
-    assert exc.value.rule == "kill_scope"
 
 
 def test_gate_robustness_prune_branch_requires_family(gate):

@@ -109,7 +109,7 @@ Nothing in this message reports in-flight specialists: `specialist_progress`
 inbox observations are sparse checkpoints, and a specialist can hold the
 machine for hours. Never read silence as "nothing is running".
 
-Rescue moves: `kill_task` / `send_message` / `extend_lease` for a single task;
+Rescue moves: `send_message` / `extend_lease` for a single task;
 `prune_branch{scope='queued'}` for the queue.
 
 Doing nothing is a legitimate choice; doing nothing because nothing
@@ -344,10 +344,7 @@ on the next tick.
   round. A `code_patch` KEEP resets the consecutive counter.
 * **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
   (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
-  directly (Critic owns it). You **CAN** emit `kill_task` with
-  `scope='task'` to reap work you dispatched (server / process kills stay
-  out — those go through Robustness `delegate(recover)`), and
-  `escalate_strategy_change`
+  directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
   PolicyGate allows this intent from both Robustness and Orchestration —

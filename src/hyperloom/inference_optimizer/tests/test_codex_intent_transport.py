@@ -155,7 +155,7 @@ def test_transport_contract_names_every_allowed_intent() -> None:
 def test_critic_transport_contract_carries_no_orchestration_text() -> None:
     """Role scoping has to hold in both directions."""
     instructions = codex_module.build_output_instructions(_CRITIC_INTENTS).lower()
-    for token in ("delegate", "propose_action", "kill_task", "prune_branch"):
+    for token in ("delegate", "propose_action", "prune_branch"):
         assert token not in instructions
 
 

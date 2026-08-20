@@ -23,17 +23,15 @@ queued behind the lane or GPUs it holds.
 
 ## Moves for a single task
 
-- `kill_task{task_id, scope='task', reason}` — cancel the coordinator task.
-  This does **not** terminate an already-running specialist process: its lane
-  and GPU leases release only when its worker exits or its reaper terminates
-  it. Do not use this to promptly free capacity; use it when the mandate is a
-  dead end and the remaining task budget is not worth spending.
 - `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
   and it acts without restarting. Prefer this when the agent works well but
   on the wrong question, or to answer its `residual_questions`.
 - `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and its
   lane rows, in bounded steps. For live work near expiry that the TTL
   watchdog would otherwise fail out.
+
+There is no single-task cancel. The only cancel is `prune_branch`, and it
+takes a whole family.
 
 ## Move for the queue
 

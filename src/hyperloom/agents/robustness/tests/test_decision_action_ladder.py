@@ -252,7 +252,6 @@ async def test_state_json_corrupt_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
     assert IntentType.PRUNE_BRANCH not in types
     assert IntentType.DELEGATE not in types
-    assert IntentType.KILL_TASK not in types
 
 
 async def test_coordinator_wal_bloat_high_alert_only():
@@ -293,11 +292,10 @@ async def test_coordinator_wal_bloat_medium_alert_only():
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-    assert IntentType.KILL_TASK not in types
 
 
-async def test_stale_lease_emits_kill_task_for_owner_lane():
-    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped)."""
+async def test_stale_lease_emits_alert_only():
+    """I3: stale_lease HIGH is strategic; the dispatcher's per-tick reap frees the lease."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -311,28 +309,7 @@ async def test_stale_lease_emits_kill_task_for_owner_lane():
         tick_index=0,
         now_unix=1.0,
     )
-    types = [i.type for i in out.intents]
-    assert IntentType.ALERT in types
-    assert IntentType.KILL_TASK in types
-    kill = next(i for i in out.intents if i.type is IntentType.KILL_TASK)
-    assert kill.payload["task_id"] == "tsk-7"
-    assert kill.payload["reason"] == "stale_lease"
-    assert kill.payload["scope"] == "task"
-    assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-
-
-async def test_stale_lease_without_task_id_does_not_kill():
-    """Missing task_id → skip kill_task to avoid bad payloads; alert still fires for visibility."""
-    ladder = ActionLadder()
-    out = await ladder.decide(
-        [_sym("stale_lease", SymptomSeverity.HIGH, evidence={}, subject={})],
-        tick_index=0,
-        now_unix=1.0,
-    )
-    types = [i.type for i in out.intents]
-    assert IntentType.KILL_TASK not in types
-    assert IntentType.ALERT in types
-    assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
+    assert [i.type for i in out.intents] == [IntentType.ALERT]
 
 
 async def test_inbox_bloat_low_emits_observation_only():
@@ -353,7 +330,6 @@ async def test_inbox_bloat_low_emits_observation_only():
     types = [i.type for i in out.intents]
     msg_types = {i.payload.get("topic") for i in out.intents if i.type is IntentType.SEND_MESSAGE}
     assert "observation" in msg_types
-    assert IntentType.KILL_TASK not in types
 
 
 async def test_coordinator_zombie_alert_only():
