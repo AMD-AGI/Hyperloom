@@ -2779,6 +2779,84 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.last_gemm_tuning["decision"] == "REVERT"
 
     @pytest.mark.asyncio
+    async def test_forge_e2e_keep_names_the_artifact_the_stack_recorded(
+        self, tmp_path, monkeypatch
+    ):
+        """The history row and the stack entry must name the same artifact.
+
+        The breakdown decides ``adopted`` by matching those two strings. Forge
+        reports per-tuner envs and never set ``tuned_file``, so the history row
+        carried "" and no KEEP could ever match -- measured across 419 real
+        attempts, none was reported adopted.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        await coord._handle_gemm_tuning_result(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.5,
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": "/dense.json"},
+                "extra_envs": {"AITER_DENSE": "/dense.json"},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": "/dense.json",
+                    }
+                ],
+            }
+        )
+
+        stack = coord.shared_state.optimization_stack
+        assert stack, "a KEEP must land on the stack"
+        assert stack[-1]["action"] == "gemm_tuning"
+        attempts = coord.shared_state.gemm_tuning_attempts
+        assert attempts[0]["decision"] == "KEEP"
+        assert attempts[0]["tuned_file"], "history row must name the artifact"
+        assert attempts[0]["tuned_file"] == stack[-1]["tuned_file"]
+
+    @pytest.mark.asyncio
+    async def test_forge_e2e_revert_does_not_claim_an_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        """A REVERT has nothing on the stack, so it must not name one."""
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        await coord._handle_gemm_tuning_result(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": "/dense.json"},
+                "extra_envs": {"AITER_DENSE": "/dense.json"},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": "/dense.json",
+                    }
+                ],
+            }
+        )
+
+        assert coord.shared_state.optimization_stack == []
+        assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
+
+    @pytest.mark.asyncio
     async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(self, tmp_path, monkeypatch):
         # a8w8 tuner reported no_improvement but the CK block-scale switch is
         # eligible → route to the E2E validator, not inline promote.
