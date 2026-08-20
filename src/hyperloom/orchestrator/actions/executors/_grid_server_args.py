@@ -821,6 +821,10 @@ def inject_sglang_context_length(
     explicit ``--max-model-len`` would inject a self-contradictory config. The
     ``max_model_len`` ceiling is applied only when it is a positive value.
 
+    Under ``HYPERLOOM_AGENTX`` the ISL/OSL cap is skipped entirely: the AgentX
+    corpus carries its own lengths and ISL/OSL are placeholders, so the window
+    is ``min(max_pos, max_model_len)``.
+
     Args:
         server_args (str | None): The server-arg string to augment.
         framework (str | None): Framework name; empty/unknown treated as sglang.
@@ -847,8 +851,19 @@ def inject_sglang_context_length(
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
         return args
-    cap = resolve_sglang_context_cap(isl, osl)
-    context_length = min(int(max_pos), cap)
+    # AgentX replays a fixed trace corpus, so ISL/OSL are placeholders here and
+    # the ISL+OSL+headroom ceiling (8192 at the 1024/1024 defaults) would pin
+    # sglang's window two orders of magnitude below what the corpus needs --
+    # every oversized trace then 4xxs. Corpus length is a property of the
+    # workload, not of a synthetic shape, so the cap does not apply; the model's
+    # own window, clamped by an explicit MAX_MODEL_LEN, is the only ceiling.
+    # Imported lazily: _workload_envs imports this module.
+    from ._workload_envs import agentx_enabled
+
+    if agentx_enabled():
+        context_length = int(max_pos)
+    else:
+        context_length = min(int(max_pos), resolve_sglang_context_cap(isl, osl))
     max_model_len_int = optional_positive_int(max_model_len)
     if max_model_len_int is not None:
         context_length = min(context_length, max_model_len_int)
