@@ -91,8 +91,7 @@ class IntentRouter:
 
         Runs the intent through :meth:`PolicyGate.validate_intent`; a
         :class:`PolicyDenied` is recorded and the intent dropped. Valid intents
-        are dispatched to the matching ``_handle_*`` method by type, and the
-        agent's message cursor is advanced to the latest sequence afterward.
+        are dispatched to the matching ``_handle_*`` method by type.
 
         Args:
             source (str): The agent that emitted the intent.
@@ -116,7 +115,6 @@ class IntentRouter:
                     "observation",
                     {"intent": it.value, "payload": intent.payload},
                 )
-            await self._cursor_advance_to_latest(source)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as exc:  # noqa: BLE001

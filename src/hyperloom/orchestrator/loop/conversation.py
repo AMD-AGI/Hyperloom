@@ -737,8 +737,10 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        # Full unread batch: events arriving in one tick must not be dropped.
         rendered = list(msgs)
+        if msgs:
+            top = msgs[-1]
+            self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
         # Durable at-least-once-until-decided delivery of proposals to the
         # Critic: the inbox tail is lossy, so re-present every still-undecided
         # proposal from the durable ``pending_proposals`` registry.
@@ -756,17 +758,30 @@ class ConversationCollaborator:
 
         return "\n".join(sections)
 
+    async def _advance_rendered_cursor(self, agent_name: str) -> None:
+        """Advance the durable read cursor to the watermark recorded by the most recent _compose_prompt call.
+
+        Reads are write-through via self._coord to cross the collaborator boundary.
+        No-op when _compose_prompt found no new messages for this agent.
+        """
+        entry = self._coord._rendered_cursor.get(agent_name)
+        if entry is None:
+            return
+        seq, msg_id = entry
+        await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
+        del self._coord._rendered_cursor[agent_name]
+
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present.
 
-        The rendered tail can drop proposals that scrolled past the capped
-        window. Source the review set from the durable ``pending_proposals``
-        registry and merge any missing proposal messages into the rendered
-        window (deduped by ``msg_id``, re-sorted by ``seq`` so "newest last"
-        holds).
+        A rendered proposal whose verdict has not yet arrived will not appear in
+        the next inbox because the cursor has legitimately moved past it. Source
+        the review set from the durable ``pending_proposals`` registry and merge
+        any missing proposal messages into the rendered window (deduped by
+        ``msg_id``, re-sorted by ``seq`` so "newest last" holds).
 
         Args:
-            rendered: The tail-capped messages already selected for the inbox.
+            rendered: The messages selected for the inbox.
 
         Returns:
             The rendered list augmented with any undecided proposal messages
