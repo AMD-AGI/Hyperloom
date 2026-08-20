@@ -511,7 +511,7 @@ class PreludePhase(PhaseHandler):
             from ..specialists.patch_safety import parse_patch_targets
 
             parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
-            resolution = resolve_warm_replay_kernel_root(patch_paths=[patch_path])
+            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
             root_value = str(resolution.root or "").rstrip("/")
         except (OSError, ValueError) as exc:
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
@@ -833,21 +833,6 @@ class PreludePhase(PhaseHandler):
         return KernelAgentKB.open()
 
     @staticmethod
-    def _warm_replay_patch_paths_from_entries(
-        patches: list[dict[str, Any]],
-    ) -> list[Path]:
-        paths: list[Path] = []
-        for patch in patches:
-            if not isinstance(patch, dict):
-                continue
-            for key in ("patch_ref", "patch_path", "patch_file"):
-                raw = str(patch.get(key) or "").strip()
-                if raw:
-                    paths.append(Path(raw))
-                    break
-        return paths
-
-    @staticmethod
     def _warm_replay_root_skip_outcome(
         *,
         reason: str,
@@ -876,10 +861,7 @@ class PreludePhase(PhaseHandler):
         state: Any,
     ) -> dict[str, Any] | None:
         """Skip combined warm replay when a kernel patch root cannot be resolved."""
-        from ..framework.paths import (
-            WarmReplayRootResolution,
-            resolve_warm_replay_kernel_root,
-        )
+        from ..framework.paths import resolve_warm_replay_kernel_root
 
         for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
             if not isinstance(entry, dict):
@@ -899,14 +881,14 @@ class PreludePhase(PhaseHandler):
                 "active_kernel_patch_root_missing",
             }:
                 continue
-            resolution = resolve_warm_replay_kernel_root(
-                patch_paths=[Path(patch_raw)]
-            )
+            # The recorded reason can predate an inline-diff or env change that
+            # makes the root resolvable, so re-resolve before blocking.
+            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
+            if resolution.root:
+                continue
             return self._warm_replay_root_skip_outcome(
-                reason=reason_code,
-                resolution=resolution
-                if isinstance(resolution, WarmReplayRootResolution)
-                else WarmReplayRootResolution("", "", reason_code, ()),
+                reason=resolution.reason or reason_code,
+                resolution=resolution,
                 root_kind="kernel",
             )
         return None
@@ -1440,9 +1422,7 @@ class PreludePhase(PhaseHandler):
                 from ..framework.paths import resolve_warm_replay_framework_root
 
                 framework_resolution = resolve_warm_replay_framework_root(
-                    patch_paths=self._warm_replay_patch_paths_from_entries(
-                        list(sdk_replay.get("patches") or [])
-                    )
+                    patch_entries=list(sdk_replay.get("patches") or [])
                 )
                 if not framework_resolution.root:
                     state.warm_replay_attempted = True
@@ -1692,9 +1672,7 @@ class PreludePhase(PhaseHandler):
             from ..framework.paths import resolve_warm_replay_framework_root
 
             framework_resolution = resolve_warm_replay_framework_root(
-                patch_paths=self._warm_replay_patch_paths_from_entries(
-                    list(wsc_patches)
-                )
+                patch_entries=list(wsc_patches)
             )
             if not framework_resolution.root:
                 rollback = (

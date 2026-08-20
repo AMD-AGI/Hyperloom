@@ -178,6 +178,72 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
     assert "current Recipe warm replay" in capsys.readouterr().out
 
 
+def test_bootstrap_recipe_kb_resume_backfills_scope_from_args(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A resumed state persisted before ``tp`` was stored still forms a scope."""
+    from hyperloom.orchestrator.knowledge import remote_recipe
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    state = SharedState.load_or_init(tmp_path)
+    state.kernel_optimizer = "geak"
+    state.save(tmp_path)
+    monkeypatch.setattr(cli_kb, "run_t0_anchor", lambda *a, **k: None)
+    monkeypatch.setattr(
+        remote_recipe.HyperloomRemoteKB,
+        "from_env",
+        classmethod(lambda cls: object()),
+    )
+
+    cli_kb._bootstrap_recipe_kb(
+        _args(tp=8, conc=64, isl=8192, osl=1024),
+        session_dir=tmp_path,
+        manifest={"model_name": "m"},
+        resume=True,
+    )
+
+    persisted = SharedState.load_or_init(tmp_path)
+    assert (persisted.tp, persisted.conc, persisted.isl, persisted.osl) == (
+        8,
+        64,
+        8192,
+        1024,
+    )
+
+
+def test_bootstrap_recipe_kb_degrades_when_scope_unresolvable(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """An unresolvable scope degrades the launch instead of aborting it."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+    state = SharedState.load_or_init(tmp_path)
+    state.kernel_optimizer = "geak"
+    state.save(tmp_path)
+    args = _args(tp=0, conc=0, isl=0, osl=0)
+
+    assert (
+        cli_kb._bootstrap_recipe_kb(
+            args,
+            session_dir=tmp_path,
+            manifest={"model_name": "m"},
+            resume=True,
+        )
+        is None
+    )
+    assert args.kb_degraded_reason == "recipe_scope_unresolved"
+    assert "Recipe KB scope is incomplete" in capsys.readouterr().err
+
+
 def test_bootstrap_knowledge_plane_validates_remote_without_recipe_dispatcher(
     tmp_path,
     monkeypatch,
