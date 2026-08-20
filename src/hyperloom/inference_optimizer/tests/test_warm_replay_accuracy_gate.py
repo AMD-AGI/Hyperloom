@@ -222,6 +222,47 @@ class TestAbsentEvidenceDoesNotBlock:
         assert outcome["replay_accuracy"] is None
         assert "no recognized metric" in outcome["eval_error"]
 
+    def test_an_undecodable_results_file_is_an_eval_that_ran(self, tmp_path):
+        """A file the parser could not decode still proves the eval ran."""
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        result = _double_run_dirs(tmp_path, warmup_score=None)
+        bench = Path(result["output_dir"]).parent / "warmup_round" / "benchmark_vllm_1"
+        (bench / "results_2026-08-19T00-00-00.json").write_text(
+            "{ this is not json",
+            encoding="utf-8",
+        )
+        coord._promote_warm_replay(result, task=_risky_task())
+
+        assert _promoted(coord) is True
+        outcome = coord.shared_state.warm_replay_outcome
+        assert outcome["eval_ran"] is True
+        assert outcome["replay_accuracy"] is None
+        assert "parse error" in outcome["eval_error"]
+
+    def test_a_parser_crash_is_not_an_eval_that_ran(self, tmp_path, monkeypatch):
+        """A parser that raised read no file, so nothing says the eval ran.
+
+        Recording this as "ran" reads as a model that answered nothing, which
+        is the one state an operator must be able to tell it apart from: the
+        first is a broken config, the second is broken infrastructure.
+        """
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        result = _double_run_dirs(tmp_path, warmup_score=None)
+
+        from hyperloom.orchestrator.actions.executors import _accuracy_gate
+
+        def _raise(*_args, **_kwargs):
+            raise OSError("results directory vanished mid-read")
+
+        monkeypatch.setattr(_accuracy_gate, "parse_eval_results", _raise)
+        coord._promote_warm_replay(result, task=_risky_task())
+
+        assert _promoted(coord) is True
+        outcome = coord.shared_state.warm_replay_outcome
+        assert outcome["eval_ran"] is False
+        assert outcome["replay_accuracy"] is None
+        assert "eval parse raised" in outcome["eval_error"]
+
     def test_a_passing_replay_records_no_eval_error(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
         coord._promote_warm_replay(

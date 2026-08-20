@@ -31,6 +31,13 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# The ``parse_eval_results`` reasons that prove an eval produced output: a
+# results file it could not decode, and one carrying no metric it recognises.
+# Every other reason -- no file at all, or the parser itself raising -- leaves
+# no evidence the eval ran, and calling those "ran" makes an infrastructure
+# fault read as a model that answered nothing.
+_EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
+
 
 def _merge_current_recipe_configs(
     explore: Mapping[str, Any],
@@ -2075,10 +2082,9 @@ class PreludePhase(PhaseHandler):
                     eval_error = str(
                         eval_out.get("error") or "no accuracy in eval output"
                     )
-                    # A results file that exists but cannot be scored means the
-                    # eval ran and produced nothing usable, which is a different
-                    # state from an eval that never ran.
-                    eval_ran = not eval_error.startswith("no results")
+                    # Only a results file the parser reached can say the eval
+                    # ran; a parser that never got one says nothing either way.
+                    eval_ran = eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE)
 
         outcome["eval_ran"] = bool(eval_ran)
         outcome["eval_error"] = eval_error or None
