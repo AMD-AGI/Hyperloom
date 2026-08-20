@@ -316,34 +316,6 @@ def _build_recipe_kb_dispatcher(
     return kb
 
 
-def _backfill_workload_scope(state: Any, args: argparse.Namespace) -> bool:
-    """Mirror the resolved CLI workload knobs onto a resumed ``SharedState``.
-
-    ``_resolve_workload_knobs`` folds resume state into ``args`` but never
-    writes back, so a session persisted before a knob was stored still carries
-    ``0`` and cannot form a Recipe scope.
-
-    Args:
-        state: The loaded ``SharedState`` for this session.
-        args: Parsed CLI arguments holding the authoritative resolved knobs.
-
-    Returns:
-        bool: Whether any knob was filled in and the state needs saving.
-    """
-    changed = False
-    for knob in ("tp", "conc", "isl", "osl"):
-        if int(getattr(state, knob, 0) or 0) > 0:
-            continue
-        try:
-            value = int(getattr(args, knob, 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            setattr(state, knob, value)
-            changed = True
-    return changed
-
-
 def _bootstrap_recipe_kb(
     args: argparse.Namespace,
     *,
@@ -405,29 +377,14 @@ def _bootstrap_recipe_kb(
         from hyperloom.orchestrator.knowledge.remote_recipe import (
             HyperloomRemoteKB,
             RecipeScope,
-            RemoteRecipeValidationError,
             RemoteWarmRecipeAdapter,
         )
 
-        if _backfill_workload_scope(state, args):
-            state.save(session_dir)
-        try:
-            scope = RecipeScope.from_state(state)
-        except RemoteRecipeValidationError as exc:
-            print(
-                f"WARNING: Recipe KB scope is incomplete: {exc}\n"
-                "Continuing without warm-start.",
-                file=sys.stderr,
-            )
-            args.kb_degraded_reason = (
-                getattr(args, "kb_degraded_reason", None) or "recipe_scope_unresolved"
-            )
-            return None
         warm_start_dir = session_dir / "runtime" / "remote_recipe"
         t0_kb = RemoteWarmRecipeAdapter(
             HyperloomRemoteKB.from_env(),
             warm_start_dir,
-            scope,
+            RecipeScope.from_state(state),
         )
         _publish_section_dirs(session_dir, warm_start_dir)
     else:
