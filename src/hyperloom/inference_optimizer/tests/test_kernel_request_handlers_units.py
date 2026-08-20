@@ -4194,6 +4194,9 @@ class TestRunGemmTuningHandler:
         assert row["engine"] == "forge"
         assert row["decision"] == "KEEP"
         assert row["tuners_run"][0]["tuner"] == "fmoe_ck"
+        # A clean run gains nothing it did not carry before, bar status.
+        assert "error" not in row["tuners_run"][0]
+        assert "error_class" not in row["tuners_run"][0]
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
