@@ -198,7 +198,15 @@ def check_aiperf_capability(
     print(
         f"WARNING: could not read the {SCENARIO_NAME!r} loader allowlist from "
         f"{aiperf_bin!r}; falling back to a flag-presence check, which cannot "
-        f"tell the pinned build from an older one carrying the same flags.",
+        f"tell the pinned build from an older one carrying the same flags"
+        + (
+            f", and cannot confirm that the pinned corpus {override!r} is one this "
+            f"scenario admits -- an unpermitted or misspelled name will now surface "
+            f"only after the server boots"
+            if override
+            else ""
+        )
+        + ".",
         file=sys.stderr,
     )
     probe = probe or _default_probe
