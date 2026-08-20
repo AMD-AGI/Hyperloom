@@ -88,7 +88,7 @@ _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.UPDATE_STATE,  # crash_count / current_action only
-        IntentType.DELEGATE,  # only handle actions: accuracy_gate / recover / server_lifecycle
+        IntentType.DELEGATE,  # only recover; enforced by PolicyGate ROBUSTNESS_DELEGATE_ONLY_ACTIONS
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }

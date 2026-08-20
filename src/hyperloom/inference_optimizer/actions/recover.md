@@ -31,24 +31,22 @@ regression — that path goes through `integrate` REVERT instead.
   `delegate{action_name="recover", params={force_gpu_cleanup: True,
   reason: "gpu_memory_leaked", evidence: {...}}}` with a tick-indexed
   `idempotency_key`. PolicyGate accepts it under
-  `DELEGATE_ACTION_SOURCE_ALLOWLIST` (`policy/gate.py`), and additionally
-  requires a non-empty `reason` + `evidence` on the payload via
-  `DELEGATE_ACTION_REQUIRED_PAYLOAD` — missing either is denied as
-  `rule="delegate_action_evidence"`. The robustness-agent envelope has its own
-  pre-emit guard, `ROBUSTNESS_DELEGATE_ACTIONS`
-  (`agents/robustness/role/envelope.py`); that constant is agent-local and is
-  not read by PolicyGate.
+  `DELEGATE_ACTION_SOURCE_ALLOWLIST` (derived from `ROBUSTNESS_DELEGATE_ONLY_ACTIONS`
+  in `policy/gate.py`), and additionally requires a non-empty `reason` +
+  `evidence` on the payload via `DELEGATE_ACTION_REQUIRED_PAYLOAD` — missing
+  either is denied as `rule="delegate_action_evidence"`. The robustness-agent
+  envelope has its own pre-emit guard, `ROBUSTNESS_DELEGATE_ACTIONS`
+  (`agents/robustness/role/envelope.py`).
 
   `recover` is a `ROBUSTNESS_DELEGATE_ONLY_ACTIONS` member
   (see `protocol/action_surfaces.py`): it is **not** in
   `FULL_ENABLED_ACTIONS` / `NO_KERNEL_AGENT_ENABLED_ACTIONS`, is subtracted
-  from `PHASE_LLM_PROPOSABLE_ACTIONS`, and PolicyGate denies any
-  Orchestration `propose_action` (`rule="propose_action_source"`) or
-  `delegate` (`rule="delegate_action_source"`). Orchestration that
-  observes a crash must emit an ALERT and let the robustness
+  from `PHASE_LLM_PROPOSABLE_ACTIONS`. PolicyGate denies any Orchestration
+  `propose_action` (`rule="propose_action_source"`) or `delegate`
+  (`rule="delegate_action_source"`), and denies any robustness `delegate` for
+  actions outside `ROBUSTNESS_DELEGATE_ONLY_ACTIONS` (`rule="role"`).
+  Orchestration that observes a crash must emit an ALERT and let the robustness
   action-ladder escalate; it can no longer self-trigger `recover`.
-  (A force-`False` recover only probes GPUs and never kills anything,
-  so this removes no real remediation capability from Orchestration.)
 
 ## Inputs (task.params)
 
