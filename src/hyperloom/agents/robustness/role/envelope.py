@@ -72,16 +72,7 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
-# Handle actions robustness may delegate; ``report`` is allowed only as a last-resort
-# wind-down lever. Here we only enforce the allowlist.
-ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset(
-    {
-        "accuracy_gate",
-        "recover",
-        "report",
-        "server_lifecycle",
-    }
-)
+ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({"recover"})
 
 
 # Core SharedState fields the robustness role must not write via ``update_state``;

@@ -145,21 +145,6 @@ def test_delegate_accepts_only_handle_actions():
         assert intent.payload["action_name"] == action
 
 
-def test_delegate_allowlist_includes_report_wind_down():
-    """``report`` is the wind-down lever for ``deadline_imminent``/``recover_unsuccessful``; the ladder relies on ``build_delegate('report')`` not raising."""
-    assert "report" in ROBUSTNESS_DELEGATE_ACTIONS
-    intent = build_delegate(
-        "report",
-        params={"reason": "deadline_imminent"},
-        idempotency_key="report-deadline-imminent-tick-7",
-    )
-    assert intent.payload == {
-        "action_name": "report",
-        "params": {"reason": "deadline_imminent"},
-        "idempotency_key": "report-deadline-imminent-tick-7",
-    }
-
-
 def test_update_state_rejects_core_fields():
     with pytest.raises(ValueError):
         build_update_state({"current_best": {"tput": 1.0}})

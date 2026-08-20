@@ -51,8 +51,7 @@ def test_prune_branch_passes(policy: PolicyAware):
 
 
 def test_delegate_passes(policy: PolicyAware):
-    for action in ("accuracy_gate", "recover", "server_lifecycle"):
-        policy.assert_payload_complete(build_delegate(action))
+    policy.assert_payload_complete(build_delegate("recover"))
 
 
 def test_delegate_recover_gpu_leak_payload_passes(policy: PolicyAware):
