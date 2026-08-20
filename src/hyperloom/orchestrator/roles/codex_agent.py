@@ -111,12 +111,9 @@ class CodexAgentBackend:
             part for part in ((system_prompt or "").strip(), _SPECIALIST_OUTPUT_INSTRUCTIONS) if part
         )
         user_prompt = prompt
-        # SpecialistRunner's legacy retry path prepends the system prompt for
-        # backends that ignore role separation. Strip that exact compatibility
-        # prefix because this backend sends developer instructions natively.
         compatibility_prefix = f"{system_prompt}\n---\n" if system_prompt else ""
         if compatibility_prefix and user_prompt.startswith(compatibility_prefix):
-            user_prompt = user_prompt[len(compatibility_prefix) :]
+            user_prompt = user_prompt[len(compatibility_prefix):]
         try:
             sdk_result = await run_codex_turn(
                 prompt=user_prompt,

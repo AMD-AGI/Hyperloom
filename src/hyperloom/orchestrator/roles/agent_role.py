@@ -195,5 +195,6 @@ __all__ = [
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_API_KEY_ENV",
     "DEFAULT_CODEX_MODEL",
+    "_SPECIALIST_INTENTS",
     "default_role_registry",
 ]
