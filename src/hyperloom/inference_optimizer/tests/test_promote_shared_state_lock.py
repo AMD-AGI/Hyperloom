@@ -1256,6 +1256,64 @@ def test_lift_is_the_only_writer_so_an_ablated_env_stays_gone(session_dir):
     assert [e["variant_name"] for e in s.optimization_stack] == ["adds-env", "drops-env"]
 
 
+def test_lift_strips_a_harness_flag_inherited_from_the_previous_current_best(session_dir):
+    """Issue #1192: the flag came back through the previous current_best re-merge."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 6137.0
+    s.current_best = {
+        "action": "replay_warm_recipe",
+        "tput": 6165.0,
+        "extra_server_args": "--no-enable-prefix-caching",
+        "extra_envs": {},
+    }
+
+    coord._lift_to_current_best(
+        "explore",
+        8063.0,
+        {
+            "name": "aiter-fp8-kv-cache",
+            "candidate_extra_server_args": "--kv-cache-dtype fp8",
+            "extra_server_args": "--kv-cache-dtype fp8",
+            "effective_extra_server_args": "--no-enable-prefix-caching --kv-cache-dtype fp8",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        },
+    )
+
+    assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert s.current_best["effective_extra_server_args"] == "--kv-cache-dtype fp8"
+    top = s.optimization_stack[-1]
+    assert top["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert top["candidate_extra_server_args"] == "--kv-cache-dtype fp8"
+
+
+def test_lift_strips_a_harness_flag_a_winner_proposed_directly(session_dir):
+    """A winner whose own delta is the harness flag publishes no serving change."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {
+        "action": "explore",
+        "tput": 1100.0,
+        "extra_server_args": "--max-num-seqs 256",
+        "extra_envs": {},
+    }
+
+    coord._lift_to_current_best(
+        "explore",
+        1200.0,
+        {
+            "name": "no-prefix-cache",
+            "candidate_extra_server_args": "--no-enable-prefix-caching",
+            "extra_server_args": "--max-num-seqs 256 --no-enable-prefix-caching",
+            "extra_envs": {},
+        },
+    )
+
+    assert s.current_best["extra_server_args"] == "--max-num-seqs 256"
+    assert s.optimization_stack[-1]["candidate_extra_server_args"] == ""
+
+
 def test_lift_refuses_a_winner_that_does_not_beat_the_anchor(session_dir):
     """A measurement below current_best must leave config and stack untouched."""
     coord = _coord(session_dir)
