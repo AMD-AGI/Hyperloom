@@ -498,22 +498,31 @@ class PreludePhase(PhaseHandler):
         boundary, or file-state failure records ``entry['resolution_error']``
         and emits a warning before replay is deferred.
         """
-        def reject(reason: str) -> list[str]:
+        def reject(reason: str, *, code: str = "") -> list[str]:
             entry["resolution_error"] = reason
+            if code:
+                entry["resolution_reason"] = code
             log.warning("Kernel Patch replay rejected: %s", reason)
             return []
 
         patch_path = Path(str(entry.get("patch_path") or "").strip())
         try:
-            from ..framework.paths import resolve_session_framework_root
+            from ..framework.paths import resolve_warm_replay_kernel_root
             from ..specialists.patch_safety import parse_patch_targets
 
             parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
-            root_value = resolve_session_framework_root()
+            resolution = resolve_warm_replay_kernel_root(patch_paths=[patch_path])
+            root_value = str(resolution.root or "").rstrip("/")
         except (OSError, ValueError) as exc:
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
         if not root_value:
-            return reject("Session active framework root is unset")
+            detail = str(resolution.reason or "Session active kernel patch root is unset")
+            if resolution.allowlist:
+                detail = f"{detail}; allowlist={list(resolution.allowlist)!r}"
+            return reject(
+                detail,
+                code=str(resolution.reason or "active_kernel_patch_root_missing"),
+            )
         try:
             root = Path(root_value).resolve(strict=False)
             root_is_dir = root.is_dir()
@@ -822,6 +831,85 @@ class PreludePhase(PhaseHandler):
         from ..knowledge.agent_kb import KernelAgentKB
 
         return KernelAgentKB.open()
+
+    @staticmethod
+    def _warm_replay_patch_paths_from_entries(
+        patches: list[dict[str, Any]],
+    ) -> list[Path]:
+        paths: list[Path] = []
+        for patch in patches:
+            if not isinstance(patch, dict):
+                continue
+            for key in ("patch_ref", "patch_path", "patch_file"):
+                raw = str(patch.get(key) or "").strip()
+                if raw:
+                    paths.append(Path(raw))
+                    break
+        return paths
+
+    @staticmethod
+    def _warm_replay_root_skip_outcome(
+        *,
+        reason: str,
+        resolution: Any,
+        root_kind: str,
+        rollback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        outcome: dict[str, Any] = {
+            "status": (
+                "skipped"
+                if rollback is None or rollback.get("ok")
+                else "rollback_failed"
+            ),
+            "reason": reason,
+            f"{root_kind}_patch_root_source": str(resolution.source or ""),
+            f"{root_kind}_patch_root_allowlist": list(resolution.allowlist or ()),
+        }
+        if resolution.root:
+            outcome[f"active_{root_kind}_patch_root"] = str(resolution.root).rstrip("/")
+        if rollback is not None:
+            outcome["rollback"] = rollback
+        return outcome
+
+    def _warm_replay_kernel_root_block_reason(
+        self,
+        state: Any,
+    ) -> dict[str, Any] | None:
+        """Skip combined warm replay when a kernel patch root cannot be resolved."""
+        from ..framework.paths import (
+            WarmReplayRootResolution,
+            resolve_warm_replay_kernel_root,
+        )
+
+        for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("column") == "gemm":
+                continue
+            patch_raw = str(entry.get("patch_path") or "").strip()
+            if not patch_raw:
+                continue
+            reason_code = str(
+                entry.get("resolution_reason")
+                or entry.get("resolution_error")
+                or ""
+            ).split(";", 1)[0].strip()
+            if reason_code not in {
+                "kernel_patch_root_not_in_allowlist",
+                "active_kernel_patch_root_missing",
+            }:
+                continue
+            resolution = resolve_warm_replay_kernel_root(
+                patch_paths=[Path(patch_raw)]
+            )
+            return self._warm_replay_root_skip_outcome(
+                reason=reason_code,
+                resolution=resolution
+                if isinstance(resolution, WarmReplayRootResolution)
+                else WarmReplayRootResolution("", "", reason_code, ()),
+                root_kind="kernel",
+            )
+        return None
 
     def _set_warm_kernel_outcome(
         self,
@@ -1349,14 +1437,23 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return None
             if sdk_replay.get("patches"):
-                from ..framework.paths import resolve_session_framework_root
+                from ..framework.paths import resolve_warm_replay_framework_root
 
-                if not resolve_session_framework_root():
+                framework_resolution = resolve_warm_replay_framework_root(
+                    patch_paths=self._warm_replay_patch_paths_from_entries(
+                        list(sdk_replay.get("patches") or [])
+                    )
+                )
+                if not framework_resolution.root:
                     state.warm_replay_attempted = True
-                    state.warm_replay_outcome = {
-                        "status": "skipped",
-                        "reason": "active_framework_root_missing",
-                    }
+                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
+                        reason=str(
+                            framework_resolution.reason
+                            or "active_framework_root_missing"
+                        ),
+                        resolution=framework_resolution,
+                        root_kind="framework",
+                    )
                     state.save(self.session_dir)
                     return None
         try:
@@ -1417,6 +1514,12 @@ class PreludePhase(PhaseHandler):
                 ),
                 "rollback": rollback,
             }
+            state.save(self.session_dir)
+            return None
+        kernel_root_block = self._warm_replay_kernel_root_block_reason(state)
+        if kernel_root_block is not None:
+            state.warm_replay_attempted = True
+            state.warm_replay_outcome = kernel_root_block
             state.save(self.session_dir)
             return None
         kernel_pending = (
@@ -1586,9 +1689,14 @@ class PreludePhase(PhaseHandler):
                 wsc_patches, wsc_advisory, state
             )
         if wsc_patches:
-            from ..framework.paths import resolve_session_framework_root
+            from ..framework.paths import resolve_warm_replay_framework_root
 
-            if not resolve_session_framework_root():
+            framework_resolution = resolve_warm_replay_framework_root(
+                patch_paths=self._warm_replay_patch_paths_from_entries(
+                    list(wsc_patches)
+                )
+            )
+            if not framework_resolution.root:
                 rollback = (
                     self._revert_warm_kernel_patches(
                         kernel_applied,
@@ -1608,15 +1716,26 @@ class PreludePhase(PhaseHandler):
                     if hasattr(state, "set_stop_reason"):
                         state.set_stop_reason("warm_replay_rollback_failed")
                 state.warm_replay_attempted = True
-                state.warm_replay_outcome = {
-                    "status": (
-                        "skipped" if rollback.get("ok") else "rollback_failed"
+                state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
+                    reason=str(
+                        framework_resolution.reason
+                        or "active_framework_root_missing"
                     ),
-                    "reason": "active_framework_root_missing",
-                    "rollback": rollback,
-                }
+                    resolution=framework_resolution,
+                    root_kind="framework",
+                    rollback=rollback,
+                )
                 state.save(self.session_dir)
                 return None
+            state.warm_replay_pending = {
+                **dict(getattr(state, "warm_replay_pending", {}) or {}),
+                "active_framework_patch_root": str(
+                    framework_resolution.root
+                ).rstrip("/"),
+                "framework_patch_root_source": str(
+                    framework_resolution.source or ""
+                ),
+            }
 
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
             state.warm_replay_outcome = {
