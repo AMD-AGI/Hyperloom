@@ -541,6 +541,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     continue_kernel_after_gemm: bool = True
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
+    # Which benchmark workload this session measures: "agentx" (agentic trace
+    # replay) or "synthetic" (ISL/OSL). Recorded at seed time and asserted on
+    # resume: the KEEP ledger is keyed on server args alone, so measurements
+    # from the two modes would silently overwrite each other in the same rows.
+    # Empty on sessions predating the field (treated as "not asserted").
+    benchmark_mode: str = ""
+    # Generation counter for AgentX measurements. Bumped whenever a change makes
+    # previously recorded AgentX numbers incomparable (aiperf/scenario upgrade,
+    # corpus generation, a fixed measurement defect). A resume whose stored
+    # epoch differs must not reuse the old KEEPs or baseline anchor.
+    agentx_epoch: int = 0
     # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
         default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],

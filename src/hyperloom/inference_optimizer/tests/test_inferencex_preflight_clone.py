@@ -157,3 +157,78 @@ def test_auto_detected_inferencex_candidates_must_be_writable():
     src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     assert "if os.access(candidate, os.W_OK):" in src
     assert "skipping non-writable auto-detected" in src
+
+
+# --- revision validation -------------------------------------------------------
+#
+# Completeness alone let a checkout cloned before a pin bump stay "usable"
+# forever, so the bump never reached the box -- and since the synthetic path
+# sources benchmark_lib.sh from whichever checkout wins, that drift was not
+# AgentX-scoped. Two processes on the same Hyperloom commit could measure
+# against different InferenceX revisions with nothing in the logs naming either.
+
+_PIN = "3d5581562f643f9bdeb8410cd924e2c70906c966"
+_OTHER = "a4bb43afa7fd74c1356583ed29e51421be010f0f"
+
+
+def _checkout(tmp_path, name="co"):
+    d = tmp_path / name
+    (d / "benchmarks").mkdir(parents=True)
+    (d / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
+    return d
+
+
+def _at(monkeypatch, sha):
+    monkeypatch.setattr(cli_preflight, "_inferencex_head_sha", lambda _p: sha)
+
+
+def test_checkout_at_the_pin_is_accepted(tmp_path, monkeypatch):
+    _at(monkeypatch, _PIN)
+    assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref=_PIN) is True
+
+
+def test_checkout_at_another_revision_is_rejected(tmp_path, monkeypatch):
+    """The case that used to pass: complete tree, wrong code."""
+    _at(monkeypatch, _OTHER)
+    assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref=_PIN) is False
+
+
+def test_short_pin_matches_a_full_head(tmp_path, monkeypatch):
+    _at(monkeypatch, _PIN)
+    assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref=_PIN[:12]) is True
+
+
+def test_unreadable_head_is_tolerated(tmp_path, monkeypatch):
+    """A tarball drop with no .git works today; do not reject it over metadata
+    we only just started asking for."""
+    _at(monkeypatch, "")
+    assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref=_PIN) is True
+
+
+def test_branch_ref_skips_the_comparison(tmp_path, monkeypatch):
+    """A branch name cannot be compared to a HEAD without a network round trip."""
+    _at(monkeypatch, _OTHER)
+    assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref="main") is True
+
+
+def test_explicit_empty_ref_skips_the_comparison(tmp_path, monkeypatch):
+    """Used right after a clone, which is at the ref by construction."""
+    _at(monkeypatch, _OTHER)
+    assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref="") is True
+
+
+def test_incomplete_checkout_still_rejected_before_any_ref_work(tmp_path, monkeypatch):
+    def _boom(_p):
+        raise AssertionError("ref check must not run on an incomplete checkout")
+
+    monkeypatch.setattr(cli_preflight, "_inferencex_head_sha", _boom)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    assert cli_preflight._inferencex_checkout_ok(stub, ref=_PIN) is False
+
+
+def test_clone_destination_is_per_revision():
+    """A shared directory name is what let one revision win by existing."""
+    assert cli_preflight._inferencex_dest_name(_PIN) == f"InferenceX@{_PIN}"
+    assert cli_preflight._inferencex_dest_name("main") == "InferenceX@main"
+    assert "/" not in cli_preflight._inferencex_dest_name("feature/x y")

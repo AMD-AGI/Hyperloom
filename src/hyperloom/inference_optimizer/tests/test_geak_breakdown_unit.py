@@ -22,6 +22,7 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.collectors import collect_geak
+from hyperloom.inference_optimizer.breakdown.collectors.geak import _geak_kind_index
 from hyperloom.orchestrator.actions.executors._geak_sweep import (
     _parse_isl_osl,
     _serving_gpus,
@@ -658,3 +659,382 @@ def test_collect_gemm_tuning_prefers_e2e_gain_over_micro_speedup() -> None:
     assert run["gain_pct"] == pytest.approx(9.26)
     assert run["tuned_tput"] == pytest.approx(1092.6)
     assert run["best_speedup"] == pytest.approx(1.5)
+
+
+def test_collect_geak_backfill_fires_on_no_gain(tmp_path: Path) -> None:
+    # A run stamped ``no_gain`` on the COLD basis can still hold a measured hot
+    # win and genuine KEEP rows in the journey. Attribution must not be dropped.
+    eval_dir = tmp_path / "geak" / "eval"
+    _write_kernel_journey(eval_dir)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "no_gain",
+            "throughput_speedup": 0.9877,
+            "alignment_metrics": {"hot_geak_speedup": 2.5722, "final_basis": "cold"},
+            "accepted_kernels": [],
+            "accepted_heads": [{"short_name": "fused_moe_kernel_gptq_awq"}],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels"][0]["kernel_id"] == "fused_moe_kernel_gptq_awq"
+
+
+def test_collect_geak_backfill_still_skipped_on_error(tmp_path: Path) -> None:
+    # ``error`` / ``timeout`` runs never produced a trustworthy workflow return;
+    # the gate must stay closed for them.
+    eval_dir = tmp_path / "geak" / "eval"
+    _write_kernel_journey(eval_dir)
+    for bad in ("error", "timeout", "missing"):
+        state = {
+            "kernel_optimizer": "geak",
+            "geak_result": {
+                "status": bad,
+                "accepted_kernels": [],
+                "eval_dir": str(eval_dir),
+            },
+        }
+        out = collect_geak(tmp_path, state, [])
+        assert out["accepted_kernels"] == [], bad
+        assert out["kernels_optimized"] == 0, bad
+
+
+def test_collect_geak_backfill_scans_earlier_cycles(tmp_path: Path) -> None:
+    # ``kernel_journey_path`` names the LAST e2e cycle. A run that keeps a kernel
+    # in cycle 0 and then opens a cycle 1 that keeps nothing must still attribute
+    # the cycle-0 kernel. Observed on two campaign runs.
+    geak_dir = tmp_path / "geak"
+    _write_kernel_journey(geak_dir / "e2e_cycle0")
+    last = geak_dir / "e2e_cycle1"
+    last.mkdir(parents=True, exist_ok=True)
+    (last / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": "paged_attention_decode_sliding_window_c0_triton",
+                        "name": "paged_attention_decode_sliding_window_c0_triton",
+                        "e2e": {"decision": "REJECTED", "integrated": False, "e2e_gain_pct": None},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "no_gain",
+            "accepted_kernels": [],
+            "kernel_journey_path": str(last / "kernel_journey.json"),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["accepted_kernels_source"] == "kernel_journey_backfill"
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels"][0]["kernel_id"] == "fused_moe_kernel_gptq_awq"
+
+
+def test_collect_geak_backfill_dedupes_repeated_kernel_across_cycles(tmp_path: Path) -> None:
+    # The same kernel_id present in two cycles must be credited once, and the
+    # pointer (last) cycle wins.
+    geak_dir = tmp_path / "geak"
+    _write_kernel_journey(geak_dir / "e2e_cycle0")
+    _write_kernel_journey(geak_dir / "e2e_cycle1")
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "kernel_journey_path": str(geak_dir / "e2e_cycle1" / "kernel_journey.json"),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+
+
+def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> None:
+    """Journey holding one accepted kernel written twice (candidate + symbol)."""
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": "c0_triton",
+                        "name": "c0_triton",
+                        "gpu_pct": 20.2,
+                        "micro_speedup": 2.2024,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": primary_gain},
+                    },
+                    {
+                        "kernel_id": "dsa_sparse_attn_prefill_main_kernel",
+                        "name": "dsa_sparse_attn_prefill_main_kernel",
+                        "gpu_pct": None,
+                        "micro_speedup": 1.13,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": twin_gain},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_collect_geak_backfill_collapses_alias_twin(tmp_path: Path) -> None:
+    # The journey records one acceptance twice: the candidate id carries the
+    # measurement, the resolved profiler symbol carries gpu_pct=None. One kernel.
+    #
+    # Which row survives and which id names it are two separate questions. The
+    # measured row survives, because it is the only one holding ``gpu_pct``; it
+    # is then named by the *symbol*, because that is the id the acceptance
+    # ledger keeps for the same kernel. Naming it ``c0_triton`` here put one
+    # kernel under two names in two tables of the same report.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=29.994, twin_gain=29.994)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "no_gain", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    kernel = out["accepted_kernels"][0]
+    assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    # The measurement survives the rename: it came from the row that had it.
+    assert kernel["gpu_pct"] == 20.2
+    assert kernel["aliases"] == ["c0_triton"]
+
+
+def test_collect_geak_backfill_collapses_rounded_alias_twin(tmp_path: Path) -> None:
+    # The twin sometimes carries the rounded gain, so exact equality is too strict.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=10.38337292749906, twin_gain=10.383)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "ok", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels"][0]["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    assert out["accepted_kernels"][0]["aliases"] == ["c0_triton"]
+
+
+def test_collect_geak_backfill_excludes_declared_env_selection(tmp_path: Path) -> None:
+    # Real shape, Qwen3-14B-FP8/20260814T163051Z: the journey holds an alias
+    # twin whose resolved symbol is a CK library GEMM. ``accepted_kernels`` is
+    # empty and the win sits in ``accepted_heads`` declaring ``kind: env``.
+    #
+    # The collapse must run before the kind join, or the join has only the slot
+    # tag ``c1_ck`` to look up and finds nothing. Once the row is named by the
+    # symbol, ``result.json`` answers the question GEAK already answered: this
+    # is a library selection, not an authored kernel. It belongs to the config
+    # bucket, so ``kernels_optimized`` is 0 -- the run's e2e gain is unaffected.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [
+                {
+                    "short_name": "dsa_sparse_attn_prefill_main_kernel",
+                    "kind": "env",
+                    "backend": "ck",
+                    "e2e_delta_pct": 14.924,
+                }
+            ],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 0
+    assert out["accepted_kernels"] == []
+
+
+def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> None:
+    # The converse, so the exclusion above can never be widened into a drop:
+    # the same twin declared ``authored`` survives, named by the symbol, and
+    # records where its kind came from. Only a *declared* env is excluded --
+    # a row no lane names stays admitted with ``kind_source: absent``, because
+    # guessing "env" would delete real kernels from dead runs.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [
+                {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
+            ],
+            "eval_dir": str(eval_dir),
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    kernel = out["accepted_kernels"][0]
+    assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    assert kernel["kind"] == "authored"
+    assert kernel["kind_source"] == "result_json"
+
+
+def test_collect_geak_backfill_reads_kind_from_the_stack_when_result_json_is_empty(
+    tmp_path: Path,
+) -> None:
+    # ``result.json`` is rewritten once per cycle and the last write wins, so a
+    # later cycle that accepts nothing blanks the lanes an earlier one declared.
+    # The ``geak_e2e`` optimization_stack entry is append-only and keeps them
+    # (KernelPhase copies both lanes into it verbatim). Reading only
+    # ``result.json`` here left every recovered row ``kind_source: absent`` and
+    # the ``env`` exclusion could not run at all -- the collector counted a CK
+    # library selection as an authored kernel.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [],
+            "eval_dir": str(eval_dir),
+        },
+        "optimization_stack": [
+            {"action": "integrate", "kernel_id": "unrelated"},
+            {
+                "action": "geak_e2e",
+                "accepted_kernels": [],
+                "accepted_heads": [
+                    {
+                        "short_name": "dsa_sparse_attn_prefill_main_kernel",
+                        "kind": "env",
+                        "backend": "ck",
+                    }
+                ],
+            },
+        ],
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 0
+    assert out["accepted_kernels"] == []
+
+
+def test_collect_geak_backfill_stack_kind_is_labelled_as_from_the_stack(
+    tmp_path: Path,
+) -> None:
+    # The converse, and the provenance. An authored declaration in the stack
+    # keeps the row, and ``kind_source`` says *which* artifact declared it, so a
+    # stack-sourced kind is never reported as something ``result.json`` said.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    _alias_journey(eval_dir, primary_gain=14.924, twin_gain=14.924)
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [],
+            "eval_dir": str(eval_dir),
+        },
+        "optimization_stack": [
+            {
+                "action": "geak_e2e",
+                "accepted_kernels": [
+                    {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
+                ],
+                "accepted_heads": [],
+            }
+        ],
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    kernel = out["accepted_kernels"][0]
+    assert kernel["kernel_id"] == "dsa_sparse_attn_prefill_main_kernel"
+    assert kernel["kind"] == "authored"
+    assert kernel["kind_source"] == "stack"
+
+
+def test_geak_kind_index_prefers_the_run_s_own_result_json_over_the_stack(
+    tmp_path: Path,
+) -> None:
+    # Adding a second source must not let it overwrite what the run published.
+    # A *declared* kind beats an undeclared one whichever artifact holds it;
+    # between two declarations ``result.json`` wins.
+    result = {
+        "accepted_kernels": [{"short_name": "a", "kind": "authored"}, {"short_name": "b"}],
+    }
+    stack = [
+        {
+            "action": "geak_e2e",
+            "accepted_heads": [
+                {"short_name": "a", "kind": "env"},
+                {"short_name": "b", "kind": "env"},
+                {"short_name": "c", "kind": "env"},
+            ],
+        }
+    ]
+    index = _geak_kind_index(result, stack)
+    assert index["a"] == ("authored", "result_json")  # published kind untouched
+    assert index["b"] == ("env", "stack")  # undeclared lane filled in
+    assert index["c"] == ("env", "stack")  # name only the stack knows
+    assert _geak_kind_index(result) == {"a": ("authored", "result_json"), "b": (None, "result_json")}
+
+
+def test_collect_geak_backfill_keeps_two_measured_kernels_of_equal_gain(tmp_path: Path) -> None:
+    # Two genuinely distinct kernels that happen to share a gain must both stay:
+    # the collapse needs a measured row AND an unmeasured row to fire.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": f"kernel_{i}",
+                        "gpu_pct": 10.0 + i,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 5.0},
+                    }
+                    for i in range(2)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "ok", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 2
+    assert all("aliases" not in k for k in out["accepted_kernels"])
+
+
+def test_collect_geak_backfill_keeps_unmeasured_kernels_of_distinct_gain(tmp_path: Path) -> None:
+    # Two unmeasured shape-split kernels are not aliases of the measured parent:
+    # their gains differ, so all three survive.
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {"kernel_id": "c0_aiter", "gpu_pct": 0.0, "e2e": {"decision": "KEEP", "e2e_gain_pct": 7.53}},
+                    {"kernel_id": "ck#1", "gpu_pct": None, "e2e": {"decision": "KEEP", "e2e_gain_pct": 6.779}},
+                    {"kernel_id": "ck#2", "gpu_pct": None, "e2e": {"decision": "KEEP", "e2e_gain_pct": 0.705}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "no_gain", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 3
