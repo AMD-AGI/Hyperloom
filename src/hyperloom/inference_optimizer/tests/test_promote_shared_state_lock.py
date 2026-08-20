@@ -1257,14 +1257,7 @@ def test_lift_is_the_only_writer_so_an_ablated_env_stays_gone(session_dir):
 
 
 def test_lift_strips_a_harness_flag_inherited_from_the_previous_current_best(session_dir):
-    """Issue #1192: the previous current_best is re-merged onto the winner.
-
-    ``compose_server_args`` already keeps the flag out of what explore launches
-    and publishes, but the composed stack collapses to exactly the candidate
-    delta when the only inherited flag is the denylisted one. That sends
-    ``_merge_cumulative_extra_server_args`` down its ``base + candidate`` branch
-    and the flag reappears from a base that never composed (here: warm replay).
-    """
+    """Issue #1192: the flag came back through the previous current_best re-merge."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 6137.0

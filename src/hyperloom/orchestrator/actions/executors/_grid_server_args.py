@@ -168,9 +168,8 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return _reserialize_json_blobs(" ".join(out))
 
 
-# Serving-ineligible harness flags. Enroll here; two sites strip the set —
-# compose_server_args (what a grid launches) and _lift_to_current_best (what a
-# KEEP persists) — so neither the benchmark nor the recommendation carries them.
+# Serving-ineligible harness flags. Enroll here; compose_server_args strips them
+# from what a grid launches and _lift_to_current_best from what a KEEP persists.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
 
 
