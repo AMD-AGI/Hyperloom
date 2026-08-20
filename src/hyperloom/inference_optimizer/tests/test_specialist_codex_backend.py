@@ -1530,7 +1530,6 @@ async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
     result = await backend.run(
         "SYSTEM_ROLE_SENTINEL\n---\nUSER_ROLE_SENTINEL",
         system_prompt="SYSTEM_ROLE_SENTINEL",
-        tools=["Read", "Bash"],
         max_turns=1,
     )
 
