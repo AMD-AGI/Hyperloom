@@ -2544,10 +2544,8 @@ class WritebackCollaborator:
         rerun of an already-stacked config cannot double-apply it.
 
         Every args string read here passes through
-        :func:`strip_benchmark_harness_flags`, including the previous
-        ``current_best`` — it is re-merged onto the winner, so a harness flag
-        left there by a layer that never composed (baseline, warm replay) would
-        otherwise reappear in the published config.
+        :func:`strip_benchmark_harness_flags`, the previous ``current_best``
+        included since it is re-merged onto the winner.
 
         Args:
             task_kind: The action kind that produced the winner (stamped on the
