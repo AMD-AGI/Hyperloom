@@ -45,12 +45,15 @@ from .mcp_context_tools import (
     ContextProvider,
     build_context_tools_server,
 )
+from hyperloom.inference_optimizer.protocol.intent import IntentType
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
     EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
     build_emit_intent_server,
+    constraints_sentence,
+    payload_contract,
 )
 
 
@@ -88,8 +91,15 @@ def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
     return total // num_turns if num_turns > 1 else total
 
 
-# Prompt suffix appended to every Claude turn so the model knows the tool contract.
-_OUTPUT_INSTRUCTIONS = f"""
+def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
+    """Render the output-format suffix for a role's allowed intent set."""
+    import json as _json
+
+    contract = payload_contract(allowed_intents)
+    constraints = constraints_sentence(allowed_intents)
+    constraints_line = f"\n-{constraints}" if constraints else ""
+    heartbeat = _json.dumps({"topic": "heartbeat", "body_md": "ok"})
+    return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
 tool. Each call carries exactly one intent; call multiple times to emit
@@ -98,15 +108,13 @@ several intents in the same turn. Free-text replies are dropped.
 Tool input shape:
 
   {{
-    "intent_type": "<one of send_message|delegate|propose_action|request|"
-                   "response|review_verdict|update_state|"
-                   "alert|extend_lease|"
-                   "prune_branch|escalate_strategy_change>",
+    "intent_type": "<one of {', '.join(sorted(t.value for t in allowed_intents))}>",
     "payload": {{ /* per-intent fields — see tool description */ }}
   }}
 
-If you have nothing to say, call once with intent_type=send_message and
-payload={{"topic":"heartbeat","body_md":"ok"}}.
+- Required keys per intent_type: {contract}.{constraints_line}
+- If you have nothing to say, call once with intent_type=send_message and
+  payload={heartbeat}.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only
@@ -209,6 +217,10 @@ class ClaudeBackend:
     # Raw single-shot completion mode: skips the emit_intent server + suffix,
     # disallows all tools, and returns ``raw_text`` without an emitted intent.
     raw_completion: bool = False
+    # The role's allowed intent set; used to render the output-format suffix so
+    # only the intents this role may emit are listed. None defaults to the full
+    # IntentType enumeration (legacy callers / tests that pre-date role records).
+    allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
     # streamed SDK messages before the turn is aborted. Env override:
     # ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
@@ -531,6 +543,9 @@ class ClaudeBackend:
     def _compose_prompt(self, prompt: str) -> str:
         """Append the emit_intent output-format suffix unless in raw mode.
 
+        The suffix is rendered from :attr:`allowed_intents` so only the
+        intents this role may emit are listed.
+
         Args:
             prompt (str): The base turn prompt.
 
@@ -540,7 +555,8 @@ class ClaudeBackend:
         """
         if self.raw_completion:
             return prompt
-        return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
+        intents = self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
+        return f"{prompt}\n\n{_build_output_instructions(intents)}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
         """Attach (or clear) the read-only context-pull MCP server.

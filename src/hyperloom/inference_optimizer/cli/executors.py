@@ -214,7 +214,13 @@ def _build_specialist_executor(
                     writable_roots=(runtime_root,),
                     call_timeout_s=per_turn_max_seconds,
                 )
-            return ClaudeBackend(model=selected_model, max_turns_default=max_turns)
+            from hyperloom.orchestrator.roles.agent_role import _SPECIALIST_INTENTS
+
+            return ClaudeBackend(
+                model=selected_model,
+                max_turns_default=max_turns,
+                allowed_intents=_SPECIALIST_INTENTS,
+            )
 
         runner = SpecialistRunner(
             backend_factory=_backend_factory,

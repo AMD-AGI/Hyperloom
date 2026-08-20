@@ -91,7 +91,7 @@ class CodexAgentBackend:
         prompt: str,
         *,
         system_prompt: str | None = None,
-        tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one agentic Codex turn and parse its structured intent envelope."""
@@ -165,8 +165,6 @@ class CodexAgentBackend:
             "error": "",
             "prompt": user_prompt,
             "response": sdk_result.text,
-            "max_turns": max_turns,
-            "allowed_tools": list(tools or ()),
         }
         self.calls.append(
             {
