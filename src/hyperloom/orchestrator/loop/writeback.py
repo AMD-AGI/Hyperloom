@@ -2014,7 +2014,6 @@ class WritebackCollaborator:
                 "backend": "disabled",
             }
 
-
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
         try:
