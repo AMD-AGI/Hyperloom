@@ -714,38 +714,58 @@ def test_collect_gemm_tuning_leaves_an_unlifted_run_unadopted() -> None:
     assert out["runs"][0]["adopted"] is False
 
 
-class TestAdoptedTunedFileBackfill:
-    """The attempt row has to name the same artifact the stack recorded.
+class TestCandidateTunedFile:
+    """The artifact a KEEP adopted, named from the candidate's own env.
 
-    Three paths hold a path for one KEEP -- the durable copy in aiter's config
-    dir, the tuner workspace original, and the E2E merge product -- and they are
-    all different strings. Only the one the stack entry recorded can match, so
-    it is read back rather than re-derived.
+    One KEEP is described by three different path strings -- the durable copy in
+    aiter's config dir, the tuner-workspace original, and the E2E merge product
+    -- so the attempt row cannot re-derive the one the stack holds. The way out
+    is not to read the stack back either: reading it back picks up whatever entry
+    is newest, and ``_lift_to_current_best`` skips the append when
+    ``(action, variant_name)`` already matches, which a second macro cycle
+    re-tuning the same tuner does. The attempt would then claim the previous
+    round's artifact and its gain. Both sides take the value from this one
+    function instead, so they are the same string by construction.
     """
 
-    def test_returns_the_newest_gemm_entry(self) -> None:
-        from hyperloom.orchestrator.phases.kernel import _adopted_tuned_file
+    def test_prefers_the_candidate_env_var(self) -> None:
+        """The candidate's own key wins over whatever the env happens to list
+        first -- a stacked env carries the earlier KEEPs' vars too."""
+        from hyperloom.orchestrator.phases.kernel import _candidate_tuned_file
 
-        stack = [
-            {"action": "gemm_tuning", "tuned_file": "/ws/first.csv"},
-            {"action": "integrate_patch", "tuned_file": "/ws/unrelated.csv"},
-            {"action": "gemm_tuning", "tuned_file": "/ws/second.csv"},
-        ]
-        assert _adopted_tuned_file(stack) == "/ws/second.csv"
+        # Deliberately not first: falling back to insertion order would pick
+        # the wrong artifact and still look right if the target led the dict.
+        env = {
+            "AITER_CONFIG_GEMM_BF16": "/ws/earlier_keep.csv",
+            "AITER_CONFIG_FMOE": "/ws/merged_tuned_fmoe.csv",
+        }
+        assert _candidate_tuned_file(env, "AITER_CONFIG_FMOE") == "/ws/merged_tuned_fmoe.csv"
 
-    def test_ignores_other_lanes(self) -> None:
-        from hyperloom.orchestrator.phases.kernel import _adopted_tuned_file
+    def test_falls_back_to_the_only_value_present(self) -> None:
+        """A candidate whose env_var is not the key its env carries."""
+        from hyperloom.orchestrator.phases.kernel import _candidate_tuned_file
 
-        stack = [{"action": "framework_agent", "tuned_file": "/ws/other.csv"}]
-        assert _adopted_tuned_file(stack) == ""
+        env = {"AITER_CONFIG_GEMM_A8W8": "/ws/tuned_a8w8.csv"}
+        assert _candidate_tuned_file(env, "AITER_CONFIG_FMOE") == "/ws/tuned_a8w8.csv"
 
-    def test_tolerates_a_missing_or_malformed_stack(self) -> None:
-        from hyperloom.orchestrator.phases.kernel import _adopted_tuned_file
+    def test_empty_env_yields_no_claim(self) -> None:
+        from hyperloom.orchestrator.phases.kernel import _candidate_tuned_file
 
-        assert _adopted_tuned_file([]) == ""
-        assert _adopted_tuned_file(None) == ""
-        assert _adopted_tuned_file(["not-a-dict"]) == ""
-        assert _adopted_tuned_file([{"action": "gemm_tuning"}]) == ""
+        assert _candidate_tuned_file({}, "AITER_CONFIG_FMOE") == ""
+
+    def test_tolerates_malformed_input(self) -> None:
+        from hyperloom.orchestrator.phases.kernel import _candidate_tuned_file
+
+        assert _candidate_tuned_file({"AITER_CONFIG_FMOE": None}, "AITER_CONFIG_FMOE") == ""
+        assert _candidate_tuned_file({"AITER_CONFIG_FMOE": ""}, "AITER_CONFIG_FMOE") == ""
+        assert _candidate_tuned_file(None, "AITER_CONFIG_FMOE") == ""
+        assert _candidate_tuned_file({"k": 42}, "k") == "42"
+
+    def test_the_stack_reader_is_gone(self) -> None:
+        """Reading the newest stack entry is what allowed the false claim."""
+        from hyperloom.orchestrator.phases import kernel as kernel_phase
+
+        assert not hasattr(kernel_phase, "_adopted_tuned_file")
 
 
 def test_collect_geak_backfill_fires_on_no_gain(tmp_path: Path) -> None:
