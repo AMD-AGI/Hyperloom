@@ -103,9 +103,13 @@ class ClosePhase(PhaseHandler):
     async def _maybe_run_close_post_opt_roofline(self) -> None:
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated.
 
-        Profiles the final optimized service once and writes
-        reports/kernel_roofline_opt.json, giving the before/after kernel roofline
-        chart its optimized snapshot. No-op for sessions without an
+        Profiles the final optimized service once. What reaches the
+        optimization-progress chart is the snapshot this lands in
+        ``state.json#roofline_snapshots`` -- the chart reads that and
+        ``reports/kernel_roofline.json``, never the ``_opt`` report; the
+        separate ``reports/kernel_roofline_opt.json`` sidecar exists so this run
+        does not overwrite the PRELUDE baseline one, and is read back when the
+        snapshot's hot-kernel summaries are built. No-op for sessions without an
         integrate-class optimization; wrapped by the caller so a failure never
         blocks close.
         """
@@ -126,15 +130,16 @@ class ClosePhase(PhaseHandler):
             self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
         )
         # Hard timeout so a slow profile+TraceLens can't stall the close
-        # sequence; on timeout the chart degrades to baseline-only.
+        # sequence; on timeout no post-opt snapshot lands and the chart degrades
+        # to baseline-only.
         try:
             result = await asyncio.wait_for(
-                self.sub.run_task(task),
+                self.run_task_registered(task),
                 timeout=self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
             log.warning(
-                "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (kernel_roofline_opt.json absent)",
+                "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (no post-opt snapshot)",
                 self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
             )
             try:
@@ -649,8 +654,10 @@ class ClosePhase(PhaseHandler):
             return state
         if state == _TASK_STATE_RUNNING:
             return await self._await_running_close_task(task, step=step)
-        result = await self.sub.run_task(task)
-        return result.state
+        # ``None`` means the lanes were busy and the row was left alone, which
+        # closing steps never hit -- they take no lanes -- so it reports the
+        # state the row still has rather than getting a branch of its own.
+        return getattr(await self.run_task_registered(task), "state", state)
 
     async def _record_close_step(
         self,
