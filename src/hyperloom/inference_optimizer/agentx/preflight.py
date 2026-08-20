@@ -91,7 +91,14 @@ def _default_loader_probe(aiperf_bin: str) -> Optional[list[str]]:
                 text=True,
                 timeout=60,
             )
-        except OSError:
+        # SubprocessError as well as OSError: subprocess.run(timeout=...) raises
+        # TimeoutExpired, which descends from SubprocessError, not OSError. Left
+        # uncaught it escapes check_aiperf_capability entirely -- turning the
+        # documented "degrade to the flag probe with a warning" into a hard
+        # preflight failure, on the one input (a hung interpreter) the timeout
+        # exists to handle. The sibling probes in cli/preflight.py already catch
+        # both.
+        except (OSError, subprocess.SubprocessError):
             continue
         if out.returncode != 0:
             continue

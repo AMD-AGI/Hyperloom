@@ -250,7 +250,15 @@ FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
 # leaderboard measurement -- by construction rather than by promise.
 CANON_ENTRIES=393
 CANON_DURATION=3600
+# The corpus this model family canonically replays, before any operator pin.
+CANON_DS="$(_default_loader "$MODEL")"
 NONCANON=()
+# A pinned corpus is a different workload, and the scenario cannot object: its
+# allowlist admits every dated weka variant, so replaying the 061526 set (which
+# upstream's own H100/H200 recipes pin) comes back submission_valid=true against
+# a leaderboard row measured on 062126. Only the client knows which one this
+# model family was supposed to replay, so only the client can say it deviated.
+[ "$DS" != "$CANON_DS" ] && NONCANON+=("corpus=${DS}(canonical ${CANON_DS})")
 [ "$NENT" != "$CANON_ENTRIES" ] && NONCANON+=("entries=${NENT}(canonical ${CANON_ENTRIES})")
 [ "$DURATION" != "$CANON_DURATION" ] && NONCANON+=("duration=${DURATION}s(canonical ${CANON_DURATION}s)")
 [ -n "${AGENTX_MAX_CTX:-}" ] && NONCANON+=("client_context_cap=${AGENTX_MAX_CTX}")

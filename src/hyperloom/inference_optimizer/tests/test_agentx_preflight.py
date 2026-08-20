@@ -200,3 +200,41 @@ def test_unreadable_allowlist_still_rejects_a_flagless_build():
             probe=lambda _b: "nothing useful here",
             env={},
         )
+
+
+def test_loader_probe_survives_a_hung_interpreter(monkeypatch):
+    """A timeout must degrade to the flag probe, not escape the check.
+
+    ``subprocess.run(timeout=...)`` raises ``TimeoutExpired``, which descends
+    from ``SubprocessError`` rather than ``OSError`` -- so catching only the
+    latter let it propagate out of ``check_aiperf_capability`` and become a hard
+    preflight failure, on exactly the input the timeout exists to handle.
+    """
+    import subprocess
+
+    from hyperloom.inference_optimizer.agentx import preflight as pf
+
+    def _hang(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="python", timeout=60)
+
+    monkeypatch.setattr(pf.subprocess, "run", _hang)
+    assert pf._default_loader_probe("/venv/bin/aiperf") is None
+
+
+def test_hung_interpreter_reaches_the_flag_fallback(monkeypatch, capsys):
+    """End to end: a hung probe must land on the documented fallback path."""
+    import subprocess
+
+    from hyperloom.inference_optimizer.agentx import preflight as pf
+
+    monkeypatch.setattr(
+        pf.subprocess,
+        "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(subprocess.TimeoutExpired("python", 60)),
+    )
+    check_aiperf_capability(
+        "/venv/bin/aiperf",
+        probe=lambda _b: "weka-trace --scenario --benchmark-duration",
+        env={},
+    )
+    assert "could not read" in capsys.readouterr().err
