@@ -31,10 +31,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   2026-08-13. Every published best was therefore rejected and the kernel
   backend fell through to the caller checkpoint or the stdout sentinel, losing
   the one record that survives a hard kill — the case it exists for. The gate
-  now names the producer's constant, and a test pins the two together so the
-  next bump cannot drift silently. The eight tests that already covered this
-  salvage path were passing only because their fixtures carried the same wrong
-  version; they now publish what the producer publishes.
+  is gone rather than corrected: every field the evidence is read for is
+  already checked on its own — the commit against the workspace history, the
+  timings for being positive, the score for actually improving — so a version
+  number decided nothing those checks do not, and was the only part that could
+  fail closed on a bump that changed none of them. The eight tests that already
+  covered this salvage path were passing only because their fixtures carried
+  the same wrong version.
 
 ## [v1.0.0b2] - 2026-08-19
 Current packaged version (`pyproject.toml`). See
