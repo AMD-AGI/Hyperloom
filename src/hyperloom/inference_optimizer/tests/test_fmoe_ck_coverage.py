@@ -3,10 +3,10 @@
 
 """Regression tests for fmoe_ck E2E coverage and apply verification (#101821/#101810).
 
-Dense BF16 GEMM lookups must not be treated as fmoe_ck evidence. When a MoE
-model also runs dense linears, the server log carries bf16_tuned_gemm.csv misses
-alongside fused-MoE dispatch lines; mis-reading the former produced
-``artifact_table_not_consulted`` and ``not_merged`` false positives.
+Dense BF16 GEMM lookups must not be treated as fmoe_ck evidence. Runtime
+attribution requires a non-default descriptor whose kernelName1/kernelName2
+pair matches the bare ``candidate_fmoe.csv`` row for the full fourteen-column
+``get_2stage_cfgs`` lookup key.
 """
 
 from __future__ import annotations
@@ -29,25 +29,86 @@ AITER_BF16_MISS = (
     "using torch solution:0"
 )
 
-FMOE_DISPATCH = (
-    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage ck for "
-    "(256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', 'torch.bfloat16', "
-    "'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.per_1x128', True, False)"
+# MiniMax-M3-MXFP4 baseline: runtime never selected a tuned row (#101821).
+MINIMAX_DEFAULT = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+    "('gfx950', 256, 512, 6144, 512, 128, 4, 'ActivationType.Swiglu', "
+    "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
+    "'QuantType.per_1x32', True, False)"
 )
 
-FMOE_DISPATCH_UNCOVERED = (
-    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage ck for "
-    "(256, 128, 7168, 2048, 128, 8, 'ActivationType.Swiglu', 'torch.bfloat16', "
-    "'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.per_1x128', True, False)"
+# GLM-style parenthesised descriptor: parses, but keys/kernel names must match candidate.
+GLM_KERNEL_DESCRIPTOR = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+    "(kernelName1='flydsl_moe1_afp4_wfp4_bf16_t128x128x256_fp4', "
+    "kernelName2='flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_bnt2_persist_sbm128') "
+    "for ('gfx950', 256, 4096, 8192, 256, 512, 10, 'ActivationType.Silu', "
+    "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
+    "'QuantType.per_1x32', True, False)"
 )
 
-_FMOE_TUNED_HEADER = (
+SYNTHETIC_SERVED = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+    "(kernelName1='ck_moe_stage1_tuned', kernelName2='ck_moe_stage2_tuned') "
+    "for ('gfx950', 256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', "
+    "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', "
+    "'QuantType.per_1x128', True, False)"
+)
+
+SYNTHETIC_WRONG_KERNEL = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+    "(kernelName1='ck_moe_stage1_other', kernelName2='ck_moe_stage2_other') "
+    "for ('gfx950', 256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', "
+    "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', "
+    "'QuantType.per_1x128', True, False)"
+)
+
+SYNTHETIC_WRONG_TOKEN = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+    "(kernelName1='ck_moe_stage1_tuned', kernelName2='ck_moe_stage2_tuned') "
+    "for ('gfx950', 256, 128, 7168, 2048, 128, 8, 'ActivationType.Swiglu', "
+    "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', "
+    "'QuantType.per_1x128', True, False)"
+)
+
+_FMOE_HEADER = (
     "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
-    "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,kernelName\n"
+    "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+    "kernelName1,kernelName2\n"
 )
-_FMOE_TUNED_ROW = (
-    "gfx950,256,64,7168,2048,128,8,Silu,bf16,"
-    "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,tuned\n"
+_CANDIDATE_ROW = (
+    "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+    "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+    "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n"
+)
+_GLM_SHAPE_ROW = (
+    "gfx950,256,4096,8192,256,512,10,Silu,bf16,"
+    "torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,1,10.0,"
+    "bundled_kernel1,bundled_kernel2\n"
+)
+_MINIMAX_SHAPE_ROW = (
+    "gfx950,256,512,6144,512,128,4,Swiglu,bf16,"
+    "torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,1,10.0,"
+    "bundled_kernel1,bundled_kernel2\n"
+)
+
+MINIMAX_SESSION_LOG = Path(
+    "/shared_nfs/hyperloom-claw/MiniMax-M3-MXFP4/20260818T071552Z/runs/integrate/"
+    "integrate-gemm_tune_fmoe_ck/warmup_round/benchmark_sglang_20260818_181234/"
+    "server.log"
+)
+MINIMAX_CANDIDATE = Path(
+    "/shared_nfs/hyperloom-claw/MiniMax-M3-MXFP4/20260818T071552Z/runs/gemm_tuning/"
+    "kernel_entry_gemm_tuning/tuners/fmoe_ck/candidate_fmoe.csv"
+)
+GLM_SESSION_LOG = Path(
+    "/shared_nfs/hyperloom-claw/GLM-5.2-MXFP4/20260818T062821Z/runs/integrate/"
+    "integrate-gemm_tune_fmoe_ck/warmup_round/benchmark_sglang_20260818_153638/"
+    "server.log"
+)
+GLM_CANDIDATE = Path(
+    "/shared_nfs/hyperloom-claw/GLM-5.2-MXFP4/20260818T062821Z/runs/gemm_tuning/"
+    "kernel_entry_gemm_tuning/tuners/fmoe_ck/candidate_fmoe.csv"
 )
 
 
@@ -77,10 +138,17 @@ def _integrate_log(tmp_path: Path, text: str) -> Path:
     return log_path
 
 
-def _fmoe_csv(tmp_path: Path) -> Path:
+def _candidate_csv(tmp_path: Path, row: str = _CANDIDATE_ROW) -> Path:
     path = tmp_path / "candidate_fmoe.csv"
-    path.write_text(_FMOE_TUNED_HEADER + _FMOE_TUNED_ROW, encoding="utf-8")
+    path.write_text(_FMOE_HEADER + row, encoding="utf-8")
     return path
+
+
+def _merged_env(tmp_path: Path, *, candidate_row: str, merged_row: str) -> dict[str, str]:
+    candidate = _candidate_csv(tmp_path, candidate_row)
+    merged = tmp_path / "merged_candidate_fmoe.csv"
+    merged.write_text(_FMOE_HEADER + merged_row, encoding="utf-8")
+    return {"AITER_CONFIG_FMOE": str(merged), "AITER_LOG_TUNED_CONFIG": "1"}
 
 
 def _envs(csv_path: Path) -> dict[str, str]:
@@ -119,11 +187,9 @@ def stub_forge_parser(monkeypatch):
 
 
 class TestFmoeCoverageGate:
-    def test_dense_bf16_miss_plus_matching_fmoe_dispatch_is_not_table_not_consulted(
-        self, tmp_path
-    ):
-        _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, FMOE_DISPATCH]))
-        csv_path = _fmoe_csv(tmp_path)
+    def test_dense_bf16_miss_does_not_trigger_table_not_consulted(self, tmp_path):
+        _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, SYNTHETIC_SERVED]))
+        csv_path = _candidate_csv(tmp_path)
         phase = _phase(tmp_path)
 
         report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
@@ -132,9 +198,59 @@ class TestFmoeCoverageGate:
         assert report["artifact_applied"] is True
         assert report.get("not_applied_reason") != "artifact_table_not_consulted"
 
+    def test_minimax_default_blocks_even_when_merged_csv_has_shape(self, tmp_path):
+        _integrate_log(tmp_path, MINIMAX_DEFAULT)
+        env = _merged_env(tmp_path, candidate_row=_CANDIDATE_ROW, merged_row=_MINIMAX_SHAPE_ROW)
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage("fmoe_ck", env)
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["not_applied_reason"] == "runtime_default_config"
+
+    def test_glm_descriptor_parses_but_bare_candidate_mismatch_blocks(self, tmp_path):
+        _integrate_log(tmp_path, GLM_KERNEL_DESCRIPTOR)
+        env = _merged_env(tmp_path, candidate_row=_CANDIDATE_ROW, merged_row=_GLM_SHAPE_ROW)
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage("fmoe_ck", env)
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["not_applied_reason"] in {
+            "no_shape_key_matched",
+            "kernel_name_mismatch",
+        }
+
+    def test_exact_candidate_kernel_hit_is_served(self, tmp_path):
+        _integrate_log(tmp_path, SYNTHETIC_SERVED)
+        csv_path = _candidate_csv(tmp_path)
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
+
+        assert report is not None
+        assert report["artifact_applied"] is True
+        assert report["covered"] == 1
+
+    def test_fourteen_col_key_or_kernel_mismatch_blocks(self, tmp_path):
+        _integrate_log(
+            tmp_path,
+            "\n".join([SYNTHETIC_WRONG_KERNEL, SYNTHETIC_WRONG_TOKEN]),
+        )
+        csv_path = _candidate_csv(tmp_path)
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["covered"] == 0
+
     def test_log_without_fused_moe_dispatch_blocks(self, tmp_path):
         _integrate_log(tmp_path, AITER_BF16_MISS)
-        csv_path = _fmoe_csv(tmp_path)
+        csv_path = _candidate_csv(tmp_path)
         phase = _phase(tmp_path)
 
         report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
@@ -143,41 +259,57 @@ class TestFmoeCoverageGate:
         assert report["artifact_applied"] is False
         assert report.get("not_applied_reason") == "no_fused_moe_dispatch"
 
-    def test_uncovered_fmoe_dispatch_blocks(self, tmp_path):
-        _integrate_log(tmp_path, FMOE_DISPATCH_UNCOVERED)
-        csv_path = _fmoe_csv(tmp_path)
-        phase = _phase(tmp_path)
-
-        report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
-
-        assert report is not None
-        assert report["artifact_applied"] is False
-        assert report.get("not_applied_reason") == "no_shape_key_matched"
-
     def test_missing_server_log_stays_inconclusive(self, tmp_path):
-        csv_path = _fmoe_csv(tmp_path)
+        csv_path = _candidate_csv(tmp_path)
         phase = _phase(tmp_path)
 
         report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
 
         assert report is None
 
+    def test_merged_env_without_bare_candidate_is_inconclusive(self, tmp_path):
+        _integrate_log(tmp_path, SYNTHETIC_SERVED)
+        merged = tmp_path / "merged_candidate_fmoe.csv"
+        merged.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage(
+            "fmoe_ck",
+            {"AITER_CONFIG_FMOE": str(merged), "AITER_LOG_TUNED_CONFIG": "1"},
+        )
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["not_applied_reason"] == "candidate_csv_missing"
+        assert report.get("conclusive") is False
+
 
 class TestFmoeApplyVerdict:
     def test_dense_consulted_tables_do_not_block_fmoe(self, tmp_path, stub_forge_parser):
-        _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, FMOE_DISPATCH]))
-        csv_path = _fmoe_csv(tmp_path)
+        _integrate_log(tmp_path, "\n".join([AITER_BF16_MISS, SYNTHETIC_SERVED]))
+        csv_path = _candidate_csv(tmp_path)
         phase = _phase(tmp_path)
 
         verdict = phase._gemm_apply_verdict("fmoe_ck", _envs(csv_path))
 
         assert verdict is not None
         assert verdict.get("blocks_keep") is False
-        assert verdict.get("verdict") != "not_merged"
+        assert verdict.get("verdict") == "served"
+
+    def test_minimax_default_blocks_keep(self, tmp_path, stub_forge_parser):
+        _integrate_log(tmp_path, MINIMAX_DEFAULT)
+        env = _merged_env(tmp_path, candidate_row=_CANDIDATE_ROW, merged_row=_MINIMAX_SHAPE_ROW)
+        phase = _phase(tmp_path)
+
+        verdict = phase._gemm_apply_verdict("fmoe_ck", env)
+
+        assert verdict is not None
+        assert verdict.get("blocks_keep") is True
+        assert verdict.get("verdict") == "runtime_default_config"
 
     def test_no_fused_moe_dispatch_blocks_apply(self, tmp_path, stub_forge_parser):
         _integrate_log(tmp_path, AITER_BF16_MISS)
-        csv_path = _fmoe_csv(tmp_path)
+        csv_path = _candidate_csv(tmp_path)
         phase = _phase(tmp_path)
 
         verdict = phase._gemm_apply_verdict("fmoe_ck", _envs(csv_path))
@@ -185,3 +317,62 @@ class TestFmoeApplyVerdict:
         assert verdict is not None
         assert verdict.get("blocks_keep") is True
         assert verdict.get("verdict") == "no_fused_moe_dispatch"
+
+    def test_merged_without_bare_candidate_blocks_inconclusively(self, tmp_path):
+        _integrate_log(tmp_path, SYNTHETIC_SERVED)
+        merged = tmp_path / "merged_candidate_fmoe.csv"
+        merged.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
+        phase = _phase(tmp_path)
+
+        verdict = phase._gemm_apply_verdict(
+            "fmoe_ck",
+            {"AITER_CONFIG_FMOE": str(merged), "AITER_LOG_TUNED_CONFIG": "1"},
+        )
+
+        assert verdict is not None
+        assert verdict.get("blocks_keep") is True
+        assert verdict.get("conclusive") is False
+        assert verdict.get("verdict") == "candidate_csv_missing"
+
+
+class TestSessionLogReplay:
+    def test_minimax_session_log_replay_blocks_on_default(self):
+        if not MINIMAX_SESSION_LOG.is_file() or not MINIMAX_CANDIDATE.is_file():
+            pytest.skip("MiniMax session artifacts not mounted")
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
+            fmoe_tuned_config_coverage,
+            parse_aiter_fused_moe_dispatches,
+            tuned_fmoe_csv_rows,
+        )
+
+        text = MINIMAX_SESSION_LOG.read_text(encoding="utf-8", errors="replace")
+        dispatches = parse_aiter_fused_moe_dispatches(text)
+        assert dispatches, "expected fused-MoE dispatch lines in session log"
+        assert all(d["descriptor"] == "default" for d in dispatches)
+        assert all(d["gfx"] == "gfx950" for d in dispatches)
+
+        report = fmoe_tuned_config_coverage(
+            tuned_fmoe_csv_rows(MINIMAX_CANDIDATE), dispatches
+        )
+        assert report["covered"] == 0
+        assert report["runtime_default"] >= 1
+
+    def test_glm_session_log_replay_does_not_attribute_bundled_hit_to_candidate(self):
+        if not GLM_SESSION_LOG.is_file() or not GLM_CANDIDATE.is_file():
+            pytest.skip("GLM session artifacts not mounted")
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
+            fmoe_tuned_config_coverage,
+            parse_aiter_fused_moe_dispatches,
+            tuned_fmoe_csv_rows,
+        )
+
+        text = GLM_SESSION_LOG.read_text(encoding="utf-8", errors="replace")
+        dispatches = parse_aiter_fused_moe_dispatches(text)
+        assert dispatches, "expected parenthesised fused-MoE descriptors"
+        assert all(d["descriptor"] != "default" for d in dispatches)
+        assert all(d["gfx"] == "gfx950" for d in dispatches)
+
+        report = fmoe_tuned_config_coverage(
+            tuned_fmoe_csv_rows(GLM_CANDIDATE), dispatches
+        )
+        assert report["covered"] == 0

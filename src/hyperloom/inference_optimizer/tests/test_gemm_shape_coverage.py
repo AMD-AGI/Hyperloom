@@ -21,6 +21,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     tuned_config_coverage,
     tuned_csv_shapes,
     tuned_fmoe_csv_keys,
+    tuned_fmoe_csv_rows,
     write_shapes_json,
 )
 
@@ -156,45 +157,79 @@ class TestServerLogParsing:
 
 class TestFmoeDispatchParsing:
     _DISPATCH = (
-        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage ck for "
-        "(256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', 'torch.bfloat16', "
-        "'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.per_1x128', True, False)"
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+        "(kernelName1='ck_moe_stage1_tuned', kernelName2='ck_moe_stage2_tuned') "
+        "for ('gfx950', 256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', "
+        "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', "
+        "'QuantType.per_1x128', True, False)"
+    )
+    _DEFAULT = (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+        "('gfx950', 256, 512, 6144, 512, 128, 4, 'ActivationType.Swiglu', "
+        "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
+        "'QuantType.per_1x32', True, False)"
     )
 
-    def test_parses_dispatch_tuple(self):
+    def test_parses_fourteen_column_tuple_with_gfx_first(self):
         (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        assert record["gfx"] == "gfx950"
+        assert record["cu_num"] == "256"
         assert record["token"] == "64"
-        assert record["model_dim"] == "7168"
-        assert record["inter_dim"] == "2048"
-        assert record["expert"] == "128"
-        assert record["topk"] == "8"
-        assert record["q_type"] == "QuantType.per_1x128"
+        assert record["kernelName1"] == "ck_moe_stage1_tuned"
+        assert record["kernelName2"] == "ck_moe_stage2_tuned"
+        assert record["descriptor"] != "default"
 
-    def test_csv_key_matches_dispatch(self, tmp_path):
-        path = tmp_path / "tuned_fmoe.csv"
+    def test_parses_default_descriptor(self):
+        (record,) = parse_aiter_fused_moe_dispatches(self._DEFAULT)
+        assert record["descriptor"] == "default"
+        assert record["kernelName1"] == ""
+        assert record["gfx"] == "gfx950"
+
+    def test_exact_candidate_kernel_hit(self, tmp_path):
+        path = tmp_path / "candidate_fmoe.csv"
         path.write_text(
             "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
-            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,kernelName\n"
-            "gfx950,256,64,7168,2048,128,8,Silu,bf16,"
-            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,tuned\n",
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+            "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n",
             encoding="utf-8",
         )
         (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
-        assert fmoe_dispatch_lookup_key(record) in tuned_fmoe_csv_keys(path)
-        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [record])
+        rows = tuned_fmoe_csv_rows(path)
+        report = fmoe_tuned_config_coverage(rows, [record])
         assert report["coverage_pct"] == 100.0
 
-    def test_csv_key_rejects_different_cu_count(self, tmp_path):
-        path = tmp_path / "tuned_fmoe.csv"
+    def test_shape_overlap_without_kernel_match_is_not_served(self, tmp_path):
+        path = tmp_path / "candidate_fmoe.csv"
         path.write_text(
             "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
-            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,kernelName\n"
-            "gfx950,304,64,7168,2048,128,8,Silu,bf16,"
-            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,tuned\n",
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+            "other_stage1,other_stage2\n",
             encoding="utf-8",
         )
         (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
-        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [record])
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), [record])
+        assert report["covered"] == 0
+        assert report["kernel_name_mismatch"] == 1
+
+    def test_csv_key_rejects_different_gfx(self, tmp_path):
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx942,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+            "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n",
+            encoding="utf-8",
+        )
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), [record])
         assert report["covered"] == 0
 
 

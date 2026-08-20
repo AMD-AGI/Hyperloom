@@ -1892,12 +1892,14 @@ class KernelPhase(PhaseHandler):
         from ..kernel.gemm_shape_coverage import (
             fmoe_tuned_config_coverage,
             parse_aiter_fused_moe_dispatches,
-            tuned_fmoe_csv_keys,
+            resolve_fmoe_candidate_csv,
+            tuned_fmoe_csv_rows,
         )
 
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
         run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
         logs = sorted(run_dir.rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
         if not logs:
@@ -1917,15 +1919,26 @@ class KernelPhase(PhaseHandler):
             report["runtime_lookup_miss"] = 0
             report["runtime_lookup_hit"] = 0
             return report
-        tuned: set[tuple[str, ...]] = set()
-        for path in csv_paths:
-            tuned |= tuned_fmoe_csv_keys(path)
-        report.update(fmoe_tuned_config_coverage(tuned, dispatches))
+        if candidate_path is None:
+            report["artifact_applied"] = False
+            report["not_applied_reason"] = "candidate_csv_missing"
+            report["runtime_lookup_miss"] = len(dispatches)
+            report["runtime_lookup_hit"] = 0
+            report["conclusive"] = False
+            return report
+        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
+        report["candidate_csv"] = str(candidate_path)
+        report.update(fmoe_tuned_config_coverage(candidate_rows, dispatches))
         report["artifact_applied"] = bool(report.get("covered"))
         report["runtime_lookup_miss"] = report.get("requested", 0) - report.get("covered", 0)
         report["runtime_lookup_hit"] = report.get("covered", 0)
         if not report["artifact_applied"]:
-            report["not_applied_reason"] = "no_shape_key_matched"
+            if report.get("runtime_default"):
+                report["not_applied_reason"] = "runtime_default_config"
+            elif report.get("kernel_name_mismatch"):
+                report["not_applied_reason"] = "kernel_name_mismatch"
+            else:
+                report["not_applied_reason"] = "no_shape_key_matched"
         return report
 
     async def _confirm_gemm_gain_paired(
@@ -2076,12 +2089,14 @@ class KernelPhase(PhaseHandler):
         from ..kernel.gemm_shape_coverage import (
             fmoe_tuned_config_coverage,
             parse_aiter_fused_moe_dispatches,
-            tuned_fmoe_csv_keys,
+            resolve_fmoe_candidate_csv,
+            tuned_fmoe_csv_rows,
         )
 
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
         run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
         logs = sorted(
             run_dir.rglob("server.log"),
@@ -2114,10 +2129,24 @@ class KernelPhase(PhaseHandler):
                 ),
             }
 
-        tuned: set[tuple[str, ...]] = set()
-        for path in csv_paths:
-            tuned |= tuned_fmoe_csv_keys(path)
-        coverage = fmoe_tuned_config_coverage(tuned, dispatches)
+        if candidate_path is None:
+            return {
+                "verdict": "candidate_csv_missing",
+                "hits": 0,
+                "misses": len(dispatches),
+                "blocks_keep": True,
+                "conclusive": False,
+                "merged_tables": [],
+                "unmerged_artifacts": list(csv_paths),
+                "detail": (
+                    "env points at merged_candidate_fmoe.csv but sibling "
+                    "candidate_fmoe.csv is absent; cannot attribute runtime "
+                    "kernel names to the tuner candidate"
+                ),
+            }
+
+        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
+        coverage = fmoe_tuned_config_coverage(candidate_rows, dispatches)
         covered = int(coverage.get("covered") or 0)
         requested = int(coverage.get("requested") or 0)
         if covered > 0:
@@ -2130,7 +2159,36 @@ class KernelPhase(PhaseHandler):
                 "merged_tables": [],
                 "unmerged_artifacts": [],
                 "detail": (
-                    f"{covered} fused-MoE dispatch(es) match tuned_fmoe.csv keys"
+                    f"{covered} fused-MoE dispatch(es) match candidate "
+                    f"kernelName1/kernelName2 in {candidate_path.name}"
+                ),
+            }
+        if coverage.get("runtime_default"):
+            return {
+                "verdict": "runtime_default_config",
+                "hits": 0,
+                "misses": requested,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    "runtime served default heuristics; tuned candidate "
+                    "kernels were not selected"
+                ),
+            }
+        if coverage.get("kernel_name_mismatch"):
+            return {
+                "verdict": "kernel_name_mismatch",
+                "hits": 0,
+                "misses": requested,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    "lookup key matched bundled rows but runtime kernelName1/"
+                    "kernelName2 differ from candidate_fmoe.csv"
                 ),
             }
         return {
@@ -2142,7 +2200,7 @@ class KernelPhase(PhaseHandler):
             "merged_tables": [],
             "unmerged_artifacts": [],
             "detail": (
-                f"0 of {requested} fused-MoE dispatch(es) resolve to a tuned row"
+                f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row"
             ),
         }
 
