@@ -93,6 +93,13 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
 
 def _run(bench, bind, res, tmp_path, **extra_env):
     env = dict(os.environ)
+    # Drop the knobs under test before overlaying: a developer or CI box with
+    # WEKA_LOADER_OVERRIDE / AGENTX_DATASET exported (both documented operator
+    # knobs) would otherwise fail the canonical-run assertions, and an inherited
+    # AGENTX_NONCANONICAL_REASONS would make the deviation tests pass vacuously.
+    for _k in [k for k in env if k.startswith("AGENTX_")]:
+        env.pop(_k, None)
+    env.pop("WEKA_LOADER_OVERRIDE", None)
     env["PATH"] = f"{bind}:{env.get('PATH', '')}"
     env.update(
         MODEL="/m",
@@ -518,3 +525,54 @@ def test_default_corpus_is_canonical_and_submittable(tmp_path):
     out = _result(res)
     assert not out["submission_invalid_reasons"]
     assert "semianalysis_cc_traces_weka_062126_256k" in _aiperf_args(res)
+
+
+def test_canonical_pin_can_be_declared(tmp_path):
+    """The family whitelist is a derivation, not a registry.
+
+    A model upstream runs on the full corpus but whose slug does not match the
+    whitelist falls back to the 256k set, and the corpus log line tells the
+    operator to pin the right one. Treating that pin as a deviation would make
+    the *correct* run permanently non-submittable, so the operator can declare
+    which corpus is canonical here.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    full = "semianalysis_cc_traces_weka_062126"
+    r = _run(
+        bench, bind, res, tmp_path,
+        WEKA_LOADER_OVERRIDE=full,
+        AGENTX_CANONICAL_DATASET=full,
+    )
+    assert r.returncode == 0, r.stderr
+    assert full in _aiperf_args(res)
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_declaring_canonical_does_not_excuse_a_different_pin(tmp_path):
+    """Declaring one corpus canonical must not bless replaying another."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench, bind, res, tmp_path,
+        AGENTX_CANONICAL_DATASET="semianalysis_cc_traces_weka_062126",
+        WEKA_LOADER_OVERRIDE="semianalysis_cc_traces_weka_with_subagents_256k",
+    )
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("corpus=" in x for x in out["submission_invalid_reasons"])
+
+
+def test_inherited_noncanonical_marker_does_not_leak_in(tmp_path):
+    """The switch forwards every AGENTX_* key, so a stale marker must be cleared.
+
+    Left alone it would stamp submission_valid=false, with reasons from a
+    previous run, onto a round that deviated in nothing.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_NONCANONICAL_REASONS="entries=7(stale)")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False

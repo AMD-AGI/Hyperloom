@@ -2014,31 +2014,6 @@ class WritebackCollaborator:
                 "backend": "disabled",
             }
 
-        # Same reasoning as the gate in _kb_amend_recipe, but this is the sink
-        # that gate cannot reach: in REMOTE mode _kb_amend_recipe returns early,
-        # so the write below is the *only* Recipe writer, and it would carry an
-        # agentic-replay throughput into a cross-session store whose canonical id
-        # has no workload or mode segment -- tagged with the inert 1024/1024
-        # ISL/OSL placeholders, which a later synthetic session's shape filter
-        # then matches positively. Placed ahead of the mode branch so every sink
-        # is covered, present and future, rather than one gate per backend.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_enabled,
-        )
-
-        if agentx_enabled():
-            log.info(
-                "Recipe KB finalize skipped (AgentX): the recipe identity has no mode "
-                "or workload dimension, so an agentic-replay result would overwrite a "
-                "synthetic best_throughput and be tagged isl/osl=%s/%s.",
-                getattr(self.shared_state, "isl", "?"),
-                getattr(self.shared_state, "osl", "?"),
-            )
-            return {
-                "status": "skipped",
-                "reason": "agentx",
-                "backend": "disabled",
-            }
 
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
@@ -2053,6 +2028,31 @@ class WritebackCollaborator:
                 "status": "error",
                 "reason": f"configuration:{type(exc).__name__}",
                 "backend": "unknown",
+            }
+        # Every Recipe sink funnels through agentx_kb_write_blocked; see it for
+        # why an agentic measurement must not enter a cross-session store. Placed
+        # ahead of the mode branch because in REMOTE mode _kb_amend_recipe returns
+        # early, which made the write below the only Recipe writer and the one
+        # door that gate could not see.
+        from hyperloom.orchestrator.actions.executors._workload_envs import (
+            agentx_kb_write_blocked,
+        )
+
+        if agentx_kb_write_blocked(self.shared_state):
+            log.info(
+                "Recipe KB finalize skipped (AgentX): the recipe identity has no mode "
+                "or workload dimension, so an agentic-replay result would overwrite a "
+                "synthetic best_throughput and be tagged isl/osl=%s/%s.",
+                getattr(self.shared_state, "isl", "?"),
+                getattr(self.shared_state, "osl", "?"),
+            )
+            # Backend stays as configured: "disabled" here would be
+            # indistinguishable in telemetry from a KB that was actually down,
+            # and reason= already carries why nothing was written.
+            return {
+                "status": "skipped",
+                "reason": "agentx",
+                "backend": str(getattr(config, "mode", "") or "unknown"),
             }
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session

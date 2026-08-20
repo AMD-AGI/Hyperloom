@@ -667,9 +667,84 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
     assert out["reason"] == "agentx"
 
 
+def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkeypatch) -> None:
+    """The REMOTE sink specifically -- the one _kb_amend_recipe cannot reach.
+
+    _make_coordinator leaves knowledge_plane unset, which resolves to LOCAL, so a
+    test that only asserts the gate fires there proves nothing about the remote
+    writer. This one puts the coordinator in REMOTE mode and fails if the write
+    is attempted.
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("AgentX finalize reached the REMOTE Recipe sink")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        _must_not_run,
+    )
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out["status"] == "skipped"
+    assert out["reason"] == "agentx"
+    # Not "disabled": telemetry must stay able to tell an AgentX skip from a KB
+    # that was actually down.
+    assert out["backend"] != "disabled"
+
+
+def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
+    """benchmark_mode is stamped so the mode survives a restart; the gate should
+    trust it rather than the shell that happens to be running."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    coord = _make_coordinator(tmp_path)
+    coord.shared_state.benchmark_mode = "agentx"
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out["reason"] == "agentx"
+
+
 def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its finalize."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
     out = coord.finalize_recipe_and_journal(source="close")
     assert out.get("reason") != "agentx"
+
+
+def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
+    """The third Recipe sink, and the one the first two gates never saw.
+
+    ``run_t0_anchor`` calls ``kb.put_recipe`` directly at session start, and
+    ``_build_t0_trace_extras`` copies SharedState.isl/osl into the row -- the
+    inert 1024/1024 placeholders under AgentX. So anchoring mis-tags the
+    cross-session row exactly as the CLOSE-time write would.
+    """
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+
+    class _ForbiddenKB:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"AgentX T0 anchor reached the recipe KB: {name}")
+
+    run_t0_anchor(
+        _ForbiddenKB(),
+        coord.shared_state,
+        workload=_MODEL,
+        hw=_HW,
+        session_dir=tmp_path,
+        save_state=False,
+    )
