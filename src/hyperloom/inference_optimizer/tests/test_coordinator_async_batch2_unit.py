@@ -2137,6 +2137,56 @@ async def test_advance_phase_hint_survives_transition_toward_explore(coord: Coor
 
 
 @pytest.mark.asyncio
+async def test_advance_phase_hint_survives_transition_toward_framework_agent(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """The same survival requirement, one hop earlier: a hint set during
+    PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT, since EXPLORE (the hint's
+    only consumer) is still ahead whenever explore is enabled. Discarding here
+    is the FRAMEWORK_AGENT -> EXPLORE bug moved one phase upstream.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    coord.shared_state.explore_enabled = True
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
+    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_discarded_toward_framework_agent_when_explore_disabled(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """When explore is disabled for the session, FRAMEWORK_AGENT is not a step
+    on the way to EXPLORE -- it never runs -- so a hint riding there is
+    genuinely stale and must still be discarded, not preserved forever.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    coord.shared_state.explore_enabled = False
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
 async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Coordinator, monkeypatch) -> None:
     """A pending hint is genuinely stale once the transition target isn't
     EXPLORE -- it can never reach exit_normal_explore's check again -- so this
