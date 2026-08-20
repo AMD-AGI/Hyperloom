@@ -1,6 +1,6 @@
 ---
 name: robustness-agent
-description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / prune_branch / delegate).
+description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (prune_branch / delegate).
 ---
 
 # Robustness Agent
@@ -10,8 +10,7 @@ A Python package that ships the `robustness` agent for the
 
 The agent observes shared state, the orchestration agent's inbox, and
 cluster telemetry; classifies symptoms; and emits Coordinator-validated
-intents (alert / prune_branch / kill_task / delegate / etc.) plus
-on-disk findings.
+intents (alert / prune_branch / delegate / etc.) plus on-disk findings.
 
 ## Quick start
 
@@ -190,7 +189,7 @@ listed below.
 | `kernel_opt_no_progress` | high | `alert(high)` + `prune_branch(kernel_opt)` | `kernel_pipeline` |
 | `state_json_corrupt` | high | `alert(high)` | `state_integrity` |
 | `coordinator_wal_bloat` (≥ warn / ≥ critical bytes) | medium / high | `alert(medium)` / `alert(high)` | `state_integrity` |
-| `stale_lease` | high | `alert(high)` + `kill_task(task_id)` | `state_integrity` |
+| `stale_lease` | high | `alert(high)` | `state_integrity` |
 | `inbox_bloat` (≥ warn / ≥ critical bytes) | low / medium | `send_message(observation)` / `alert(medium)` | `state_integrity` |
 | `coordinator_zombie` | high | `alert(high)` | `state_integrity` |
 | `gateway_auth_outage` | high | `alert(high)` | `external_deps` |

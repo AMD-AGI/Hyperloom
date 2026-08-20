@@ -777,42 +777,6 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_kill_task_by_robustness(session_dir):
-    delegate = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "long_running",
-            "params": {},
-            "idempotency_key": "k-long-1",
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
-
-    c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        await c.tick(1)  # delegate enqueued; dispatcher fails (no runner)
-        all_tasks = await c.tasks.by_state("failed")
-        assert all_tasks
-
-        new_task = await c.tasks.create(
-            kind="long_running",
-            params={},
-            idempotency_key="k-long-2",
-        )
-        await c._handle_intent(
-            "robustness",
-            Intent(
-                type=IntentType.KILL_TASK,
-                payload={"task_id": new_task.task_id, "reason": "stalled", "scope": "task"},
-            ),
-        )
-        after = await c.tasks.get(new_task.task_id)
-        assert after.state == "cancelled"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
@@ -2399,34 +2363,6 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "target_reached"
         assert persisted.last_tick_exception["stage"] == "advance_phase"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
-    # Defensive audit (log-only): killing a queued/running task must still
-    # cancel it (behaviour unchanged) AND emit a log-only audit record.
-    import logging
-
-    c = Coordinator(session_dir, backends=_build_backends({}))
-    try:
-        task = await c.tasks.create(
-            kind="long_running",
-            params={},
-            idempotency_key="k-audit-kill-1",
-        )
-        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
-            await c._handle_intent(
-                "robustness",
-                Intent(
-                    type=IntentType.KILL_TASK,
-                    payload={"task_id": task.task_id, "reason": "stalled", "scope": "task"},
-                ),
-            )
-        after = await c.tasks.get(task.task_id)
-        assert after.state == "cancelled"
-        assert any("kill_task audit" in r.getMessage() and task.task_id in r.getMessage() for r in caplog.records)
     finally:
         await c.stop()
 

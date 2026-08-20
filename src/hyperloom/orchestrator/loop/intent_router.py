@@ -63,7 +63,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.DELEGATE: "_handle_delegate",
     IntentType.REQUEST: "_handle_request",
     IntentType.RESPONSE: "_handle_response",
-    IntentType.KILL_TASK: "_handle_kill_task",
     IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
@@ -975,54 +974,6 @@ class IntentRouter:
                 dict(intent.payload),
                 in_reply_to=in_reply_to,
                 priority=1,
-            )
-        )
-
-    async def _handle_kill_task(self, source: str, intent: Intent) -> None:
-        """Cancel a queued/running task in response to a kill_task intent.
-
-        Records an observation for unknown task ids, transitions a
-        queued/running task to ``cancelled``, and broadcasts a ``kill`` event.
-
-        Args:
-            source (str): The agent (typically robustness) issuing the kill.
-            intent (Intent): The KILL_TASK intent; ``payload`` carries
-                ``task_id`` and optional ``reason``.
-        """
-        task_id = intent.payload["task_id"]
-        try:
-            task = await self.tasks.get(task_id)
-        except Exception:  # noqa: BLE001 — TaskNotFound
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "kill_task_unknown", "task_id": task_id, "source": source},
-            )
-            return
-        if task.state in ("queued", "running"):
-            await self.tasks.transition(
-                task_id,
-                "cancelled",
-                evidence={"reason": intent.payload.get("reason"), "by": source},
-            )
-            # Defensive audit (log-only): emit an audit trail for KILL_TASK
-            # so kills are traceable. Behaviour is unchanged.
-            try:
-                log.warning(
-                    "kill_task audit: source=%s task_id=%s prior_state=%s reason=%r",
-                    source,
-                    task_id,
-                    task.state,
-                    intent.payload.get("reason"),
-                )
-            except Exception:  # noqa: BLE001 - audit log must never affect flow
-                pass
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "kill",
-                {"task_id": task_id, "reason": intent.payload.get("reason")},
             )
         )
 

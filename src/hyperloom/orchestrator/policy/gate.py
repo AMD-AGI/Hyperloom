@@ -368,10 +368,6 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# kill_task sources; the other scheduling-police intents stay robustness-only.
-KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
-KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
-
 # prune_branch scopes. ``family`` retires the action for the rest of the run;
 # ``queued`` only drains the backlog and leaves the family usable.
 PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
@@ -754,8 +750,6 @@ class PolicyGate:
             self._validate_response(payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
             self._validate_review_verdict(role, payload)
-        elif intent.type == IntentType.KILL_TASK:
-            self._validate_kill_task(role, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
             self._validate_extend_lease(payload)
         elif intent.type in ROBUSTNESS_ONLY_INTENTS:
@@ -2050,47 +2044,6 @@ class PolicyGate:
                 ),
             )
 
-    def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate a ``KILL_TASK`` intent.
-
-        Requires the source role to be on
-        :data:`KILL_TASK_SOURCE_ALLOWLIST`, a non-empty ``task_id`` and
-        ``reason``, and a ``scope`` within :data:`KILL_TASK_ALLOWED_SCOPES`
-        (``task`` only — server/process kills stay out).
-
-        Args:
-            role (AgentRole): the resolved role of the emitting agent.
-            payload (dict[str, Any]): the kill_task payload carrying
-                ``task_id``, ``reason`` and optional ``scope``.
-
-        Returns:
-            None: returns silently when the kill request is permitted.
-
-        Raises:
-            PolicyDenied: when the role is not allowed
-                (``kill_task_source``), ``task_id`` / ``reason`` is missing
-                (``payload``), or the scope is disallowed (``kill_scope``).
-        """
-        if role.name not in KILL_TASK_SOURCE_ALLOWLIST:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot emit kill_task (allowed: {sorted(KILL_TASK_SOURCE_ALLOWLIST)!r})",
-                rule="kill_task_source",
-            )
-        task_id = str(payload.get("task_id", "")).strip()
-        if not task_id:
-            raise PolicyDenied("kill_task missing task_id", rule="payload")
-        reason = str(payload.get("reason", "")).strip()
-        if not reason:
-            raise PolicyDenied("kill_task missing reason", rule="payload")
-        scope = str(payload.get("scope") or "task").strip()
-        if scope not in KILL_TASK_ALLOWED_SCOPES:
-            raise PolicyDenied(
-                f"kill_task scope={scope!r} not allowed "
-                f"(allowed: {sorted(KILL_TASK_ALLOWED_SCOPES)!r}; "
-                f"v0.6 keeps server/process kills out per IR-5)",
-                rule="kill_scope",
-            )
-
     def _path_under_session(self, value: str) -> bool:
         """Return whether a path resolves inside the active session_dir.
 
@@ -2539,8 +2492,6 @@ __all__ = [
     "BASELINE_ACTION_NAME",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
-    "KILL_TASK_ALLOWED_SCOPES",
-    "KILL_TASK_SOURCE_ALLOWLIST",
     "PATH_LIKE_FIELDS",
     "PRUNE_BRANCH_ALLOWED_SCOPES",
     "PRUNE_BRANCH_SCOPE_FAMILY",

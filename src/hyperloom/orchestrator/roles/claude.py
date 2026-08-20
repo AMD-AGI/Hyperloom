@@ -100,7 +100,7 @@ Tool input shape:
   {{
     "intent_type": "<one of send_message|delegate|propose_action|request|"
                    "response|review_verdict|update_state|"
-                   "alert|kill_task|extend_lease|"
+                   "alert|extend_lease|"
                    "prune_branch|escalate_strategy_change>",
     "payload": {{ /* per-intent fields — see tool description */ }}
   }}

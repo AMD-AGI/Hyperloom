@@ -15,7 +15,6 @@ from hyperloom.agents.robustness.role.envelope import (
     build_delegate,
     build_escalate,
     build_heartbeat,
-    build_kill_task,
     build_prune_branch,
     build_send_message,
     build_update_state,
@@ -45,10 +44,6 @@ def test_alert_each_severity_passes(severity, policy: PolicyAware):
 
 def test_escalate_passes(policy: PolicyAware):
     policy.assert_payload_complete(build_escalate("r", "next"))
-
-
-def test_kill_task_passes(policy: PolicyAware):
-    policy.assert_payload_complete(build_kill_task("t1", "stuck"))
 
 
 def test_prune_branch_passes(policy: PolicyAware):
@@ -127,23 +122,6 @@ def test_alert_unknown_severity_is_payload_error(policy: PolicyAware):
     with pytest.raises(PolicyViolation) as excinfo:
         policy.assert_payload_complete(intent)
     assert excinfo.value.rule == "payload"
-
-
-def test_kill_task_missing_task_id(policy: PolicyAware):
-    intent = Intent(type=IntentType.KILL_TASK, payload={"reason": "x"})
-    with pytest.raises(PolicyViolation) as excinfo:
-        policy.assert_payload_complete(intent)
-    assert excinfo.value.rule == "payload"
-
-
-def test_kill_task_bad_scope_uses_kill_scope_rule(policy: PolicyAware):
-    intent = Intent(
-        type=IntentType.KILL_TASK,
-        payload={"task_id": "t", "reason": "r", "scope": "process"},
-    )
-    with pytest.raises(PolicyViolation) as excinfo:
-        policy.assert_payload_complete(intent)
-    assert excinfo.value.rule == "kill_scope"
 
 
 def test_prune_branch_required_fields(policy: PolicyAware):

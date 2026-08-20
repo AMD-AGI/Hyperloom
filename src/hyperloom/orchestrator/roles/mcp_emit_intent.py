@@ -48,7 +48,6 @@ EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 # already required printed it twice.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
-    IntentType.KILL_TASK: ("scope must be 'task'",),
     IntentType.EXTEND_LEASE: ("reason is optional",),
     IntentType.PRUNE_BRANCH: ("scope ∈ family|queued",),
     IntentType.ALERT: ("severity ∈ low|medium|high",),
