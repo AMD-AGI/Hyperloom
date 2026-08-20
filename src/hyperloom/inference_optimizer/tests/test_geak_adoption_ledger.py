@@ -222,7 +222,7 @@ def test_an_unproven_overlay_records_the_row_without_a_gain() -> None:
     assert entry["attempts"][0]["decision"] == "UNATTRIBUTED"
 
 
-def test_unvalidated_geak_ledger_row_is_not_adopted() -> None:
+def test_unproven_overlay_geak_row_is_not_adopted() -> None:
     phase = _phase()
     _record(
         phase,
@@ -233,6 +233,31 @@ def test_unvalidated_geak_ledger_row_is_not_adopted() -> None:
         {"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts}
     )
     assert adopted == []
+
+
+def test_joint_rebench_with_proven_overlay_is_still_adopted() -> None:
+    phase = _phase()
+    result = {"accepted_kernels": [_spec("k_one", 5.0), _spec("k_two", 7.0)]}
+    _record(phase, result)
+    adopted = _collect_adopted_kernels(
+        {"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts}
+    )
+    assert {r["kernel_id"] for r in adopted} == {"k_one", "k_two"}
+    assert all(r["validated"] is False for r in adopted)
+
+
+def test_historical_keep_survives_a_later_unproven_rebench() -> None:
+    phase = _phase()
+    result = {"accepted_kernels": [_spec("k", 5.0)]}
+    _record(phase, result, measured_tput=150.0)
+    _record(phase, result, measured_tput=150.0, overlay_loaded=False)
+    adopted = _collect_adopted_kernels(
+        {"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts}
+    )
+    assert len(adopted) == 1
+    assert adopted[0]["kernel_id"] == "k"
+    assert adopted[0]["e2e_gain_pct"] == 50.0
+    assert adopted[0]["validated"] is False
 
 
 def test_two_kernels_on_one_rebench_share_no_invented_split() -> None:
