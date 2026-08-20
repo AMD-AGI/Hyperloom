@@ -28,6 +28,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
@@ -2378,5 +2379,30 @@ async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_di
         assert evidence.get("reason") == "policy_denied"
         assert evidence.get("rule") == "kernel_owned_by_kernel_agent"
         assert not await c.tasks.by_state("failed")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_target_reached_routes_through_close_phase(session_dir):
+    """A met objective transitions to CLOSE instead of breaking out of the loop.
+
+    ``machine_state`` registers ``target_reached`` as an "any phase -> CLOSE"
+    transition reason, so a met target must reach the close sequencer rather
+    than leaving the run with only the cli safety-net report.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.save(session_dir)
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_ticks=6,
+        )
+        assert reason == "target_reached"
+        assert (c.shared_state.phase or "").upper() == "CLOSE"
     finally:
         await c.stop()
