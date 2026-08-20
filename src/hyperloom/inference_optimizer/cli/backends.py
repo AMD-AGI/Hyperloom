@@ -253,6 +253,7 @@ def _build_backends(
             max_turns_default=4,
             conversational=True,
             capture_turn_diagnostics=True,
+            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
         )
 
     return {
