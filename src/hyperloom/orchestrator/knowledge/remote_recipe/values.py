@@ -19,6 +19,7 @@ from .models import (
     MAX_FILE_BYTES,
     Artifact,
     KnowledgeBundle,
+    RecipeScope,
     RemoteRecipeValidationError,
     extract_knowledge_artifact_refs,
     validate_relative_path,
@@ -102,7 +103,7 @@ def _workload_shape(state: Any) -> dict[str, int]:
     """Return the replay-sensitive workload dimensions."""
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
     shape: dict[str, int] = {}
-    for key in ("conc", "isl", "osl"):
+    for key in ("tp", "conc", "isl", "osl"):
         value = _positive_int(getattr(state, key, None))
         if value is None:
             value = _positive_int(extra.get(key))
@@ -1079,6 +1080,7 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any = None,
+    scope: RecipeScope | None = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
     pending_sections = list(
@@ -1152,19 +1154,29 @@ def build_remote_knowledge(
     else:
         explore_value = {"patches": [], "artifacts": []}
         framework_value = {"patches": [], "artifacts": []}
+    kernel_value = (
+        {
+            "gemm": {"optimizations": []},
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+        if scope is not None and scope.kernel_optimizer == "geak"
+        else {
+            "gemm": build_kernel_gemm_value(state, files),
+            "fusion": build_kernel_fusion_value(state, files),
+            "rewrite": build_kernel_rewrite_value(state, files),
+        }
+    )
     value = {
         "config": _config_from_current_best(state),
         "explore": explore_value,
         "framework": framework_value,
-        "kernel": {
-            "gemm": build_kernel_gemm_value(state, files),
-            "fusion": build_kernel_fusion_value(state, files),
-            "rewrite": build_kernel_rewrite_value(state, files),
-        },
+        "kernel": kernel_value,
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
-        _adopt_prior_kernel(state, sections, value, files)
+        if scope is None or scope.kernel_optimizer == "forge":
+            _adopt_prior_kernel(state, sections, value, files)
     staged_sections = (
         merge_staged_sections(
             value,
@@ -1198,6 +1210,11 @@ def build_remote_knowledge(
             "pitfalls": _experience(state, "warm_start_pitfalls"),
             "provenance": {
                 "producer": "hyperloom-inference-optimizer",
+                **(
+                    {"kernel_optimizer": scope.kernel_optimizer}
+                    if scope is not None
+                    else {}
+                ),
                 "phase": "CLOSE",
                 "session_id": str(
                     getattr(state, "recipe_kb_session_id", "")
@@ -1334,7 +1351,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         ),
     }
     for key, value in _mapping(knowledge.get("workload_shape")).items():
-        if key in {"conc", "isl", "osl"}:
+        if key in {"tp", "conc", "isl", "osl"}:
             resolved = _positive_int(value)
             if resolved is not None:
                 row[key] = resolved
