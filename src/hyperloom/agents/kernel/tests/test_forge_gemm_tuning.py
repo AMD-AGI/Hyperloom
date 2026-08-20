@@ -63,6 +63,22 @@ def test_build_cmd_maps_all_options():
     assert "--thorough" in cmd
 
 
+def test_build_cmd_forwards_isl_when_known():
+    """isl sizes forge's prefill M bands; without it forge infers a shorter one."""
+    payload = _payload()
+    payload["isl"] = 8192
+
+    cmd = forge_gemm_tuning._build_cmd(payload)
+
+    assert cmd[cmd.index("--isl") + 1] == "8192"
+
+
+def test_build_cmd_omits_isl_when_unknown():
+    """Absent rather than zero: forge's own fallback is the pre-existing
+    behaviour, and an older forge build has no such option to receive."""
+    assert "--isl" not in forge_gemm_tuning._build_cmd(_payload())
+
+
 def test_build_cmd_forwards_provenance_but_no_knowledge_base_options(monkeypatch):
     """Tuning has no knowledge base; asking it to consult one aborts the run."""
     payload = _payload()
