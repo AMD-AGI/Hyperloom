@@ -210,6 +210,34 @@ def test_collapse_skips_unrelated_measured_unmeasured_pair_at_same_gain() -> Non
     assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
 
 
+def test_collapse_skips_three_kernel_mixed_group_at_same_gain() -> None:
+    rows = [
+        {
+            "kernel_id": "c0_triton",
+            "name": "c0_triton",
+            "gpu_pct": 10.0,
+            "e2e_gain_pct": 5.0,
+            "op_kind": "prefill_attn",
+        },
+        {
+            "kernel_id": "sym_a",
+            "name": "sym_a",
+            "gpu_pct": None,
+            "e2e_gain_pct": 5.0,
+            "op_kind": "prefill_attn",
+        },
+        {
+            "kernel_id": "kernel_c",
+            "name": "kernel_c",
+            "gpu_pct": 8.0,
+            "e2e_gain_pct": 5.0,
+            "op_kind": "prefill_attn",
+        },
+    ]
+    out = _collapse_journey_aliases(rows)
+    assert len(out) == 3
+
+
 def test_collapse_keeps_two_unmeasured_rows_that_share_a_gain() -> None:
     rows = [
         {"kernel_id": "kernel_a", "name": "kernel_a", "gpu_pct": None, "e2e_gain_pct": 2.0},

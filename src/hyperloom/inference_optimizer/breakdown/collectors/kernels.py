@@ -779,11 +779,33 @@ def _collect_optimized_kernels(
     return sorted(by_kid.values(), key=lambda e: e.get("kernel_id") or "")
 
 
+def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
+    """Report whether a ledger row represents an adopted kernel patch.
+
+    ``validated`` tracks single-kernel gain attribution, not adoption. GEAK
+    joint rebench rows and later failed revalidations can be ``validated=False``
+    while the kernel was still promoted with a proven overlay or an earlier
+    ``KEEP`` attempt.
+    """
+    if ent.get("last_decision") == "KEEP":
+        return True
+    source = str(ent.get("source") or "")
+    attempts = ent.get("attempts") or []
+    has_keep = any(
+        isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts
+    )
+    if source == "geak_e2e":
+        if ent.get("overlay_loaded") is True:
+            return True
+        return has_keep
+    return has_keep
+
+
 def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Collect KEEP-promoted (adopted) kernel patch entries.
 
-    Reads ``state.kernel_integrate_attempts`` and keeps only entries whose
-    ``last_decision`` is ``"KEEP"``.
+    Reads ``state.kernel_integrate_attempts`` and keeps entries that were
+    promoted (``KEEP`` or proven GEAK overlay / historical ``KEEP``).
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -799,11 +821,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
         for key, ent in integ.items():
             if not isinstance(ent, dict):
                 continue
-            if ent.get("last_decision") != "KEEP":
-                continue
-            # GEAK rows without a proven overlay stay in the ledger for audit
-            # but must not surface as adopted lifecycle entries.
-            if ent.get("validated") is False:
+            if not _ledger_entry_is_adopted(ent):
                 continue
             out.append(
                 {

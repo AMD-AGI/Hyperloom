@@ -342,24 +342,16 @@ def _journey_row_symbol(row: dict[str, Any]) -> str:
 
 
 def _is_alias_twin_group(group: list[dict[str, Any]], is_cand_tag: Any) -> bool:
-    """Return True only when a group is a slot-tag + symbol alias pair.
-
-    Two unrelated kernels can share a run-level gain and the measured/unmeasured
-    gpu_pct split; collapsing on gain alone would drop one of them.
-    """
+    """Return True only for a one-to-one slot-tag + symbol alias pair."""
+    if len(group) != 2:
+        return False
     measured = [r for r in group if r.get("gpu_pct") is not None]
     unmeasured = [r for r in group if r.get("gpu_pct") is None]
-    if not measured or not unmeasured:
+    if len(measured) != 1 or len(unmeasured) != 1:
         return False
-    names: list[str] = []
-    for row in group:
-        for field in ("name", "kernel_id"):
-            text = str(row.get(field) or "").strip()
-            if text and text not in names:
-                names.append(text)
-    has_tag = any(is_cand_tag(n) for n in names)
-    has_symbol = any(not is_cand_tag(n) for n in names)
-    return has_tag and has_symbol
+    tag_id = _journey_row_symbol(measured[0])
+    sym_id = _journey_row_symbol(unmeasured[0])
+    return bool(tag_id) and bool(sym_id) and is_cand_tag(tag_id) and not is_cand_tag(sym_id)
 
 
 def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -517,10 +509,17 @@ def _geak_accepted_kernels_from_journey(
         verification = br.get("verification") if isinstance(br.get("verification"), dict) else {}
         dispatch = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
         backend = str(verification.get("best_backend") or (dispatch.get("backends") or [None])[0] or "")
+        op_kind = str(
+            k.get("op_kind")
+            or dispatch.get("op_kind")
+            or e2e.get("op_kind")
+            or ""
+        )
         accepted.append(
             {
                 "kernel_id": kid,
                 "name": str(k.get("name") or kid),
+                "op_kind": op_kind,
                 "gpu_pct": _to_float(k.get("gpu_pct")),
                 "micro_speedup": _to_float(k.get("micro_speedup") or verification.get("micro_speedup")),
                 "e2e_gain_pct": _to_float(e2e.get("e2e_gain_pct")),
