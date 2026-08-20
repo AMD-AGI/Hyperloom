@@ -539,10 +539,9 @@ async def test_readonly_research_scout_skips_worktree(
         {
             "domain": "research_scout_specialist",
             "gap_canonical_id": "gap.research_scout.round0",
-            "readonly": True,
+            "mode": "research",
         }
     )
-    ctx.task.allowed_tools = ["Read", "Grep", "Glob", "Write"]
 
     result = await runner.run(ctx)
 

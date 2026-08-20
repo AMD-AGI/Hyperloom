@@ -449,7 +449,7 @@ def test_dispatch_generation_specialist_params_and_marker():
     p = call["params"]
     assert p["domain"] == "serving_specialist"
     assert p["framework_config_generation"] is True
-    assert p["readonly"] is True
+    assert p["mode"] == "research"
     assert p["gap_layer"] == "framework"
     assert p["framework"] == "sglang"
 
