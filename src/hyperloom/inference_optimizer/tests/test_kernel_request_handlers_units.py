@@ -1201,7 +1201,7 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", Path)
 
         async def _fake_subprocess(cmd, *, timeout_sec):
             result = {"status": "complete", "decision": "REVERT", "kept": False}
@@ -1234,7 +1234,7 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", Path)
 
         async def _timeout(cmd, *, timeout_sec):
             workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
