@@ -46,6 +46,51 @@ class RemoteRecipeValidationError(ValueError):
     """A locally-built remote recipe violates the KB Store contract."""
 
 
+@dataclass(frozen=True)
+class RecipeScope:
+    kernel_optimizer: str
+    tp: int
+    conc: int
+    isl: int
+    osl: int
+
+    @classmethod
+    def from_state(cls, state: Any) -> "RecipeScope":
+        optimizer = str(getattr(state, "kernel_optimizer", "") or "").strip().lower()
+        backend = "forge" if optimizer in {"native", "forge", "kernel_agent_forge"} else optimizer
+        scope = cls(
+            kernel_optimizer=backend,
+            tp=int(getattr(state, "tp", 0) or 0),
+            conc=int(getattr(state, "conc", 0) or 0),
+            isl=int(getattr(state, "isl", 0) or 0),
+            osl=int(getattr(state, "osl", 0) or 0),
+        )
+        scope.validate()
+        return scope
+
+    def validate(self) -> None:
+        if self.kernel_optimizer not in {"forge", "geak"}:
+            raise RemoteRecipeValidationError(
+                f"unsupported kernel_optimizer: {self.kernel_optimizer!r}"
+            )
+        if min(self.tp, self.conc, self.isl, self.osl) <= 0:
+            raise RemoteRecipeValidationError(
+                "Recipe scope tp/conc/isl/osl must be positive"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kernel_optimizer": self.kernel_optimizer,
+            "tp": self.tp,
+            "conc": self.conc,
+            "isl": self.isl,
+            "osl": self.osl,
+        }
+
+    def matches(self, value: Any) -> bool:
+        return isinstance(value, dict) and value == self.as_dict()
+
+
 def validate_relative_path(value: str) -> str:
     """Return a normalized KB artifact path, rejecting traversal and ``files/``."""
     raw = str(value or "")
@@ -195,6 +240,7 @@ __all__ = [
     "MAX_PATH_BYTES",
     "RemoteRecipeValidationError",
     "RemoteWriteResult",
+    "RecipeScope",
     "extract_knowledge_artifact_refs",
     "validate_relative_path",
 ]
