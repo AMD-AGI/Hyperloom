@@ -59,7 +59,8 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._canonical_fingerprint import workload_signature
+from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -123,27 +124,6 @@ def _initial_explore_search_state() -> dict[str, Any]:
     }
 
 
-def _coerce_args_str(value: Any) -> str:
-    """Coerce a payload ``extra_args`` / ``extra_server_args`` value into a
-    shell-arg string.
-
-    The LLM sometimes emits the server flags as a JSON list instead of a single
-    string; a naive ``str(list)`` yields the Python repr which the server
-    rejects. Lists/tuples are space-joined into individual tokens.
-
-    Args:
-        value: The raw payload value (string, list/tuple, or None).
-
-    Returns:
-        The coerced shell-arg string ("" when ``value`` is None).
-    """
-    if value is None:
-        return ""
-    if isinstance(value, (list, tuple)):
-        return " ".join(str(v).strip() for v in value if str(v).strip())
-    return str(value)
-
-
 # Audit/provenance metadata stashed on a GridVariant that must survive being
 # rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
@@ -173,7 +153,7 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 
 
 def _variant_control_fields(variant: Any) -> dict[str, Any]:
-    """Return non-default remove/unset/replace controls for ledger rows."""
+    """Return non-default remove/unset/replace controls for identity and ledger rows."""
     remove_args = to_str_list(getattr(variant, "remove_args", []))
     unset_envs = to_str_list(getattr(variant, "unset_envs", []))
     args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
@@ -220,17 +200,15 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = _coerce_args_str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
-        envs_raw = raw.get("extra_envs") or {}
-        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
+        fields = normalize_proposal(raw)
         gv = GridVariant(
-            name=str(raw["name"]),
-            extra_server_args=args,
-            extra_envs=envs,
+            name=fields["name"],
+            extra_server_args=fields["extra_args"],
+            extra_envs=fields["extra_envs"],
             note=str(raw.get("note") or raw.get("provenance") or ""),
-            remove_args=to_str_list(raw.get("remove_args")),
-            unset_envs=to_str_list(raw.get("unset_envs")),
-            args_mode=str(raw.get("args_mode") or "append"),
+            remove_args=fields["remove_args"],
+            unset_envs=fields["unset_envs"],
+            args_mode=fields["args_mode"],
         )
         # Stash extra metadata on the GridVariant so the ledger writer can
         # pull provenance/evidence.
@@ -994,23 +972,13 @@ class ExploreExecutor:
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
-            identity_controls = _variant_control_fields(gv)
-            identity_remove_args = list(
-                dict.fromkeys(base_remove_args + to_str_list(identity_controls.get("remove_args")))
-            )
-            identity_unset_envs = list(
-                dict.fromkeys(base_unset_envs + to_str_list(identity_controls.get("unset_envs")))
-            )
-            if identity_remove_args:
-                identity_controls["remove_args"] = identity_remove_args
-            if identity_unset_envs:
-                identity_controls["unset_envs"] = identity_unset_envs
-            if base_args_mode == "replace":
-                identity_controls["args_mode"] = "replace"
-            fp = canonical_fingerprint(
+            fp = effective_fingerprint(
                 gv.extra_server_args,
                 gv.extra_envs,
-                **identity_controls,
+                controls=_variant_control_fields(gv),
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+                base_args_mode=base_args_mode,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in unique_in_round:

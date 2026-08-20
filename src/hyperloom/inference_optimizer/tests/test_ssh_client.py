@@ -12,7 +12,6 @@ stdin-only secret path. All tests stub ``subprocess.run`` so nothing is spawned.
 from __future__ import annotations
 
 import base64
-import os
 import shlex
 
 import pytest

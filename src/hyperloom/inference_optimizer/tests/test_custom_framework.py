@@ -13,7 +13,6 @@ blacklists the shipped frameworks rely on.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 import yaml
