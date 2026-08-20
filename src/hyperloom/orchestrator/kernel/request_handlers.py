@@ -4019,9 +4019,18 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     The forge KEEP references tuned CSVs by their ephemeral tuner-workspace paths,
     so a recipe replayed after the workspace is gone (or on another box) loses the
     tuning and aiter falls back to its default config. Mirror integrate_patch's
-    durability: copy each CSV into the serving aiter ``configs/model_configs/``
-    tree, repoint the env there, and snapshot the realized files via
-    :func:`snapshot_source_layer` so they travel with the recipe.
+    durability: copy each CSV into the serving aiter config tree, repoint the env
+    there, and snapshot the realized files via :func:`snapshot_source_layer` so
+    they travel with the recipe.
+
+    The copy lands one level below ``configs/model_configs/`` on purpose. aiter
+    merges every ``model_configs/*{table}*.csv`` it can glob whenever the env var
+    is unset, and that glob is not recursive. Writing directly into that
+    directory would hand the table to every later server start -- including after
+    E2E rejected the candidate, and including servers for other models, since the
+    scan does not discriminate by model. Replay does not need the scan: it
+    restores the env var explicitly (see ``prelude._warm_kernel_extra_envs``) and
+    defers a GEMM column that has no env at all.
 
     The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
     durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
@@ -4031,6 +4040,8 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
     Returns ``(extra_envs, source_snapshot_dir)``.
     """
+    # Below model_configs/, out of reach of aiter's non-recursive auto-merge glob.
+    _FORGE_DURABLE_SUBDIR = "hyperloom"
     _forge_durable_env_stems = {
         "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm",
         "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm",
@@ -4050,7 +4061,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         src_csv = str(extra_envs.get(env_key) or "").strip()
         if not src_csv or not Path(src_csv).is_file():
             continue
-        rel = f"configs/model_configs/{stem}_{slug}.csv"
+        rel = f"configs/model_configs/{_FORGE_DURABLE_SUBDIR}/{stem}_{slug}.csv"
         pending.append((env_key, rel, Path(src_csv)))
     if not pending:
         return extra_envs, ""
