@@ -439,6 +439,19 @@ def test_compute_next_phase_prelude_to_framework_when_enabled():
     assert reason == "prelude_done"
 
 
+def test_compute_next_phase_closing_phase_goes_to_close_not_framework():
+    """A spent wall-clock must not start FRAMEWORK; that allowlist drops ``report``."""
+    state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
+    state.closing_phase = True
+    out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
+    assert out is not None
+    next_phase, reason, ev = out
+    assert next_phase == phase_state.PHASE_CLOSE
+    assert reason == "time_exhausted"
+    assert ev.get("terminal") is True
+    assert ev.get("reason_origin") == "closing_phase"
+
+
 def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_reason():
     """``framework_agent_phase_enabled=False`` preserves the historical ``prelude_done`` reason."""
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
