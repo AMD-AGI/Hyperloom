@@ -430,6 +430,43 @@ def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
     assert exc.value.rule == "delegate_action_evidence"
 
 
+@pytest.mark.parametrize(
+    "phase,action",
+    [
+        ("PRELUDE", "baseline"),
+        ("EXPLORE", "explore"),
+        ("SWEEP", "sweep"),
+        ("CLOSE", "session_breakdown"),
+    ],
+)
+def test_gate_robustness_delegate_out_of_scope_action_denied(phase, action):
+    """Robustness cannot delegate actions outside its declared set, even when the phase allows them."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    gate = PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=SharedState(phase=phase, framework="sglang"),
+        strict_phase=True,
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "robustness",
+            Intent(type=IntentType.DELEGATE, payload={"action_name": action}),
+        )
+    assert exc.value.rule == "role"
+
+
+def test_gate_robustness_delegate_recover_still_allowed_in_all_phases(gate):
+    """recover remains the one action robustness may delegate in any phase."""
+    payload = {
+        "action_name": "recover",
+        "reason": "gpu_memory_leaked",
+        "force_gpu_cleanup": True,
+        "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
+    }
+    gate.validate_intent("robustness", Intent(type=IntentType.DELEGATE, payload=payload))
+
+
 def test_gate_orchestration_request_to_kernel_ok(gate):
     gate.validate_intent(
         "orchestration",
