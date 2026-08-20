@@ -211,8 +211,8 @@ async def test_dispatched_internal_conc_sweep_passes_auto_enqueue_singleton(tmp_
 
 
 @pytest.mark.asyncio
-async def test_dispatched_recover_rejected_for_orchestration_source(tmp_path, monkeypatch):
-    """Robustness-only delegates cannot be forged as orchestration queued tasks."""
+async def test_dispatched_recover_executes_when_queued(tmp_path, monkeypatch):
+    """A recover task that passed ingress validation must reach its executor at dispatch."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     executed = {"ran": False}
 
@@ -223,13 +223,12 @@ async def test_dispatched_recover_rejected_for_orchestration_source(tmp_path, mo
     sub.register_executor("recover", _stub)
     task = await sub.tasks.create(
         kind="recover",
-        params={"reason": "forged", "evidence": {"kind": "test"}},
-        idempotency_key="forged-recover",
+        params={"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},
+        idempotency_key="queued-recover",
     )
     res = await sub.run_task(task)
-    assert res.state == "failed"
-    assert "cannot delegate action='recover'" in (res.error or "")
-    assert executed["ran"] is False
+    assert res.state == "succeeded"
+    assert executed["ran"] is True
 
 
 def test_validate_dispatched_task_unit_integrate_patch_gate(tmp_path):

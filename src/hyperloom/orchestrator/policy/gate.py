@@ -769,11 +769,12 @@ class PolicyGate:
         """Re-validate a persisted queued task before executor dispatch.
 
         Defense-in-depth for forged ``coordinator.db`` rows: replays path
-        containment and delegate action gates that normally run at intent
-        ingress. Coordinator-managed internal actions receive path checks
-        only (they are never LLM-delegated). Phase compatibility is
+        containment and structural delegate action gates. Coordinator-managed
+        internal actions receive path checks only. Phase compatibility is
         intentionally skipped so legitimately queued work is not rejected
-        after a phase transition.
+        after a phase transition. Per-action source rules are also skipped
+        because the originating role is not stored in the task row; those
+        rules are enforced exclusively at intent ingress.
 
         Args:
             action_name: The task ``kind`` / delegate action name.
@@ -782,8 +783,8 @@ class PolicyGate:
                 revalidation baseline.
 
         Raises:
-            PolicyDenied: When the task would have been rejected had it
-                arrived via ``IntentRouter`` delegate validation.
+            PolicyDenied: When the task fails path-containment or structural
+                delegate action validation.
         """
         kind = str(action_name or "").strip()
         if not kind:
@@ -823,6 +824,7 @@ class PolicyGate:
             role,
             payload,
             check_phase=False,
+            check_source=False,
             skip_baseline_singleton=skip_baseline_singleton,
         )
 
@@ -915,6 +917,7 @@ class PolicyGate:
         payload: dict[str, Any],
         *,
         check_phase: bool,
+        check_source: bool = True,
         skip_baseline_singleton: bool = False,
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
@@ -927,6 +930,9 @@ class PolicyGate:
                 (intent ingress). Dispatch-time replay passes False so
                 legitimately queued tasks are not rejected after a phase
                 transition.
+            check_source: When True, enforce the per-action source allowlist.
+                The task row's originating role is not persisted, so dispatch
+                replay passes False; source enforcement is ingress-only.
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -962,18 +968,18 @@ class PolicyGate:
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
-        # Per-action source allowlist (e.g. ``recover`` is robustness-only).
-        allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
-        if allowed_sources is not None and role.name not in allowed_sources:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot delegate action={action_name!r} (allowed: {sorted(allowed_sources)!r})",
-                rule="delegate_action_source",
-                hint=(
-                    "side-effecting actions like `recover` are reserved for "
-                    "the robustness agent; emit an ALERT and let robustness "
-                    "escalate via its action-ladder instead"
-                ),
-            )
+        if check_source:
+            allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
+            if allowed_sources is not None and role.name not in allowed_sources:
+                raise PolicyDenied(
+                    f"role={role.name!r} cannot delegate action={action_name!r} (allowed: {sorted(allowed_sources)!r})",
+                    rule="delegate_action_source",
+                    hint=(
+                        "side-effecting actions like `recover` are reserved for "
+                        "the robustness agent; emit an ALERT and let robustness "
+                        "escalate via its action-ladder instead"
+                    ),
+                )
         # Per-action required-payload guard (e.g. ``recover`` must carry ``reason`` + ``evidence``); top-level or under ``params``.
         required = DELEGATE_ACTION_REQUIRED_PAYLOAD.get(action_name)
         if required:
