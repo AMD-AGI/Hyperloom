@@ -481,3 +481,40 @@ def test_agentx_server_script_override_without_framework(tmp_path):
     r = _run(bench, bind, res, tmp_path, FRAMEWORK="", AGENTX_SERVER_SCRIPT="custom_server.sh")
     assert r.returncode == 0, r.stderr
     assert (res / "inferencex_result.json").exists()
+
+
+def test_pinned_corpus_cannot_keep(tmp_path):
+    """A different corpus is a different workload, and the scenario cannot object.
+
+    Its allowlist admits every dated weka variant, so replaying an older set --
+    which upstream's own H100/H200 recipes pin via WEKA_LOADER_OVERRIDE -- comes
+    back submission_valid=true against a row measured on 062126.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    older = "semianalysis_cc_traces_weka_with_subagents_256k"
+    r = _run(bench, bind, res, tmp_path, WEKA_LOADER_OVERRIDE=older)
+    assert r.returncode == 0, r.stderr
+    assert older in _aiperf_args(res)  # the pin is honoured
+    out = _result(res)
+    assert out["submission_valid"] is False  # but it cannot be submitted
+    assert any("corpus=" in x for x in out["submission_invalid_reasons"])
+
+
+def test_agentx_dataset_pin_cannot_keep(tmp_path):
+    """The Hyperloom-side alias for the same knob gets the same treatment."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_DATASET="semianalysis_cc_traces_weka_062126")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("corpus=" in x for x in out["submission_invalid_reasons"])
+
+
+def test_default_corpus_is_canonical_and_submittable(tmp_path):
+    """The unpinned path must not be demoted by the new check."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert "semianalysis_cc_traces_weka_062126_256k" in _aiperf_args(res)

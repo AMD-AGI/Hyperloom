@@ -641,3 +641,35 @@ def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch
     assert row is not None, "the AgentX gate must not silence the synthetic path"
     statements = [x.get("statement") for x in (row.get("lessons") or [])]
     assert "synthetic still recorded" in statements
+
+
+def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
+    """The sink the _kb_amend_recipe gate cannot reach.
+
+    In REMOTE mode _kb_amend_recipe returns early, so finalize_recipe_and_journal
+    is the only Recipe writer -- and it went straight to HyperloomRemoteKB.write
+    with no AgentX check, carrying an agentic-replay throughput into a
+    cross-session store keyed on an identity with no workload or mode segment.
+    Gated ahead of the mode branch, so LOCAL is covered by the same line.
+    """
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("AgentX finalize reached a Recipe KB sink")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        _must_not_run,
+    )
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out["status"] == "skipped"
+    assert out["reason"] == "agentx"
+
+
+def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
+    """The gate must not cost the synthetic path its finalize."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    coord = _make_coordinator(tmp_path)
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out.get("reason") != "agentx"
