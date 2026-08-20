@@ -5372,6 +5372,8 @@ class FrameworkPhase(PhaseHandler):
                 kind="explore",
                 params=params,
                 idempotency_key=f"framework-config-explore-round{int(round_no)}{self._cycle_idem_suffix()}",
+                # Without a TTL the row is invisible to ``reclaim_expired_running``.
+                lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
             )
         except Exception:  # noqa: BLE001 -- defensive; never wedge the pump
             log.exception("framework_config: failed to enqueue explore round")

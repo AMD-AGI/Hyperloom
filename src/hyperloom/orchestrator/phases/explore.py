@@ -1499,6 +1499,8 @@ class ExplorePhase(PhaseHandler):
                 kind="explore",
                 params=params,
                 idempotency_key=f"mn-auto-explore-{task.task_id}",
+                # Without a TTL the row is invisible to ``reclaim_expired_running``.
+                lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
             )
             log.info(
                 "mn_auto_materialize: enqueued explore task_id=%s "
