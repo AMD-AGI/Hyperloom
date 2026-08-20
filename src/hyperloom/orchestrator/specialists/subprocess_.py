@@ -818,7 +818,7 @@ class SpecialistSubprocessDispatcher:
         worktree_base: Path | None,
         system_prompt: str,
         user_prompt: str,
-        allowed_tools: tuple[str, ...],
+        disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset(),
         max_turns: int,
         gpu_ids: tuple[int, ...] = (),
         wall_budget_sec: float | None = None,
@@ -846,8 +846,9 @@ class SpecialistSubprocessDispatcher:
             system_prompt (str): System prompt assembled by
                 :func:`specialist_prompt_builder.build_specialist_prompts`.
             user_prompt (str): User prompt from the same builder.
-            allowed_tools (tuple[str, ...]): Per-task tool whitelist
-                (post-:meth:`SpecialistRunner._resolve_tools`).
+            disallowed_tools: Tool names to deny in the agent CLI subprocess.
+                Passed as ``--disallowedTools`` to the Claude CLI; has no
+                Codex equivalent (Codex containment uses ``--sandbox``).
             max_turns (int): Turn budget. This dispatcher never enforces it
                 mechanically — neither agent CLI is passed a turn-cap flag (the
                 cap reaches the specialist only as advisory prompt text baked
@@ -928,7 +929,7 @@ class SpecialistSubprocessDispatcher:
                     prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
-                    allowed_tools=allowed_tools,
+                    disallowed_tools=frozenset(disallowed_tools),
                 )
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
@@ -1182,7 +1183,7 @@ class SpecialistSubprocessDispatcher:
         prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
-        allowed_tools: tuple[str, ...],
+        disallowed_tools: frozenset[str] = frozenset(),
         backend: str = "",
         system_prompt: str = "",
     ) -> list[str]:
@@ -1192,7 +1193,8 @@ class SpecialistSubprocessDispatcher:
             prompt_file (Path): User prompt for Codex; combined prompt for Claude.
             workspace (Path): Task workspace surfaced as a writable dir.
             worktree (Path | None): Write-isolated worktree, when present.
-            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
+            disallowed_tools: Tool names to remove from the available set.
+                Applied only on the Claude path; Codex uses sandbox policy.
             backend (str): Backend to build for; resolved from the config /
                 credential shape when empty.
             system_prompt (str): Higher-priority Codex developer instructions.
@@ -1217,7 +1219,7 @@ class SpecialistSubprocessDispatcher:
             prompt_file=prompt_file,
             workspace=workspace,
             worktree=worktree,
-            allowed_tools=allowed_tools,
+            disallowed_tools=disallowed_tools,
         )
 
     def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
@@ -1366,15 +1368,13 @@ class SpecialistSubprocessDispatcher:
         prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
-        allowed_tools: tuple[str, ...],
+        disallowed_tools: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
         The Anthropic-side half of :meth:`_build_agent_cmd`. Builds the flag list
-        (output format, permission mode, system prompt file, tool whitelist, mcp
+        (output format, permission mode, system prompt file, tool denylist, mcp
         config, ``--add-dir`` entries, operator escape-hatch args).
-        ``emit_intent`` is dropped from the tool whitelist since the subprocess
-        has no in-process MCP server.
 
         Args:
             prompt_file (Path): Combined system+user prompt file passed via
@@ -1382,7 +1382,7 @@ class SpecialistSubprocessDispatcher:
             workspace (Path): Task workspace surfaced as an ``--add-dir``.
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.
-            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
+            disallowed_tools: Tool names to remove from the available set.
 
         Returns:
             list[str]: The full command argv to spawn.
@@ -1404,15 +1404,11 @@ class SpecialistSubprocessDispatcher:
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])
-        # Drop ``emit_intent``: the subprocess exits via writing specialist_done.json.
-        tools_filtered = [t for t in allowed_tools if t != "emit_intent"]
-        if tools_filtered:
-            cmd.extend(["--allowedTools", ",".join(tools_filtered)])
-        # Declare leaf sub-agent types when the specialist may fan out via Task.
-        if "Task" in tools_filtered:
-            from .leaf import build_leaf_agents_json
+        if disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
+        from .leaf import build_leaf_agents_json
 
-            cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
+        cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
         for d in self._writable_dirs(workspace, worktree):

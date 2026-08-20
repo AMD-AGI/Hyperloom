@@ -479,7 +479,6 @@ from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
 from hyperloom.orchestrator.specialists.runner import (
-    DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
     build_empty_specialist_done,
@@ -921,12 +920,12 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
     assert "unknown specialist domain" in result.specialist_done["reason"]
 
 
-def test_specialist_tool_denylist_is_empty():
-    """KB write MCP tools were removed with specialist recipe_kb; denylist is empty."""
-    assert SPECIALIST_TOOL_DENYLIST == frozenset()
+def test_specialist_tool_denylist_blocks_dangerous_tools():
+    """KillShell and SlashCommand are denied to enforce the process-safety prompt rule."""
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
     for write_tool in ("Edit", "Write", "MultiEdit"):
         assert write_tool not in SPECIALIST_TOOL_DENYLIST
-        assert write_tool in DEFAULT_SPECIALIST_TOOLS
 
 
 def test_build_empty_specialist_done_shape():

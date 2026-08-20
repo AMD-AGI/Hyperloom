@@ -575,27 +575,15 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
 
 
 # --------------------------------------------------------------------------- #
-# Tool surface: TodoWrite and Task are granted.
+# Tool surface: TaskKill and SlashCommand are denied.
 # --------------------------------------------------------------------------- #
-def test_task_tool_granted_and_todowrite_granted():
-    from hyperloom.orchestrator.specialists.runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SPECIALIST_TOOL_DENYLIST,
-        SpecialistRunner,
-    )
+def test_denylist_blocks_process_kill_tools():
+    from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
-    assert "TodoWrite" in DEFAULT_SPECIALIST_TOOLS
-    assert "Task" in DEFAULT_SPECIALIST_TOOLS
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
     assert "Task" not in SPECIALIST_TOOL_DENYLIST
-
-    runner = SpecialistRunner(backend_factory=lambda *a, **k: None)
-
-    default_resolved = runner._resolve_tools(None)
-    assert "Task" in default_resolved
-    assert "TodoWrite" in default_resolved
-
-    resolved = runner._resolve_tools(["Read", "Task", "TodoWrite", "Bash"])
-    assert {"Read", "Task", "TodoWrite", "Bash"} <= set(resolved)
+    assert "TodoWrite" not in SPECIALIST_TOOL_DENYLIST
 
 
 # --------------------------------------------------------------------------- #

@@ -317,6 +317,7 @@ class ClaudeBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
         allow_no_intent: bool = False,
     ) -> BackendTurnResult:
@@ -326,6 +327,8 @@ class ClaudeBackend:
             prompt: User prompt for this turn.
             system_prompt: Optional system prompt override.
             tools: Tool names to enable for the turn.
+            disallowed_tools: Tool names to remove from the available set.
+                Applied additively on top of any ``raw_completion`` denylist.
             max_turns: Maximum agent turns; falls back to the backend
                 default when falsy.
             allow_no_intent: When ``True``, relax the guard that requires
@@ -353,6 +356,7 @@ class ClaudeBackend:
         try:
             options = self._build_options(
                 tools=tools or [],
+                disallowed_tools=disallowed_tools or [],
                 max_turns=max_turns_use,
                 system_prompt=system_prompt,
                 resume_session_id=resume_session,
@@ -712,6 +716,7 @@ class ClaudeBackend:
         self,
         *,
         tools: list[str],
+        disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
         resume_session_id: str | None = None,
@@ -725,6 +730,8 @@ class ClaudeBackend:
 
         Args:
             tools (list[str]): Caller-provided allowed tool names.
+            disallowed_tools (list[str] | None): Additional tool names to deny.
+                Merged with the ``raw_completion`` denylist when both apply.
             max_turns (int): Agent-loop budget to pass through to the SDK.
             system_prompt (str | None): Optional system prompt for the turn.
             resume_session_id (str | None): SDK session token to resume; set
@@ -746,7 +753,10 @@ class ClaudeBackend:
         if self.raw_completion:
             # Single text turn: no MCP tools, all built-ins disallowed.
             kwargs["allowed_tools"] = []
-            kwargs["disallowed_tools"] = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+            deny = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+            if disallowed_tools:
+                deny = list(dict.fromkeys(deny + disallowed_tools))
+            kwargs["disallowed_tools"] = deny
             kwargs["stderr"] = self._stderr_sink
             return self._instantiate_options(kwargs)
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the
@@ -761,6 +771,8 @@ class ClaudeBackend:
                     allowed.append(qname)
         if allowed:
             kwargs["allowed_tools"] = allowed
+        if disallowed_tools:
+            kwargs["disallowed_tools"] = disallowed_tools
         mcp_servers: dict[str, Any] = {}
         if self.mcp_server_config is not None:
             mcp_servers[MCP_SERVER_NAME] = self.mcp_server_config
