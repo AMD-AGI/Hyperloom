@@ -465,7 +465,6 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
     SPECIALIST_ACTION_NAME,
-    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,

@@ -2886,7 +2886,46 @@ def _resolve_vllm_aiter_routing(
         )
 
         flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+
+    _warn_if_moe_routing_is_coarser_than_the_log(server_log, flags)
     return flags
+
+
+def _warn_if_moe_routing_is_coarser_than_the_log(
+    server_log: str, flags: dict[str, bool]
+) -> None:
+    """Say so when one log shows both MoE backends and routing picks one.
+
+    The decision above is a substring scan: seeing an aiter fused-MoE marker
+    anywhere routes the whole run to the aiter tuner family, and
+    ``vllm_moe_triton`` then never runs. A run can dispatch both -- aiter CK over
+    part of the token range and vLLM's Triton path over the rest -- and forge's
+    own parser records exactly that as ``impl="mixed"``. Whichever way the single
+    flag falls, the range served by the other backend is left untuned.
+
+    Reported rather than acted on here: changing this routing changes which
+    tuners run for every aiter-served vLLM model, which is a bigger step than
+    the tuner-side addition that already covers the CK half. Forge adds
+    ``fmoe_ck`` from the same evidence, so the gap this warns about is the
+    Triton half.
+    """
+    if not flags.get("aiter_fused_moe"):
+        return
+    try:
+        from forge_gemm_tune.evidence import parse_log_file
+    except ImportError:
+        return
+    try:
+        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
+    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
+        return
+    if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
+        log.warning(
+            "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
+            "(impl=%s, stages=%s); routing sends the whole run to the aiter "
+            "tuner family, so the token range Triton serves goes untuned",
+            server_log, moe.get("impl"), moe.get("stages_seen"),
+        )
 
 
 def _vllm_block_fp8_profile_capture_required(
@@ -4878,6 +4917,47 @@ async def run_collective_handler(payload: dict, *, session_dir: Path) -> Handler
     return result
 
 
+# A tuner error is a diagnostic pointer, not the diagnosis: the full text lives
+# in the run's own result.json and tune.log. 400 characters is enough to carry
+# the argparse line or the aiter marker that says which of the two it was.
+_TRACE_TUNER_ERROR_MAXLEN = 400
+
+# Emitted even when null. ``kept`` is null on every row observed so far, and an
+# absent key would be indistinguishable from ``false``.
+_TRACE_TUNER_ALWAYS_KEYS = ("tuner", "best_micro_speedup", "kept")
+
+
+def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
+    """One per-tuner entry for the audit row, keeping why it ended as it did.
+
+    The row used to carry only ``tuner``/``best_micro_speedup``/``kept``, which
+    cannot separate a tuner that crashed from one that ran and found nothing --
+    the single question the audit trail exists to answer. Across one campaign 38
+    of 337 tuner runs ended ``failed`` or ``empty_output`` and the trace showed
+    none of them; one of those was 82 runs rejected by argparse in 11 seconds
+    and recorded as a clean ``no_improvement`` (#1211), which stayed invisible
+    for three weeks because this row had nowhere to put it.
+    """
+    error = tuner.get("error")
+    if isinstance(error, str) and len(error) > _TRACE_TUNER_ERROR_MAXLEN:
+        error = error[:_TRACE_TUNER_ERROR_MAXLEN] + "..."
+    row = {
+        "tuner": tuner.get("tuner") or tuner.get("name"),
+        "best_micro_speedup": tuner.get("best_micro_speedup"),
+        "kept": tuner.get("kept"),
+        "status": tuner.get("status"),
+        "elapsed_s": tuner.get("elapsed_s"),
+        "error_class": tuner.get("error_class"),
+        "error": error,
+    }
+    # A clean run stays as compact as before: everything added here is dropped
+    # when it is null, so a successful row gains only status and elapsed_s.
+    return {
+        k: v for k, v in row.items()
+        if k in _TRACE_TUNER_ALWAYS_KEYS or v is not None
+    }
+
+
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
@@ -4896,17 +4976,15 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
     engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
-    tuners: list[dict[str, Any]] = []
-    for t in result.get("tuners_run") or []:
-        if not isinstance(t, dict):
-            continue
-        tuners.append(
-            {
-                "tuner": t.get("tuner") or t.get("name"),
-                "best_micro_speedup": t.get("best_micro_speedup"),
-                "kept": t.get("kept"),
-            }
-        )
+    tuners: list[dict[str, Any]] = [
+        _trace_tuner_row(t) for t in (result.get("tuners_run") or []) if isinstance(t, dict)
+    ]
+    # The envelope reported no error class even when a tuner had named one, so a
+    # crashed run and a barren one looked alike at the top level too. Take the
+    # first one a tuner supplied rather than leaving the field null.
+    error_class = result.get("error_class") or next(
+        (t["error_class"] for t in tuners if t.get("error_class")), None
+    )
     row = {
         "kind": "gemm_tuning",
         "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -4923,7 +5001,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "workspace": result.get("workspace"),
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
-        "error_class": result.get("error_class"),
+        "error_class": error_class,
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:

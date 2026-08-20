@@ -2,7 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 """Behavior-lock tests for ``materialize_config_with_envs``: golden snapshots of
-the real materialized YAML, plus RUN_EVAL warn-once and unset/extra_envs restore."""
+the real materialized YAML, plus RUN_EVAL warn-once and unset/extra_envs restore.
+
+The snapshots carry ``AITER_LOG_TUNED_CONFIG`` because every serving run now gets
+it: aiter logs a tuned-config MISS unconditionally but the matching HIT only
+under that flag, and both GEMM shape discovery and apply verification read hits.
+Its position differs between the snapshots because ``extra_server_args`` seeds
+``EXTRA_*_ARGS`` earlier in the dict when a caller passes one.
+"""
 
 from __future__ import annotations
 
@@ -62,6 +69,7 @@ benchmark:
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     EXTRA_SGLANG_ARGS: --variant 4 --watchdog-timeout 1800
+    AITER_LOG_TUNED_CONFIG: '1'
     MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
@@ -78,6 +86,7 @@ benchmark:
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     EXTRA_VLLM_ARGS: --max-num-seqs 256
+    AITER_LOG_TUNED_CONFIG: '1'
     MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
@@ -99,6 +108,7 @@ benchmark:
       true, "detailed_annotations": true}'
     NUM_PROMPTS: 776
     NUM_WARMUPS: 8
+    AITER_LOG_TUNED_CONFIG: '1'
     EXTRA_SGLANG_ARGS: --watchdog-timeout 1800
     MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'

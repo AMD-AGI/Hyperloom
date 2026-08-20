@@ -2238,7 +2238,7 @@ def test_timeout_salvages_authoritative_best_result(tmp_path, monkeypatch):
         (campaign / "best_result.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "correctness_passed": True,
                     "commit_hash": best_commit,
                     "baseline_wall_ms": 10.0,

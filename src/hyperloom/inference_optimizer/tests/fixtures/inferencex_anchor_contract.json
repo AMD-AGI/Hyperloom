@@ -1,5 +1,5 @@
 {
-  "anchors_fingerprint": "f38b606980f3cd787834337a143b23aebc5ec37e54de459c7660ceb8c8faa028",
+  "anchors_fingerprint": "4917512af88fd31cf58f6f29c878266b4ec702ba3d9815dedb41b00177d0d7de",
   "files": {
     "benchmarks/benchmark_lib.sh": {
       "anchors": {
@@ -7,7 +7,7 @@
         "eval_start": 1,
         "num_prompts": 1
       },
-      "sha256": "b8b405b12f6d81fe58b5e9ef9ea7a3f84bb2b70fe7666ffa507aa99dadc4d427"
+      "sha256": "23dc5b2fcc2b66fb6f6afc509f7400da062f43f758d22f61881f73a3c441ce18"
     },
     "utils/bench_serving/benchmark_serving.py": {
       "anchors": {
@@ -16,10 +16,14 @@
       "sha256": "9bb3e5096ddc74398f8a33ec2dc7c787afa6ae7bf8f5dd2c8b2e387a280a7785"
     }
   },
+  "magpie_patch": {
+    "applies": true,
+    "path": "benchmarks/benchmark_lib.sh"
+  },
   "probe_target": {
     "path": "utils/evals/patches/lm_eval_sitecustomize.py",
     "sha256": "b46fbc383c896d16b2cf3e7f862ada35b97612d6179e71a5a7145e4dd15b2ea2"
   },
-  "ref": "a4bb43afa7fd74c1356583ed29e51421be010f0f",
+  "ref": "3d5581562f643f9bdeb8410cd924e2c70906c966",
   "refresh_with": "python scripts/refresh_inferencex_anchor_contract.py"
 }
