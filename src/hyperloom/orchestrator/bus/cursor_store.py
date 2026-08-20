@@ -101,15 +101,6 @@ class CursorStore:
             return CursorState.empty(agent)
         return CursorState.from_row(row)
 
-    async def all(self) -> dict[str, CursorState]:
-        """Load every agent's cursor.
-
-        Returns:
-            dict[str, CursorState]: Cursors keyed by agent identifier.
-        """
-        rows = await self.db.fetchall("SELECT * FROM cursors")
-        return {r["agent"]: CursorState.from_row(r) for r in rows}
-
     async def advance(
         self,
         agent: str,

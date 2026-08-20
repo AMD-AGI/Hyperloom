@@ -3619,7 +3619,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
-    """REQUEST with no registered handler emits an auto-reject RESPONSE and advances the kernel cursor."""
+    """REQUEST with no registered handler emits an auto-reject RESPONSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = True
@@ -3643,8 +3643,6 @@ async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
         assert r.payload["result"]["error_class"] == "unknown_kernel_kind"
         assert r.payload["source"] == "coordinator_auto_reject"
         assert "valid_kinds" in r.payload["result"]
-        cur = await c.cursors.load("kernel_agent")
-        assert cur.last_processed_seq == req_msgs[0].seq
     finally:
         await c.stop()
 

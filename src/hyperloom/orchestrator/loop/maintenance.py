@@ -28,7 +28,7 @@ async def run_lease_and_db_reclaim(
 
     Args:
         host: Anything exposing the Coordinator's ``locks``,
-            ``gpu_specialist_pool``, ``tasks``, ``db`` and ``cursors``.
+            ``gpu_specialist_pool``, ``tasks`` and ``db``.
         summary: Mutated in place with the per-step counts.
         reason: Reclaim reason recorded on the tasks and used as the log prefix.
     """
@@ -49,7 +49,7 @@ async def run_lease_and_db_reclaim(
     try:
         from ..bus import db_maintenance as _db_maint
 
-        res = await _db_maint.run_db_retention(host.db, host.cursors)
+        res = await _db_maint.run_db_retention(host.db)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
     except Exception:  # noqa: BLE001
@@ -73,9 +73,8 @@ class MaintenanceCollaborator:
         """Periodic in-process maintenance (R5 reaper + R4 DB retention).
 
         On a fixed tick cadence: actively reap TTL-expired serving + GPU leases
-        and prune the events/tasks DB (strictly below the resume anchor) so a
-        multi-day single-session run never leaks capacity or grows the DB
-        unbounded. Best-effort — every step is independently guarded so one
+        and prune the events/tasks DB so a multi-day single-session run never
+        leaks capacity or grows the DB unbounded. Best-effort — every step is independently guarded so one
         failure never aborts the run loop. Returns a summary dict when it ran,
         else ``None``.
 

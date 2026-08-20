@@ -101,55 +101,6 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypatch):
-    """After an inline 'trace_analyze' handler, the kernel cursor moves past the request."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        async def fake_handler(payload, *, session_dir):
-            return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake_handler,
-        )
-
-        cur_before = await c.cursors.load("kernel_agent")
-        assert cur_before.last_processed_seq == 0
-
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace.json"},
-            },
-        )
-        await c._handle_intent("orchestration", intent)
-
-        msgs = await c.bus.tail(n=10)
-        topics = [m.topic for m in msgs]
-        assert "request" in topics
-        assert "response" in topics
-
-        cur_after = await c.cursors.load("kernel_agent")
-        request_msg = next(m for m in msgs if m.topic == "request")
-        assert cur_after.last_processed_seq >= request_msg.seq, (
-            f"kernel cursor {cur_after.last_processed_seq} must be past "
-            f"request seq {request_msg.seq} to suppress duplicate response"
-        )
-        leftover = await c.bus.replay_for(
-            "kernel_agent",
-            after_seq=cur_after.last_processed_seq,
-        )
-        assert not any(m.topic == "request" and m.msg_id == request_msg.msg_id for m in leftover)
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
     """Successful trace_analyze caches; an identical request short-circuits the handler."""
     c = Coordinator(session_dir, backends=_silent_backends())
