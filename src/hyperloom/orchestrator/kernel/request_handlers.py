@@ -3727,6 +3727,10 @@ async def _run_forge_gemm_tuning(
 
     tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
     conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
+    # Sizes forge's prefill M bands. Without it forge infers one from the token
+    # coverage list, which is capped by conc and so describes a much shorter
+    # workload than a long-context arm actually serves.
+    isl = int(payload.get("isl") or state.isl or os.environ.get("ISL") or 0)
     gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
     tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs.
@@ -3907,6 +3911,11 @@ async def _run_forge_gemm_tuning(
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
+    # Only when it is actually known. Forge infers a shorter one from the token
+    # list otherwise, which is the pre-existing behaviour, and sending a zero
+    # would spend the option on nothing.
+    if isl > 0:
+        input_payload["isl"] = isl
     input_json = workspace / "forge_gemm_tuning_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [

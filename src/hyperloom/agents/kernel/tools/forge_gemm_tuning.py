@@ -48,6 +48,9 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "gpu_type", "--gpu-type")
     _add_opt(cmd, args, "tp", "--tp")
     _add_opt(cmd, args, "conc", "--conc")
+    # Absent unless the caller knows it: forge derives a fallback from --tokens,
+    # and older forge builds have no such option to receive.
+    _add_opt(cmd, args, "isl", "--isl")
     _add_opt(cmd, args, "mp", "--mp")
     _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
     _add_opt(cmd, args, "iters", "--iters")
