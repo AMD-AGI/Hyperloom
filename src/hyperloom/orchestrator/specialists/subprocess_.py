@@ -1176,53 +1176,6 @@ class SpecialistSubprocessDispatcher:
             )
         return pinned
 
-    def _build_agent_cmd(
-        self,
-        *,
-        prompt_file: Path,
-        workspace: Path,
-        worktree: Path | None,
-        disallowed_tools: frozenset[str] = frozenset(),
-        backend: str = "",
-        system_prompt: str = "",
-    ) -> list[str]:
-        """Assemble the argv for whichever agent CLI drives this specialist.
-
-        Args:
-            prompt_file (Path): User prompt file (stdin for both backends).
-            workspace (Path): Task workspace surfaced as a writable dir.
-            worktree (Path | None): Write-isolated worktree, when present.
-            disallowed_tools: Tool names to remove from the available set.
-                Applied only on the Claude path; Codex uses sandbox policy.
-            backend (str): Backend to build for; resolved from the config /
-                credential shape when empty.
-            system_prompt (str): Developer instructions (Codex) or system
-                prompt content (Claude, written to system_prompt.md).
-
-        Returns:
-            list[str]: The full command argv to spawn.
-
-        Raises:
-            SpecialistAgentUnavailableError: If the selected CLI has no runtime
-                or cannot be pointed at the deployment's gateway.
-        """
-        selected = backend or self._agent_backend()
-        if selected == AGENT_BACKEND_CODEX:
-            return self._build_codex_cmd(
-                prompt_file=prompt_file,
-                workspace=workspace,
-                worktree=worktree,
-                system_prompt=system_prompt,
-            )
-        return self._build_claude_cmd(
-            system_prompt_file=prompt_file.parent / "system_prompt.md",
-            system_prompt=system_prompt,
-            user_prompt_file=prompt_file,
-            workspace=workspace,
-            worktree=worktree,
-            disallowed_tools=disallowed_tools,
-        )
-
     def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
         """Return the dirs an agent CLI may write, in precedence order.
 
@@ -1375,10 +1328,8 @@ class SpecialistSubprocessDispatcher:
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
-        The Anthropic-side half of :meth:`_build_agent_cmd`. System and user
-        prompts travel through separate channels: system via
-        ``--system-prompt-file`` and user via stdin so untrusted task data
-        cannot reach the system-prompt slot.
+        System and user prompts travel through separate channels: system via
+        ``--system-prompt-file``, user via stdin.
 
         Args:
             system_prompt_file (Path): Destination for the written system prompt;

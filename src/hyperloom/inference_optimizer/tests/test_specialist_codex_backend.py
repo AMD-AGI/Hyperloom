@@ -298,13 +298,28 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
     prompt_file = workspace / "prompt.md"
     prompt_file.write_text("USER_PROMPT_SENTINEL", encoding="utf-8")
     cfg_overrides.setdefault("framework_source_roots", (str(framework),))
-    dispatcher = SpecialistSubprocessDispatcher(SpecialistSubprocessConfig(**cfg_overrides))
-    return dispatcher._build_agent_cmd(
-        prompt_file=prompt_file,
+    cfg = SpecialistSubprocessConfig(**cfg_overrides)
+    dispatcher = SpecialistSubprocessDispatcher(cfg)
+    backend = dispatcher._agent_backend()
+    if backend == AGENT_BACKEND_CODEX:
+        import os as _os
+        base_env = {k: v for k, v in _os.environ.items() if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST}
+        cmd, _ = dispatcher._build_codex_launch(
+            prompt_file=prompt_file,
+            workspace=workspace,
+            worktree=worktree,
+            system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
+            base_env=base_env,
+            probe_sandbox=False,
+        )
+        return cmd
+    return dispatcher._build_claude_cmd(
+        system_prompt_file=workspace / "system_prompt.md",
+        system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
+        user_prompt_file=prompt_file,
         workspace=workspace,
         worktree=worktree,
         disallowed_tools=frozenset(),
-        system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
     )
 
 

@@ -190,18 +190,12 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`.
 
     Args:
-        model: Claude model id (e.g. ``"claude-opus-5"``); defaults to
-            ``ANTHROPIC_MODEL`` env or library default.
-        api_key_env: env var checked at construction (``ANTHROPIC_API_KEY``
-            by default). Missing key is recorded as a soft warning — SDK
-            may still authenticate via Bedrock / Vertex.
-        max_turns_default: agent-loop budget when caller doesn't override;
-            ``run()`` floors it at 8 (12 conversational), so lower values
-            never reach the SDK.
-        enable_mcp_emit_intent: if True (default), registers the
-            in-process MCP ``emit_intent`` tool.
-        capture_turn_diagnostics: Capture full turn diagnostics for durable
-            orchestration tracing.
+        model: Claude model id; defaults to ``ANTHROPIC_MODEL`` env or library default.
+        api_key_env: Env var checked at construction (``ANTHROPIC_API_KEY`` by default).
+        max_turns_default: Agent-loop budget when caller doesn't override; floored at 8.
+        enable_mcp_emit_intent: Registers the in-process MCP ``emit_intent`` tool.
+        capture_turn_diagnostics: Capture full turn diagnostics for orchestration tracing.
+        allowed_intents: Role's permitted intent set; drives the output-format suffix.
     """
 
     model: str | None = None
@@ -217,9 +211,7 @@ class ClaudeBackend:
     # Raw single-shot completion mode: skips the emit_intent server + suffix,
     # disallows all tools, and returns ``raw_text`` without an emitted intent.
     raw_completion: bool = False
-    # The role's allowed intent set; used to render the output-format suffix so
-    # only the intents this role may emit are listed. None defaults to the full
-    # IntentType enumeration (legacy callers / tests that pre-date role records).
+    # Role's allowed intent set for the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
     # streamed SDK messages before the turn is aborted. Env override:

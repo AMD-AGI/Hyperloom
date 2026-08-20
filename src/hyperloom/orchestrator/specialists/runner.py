@@ -377,8 +377,7 @@ class SpecialistRunner:
         """Create a runner.
 
         Exactly one of ``backend_factory`` (in-process, tests) /
-        ``subprocess_config`` (PR-A2 ``claude`` subprocess, production) must
-        be supplied.
+        ``subprocess_config`` (subprocess, production) must be supplied.
 
         Args:
             backend_factory: In-process backend factory (tests path).
@@ -1388,7 +1387,7 @@ class SpecialistRunner:
         Args:
             ctx: The runner context for this specialist task.
             workspace: The task workspace the worktree is created under.
-            profile: Resolved dispatch profile; read-only mode skips worktree.
+            profile: Resolved dispatch profile; non-patch mode skips worktree.
 
         Returns:
             A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
