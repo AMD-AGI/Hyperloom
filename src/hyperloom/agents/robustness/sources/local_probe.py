@@ -9,7 +9,7 @@ extraction, HTTP server probe). A failing sub-probe returns empty data
 without raising; :class:`LocalProbeSource` raises
 :class:`SourceUnavailable` only when *every* sub-probe yields nothing,
 so :class:`DegradeRouter` does not flap. Cluster-wide metrics and
-node-level fault detection stay with robustness-server.
+node-level fault detection are out of scope.
 """
 
 from __future__ import annotations
@@ -1724,7 +1724,7 @@ def _sample_critic_workdir(
     session_dir: Path | None,
     max_judges: int,
 ) -> dict[str, Any]:
-    """Scan ``critic-workdir/<turn>/judge_bundle.json`` for E1+E4 signals.
+    """Scan ``critic-workdir/<turn>/judge_bundle.json`` for critic-health signals.
 
     Args:
         session_dir (Path | None): Session root containing
@@ -2096,7 +2096,7 @@ async def _probe_external_deps(
     mount_timeout_s: float,
     http_timeout_s: float,
 ) -> dict[str, Any]:
-    """Async wrapper that runs J1+J2+J3 probes once per tick.
+    """Async wrapper that runs the external-dependency probes once per tick.
 
     Args:
         gateway_probe_url_override (str): Explicit gateway probe URL;
@@ -2138,7 +2138,7 @@ async def _probe_gateway_health(
 
     A 401 here (with the same token + custom headers that critic +
     kernel-agent use) means the upstream gateway has revoked / lost the
-    key. Matching the main LLM auth resolver avoids false J1 alerts on
+    key. Matching the main LLM auth resolver avoids false gateway alerts on
     gateways that require ``Ocp-Apim-Subscription-Key`` for ``/models``.
 
     Args:

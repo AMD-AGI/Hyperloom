@@ -37,7 +37,6 @@ from .backends import (
     _build_proposal_scorer,
     _official_anthropic_only,
     _official_openai_only,
-    _robustness_server_configured,
     resolve_robustness_options,
 )
 from .model_gate import (
@@ -54,6 +53,8 @@ from ..model_config_utils import (
     summarize_model_config,
 )
 from .bootstrap import (
+    _begin_resume_leg,
+    _clean_stop_resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
@@ -96,7 +97,7 @@ from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from hyperloom.orchestrator.state.objective import Objective, build_objective
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
@@ -104,6 +105,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 )
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
+    ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
 )
@@ -448,7 +450,7 @@ SESSION_BUSY_EXIT_CODE = 3
 def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``.
 
-    Guards both fresh ``optimize`` and ``--resume`` against a second optimizer
+    Guards both fresh ``optimize`` and ``--resume-from`` against a second optimizer
     attaching to the same ``session_dir``. When a live optimizer already owns
     the session this refuses to run before any ``state.json`` / lease mutation.
 
@@ -1069,13 +1071,9 @@ _VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
 def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid.
 
-    Multi-node policy: on ``nodes>=2`` the agent's LocalProbe targets sandbox-local resources that live in
-    separate pods (HIGH false positives). Keep ``agent`` only when a robustness-server is configured; else
-    auto-downgrade to ``mock`` (explicit --robustness-agent gets a WARN).
-
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``robustness_backend`` / ``nodes`` and server config).
+            ``robustness_backend``).
 
     Returns:
         str: The resolved robustness backend (one of
@@ -1084,31 +1082,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen, explicit = _resolve_choice(
+    chosen, _ = _resolve_choice(
         "robustness_backend",
         DEFAULT_ROBUSTNESS_BACKEND,
         _VALID_ROBUSTNESS_BACKENDS,
         "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
         args=args,
     )
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
-        if explicit:
-            print(
-                f"WARN: --robustness-agent selected but nodes={nodes} and "
-                f"no robustness-server configured — the agent's LocalProbe "
-                f"family targets sandbox-local resources (ray, inference "
-                f"server, GPU, ...) that all live in separate pods on "
-                f"multi-node and surface as HIGH false positives. "
-                f"Auto-downgrading to --robustness-mock; configure "
-                f"--robustness-server-url / ROBUSTNESS_SERVER_URL to keep "
-                f"the agent backend, or pass --robustness-mock explicitly "
-                f"to suppress this warning. See "
-                f"src/hyperloom/inference_optimizer/multi_node/SKILL.md "
-                f"(Robustness limitation in multi-node mode).",
-                file=sys.stderr,
-            )
-        chosen = "mock"
     return chosen
 
 
@@ -1639,7 +1619,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
     # resume branch re-exports the real values after ``_resolve_workload_knobs``
     # so downstream (incl. preflight) never sees the placeholder default.
-    if not args.resume and not args.resume_from:
+    if not args.resume_from:
         _export_workload_envs_for_optimize(
             args,
             nodes_resolved=nodes_resolved,
@@ -1715,58 +1695,37 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         codex_follows_claude=codex_follows_claude,
     )
 
-    # `--resume-from <path>` implies `--resume` (operator convenience).
-    if args.resume_from and not args.resume:
-        args.resume = True
-
     # Before either session branch: these are read by the fresh-launch seeding
     # AND by the resume path, so this is the one place that covers both.
     _preflight_agentx_backend(args)
     _apply_agentx_budget_profile(args)
 
-    if args.resume:
-        # Resume mode: USER_DATA_PATH stays at workspace level; pick the
-        # per-session subdir via --resume-from or auto-pick the latest. Pin
-        # INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR for consistent resolution.
+    if args.resume_from:
+        # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
         from ..session.paths import (
             ENV_CURRENT_SESSION_DIR,
-            find_latest_per_session_dir,
             workspace_root,
         )
 
         ws = workspace_root()
-        if args.resume_from:
-            session_dir = Path(args.resume_from).expanduser().resolve()
-            try:
-                session_dir.relative_to(ws.resolve())
-            except ValueError:
-                print(
-                    f"ERROR: --resume-from {session_dir!r} is not under "
-                    f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
-                    f"workspace root (the parent of the per-session subdirs) "
-                    f"and pass the per-session subdir via --resume-from.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if not session_dir.is_dir():
-                print(
-                    f"ERROR: --resume-from {session_dir!r} does not exist.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        else:
-            picked = find_latest_per_session_dir()
-            if picked is not None:
-                session_dir = picked
-                print("  --resume: auto-picked latest per-session subdir")
-            else:
-                # No per-session subdir found — workspace_root itself is the
-                # session_dir (e.g. resuming a pre-existing single-dir session).
-                session_dir = ws
-                print(
-                    f"  --resume: no per-session subdir found under "
-                    f"{ws}/<model>/<ts>/; falling back to {ws}"
-                )
+        session_dir = Path(args.resume_from).expanduser().resolve()
+        try:
+            session_dir.relative_to(ws.resolve())
+        except ValueError:
+            print(
+                f"ERROR: --resume-from {session_dir!r} is not under "
+                f"$USER_DATA_PATH={ws}. Move USER_DATA_PATH to the "
+                f"workspace root (the parent of the per-session subdirs) "
+                f"and pass the per-session subdir via --resume-from.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if not session_dir.is_dir():
+            print(
+                f"ERROR: --resume-from {session_dir!r} does not exist.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
         os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
         # Ensure per-session skeleton exists (idempotent mkdir -p).
@@ -1782,11 +1741,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         try:
             manifest = load_manifest(session_dir)
         except FileNotFoundError as exc:
-            print(f"ERROR: --resume failed: {exc}", file=sys.stderr)
+            print(f"ERROR: --resume-from failed: {exc}", file=sys.stderr)
             sys.exit(2)
         if not (session_dir / "state.json").exists():
             print(
-                f"ERROR: --resume failed: {session_dir}/state.json missing "
+                f"ERROR: --resume-from failed: {session_dir}/state.json missing "
                 f"(manifest exists but Coordinator never wrote SharedState)",
                 file=sys.stderr,
             )
@@ -1804,7 +1763,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
         print(f"  prior baseline_tput   : {state.baseline_tput:.1f}")
-        print(f"  prior cumul_gain      : {state.cumulative_gain:.2f}%")
+        print(f"  prior cumul_gain      : {state.cumulative_gain_validated:.2f}%")
         print(
             f"  prior current_best    : "
             f"{(state.current_best or {}).get('action')}/"
@@ -1953,7 +1912,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     f"(cannot retroactively ungrade prior KEEPs)"
                 )
 
-        # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
         prior_crash = state.crash_count
 
         # target_reached is a terminal state requiring --force-resume to push
@@ -1962,7 +1920,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         gated_terminal = {"target_reached"}
         if prior_stop in gated_terminal and not force_resume:
             print(
-                f"\nERROR: --resume blocked by terminal stop_reason="
+                f"\nERROR: --resume-from blocked by terminal stop_reason="
                 f"{prior_stop!r}.\n"
                 f"\n"
                 f"  SKILL.md (Run-time signals): {prior_stop!r} is a "
@@ -1987,38 +1945,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
 
-        if prior_stop or prior_crash >= 3:
-            state.stop_reason = ""
-            state.closing_phase = False
-            state.closing_started_unix = 0.0
-            state.closing_report_task_id = ""
-            # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
-            state.crash_count = 0
-            # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
-            from datetime import datetime, timezone
-
-            state.start_ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-            state.save(session_dir)
+        reanchor_budget = bool(prior_stop or prior_crash >= 3)
+        _begin_resume_leg(state, reanchor_budget=reanchor_budget)
+        state.save(session_dir)
+        if reanchor_budget:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
         else:
-            # A clean stop (no stop_reason, crash_count < 3) keeps start_ts, so
-            # --max-hours is measured from the ORIGINAL session start and the
-            # earlier legs' wall-clock is already spent. Say so: an operator who
-            # stops a run by hand reads --max-hours as "from now".
-            elapsed_h = state.elapsed_minutes() / 60.0
-            budget_h = float(getattr(args, "max_hours", 0) or 0)
-            print(
-                f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
-                f"--max-hours counts from the original session start"
-            )
-            print(f"  → budget: {elapsed_h:.2f}h already elapsed of {budget_h:.2f}h → {budget_h - elapsed_h:.2f}h left")
-            if budget_h and elapsed_h >= budget_h:
-                print(
-                    "  → WARNING: this budget is already exhausted; raise --max-hours "
-                    "or start a fresh session, or the run stops almost immediately"
-                )
+            for line in _clean_stop_resume_budget_lines(
+                state,
+                max_hours=float(getattr(args, "max_hours", 0) or 0),
+            ):
+                print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
@@ -2040,8 +1979,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if not args.model:
             print(
                 "ERROR: model is required. Pass --model <path> or set "
-                "MODEL_PATH env (or use --resume to continue an existing "
-                "session at the canonical session_dir).",
+                "MODEL_PATH env (or use --resume-from <session_dir> to "
+                "continue an existing session).",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -2165,7 +2104,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
-        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/.
+        # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         # Use the resolved identity so a quantized run is named after the source
         # model (e.g. "<model>-quantized") instead of the generic export-dir
         # basename "quantized".
@@ -2338,6 +2277,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Resolve robustness backend choice + runtime root, mirroring critic.
     robustness_choice = _resolve_robustness_choice(args)
     robustness_agent_root: Path | None = None
+    # T0 anchor writes warm_start_* via its own SharedState load; reload before
+    # persisting launch-shape fields so seed/resume memory cannot clobber them.
+    state = SharedState.load_or_init(session_dir)
     robustness_options = resolve_robustness_options(args, state)
     state.robustness_options = robustness_options
     # Persist before the Coordinator reads SharedState off disk, or the launch
@@ -2372,7 +2314,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin
-    # env var; reinforced here for --resume paths. Do NOT overwrite
+    # env var; reinforced here for resume paths. Do NOT overwrite
     # USER_DATA_PATH — it must remain the workspace root for concurrent sessions
     # and install.sh on shared filesystems (WekaFS).
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
@@ -2404,7 +2346,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Advisory multi-model specialist-proposal scorer, disabled by default
         # (enable via --proposal-scoring). When active it scores each
         # proposal_set and surfaces results to Orchestration without gating.
-        # Not persisted across --resume. ``session_dir`` lets it append per-model
+        # Not persisted across a resume. ``session_dir`` lets it append per-model
         # token usage to the full-trace ledger (component=proposal_scorer).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON; fires when
@@ -2560,28 +2502,28 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             closing_grace_sec=args.closing_grace_sec,
         )
     finally:
-        await coordinator.stop()
+        state = coordinator.shared_state
+        with timed_teardown_step(state, "coordinator_stop"):
+            await coordinator.stop()
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
-        session_lock.release()
+        with timed_teardown_step(state, "session_lock"):
+            session_lock.release()
         # Crash-safe reports/final.json. Runs unconditionally and first so a
         # machine-readable summary always exists even when the CLOSE sequencer
         # never ran. Idempotent: a no-op when ReportExecutor already wrote it.
         try:
             from ..breakdown import write_minimal_final_json
 
-            final_json = write_minimal_final_json(session_dir)
+            with timed_teardown_step(state, "final_json"):
+                final_json = write_minimal_final_json(session_dir)
             print(f"Final summary     : {final_json}")
         except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
             log.exception("crash-safe final.json write failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
-        sequencer_done = getattr(
-            coordinator.shared_state,
-            "close_sequence_done",
-            False,
-        )
+        sequencer_done = getattr(state, "close_sequence_done", False)
         if sequencer_done:
             print(
                 "Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)"
@@ -2593,18 +2535,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     record_session_breakdown,
                 )
 
-                flush_session(session_dir)
-                from ..breakdown import patch_breakdown_langfuse
+                with timed_teardown_step(state, "langfuse"):
+                    flush_session(session_dir)
+                    from ..breakdown import patch_breakdown_langfuse
 
-                patch_breakdown_langfuse(session_dir)
-                record_session_breakdown(session_dir)
+                    patch_breakdown_langfuse(session_dir)
+                    record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
             try:
                 from ..breakdown import write_breakdown_json
 
-                breakdown_path = write_breakdown_json(session_dir)
+                with timed_teardown_step(state, "session_breakdown"):
+                    breakdown_path = write_breakdown_json(session_dir)
                 print(f"Session breakdown : {breakdown_path}")
             except Exception:  # noqa: BLE001
                 log.exception("session_breakdown finalize failed (non-fatal)")
@@ -2612,7 +2556,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             try:
                 from ..breakdown import write_minimal_final_report
 
-                final_md = write_minimal_final_report(session_dir)
+                with timed_teardown_step(state, "final_md"):
+                    final_md = write_minimal_final_report(session_dir)
                 print(f"Final report      : {final_md}")
             except Exception:  # noqa: BLE001
                 log.exception("emergency final report write failed (non-fatal)")
@@ -2627,11 +2572,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     record_session_breakdown,
                 )
 
-                flush_session(session_dir)
-                from ..breakdown import patch_breakdown_langfuse
+                with timed_teardown_step(state, "langfuse"):
+                    flush_session(session_dir)
+                    from ..breakdown import patch_breakdown_langfuse
 
-                patch_breakdown_langfuse(session_dir)
-                record_session_breakdown(session_dir)
+                    patch_breakdown_langfuse(session_dir)
+                    record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
@@ -2642,16 +2588,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         try:
             from ..breakdown import package_session_artifacts
 
-            pkg_path = package_session_artifacts(
-                session_dir,
-                session_id=str(
-                    getattr(coordinator.shared_state, "session_id", "") or "",
-                ),
-            )
+            with timed_teardown_step(state, "artifact_package"):
+                pkg_path = package_session_artifacts(
+                    session_dir,
+                    session_id=str(getattr(state, "session_id", "") or ""),
+                )
             if pkg_path is not None:
                 print(f"Artifact package  : {pkg_path}")
         except Exception:  # noqa: BLE001
             log.exception("session artifact package failed (non-fatal)")
+        try:
+            state.save(session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to persist teardown timings (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
@@ -2683,6 +2632,12 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
+
+    # Absolutise before the parser defaults or any session path derive from it:
+    # subprocesses run with their own cwd, so a relative value would diverge.
+    user_data = os.environ.get(ENV_USER_DATA_PATH, "")
+    if user_data and not Path(user_data).is_absolute():
+        os.environ[ENV_USER_DATA_PATH] = str(Path(user_data).expanduser().absolute())
 
     parser = _build_parser()
     # Strict on purpose. The platform's prompt FLAGS block is authored by hand,

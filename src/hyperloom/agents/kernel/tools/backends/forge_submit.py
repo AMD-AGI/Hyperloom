@@ -37,6 +37,7 @@ from _task_group_contract import (  # noqa: E402
     logical_operator_name,
     task_group_shape_cases,
 )
+from _vendor_operator_playbooks import match_vendor_operator_playbook  # noqa: E402
 
 if _TOOLS_DIR_INSERTED:
     sys.path.remove(_TOOLS_DIR)
@@ -2952,11 +2953,19 @@ def _run_loop_via_cli(
     # logged in". Pin codex instead, and disable the provider fallback (it
     # defaults to claude) so a missing Codex SDK fails loudly here rather than
     # degrading into an unauthenticated claude run.
+    #
+    # Model id uses the shared Forge ladder (FORGE_* → CLAUDE/CODEX_MODEL) so
+    # rewrite honors the same overrides as fusion and collective. Omit --model
+    # when unset so KernelForge keeps its own provider default.
+    from hyperloom.common.llm_config import resolve_forge_llm_model
+
     if _openai_only_provider():
         cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
-        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
-        if codex_model:
-            cmd += ["--model", codex_model]
+        forge_model = resolve_forge_llm_model("codex")
+    else:
+        forge_model = resolve_forge_llm_model("claude")
+    if forge_model:
+        cmd += ["--model", forge_model]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
@@ -3176,9 +3185,19 @@ def _run_rewrite_via_cli(
     # has no options for: it takes no --agent-backend, so its Config reads these.
     # Without them an OpenAI-only deployment resolves "auto" to the claude
     # provider and every session fails "Not logged in", after the whole budget.
+    #
+    # forge-rewrite-by-flydsl accepts --model (overrides KERNEL_AGENTS_MODEL /
+    # FORGE_AGENT_MODEL). KernelForge Config does not read FORGE_CLAUDE_MODEL /
+    # FORGE_CODEX_MODEL, so Hyperloom must resolve and pass the id explicitly —
+    # the same ladder forge-loop / fusion / collective already use.
+    from hyperloom.common.llm_config import resolve_forge_llm_model
+
     if _openai_only_provider():
         env["FORGE_AGENT_BACKEND"] = "codex"
         env["FORGE_AGENT_FALLBACK_PROVIDER"] = "none"
+        forge_model = resolve_forge_llm_model("codex")
+    else:
+        forge_model = resolve_forge_llm_model("claude")
     if "/aiter/" in (source_kernel or ""):
         env.pop("AITER_REBUILD", None)
         _ensure_flydsl_aiter_compat()
@@ -3219,6 +3238,8 @@ def _run_rewrite_via_cli(
     # rewrite producer files its port under an identity the model is part of,
     # and an unresolved model has to be said rather than left out.
     cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
+    if forge_model:
+        cmd += ["--model", forge_model]
     if source_entry:
         cmd += ["--source-entry", source_entry]
     if source_language:
@@ -3689,6 +3710,828 @@ def _finalize_forge_workspace(
     )
 
 
+# --- Vendor-operator-playbook route -----------------------------------------
+#
+# A vendor-playbook candidate (mori's EP dispatch/combine is the first case,
+# see _vendor_operator_playbooks.py and KernelForge PR #88) has no rewritable
+# device source: it's a pip-installed compiled library. Instead of the
+# git-worktree / source-rewrite pipeline `submit()` otherwise runs, this copies
+# a validated KernelForge `examples/<task>/` bundle into a scratch workspace
+# and runs forge-loop against that bundle's own driver/config/program.md.
+#
+# mori's dispatch and combine are two separate hot-kernel candidates that
+# share one playbook id and are deliberately invoked as **one** Forge
+# task/session (not two) -- the lock/result files below de-duplicate so a
+# session that dispatches both candidates only launches forge-loop once.
+
+_VENDOR_PLAYBOOK_CLAIM_POLL_S = 5.0
+
+# A cached FAILURE only de-dupes submissions within this window -- long
+# enough to catch a genuinely concurrent dispatch+combine pair, short enough
+# that Hyperloom's normal "fail -> add budget -> retry" model gets a fresh
+# attempt instead of the whole group being permanently retired for the rest
+# of the session by one transient failure (see PR #1191 review finding #2).
+# A cached SUCCESS has no such expiry: sharing one session's result for the
+# rest of the session is the intended dedup behavior this module implements.
+_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S = 600.0
+
+# Extra time past an attempt's own timeout_s before its claim is presumed
+# abandoned (SIGKILL budget enforcement, OOM, node restart -- anything that
+# kills the holder without a chance to write result.json) rather than merely
+# still finishing up (writing the report, staging the artifact copy, etc).
+_VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S = 120.0
+
+
+def _vendor_playbook_lock_dir(output_dir: Path, group_id: str) -> Path:
+    """Return the session-scoped directory used to de-duplicate a playbook group.
+
+    ``output_dir`` is per-attempt (``.../forge/<session_id>/<prompt_stem>``);
+    the lock lives one level up so every kernel_id in the same analysis
+    session and playbook group shares it.
+    """
+    safe_group = re.sub(r"[^A-Za-z0-9_-]+", "-", group_id).strip("-") or "vendor-playbook"
+    return output_dir.parent / "vendor_playbook_locks" / safe_group
+
+
+def _read_vendor_playbook_cached_result(
+    lock_dir: Path, *, max_failure_age_s: float | None = None
+) -> dict | None:
+    """Read a previously-cached vendor-playbook result, if any.
+
+    A cached SUCCESS (``returncode == 0``) is returned unconditionally --
+    sharing one session's validated result for the rest of the session is
+    the intended dedup behavior. A cached FAILURE is only returned while it
+    is younger than ``max_failure_age_s``; once it ages out it is treated as
+    absent so a fresh submission actually retries instead of one transient
+    failure (FORGE_PATH momentarily unset, a flaky bundle copy, etc.)
+    permanently wedging the whole playbook group for the rest of the session
+    (PR #1191 review finding #2).
+    """
+    result_path = lock_dir / "result.json"
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if max_failure_age_s is not None and result.get("returncode") != 0:
+        try:
+            age_s = time.time() - result_path.stat().st_mtime
+        except OSError:
+            age_s = None
+        if age_s is not None and age_s > max_failure_age_s:
+            return None
+    return result
+
+
+def _write_vendor_playbook_result(lock_dir: Path, result: dict) -> None:
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = lock_dir / f".result.json.{uuid.uuid4().hex[:8]}.tmp"
+    tmp_path.write_text(json.dumps(result, sort_keys=True, default=str), encoding="utf-8")
+    tmp_path.replace(lock_dir / "result.json")
+
+
+def _write_claim_marker(claim_path: Path, *, nonce: str | None = None) -> str:
+    """Write ``{pid, claimed_at, nonce}`` into an already-created claim file.
+
+    The timestamp lets any waiter compute how long the claim has been held
+    without a result appearing; the nonce lets ``_steal_stale_claim`` verify
+    which of several racing stealers actually won the replace.
+    """
+    nonce = nonce or uuid.uuid4().hex
+    payload = {"pid": os.getpid(), "claimed_at": time.time(), "nonce": nonce}
+    claim_path.write_text(json.dumps(payload), encoding="utf-8")
+    return nonce
+
+
+def _claim_marker_age_s(claim_path: Path) -> float | None:
+    """Return how long ago ``claim_path`` was claimed, or ``None`` if unknown."""
+    try:
+        raw = claim_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    claimed_at: float | None = None
+    if raw.strip():
+        try:
+            claimed_at = float(json.loads(raw).get("claimed_at"))
+        except (ValueError, TypeError):
+            claimed_at = None
+    if claimed_at is None:
+        # Marker predates this format (or failed to write its JSON body) --
+        # fall back to the file's own mtime rather than treating age as
+        # unknown, since os.O_CREAT|O_EXCL always sets one.
+        try:
+            claimed_at = claim_path.stat().st_mtime
+        except OSError:
+            return None
+    return max(0.0, time.time() - claimed_at)
+
+
+def _claim_is_stale(claim_path: Path, timeout_s: int) -> bool:
+    """A claim is stale (its holder is presumed done or dead) when either:
+
+    1. A result already exists but has aged out of the failure-cache TTL
+       (``_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S``) -- the completed attempt's
+       ``claimed.lock`` is never deleted, so without this check a lingering
+       claim from a long-finished, now-expired failure would block every
+       later retry from ever running (PR #1191 review finding #2 combined
+       with #3: the claim and the result cache must age out together).
+    2. The claim is older than its own attempt budget plus grace, with no
+       result at all -- covers SIGKILL budget enforcement, OOM, and node
+       restarts, none of which give the holder a chance to write
+       ``result.json``. Without this check every subsequent submission for
+       the group would poll ``_wait_for_vendor_playbook_result`` all the way
+       to its deadline and still find nothing -- for a 60-minute-budget
+       attempt, that is an hour burned per submission (PR #1191 review
+       finding #3).
+    """
+    lock_dir = claim_path.parent
+    cached = _read_vendor_playbook_cached_result(
+        lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
+    )
+    if cached is None and (lock_dir / "result.json").is_file():
+        return True
+    age_s = _claim_marker_age_s(claim_path)
+    if age_s is None:
+        return False
+    return age_s > (float(timeout_s) + _VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S)
+
+
+def _steal_stale_claim(claim_path: Path) -> bool:
+    """Atomically replace a stale claim, verifying this caller actually won it.
+
+    ``os.replace`` never raises when the target already exists, so two
+    waiters racing to steal the same stale claim could both believe they
+    succeeded. Tag the write with a nonce and read it back afterwards: only
+    the caller whose nonce is what's on disk is the new owner.
+    """
+    nonce = uuid.uuid4().hex
+    tmp_path = claim_path.with_name(f".{claim_path.name}.{nonce}.tmp")
+    try:
+        _write_claim_marker(tmp_path, nonce=nonce)
+        os.replace(str(tmp_path), str(claim_path))
+        current = json.loads(claim_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            # Best-effort scratch-file cleanup only: by now tmp_path has
+            # already been atomically replaced onto claim_path (success) or
+            # never fully written (failure), so nothing downstream depends
+            # on this unlink -- it must never raise out of a claim-stealing
+            # attempt over something as inconsequential as a leftover temp
+            # file (missing_ok=True already covers the common "already
+            # gone" case; this only guards rarer failures like EPERM).
+            pass
+    return current.get("nonce") == nonce
+
+
+def _claim_vendor_playbook_run(lock_dir: Path, timeout_s: int) -> bool:
+    """Atomically claim the right to run this group's one forge-loop session.
+
+    Returns ``True`` for whichever caller wins the race (dispatch or
+    combine, whichever the orchestrator happened to submit first); the loser
+    waits for the winner's result instead of launching a second session.
+    Also returns ``True`` when the existing claim is stale (its holder is
+    presumed dead) and this caller wins the steal.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    claim_path = lock_dir / "claimed.lock"
+    try:
+        fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        if not _claim_is_stale(claim_path, timeout_s):
+            return False
+        return _steal_stale_claim(claim_path)
+    try:
+        _write_claim_marker(claim_path)
+    except OSError:
+        log.warning(
+            "forge: claimed %s but could not write its pid/timestamp marker; "
+            "staleness detection will fall back to file mtime",
+            claim_path,
+        )
+    return True
+
+
+def _wait_for_vendor_playbook_result(
+    lock_dir: Path, deadline_unix: float, timeout_s: int
+) -> dict | None:
+    """Poll for the winner's result until it appears, the claim looks
+    abandoned, or ``deadline_unix`` passes.
+
+    Returns early (well before ``deadline_unix``) the moment the claim looks
+    stale, so a waiter never burns its entire poll window on a holder that
+    was SIGKILLed/OOM-killed and will never write a result (PR #1191 review
+    finding #3). The caller is responsible for then trying to claim (steal)
+    the group itself rather than treating an early ``None`` as a hard
+    failure.
+    """
+    claim_path = lock_dir / "claimed.lock"
+    while True:
+        cached = _read_vendor_playbook_cached_result(
+            lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
+        )
+        if cached is not None:
+            return cached
+        if _claim_is_stale(claim_path, timeout_s):
+            return None
+        if time.time() >= deadline_unix:
+            return None
+        time.sleep(min(_VENDOR_PLAYBOOK_CLAIM_POLL_S, max(0.0, deadline_unix - time.time())))
+
+
+def _stage_vendor_playbook_artifact_for_reuse(cached: dict, output_dir: Path) -> None:
+    """Duplicate a reused vendor-playbook result's artifact under ``output_dir``.
+
+    ``kernel_optimization.py``'s ``invoke_backend()`` unconditionally resets
+    ``result["output_dir"]`` to *this* attempt's own directory right after
+    ``submit()`` returns (``result["output_dir"] = str(out_dir)``), and
+    ``_candidate_artifact_paths()`` looks under both ``cli_workspace`` and
+    ``output_dir`` for an ``optimized_versions/`` directory. A cache-hit
+    result's ``cli_workspace``/``output_dir`` fields describe the *winner's*
+    directory (correct at the time they were written to ``result.json``,
+    before that later overwrite mutates the in-memory dict this call
+    returns), so the winner's directory alone would silently stop being
+    reachable for a reused sibling once the caller clobbers ``output_dir``.
+    Physically copying the file(s) here makes the reused result
+    self-contained regardless of that overwrite.
+    """
+    src_opt = None
+    for key in ("cli_workspace", "output_dir"):
+        candidate_dir = cached.get(key)
+        if not candidate_dir:
+            continue
+        probe = Path(candidate_dir) / "optimized_versions"
+        if probe.is_dir():
+            src_opt = probe
+            break
+    if src_opt is None:
+        return
+    dest_opt = output_dir / "optimized_versions"
+    try:
+        dest_opt.mkdir(parents=True, exist_ok=True)
+        for item in src_opt.iterdir():
+            if not item.is_file():
+                continue
+            dest = dest_opt / item.name
+            if not dest.exists():
+                shutil.copy2(item, dest)
+    except OSError as exc:
+        log.warning("forge: could not stage reused vendor playbook artifact copy: %s", exc)
+
+
+def _copy_vendor_task_bundle(task_bundle_root: Path, workspace: Path) -> None:
+    """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and
+    git-init it there.
+
+    forge-loop's IterationLoop runs ``git status``/``git checkout`` against
+    the workspace to snapshot and restore each attempt (see the bundle's own
+    ``run_example.sh``, which does the identical ``git init`` + commit before
+    invoking forge-loop directly); a bare directory of copied files with no
+    ``.git`` fails the very first git call with "not a git repository".
+    """
+    workspace.mkdir(parents=True, exist_ok=True)
+    for item in sorted(task_bundle_root.iterdir()):
+        if item.name in (".git", "__pycache__"):
+            continue
+        dest = workspace / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
+    gitignore = workspace / ".gitignore"
+    if not gitignore.is_file():
+        gitignore.write_text(
+            "__pycache__/\n*.pyc\n*.log\nbuild/\nforge_experiments/\n", encoding="utf-8"
+        )
+    _git = shutil.which("git") or "git"
+    subprocess.run([_git, "init", "-q"], cwd=str(workspace), check=True)
+    subprocess.run(
+        [_git, "config", "user.email", "forge-vendor-playbook@local"],
+        cwd=str(workspace),
+        check=True,
+    )
+    subprocess.run(
+        [_git, "config", "user.name", "forge-vendor-playbook"],
+        cwd=str(workspace),
+        check=True,
+    )
+    subprocess.run([_git, "add", "-A"], cwd=str(workspace), check=True)
+    subprocess.run(
+        [_git, "commit", "-q", "-m", "vendor playbook: initial task bundle", "--allow-empty"],
+        cwd=str(workspace),
+        check=True,
+    )
+
+
+def _run_vendor_playbook_loop_via_cli(
+    *,
+    kernel_anchor: str,
+    driver: str,
+    workspace: str,
+    snr_threshold: float,
+    max_iters: int,
+    max_hours: float,
+    branch: str,
+    gpu_target: str,
+    gpu_type: str,
+    fellow: str,
+    program_md_file: str,
+    target_functions: list[str],
+    experiments_dir: Path,
+    forge_log: Path,
+    timeout_s: int,
+    deadline_unix: float,
+    experience_id: str,
+    extra_env: dict[str, str] | None = None,
+) -> ForgeLoopOutcome:
+    """Run forge-loop against a copied vendor-playbook task bundle.
+
+    Mirrors ``_run_loop_via_cli``'s subprocess/result-parsing conventions, but
+    always passes ``--no-profiling --no-prepare-task`` (the bundle already
+    ships a hand-written, validated ``driver.py`` -- forge-loop's own
+    task-preparer/profiler must not try to author or reprofile it) and forwards
+    the playbook's own env requirements (e.g. ``KERNELFORGE_INCLUDE_MORI_KB``).
+    """
+    result_json = experiments_dir.parent / "forge_cli_result.json"
+    checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
+    for stale_path in (result_json, checkpoint_json):
+        try:
+            stale_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not clear stale Forge recovery artifact {stale_path}: {exc}"
+            ) from exc
+
+    forge_root = _ensure_forge_on_path()
+    env = dict(os.environ)
+    if forge_root:
+        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
+    env["GPU_TARGET"] = gpu_target
+    _apply_gpu_type_env(env, gpu_type)
+    _apply_fellow_env(env)
+    for key, value in (extra_env or {}).items():
+        env[str(key)] = str(value)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kernel_agents.cli",
+        "forge-loop",
+        "--kernel",
+        kernel_anchor,
+        "--driver",
+        driver,
+        "--workspace",
+        workspace,
+        "--snr-threshold",
+        str(snr_threshold),
+        "--max-iters",
+        str(max_iters),
+        "--max-hours",
+        str(max_hours),
+        "--git-branch",
+        branch,
+        "--gpu-target",
+        gpu_target,
+        "--fellow",
+        fellow,
+        "--experiments-dir",
+        str(experiments_dir),
+        "--experiment-id",
+        _FORGE_EXPERIMENT_ID,
+        "--experience-id",
+        experience_id or experiments_dir.parent.name,
+        "--deadline-unix",
+        str(deadline_unix),
+        "--result-json",
+        str(result_json),
+        "--no-profiling",
+        "--no-prepare-task",
+    ]
+    cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
+    if _openai_only_provider():
+        cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
+        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
+        if codex_model:
+            cmd += ["--model", codex_model]
+    if program_md_file and Path(program_md_file).exists():
+        cmd += ["--program-md-file", str(program_md_file)]
+    if target_functions:
+        cmd += ["--target-functions", ",".join(target_functions)]
+
+    loop_exc = None
+    out = ""
+    timed_out = False
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=workspace,
+            start_new_session=True,
+        )
+        try:
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stdout, stderr = _terminate_forge_process(proc)
+        out = (stdout or "") + "\n" + (stderr or "")
+        if timed_out:
+            loop_exc = RuntimeError(f"forge-loop exceeded absolute deadline after {timeout_s}s")
+        if proc.returncode != 0:
+            if loop_exc is None:
+                loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}: {_forge_failure_tail(out)}")
+    except Exception as exc:  # noqa: BLE001
+        loop_exc = exc
+
+    try:
+        with open(forge_log, "a") as f:
+            f.write("\n=== forge-loop vendor-playbook (cli) stdout ===\n")
+            f.write(out)
+            if loop_exc:
+                f.write(f"\n=== forge-loop exception ===\n{loop_exc}\n")
+    except OSError:  # noqa: S110
+        pass
+
+    baseline_ms = best_ms = None
+    pristine_baseline_ms = search_start_ms = None
+    mean_case_speedup = search_start_mean_case_speedup = None
+    improved = improved_during_search = total_improved = incremental_improved = False
+    parsed = None
+    try:
+        if result_json.exists():
+            parsed = json.loads(result_json.read_text())
+    except Exception:
+        parsed = None
+    if parsed is None and "__FORGE_RESULT__" in out:
+        try:
+            parsed = json.loads(out.split("__FORGE_RESULT__")[1])
+        except Exception:
+            parsed = None
+    if parsed:
+        baseline_ms = parsed.get("baseline_ms")
+        best_ms = parsed.get("best_ms")
+        pristine_baseline_ms = parsed.get("pristine_baseline_ms", baseline_ms)
+        search_start_ms = parsed.get("search_start_ms", baseline_ms)
+        (
+            mean_case_speedup,
+            search_start_mean_case_speedup,
+            total_improved,
+            incremental_improved,
+        ) = _observed_mean_case_result_fields(parsed)
+        improved = total_improved
+        improved_during_search = incremental_improved
+        if parsed.get("deadline_expired"):
+            timed_out = True
+            if loop_exc is None:
+                loop_exc = RuntimeError("forge-loop reached its graceful absolute deadline")
+    checkpoint = _read_forge_checkpoint(experiments_dir)
+    return ForgeLoopOutcome(
+        baseline_ms=baseline_ms,
+        best_ms=best_ms,
+        improved=improved,
+        output=out,
+        error=loop_exc,
+        timed_out=timed_out,
+        checkpoint=checkpoint,
+        pristine_baseline_ms=pristine_baseline_ms,
+        search_start_ms=search_start_ms,
+        improved_during_search=improved_during_search,
+        structured_result=parsed if isinstance(parsed, dict) else None,
+        mean_case_speedup=mean_case_speedup,
+        search_start_mean_case_speedup=search_start_mean_case_speedup,
+        total_improved=total_improved,
+        incremental_improved=incremental_improved,
+    )
+
+
+def _run_claimed_vendor_playbook(
+    *,
+    candidate: dict[str, Any],
+    prompt_file: Path,
+    output_dir: Path,
+    timeout_s: int,
+    playbook: dict[str, Any],
+    group_id: str,
+    role: str,
+    lock_dir: Path,
+    started: float,
+) -> dict:
+    """Copy the task bundle and run forge-loop, having already won the claim.
+
+    May raise (e.g. ``subprocess.CalledProcessError`` from the git-init
+    calls in ``_copy_vendor_task_bundle``, or anything else unexpected from
+    forge-loop setup) -- the caller (``_submit_vendor_playbook``) must catch
+    broadly and always write a result to ``lock_dir``, or a raised exception
+    here leaves ``claimed.lock`` in place forever with no result for any
+    waiting sibling or later retry to find.
+    """
+    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
+    if not forge_root:
+        result = _normalized(
+            2,
+            "",
+            "forge: FORGE_PATH is not set; cannot locate the KernelForge "
+            f"examples/ task bundle for vendor playbook {group_id!r}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    task_bundle_root = Path(forge_root) / str(playbook.get("task_bundle") or "")
+    if not task_bundle_root.is_dir():
+        result = _normalized(
+            2,
+            "",
+            f"forge: vendor playbook task bundle not found: {task_bundle_root}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    workspace = output_dir / "worktree"
+    if workspace.exists() or workspace.is_symlink():
+        result = _normalized(
+            2,
+            "",
+            f"forge: retained vendor playbook workspace already exists: {workspace}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    try:
+        _copy_vendor_task_bundle(task_bundle_root, workspace)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # _copy_vendor_task_bundle's git init/config/add/commit calls run with
+        # check=True and raise CalledProcessError, not OSError, on failure.
+        result = _normalized(
+            2,
+            "",
+            f"forge: failed to copy vendor playbook task bundle {task_bundle_root} "
+            f"-> {workspace}: {exc}",
+            time.time() - started,
+            skipped=True,
+        )
+        _write_vendor_playbook_result(lock_dir, result)
+        return result
+
+    kernel_anchor = workspace / str(playbook.get("kernel_anchor") or "")
+    driver = workspace / str(playbook.get("driver") or "driver.py")
+    program_md = workspace / str(playbook.get("program_md") or "program.md")
+    if not program_md.is_file():
+        program_md = Path(prompt_file)
+
+    experiments_dir = output_dir / "forge_experiments"
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+    forge_log = output_dir / "forge_loop.log"
+    branch = _new_forge_branch(output_dir, str(kernel_anchor))
+    gpu_target = _resolve_gpu_target(candidate)
+    gpu_type = _resolve_gpu_type(candidate)
+    max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
+    snr_threshold = float(playbook.get("snr_threshold", 30.0))
+    if timeout_s < _FORGE_MIN_BUDGET_SEC:
+        log.warning(
+            "forge budget %.0f min is below the %d-min minimum forge-loop "
+            "accepts for vendor playbook %r; running with the floored "
+            "--max-hours and hard-killing at the requested budget",
+            timeout_s / 60.0,
+            _FORGE_MIN_BUDGET_SEC // 60,
+            group_id,
+        )
+    deadline_unix = max(time.time() + 1.0, started + timeout_s)
+
+    loop_outcome = _run_vendor_playbook_loop_via_cli(
+        kernel_anchor=str(kernel_anchor),
+        driver=str(driver),
+        workspace=str(workspace),
+        snr_threshold=snr_threshold,
+        max_iters=max_iters,
+        max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
+        branch=branch,
+        gpu_target=gpu_target,
+        gpu_type=gpu_type,
+        fellow=str(playbook.get("fellow") or "aiter-fellow"),
+        program_md_file=str(program_md),
+        target_functions=[str(f) for f in (playbook.get("target_functions") or [])],
+        experiments_dir=experiments_dir,
+        forge_log=forge_log,
+        timeout_s=timeout_s,
+        deadline_unix=deadline_unix,
+        experience_id=output_dir.name,
+        extra_env={str(k): str(v) for k, v in (playbook.get("env") or {}).items()},
+    )
+    result = _normalized(
+        0 if loop_outcome.error is None else 1,
+        loop_outcome.output or "",
+        "" if loop_outcome.error is None else str(loop_outcome.error),
+        time.time() - started,
+    )
+    # kernel_optimization.py's build_verification() only recognizes a forge
+    # attempt's measured speedup when total_improved/mean_case_speedup are
+    # BOTH present on the result dict it reads (see run_attempt's field
+    # copy); leaving any of these out silently downgrades a real KEEP-worthy
+    # improvement to PARTIAL ("no measurable speedup found"), even though
+    # forge-loop itself committed and validated a faster config.
+    result.update(
+        {
+            # NOTE: cli_workspace intentionally equals output_dir here (the
+            # convention the ordinary per-file forge path uses, see
+            # `res["cli_workspace"] = str(output_dir)` elsewhere in this
+            # module), NOT the git worktree -- optimized_versions/ below is
+            # written directly under output_dir, and _candidate_artifact_paths()
+            # checks cli_workspace/optimized_versions first. forge_workspace
+            # separately carries the real git worktree for anything that needs
+            # the live tree (e.g. a future patch-based snapshot).
+            "cli_workspace": str(output_dir),
+            "forge_workspace": str(workspace),
+            "output_dir": str(output_dir),
+            "improved": bool(loop_outcome.total_improved),
+            "total_improved": bool(loop_outcome.total_improved),
+            "incremental_improved": bool(loop_outcome.incremental_improved),
+            "improved_during_search": bool(loop_outcome.improved_during_search),
+            "mean_case_speedup": loop_outcome.mean_case_speedup,
+            "search_start_mean_case_speedup": loop_outcome.search_start_mean_case_speedup,
+            "best_ms": loop_outcome.best_ms,
+            "baseline_ms": loop_outcome.baseline_ms,
+            "pristine_baseline_ms": loop_outcome.pristine_baseline_ms,
+            "search_start_ms": loop_outcome.search_start_ms,
+            "vendor_playbook_id": group_id,
+            "vendor_playbook_role": role,
+            "vendor_playbook_task_bundle": str(task_bundle_root),
+            "vendor_playbook_reused": False,
+            # This role is the one that actually ran forge-loop and produced
+            # the measurement; a sibling role that reuses this same result
+            # (see _submit_vendor_playbook's ``_reuse``) marks itself False
+            # so downstream benefit accounting sums this speedup once, not
+            # once per role sharing it (PR #1191 review finding #4).
+            "vendor_playbook_independently_counted": True,
+        }
+    )
+    # The ordinary per-file forge path's correctness signal comes from
+    # optimization_report.md's "[correctness] pass" marker (kernel_optimization
+    # .py's _extract_correctness_from_report scans cli_workspace for it). The
+    # vendor-playbook path reused this same forge-loop run but never wrote
+    # that file, so correctness_passed stayed False and make_proposal()
+    # could never return KEEP even when SNR validation had already passed
+    # inside forge-loop (PR #1191 review finding #5). cli_workspace ==
+    # output_dir here (see the NOTE above), so writing it here is exactly
+    # where the correctness scan will look.
+    _write_report(
+        output_dir,
+        loop_outcome.baseline_ms,
+        loop_outcome.best_ms,
+        loop_outcome.total_improved,
+        mean_case_speedup=loop_outcome.mean_case_speedup,
+        search_start_ms=loop_outcome.search_start_ms,
+        improved_during_search=loop_outcome.improved_during_search,
+    )
+    if loop_outcome.total_improved and kernel_anchor.is_file():
+        # There is no separate "deploy" artifact for a vendor launch-config:
+        # the tuned values live in the anchor file forge-loop already
+        # committed in-place in workspace. Materialize a copy under the
+        # attempt's own optimized_versions/ so _select_source_artifact()
+        # (which only looks in that conventional directory) can find it,
+        # exactly like the ordinary per-file-rewrite forge path does.
+        try:
+            opt_dir = output_dir / "optimized_versions"
+            opt_dir.mkdir(parents=True, exist_ok=True)
+            dest = opt_dir / f"{group_id}_{role or 'optimized'}{kernel_anchor.suffix}"
+            shutil.copy2(kernel_anchor, dest)
+        except OSError as exc:
+            log.warning("forge: could not stage vendor playbook artifact copy: %s", exc)
+    _write_vendor_playbook_result(lock_dir, result)
+    return result
+
+
+def _submit_vendor_playbook(
+    *,
+    candidate: dict[str, Any],
+    prompt_file: Path,
+    output_dir: Path,
+    timeout_s: int,
+) -> dict:
+    """Run (or reuse) the one forge-loop session for a vendor-playbook group."""
+    started = time.time()
+    playbook = candidate.get("vendor_operator_playbook")
+    if not isinstance(playbook, dict) or not playbook.get("id"):
+        # Defensive re-resolve: a candidate dict round-tripped through JSON by
+        # a caller that dropped nested fields still carries enough identity
+        # (name/library/source_file) to re-match the registry.
+        playbook = match_vendor_operator_playbook(candidate)
+    if not isinstance(playbook, dict) or not playbook.get("id"):
+        return _normalized(
+            2,
+            "",
+            "forge: patch_strategy=vendor_playbook but candidate carries no "
+            "vendor_operator_playbook entry (re-run classify_patchability?)",
+            time.time() - started,
+            skipped=True,
+        )
+
+    group_id = str(playbook.get("id"))
+    role = str(candidate.get("vendor_playbook_role") or playbook.get("role") or "")
+    lock_dir = _vendor_playbook_lock_dir(output_dir, group_id)
+
+    def _reuse(cached_result: dict) -> dict:
+        result = dict(cached_result)
+        result["vendor_playbook_reused"] = True
+        result["vendor_playbook_role"] = role
+        # This measurement was already counted once, on the role that
+        # actually ran forge-loop; a reused sibling must not add its
+        # identical mean_case_speedup/best_ms again into downstream benefit
+        # totals (PR #1191 review finding #4).
+        result["vendor_playbook_independently_counted"] = False
+        _stage_vendor_playbook_artifact_for_reuse(cached_result, output_dir)
+        return result
+
+    def _run_and_guard() -> dict:
+        # From here on we (believe we) hold the claim: any unhandled
+        # exception MUST still produce a result.json, or claimed.lock is
+        # orphaned forever and no sibling/retry for this group can ever run
+        # again (see _run_claimed_vendor_playbook's docstring).
+        # _copy_vendor_task_bundle's git subprocess calls and the forge-loop
+        # launch are the known risks, but this is a deliberate catch-all,
+        # not just those two.
+        try:
+            return _run_claimed_vendor_playbook(
+                candidate=candidate,
+                prompt_file=prompt_file,
+                output_dir=output_dir,
+                timeout_s=timeout_s,
+                playbook=playbook,
+                group_id=group_id,
+                role=role,
+                lock_dir=lock_dir,
+                started=started,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = _normalized(
+                2,
+                "",
+                f"forge: vendor playbook group {group_id!r} raised after claiming "
+                f"the shared session, before producing a result "
+                f"({type(exc).__name__}: {exc})",
+                time.time() - started,
+                skipped=True,
+            )
+            try:
+                _write_vendor_playbook_result(lock_dir, result)
+            except OSError:
+                log.exception(
+                    "forge: could not write a failure result for vendor playbook "
+                    "group %r after claiming it; claimed.lock will remain until "
+                    "manually cleared",
+                    group_id,
+                )
+            return result
+
+    cached = _read_vendor_playbook_cached_result(
+        lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
+    )
+    if cached is not None:
+        return _reuse(cached)
+
+    if _claim_vendor_playbook_run(lock_dir, timeout_s):
+        return _run_and_guard()
+
+    # A sibling role (e.g. this is "combine" and "dispatch" already claimed
+    # the group) is running the one shared session; wait for it rather than
+    # launching a second forge-loop for the same task.
+    deadline = time.time() + max(60.0, float(timeout_s) + 300.0)
+    cached = _wait_for_vendor_playbook_result(lock_dir, deadline, timeout_s)
+    if cached is not None:
+        return _reuse(cached)
+
+    # The wait ended without a result either because the deadline passed or
+    # because the holder's claim looked abandoned (SIGKILL/OOM/node restart
+    # -- PR #1191 review finding #3). Try once more to claim the group: if
+    # the claim really is stale this steals it and we run for real instead
+    # of failing outright; if the original holder is alive and simply still
+    # running, this correctly fails again.
+    if _claim_vendor_playbook_run(lock_dir, timeout_s):
+        return _run_and_guard()
+
+    return _normalized(
+        2,
+        "",
+        f"forge: vendor playbook group {group_id!r} was claimed by a "
+        "concurrent submission but never produced a result before the wait "
+        "deadline",
+        time.time() - started,
+        skipped=True,
+    )
+
+
 def submit(
     source_file: str,
     prompt_file: Path,
@@ -3710,14 +4553,28 @@ def submit(
     optimization_report.md under output_dir.
     """
     started = time.time()
+    candidate = candidate or {}
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Vendor-operator-playbook route: a closed-source vendor op (e.g. mori's EP
+    # dispatch/combine) has no rewritable device source to worktree/rewrite --
+    # skip the entire git-worktree / fellow-resolution / rewrite-route pipeline
+    # below and copy the validated KernelForge task bundle instead. See
+    # _vendor_operator_playbooks.py and KernelForge PR #88.
+    if candidate.get("patch_strategy") == "vendor_playbook":
+        return _submit_vendor_playbook(
+            candidate=candidate,
+            prompt_file=Path(prompt_file),
+            output_dir=output_dir,
+            timeout_s=timeout_s,
+        )
+
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
         KernelExperienceBridge,
     )
 
     knowledge_bridge = KernelExperienceBridge(_knowledge_config_for_forge())
-    candidate = candidate or {}
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Re-derive source_type from the file extension when it's unknown: an aiter
     # .cu/.cuh kernel can arrive as "unknown" and be wrongly skipped. A real

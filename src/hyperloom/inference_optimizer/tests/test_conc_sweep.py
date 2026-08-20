@@ -28,6 +28,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _flush_partial_conc_sweep_report,
     _has_optimization,
     _order_concs_desc,
+    conc_sweep_declined_to_run,
     run_conc_sweep,
 )
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
@@ -710,6 +711,8 @@ def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
     assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    # This sweep started; only the pre-flight envelope means "declined to run".
+    assert conc_sweep_declined_to_run(payload) is False
 
 
 # ActionExecutor integration (SWEEP-phase dispatch)
@@ -875,6 +878,7 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
     assert result["status"] == "succeeded"
     assert result["was_skipped"] is True
     assert result["skip_reason"] == "no_baseline_tput"
+    assert conc_sweep_declined_to_run(result) is True
 
 
 # record_conc_sweep writes state.last_conc_sweep for SWEEP completion detection.
@@ -947,6 +951,36 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     reason, evidence = result
     assert reason == "conc_sweep_failed"
     assert evidence.get("conc_sweep_status") == "failed"
+
+
+def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
+    """``was_skipped`` covers both outcomes, so the row must carry what tells them apart."""
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    state = SharedState(
+        phase="SWEEP",
+        phase_started_ts="2026-06-02T10:00:00+00:00",
+        max_minutes=360,
+        phase_budget_pct={"SWEEP": 0.50},
+    )
+    state.record_conc_sweep(
+        {"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"}
+    )
+    _, declined = exit_normal_sweep(state)
+    assert declined["conc_sweep_was_skipped"] is True
+    assert declined["conc_sweep_budget_exhausted"] is False
+
+    state.record_conc_sweep(
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "budget_exhausted": True,
+            "skip_reason": "budget_exhausted_no_successful_pairs",
+        }
+    )
+    _, spent = exit_normal_sweep(state)
+    assert spent["conc_sweep_was_skipped"] is True
+    assert spent["conc_sweep_budget_exhausted"] is True
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):

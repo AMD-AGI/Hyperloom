@@ -51,7 +51,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
         "final": {
             "throughput_tok_s_per_gpu": 2447.5,
             "cumulative_gain_pct_validated": 10.99,
-            "cumulative_gain_pct_per_round_sum": 10.99,
             "validated_at_stack_len": 1,
             "validated_ts": "2026-05-12T11:54:00Z",
             "stack_changed_after_validation": False,
@@ -338,25 +337,33 @@ def test_capability_decision_kind_round_trips(
     assert decisions.get("sweep") == expected_kind
 
 
-def test_attribution_method_renders_from_field() -> None:
-    """The attribution renderer surfaces ``attribution.method`` verbatim."""
+def test_gain_that_belongs_to_nobody_gets_its_own_row() -> None:
+    """Shares are taken against what the session moved, so the rest must show.
+
+    Without a row for it, the sources' shares quietly fail to reach 100% and
+    the reader is left to work out what the missing slice was.
+    """
     bd = _fixture_breakdown()
-    bd["attribution"] = {
-        "method": "reconstructed",
-        "source_breakdown": {
-            "validated_total_pct": 14.5,
-            "explore_pct_of_total": 14.5,
-            "backends_pct_of_total": 0.0,
-            "params_pct_of_total": 0.0,
-            "geak_pct_of_total": 0.0,
-            "sweep_pct_of_total": 0.0,
+    bd.pop("attribution", None)
+    bd["optimizations"] = {
+        "entries": [{"id": "opt-1", "source": "explore", "gain_pct": 9.0, "validated": True}],
+        "summary_by_source": {"explore": {"keeps": 1, "total_gain_pct": 9.0}},
+        "validation": {
+            "method": "recorded_adoptions",
+            "validated_total_gain_pct": 10.0,
+            "attributed_total_gain_pct": 9.0,
+            "unattributed_gain_pct": 1.0,
         },
-        "notes": [],
     }
+
     r = render_session_report(bd)
     sec = next(s for s in r.sections if s.section_id == "attribution")
-    assert any("reconstructed" in fact for fact in sec.key_facts), sec.key_facts
-    assert not any("single-source" in fact and "single_source" not in fact for fact in sec.key_facts), sec.key_facts
+
+    assert "unattributed (between adopted steps)" in sec.markdown_block
+    # 9 of 10 and 1 of 10: the shares close.
+    assert any("90.0" in fact and "explore" in fact for fact in sec.key_facts), sec.key_facts
+    # The residue is not a contributor and must not reach the leaderboard.
+    assert not any(d.subject.startswith("attribution:unattributed") for d in sec.decisions)
 
 
 def test_v5_attribution_method_and_notes_render_from_validation() -> None:

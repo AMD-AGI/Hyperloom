@@ -43,6 +43,7 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from ._ray_serving import maybe_serving_lease
 from ._workload_envs import (
@@ -327,9 +328,13 @@ class SweepExecutor:
         # outlives its GPU lease. ``None`` on the local path (multi-node /
         # RAY_EXEC off / tests) keeps the legacy behaviour.
         sweep_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
-        # Stop the sweep grid mid-way when the session wall-clock budget runs out.
-        _ss = extra.get("shared_state") or extra.get("state")
-        session_deadline_sec = _ss.grid_session_deadline_sec() if _ss is not None else None
+        # Stop the sweep grid mid-way when the session wall-clock budget runs out,
+        # and cap each variant at what the budget can still pay for. Admission is
+        # judged on the expected runtime rather than ``timeout_sec``, which is the
+        # catastrophic-hang backstop and would abandon the tail of the budget.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(
+            extra.get("shared_state") or extra.get("state")
+        )
         try:
             # Pass resolved_model / resolved_gpu so variant servers inherit TP/precision.
             results = await run_grid(
@@ -344,6 +349,7 @@ class SweepExecutor:
                 result_dir=override_result_dir,
                 serving_lease=sweep_lease,
                 session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         finally:
             if sweep_lease is not None:

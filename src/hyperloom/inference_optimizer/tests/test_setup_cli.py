@@ -1276,6 +1276,9 @@ def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
     assert "- Framework: atom" in res.stdout
 
 
+
+
+
 def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
     """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
     res = _drive_installer(
@@ -1299,7 +1302,6 @@ def test_baremetal_profiler_hotfix_still_skipped_without_any_framework(tmp_path:
 
     assert "HOTFIX_ELIGIBLE" not in res.stdout
     assert "no serving framework importable" in res.stderr
-
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"

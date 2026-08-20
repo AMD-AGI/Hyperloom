@@ -52,7 +52,22 @@ log = logging.getLogger(__name__)
 CRITIC_AGENT_RUNTIME_TIMEOUT_SEC = 30  # prepare-review / commit-review wall cap
 # Output-token cap for both review paths. The Anthropic side spends it as a
 # request field or through the CLI environment, depending on the transport.
-CRITIC_AGENT_MAX_COMPLETION_TOKENS = 2000
+#
+# The cap is a ceiling, not a budget: headroom left unused is never billed,
+# while a reply cut off at the cap bills the whole call and yields nothing. It
+# is therefore sized for the largest review a batch could ever need rather than
+# the typical one. The number is measured, not guessed: the three-proposal
+# batch that deadlocked session 100162 needed roughly 2.4k output tokens to
+# write out in full, so this leaves about 13x that — a batch would have to grow
+# by an order of magnitude before the cap is what binds. Use the env var of the
+# same name to lower it for a model whose own output limit is smaller, or to
+# raise it further.
+CRITIC_AGENT_MAX_COMPLETION_TOKENS = 32000
+# One retry at this multiple of the cap when a reply stops at the limit.
+CRITIC_AGENT_TRUNCATION_RETRY_FACTOR = 2
+# Finish/stop reasons that mean "cut off at the output cap": OpenAI reports
+# ``length``, the Anthropic Messages API reports ``max_tokens``.
+_TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
 # Anthropic usage counters carried through to the trace row, each in its own
 # column so critic rows stay comparable with the orchestration ones.
 _ANTHROPIC_USAGE_KEYS = (
@@ -61,9 +76,21 @@ _ANTHROPIC_USAGE_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
-# OpenAI HTTP client timeout defaults for critic review calls.
+# HTTP client timeout defaults for critic review calls. A completion is not
+# streamed, so the read half is what bounds generation: the server holds the
+# connection open until the whole reply exists.
+#
+# It is therefore coupled to the output cap above and has to move with it. The
+# 120s this used to sit at is the budget a completion is elsewhere given, and it
+# was the right one while the cap was 2000 tokens: a reply that short always
+# came back inside it, so the cap doubled as a latency bound. Raising the
+# ceiling removed that guarantee, and a batch large enough to need the new room
+# would now hit the timeout instead of finishing — a timeout that then repeats
+# on identical input, which is the failure shape this whole fix exists to end.
+# 300s is what the orchestration paths floor a multi-turn budget at, and it
+# covers any review that could plausibly be worth waiting for.
 CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC = 10.0
-CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 120.0
+CRITIC_AGENT_LLM_RW_TIMEOUT_SEC = 300.0
 
 # Cap on per-turn workdirs kept on disk; older ones are pruned each turn.
 CRITIC_AGENT_WORKDIR_KEEP_COUNT = 50
@@ -139,6 +166,19 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     can only appear before it.
     """
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE, last=True)
+
+
+def _is_truncated_finish(finish: str | None) -> bool:
+    """Report whether a finish/stop reason means the reply hit the output cap.
+
+    Args:
+        finish: The finish/stop reason a transport reported, or ``None`` when
+            it supplied none.
+
+    Returns:
+        ``True`` when the reason names the output cap, ``False`` otherwise.
+    """
+    return isinstance(finish, str) and finish.strip().lower() in _TRUNCATED_FINISH_REASONS
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
@@ -514,6 +554,33 @@ class CriticAgentBackend:
                 default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
             ),
         )
+
+    @staticmethod
+    def _resolve_max_completion_tokens() -> int:
+        """Return the output-token cap one review call may spend.
+
+        The env override exists so a deployment that hits the cap can raise it
+        without a code change; a malformed value falls back to the default
+        rather than failing the turn.
+
+        Returns:
+            The positive cap in tokens.
+        """
+        raw = os.environ.get("CRITIC_AGENT_MAX_COMPLETION_TOKENS")
+        if raw is None or not raw.strip():
+            return CRITIC_AGENT_MAX_COMPLETION_TOKENS
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value <= 0:
+            log.warning(
+                "CRITIC_AGENT_MAX_COMPLETION_TOKENS=%r is not a positive integer; using default %d",
+                raw,
+                CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+            )
+            return CRITIC_AGENT_MAX_COMPLETION_TOKENS
+        return value
 
     def _require_anthropic_transport(self) -> None:
         """Fail fast when the Anthropic side cannot serve a review call.
@@ -932,8 +999,9 @@ class CriticAgentBackend:
         """Drive Codex with the judge bundle and parse a review object.
 
         Builds the skill-preamble + judge-bundle + output-format user prompt,
-        runs the single-shot reasoning call, and extracts the review JSON,
-        falling back to an empty verdict list when nothing parses.
+        runs the single-shot reasoning call, and extracts the review JSON. A
+        reply cut off at the output cap is retried once with more room; a reply
+        that still carries no review JSON fails the turn.
 
         Args:
             judge_bundle (dict[str, Any]): The prepared judge bundle to reason
@@ -944,6 +1012,14 @@ class CriticAgentBackend:
         Returns:
             tuple[dict[str, Any], str, str | None]: The parsed review dict, the
             raw model text, and the final finish reason.
+
+        Raises:
+            BackendError: If no reply yields parseable ``review_verdicts``
+                JSON. The turn ends here, so ``commit-review``, the breakdown
+                record and the Langfuse mirror are all skipped — there is no
+                half-built envelope to hand on. The prompt and the unusable
+                reply are already on ``conversations.jsonl``, which is where a
+                post-mortem finds them.
         """
         preamble = self._load_skill_preamble()
         bundle_view: dict[str, Any] = {
@@ -967,9 +1043,11 @@ class CriticAgentBackend:
             f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"
             f"{_REVIEW_OUTPUT_INSTRUCTIONS}"
         )
+        max_tokens = self._resolve_max_completion_tokens()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            max_tokens=max_tokens,
         )
 
         # Mirror the full prompt + reply onto conversations.jsonl so the critic
@@ -979,15 +1057,62 @@ class CriticAgentBackend:
             user_prompt=user_prompt,
             response=text,
         )
-
         review = _extract_review_json(text)
-        if review is None:
-            # Empty list → commit-review emits a heartbeat; don't raise.
-            review = {"review_verdicts": []}
+
+        if review is None and _is_truncated_finish(finish):
+            # Retrying a cap-truncated reply under the same cap would truncate
+            # again at the same byte, so the retry only makes sense with more
+            # room. One is enough: a bundle that overflows twice this much is a
+            # sizing problem, not a flaky call.
+            #
+            # Only the HTTP transports always name the reason. The Claude CLI
+            # reports a stop reason only when the model supplies one, so a
+            # truncated reply can arrive as finish=None and fall through to the
+            # raise below. That path loses the retry but still fails loudly,
+            # which is the half of this fix that matters.
+            retry_tokens = max_tokens * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
             log.warning(
-                "critic_agent_backend: model reply contained no parseable review_verdicts JSON (chars=%d, finish=%s)",
+                "critic_agent_backend: review reply stopped at the %d-token cap "
+                "(chars=%d, finish=%s); retrying once with %d",
+                max_tokens,
                 len(text),
                 finish,
+                retry_tokens,
+            )
+            try:
+                text, finish = await self._run_reasoning_loop(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=retry_tokens,
+                )
+            except BackendError as exc:
+                # A provider whose own output limit sits below the doubled cap
+                # rejects the retry outright. Letting that transport error
+                # surface on its own would name the retry as the problem and
+                # bury the truncation that caused it, pointing the reader at
+                # the wrong thing.
+                raise BackendError(
+                    f"CriticAgentBackend: review reply was truncated at {max_tokens} tokens "
+                    f"and the retry at {retry_tokens} was rejected: {exc}"
+                ) from exc
+            self._record_critic_conversation(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=text,
+            )
+            review = _extract_review_json(text)
+            max_tokens = retry_tokens
+
+        if review is None:
+            # A reply carrying no verdicts is a review that failed to arrive,
+            # not a review that found nothing to say. Reporting it as an empty
+            # verdict list makes the two indistinguishable downstream: the turn
+            # looks successful, the proposals it was asked about stay pending,
+            # and the loop re-asks the same question forever. Raising instead
+            # puts a backend_error on the record and lets the streak guard trip.
+            raise BackendError(
+                "CriticAgentBackend: review reply carried no parseable review_verdicts JSON "
+                f"(chars={len(text)}, finish={finish!r}, max_tokens={max_tokens})"
             )
         return review, text, finish
 
@@ -996,6 +1121,7 @@ class CriticAgentBackend:
         *,
         system_prompt: str | None,
         user_prompt: str,
+        max_tokens: int,
     ) -> tuple[str, str | None]:
         """Issue one review inference call and return ``(text, finish_reason)``.
 
@@ -1006,6 +1132,7 @@ class CriticAgentBackend:
         Args:
             system_prompt: The system instruction, or ``None``.
             user_prompt: The judge bundle plus output instructions.
+            max_tokens: Output-token cap for this call.
 
         Returns:
             A tuple of the reply text and the finish/stop reason.
@@ -1017,10 +1144,12 @@ class CriticAgentBackend:
             return await self._run_anthropic_reasoning(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                max_tokens=max_tokens,
             )
         return await self._run_openai_reasoning(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            max_tokens=max_tokens,
         )
 
     async def _run_openai_reasoning(
@@ -1028,12 +1157,14 @@ class CriticAgentBackend:
         *,
         system_prompt: str | None,
         user_prompt: str,
+        max_tokens: int,
     ) -> tuple[str, str | None]:
         """Issue one Codex chat-completions call and return ``(text, finish_reason)``.
 
         Args:
             system_prompt: The system instruction, or ``None``.
             user_prompt: The judge bundle plus output instructions.
+            max_tokens: Output-token cap for this call.
 
         Returns:
             A tuple of the reply text and the finish reason.
@@ -1044,7 +1175,7 @@ class CriticAgentBackend:
         kwargs: dict[str, Any] = {
             "model": self._review_model,
             "messages": build_chat_messages(system_prompt, user_prompt),
-            "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+            "max_completion_tokens": max_tokens,
         }
         apply_reasoning_effort(kwargs)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
@@ -1066,6 +1197,7 @@ class CriticAgentBackend:
         *,
         system_prompt: str | None,
         user_prompt: str,
+        max_tokens: int,
     ) -> tuple[str, str | None]:
         """Issue one single-shot Anthropic completion for the review.
 
@@ -1077,6 +1209,7 @@ class CriticAgentBackend:
         Args:
             system_prompt: The system instruction, or ``None``.
             user_prompt: The judge bundle plus output instructions.
+            max_tokens: Output-token cap for this call.
 
         Returns:
             A tuple of the reply text and the stop reason. The CLI transport
@@ -1093,7 +1226,7 @@ class CriticAgentBackend:
                 model=self._review_model,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
-                max_tokens=CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+                max_tokens=max_tokens,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
@@ -1349,10 +1482,12 @@ class CriticAgentBackend:
 __all__ = [
     "CRITIC_AGENT_MAX_COMPLETION_TOKENS",
     "CRITIC_AGENT_RUNTIME_TIMEOUT_SEC",
+    "CRITIC_AGENT_TRUNCATION_RETRY_FACTOR",
     "CRITIC_AGENT_WORKDIR_KEEP_COUNT",
     "CriticAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
     "_default_runtime_caller",
     "_extract_review_json",
+    "_is_truncated_finish",
 ]

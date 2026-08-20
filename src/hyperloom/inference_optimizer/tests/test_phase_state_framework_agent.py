@@ -55,10 +55,16 @@ def test_framework_exit_reasons_registered():
     reasons = {
         "framework_agent_phase_done",
         "framework_agent_plateau",
-        "framework_agent_force_exit_low_budget",
     }
     assert reasons <= phase_state.PHASE_EXIT_REASONS
     assert reasons <= phase_state.STOP_REASON_VOCAB
+
+
+def test_framework_agent_force_exit_low_budget_is_retired_vocab():
+    """``framework_agent_budget_cap`` replaced the session-remaining force-exit."""
+    assert "framework_agent_force_exit_low_budget" not in phase_state.PHASE_EXIT_REASONS
+    assert "framework_agent_force_exit_low_budget" not in phase_state.STOP_REASON_VOCAB
+    assert "framework_agent_budget_cap" in phase_state.PHASE_EXIT_REASONS
 
 
 def test_framework_agent_skipped_is_not_a_registered_reason():
@@ -99,33 +105,16 @@ def test_exit_normal_framework_agent_returns_none_when_nothing_to_do():
     assert phase_state.exit_normal_framework_agent(state) is None
 
 
-def test_exit_normal_framework_agent_force_exit_when_remaining_below_ratio():
-    # remaining 30min < 72min force-exit floor → fires.
-    state = _State(remaining_minutes_value=30.0)
-    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
-    assert out is not None
-    reason, ev = out
-    assert reason == "framework_agent_force_exit_low_budget"
-    assert ev["evidence"] == "force_exit"
-    assert ev["remaining_minutes"] == 30.0
+def test_exit_normal_framework_agent_ignores_session_remaining():
+    """Low session-remaining alone must not evict a phase that has done nothing.
 
-
-def test_exit_normal_framework_agent_no_force_exit_when_remaining_above_ratio():
-    # remaining 80min > 72min force-exit floor → no force exit.
-    state = _State(remaining_minutes_value=80.0)
-    assert phase_state.exit_normal_framework_agent(state, max_hours=2.0) is None
-
-
-def test_exit_normal_framework_agent_accepts_positional_remaining_minutes():
-    class PositionalRemainingState(_State):
-        def remaining_minutes(self) -> float:  # type: ignore[override]
-            return 30.0
-
-    out = phase_state.exit_normal_framework_agent(PositionalRemainingState(), max_hours=2.0)
-
-    assert out is not None
-    assert out[0] == "framework_agent_force_exit_low_budget"
-    assert out[1]["remaining_minutes"] == 30.0
+    FRAMEWORK now leaves only on its own charge-back cap, a plateau, or an
+    exhausted candidate list — never on the session clock.
+    """
+    assert phase_state.exit_normal_framework_agent(_State(remaining_minutes_value=30.0)) is None
+    below_streak = [{"candidate_id": f"c{i}", "status": "reverted", "kept": False} for i in range(3)]
+    state = _State(framework_agent_phase_progress=below_streak, remaining_minutes_value=10.0)
+    assert phase_state.exit_normal_framework_agent(state) is None
 
 
 def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
@@ -232,27 +221,25 @@ def test_framework_batch_plateau_counts_current_cycle_audit_skips():
     assert triggered is True
 
 
-def test_exit_normal_framework_agent_force_exit_evidence_carries_pending_count():
-    """Regression: force-exit evidence surfaces ``pending_candidate_count``."""
+def test_exit_normal_framework_agent_exit_evidence_carries_pending_count():
+    """Regression: an early exit surfaces how many candidates it left behind."""
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
     batches = [
         {
             "batch_id": "b1",
             "max_gain_pct_observed_in_batch": 0.0,
-            "candidates": [{"id": "c1a"}, {"id": "c1b"}, {"id": "c1c"}],
+            "candidates": [{"id": f"c{i}"} for i in range(n + 2)],
         },
     ]
-    progress = [
-        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
-    ]
+    progress = [{"batch_id": "b1", "candidate_id": f"c{i}", "status": "reverted"} for i in range(n)]
     state = _State(
         framework_agent_batches=batches,
         framework_agent_phase_progress=progress,
-        remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     reason, ev = out
-    assert reason == "framework_agent_force_exit_low_budget"
+    assert reason == "framework_agent_plateau"
     assert ev["pending_candidate_count"] == 2
 
 
@@ -377,22 +364,6 @@ def test_exit_normal_framework_agent_plateau_mixed_terminal_no_keep_rows():
     assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
-def test_exit_normal_framework_agent_force_exit_beats_plateau():
-    """Priority order: force-exit > plateau."""
-    progress = [
-        {"candidate_id": "c1", "status": "reverted", "kept": False},
-        {"candidate_id": "c2", "status": "reverted", "kept": False},
-        {"candidate_id": "c3", "status": "reverted", "kept": False},
-    ]
-    state = _State(
-        framework_agent_phase_progress=progress,
-        remaining_minutes_value=10.0,
-    )
-    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
-    assert out is not None
-    assert out[0] == "framework_agent_force_exit_low_budget"
-
-
 def test_exit_normal_framework_agent_plateau_beats_phase_done():
     """Priority order: plateau > phase_done."""
     progress = [
@@ -442,8 +413,8 @@ def test_framework_agent_plateau_streak_threshold_is_default():
     )
 
 
-def test_exit_normal_framework_agent_force_exit_beats_phase_done():
-    """Priority order: force-exit > phase_done."""
+def test_exit_normal_framework_agent_phase_done_wins_when_low_on_session_time():
+    """A nearly spent session no longer masks the honest ``phase_done`` reason."""
     batches = [
         {"max_gain_pct_observed_in_batch": 0.1},
         {"max_gain_pct_observed_in_batch": 0.1},
@@ -454,9 +425,9 @@ def test_exit_normal_framework_agent_force_exit_beats_phase_done():
         framework_agent_phase_done=True,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
+    out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
-    assert out[0] == "framework_agent_force_exit_low_budget"
+    assert out[0] == "framework_agent_phase_done"
 
 
 def test_compute_next_phase_prelude_to_framework_when_enabled():
@@ -466,6 +437,19 @@ def test_compute_next_phase_prelude_to_framework_when_enabled():
     next_phase, reason, _ev = out
     assert next_phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert reason == "prelude_done"
+
+
+def test_compute_next_phase_closing_phase_goes_to_close_not_framework():
+    """A spent wall-clock must not start FRAMEWORK; that allowlist drops ``report``."""
+    state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
+    state.closing_phase = True
+    out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
+    assert out is not None
+    next_phase, reason, ev = out
+    assert next_phase == phase_state.PHASE_CLOSE
+    assert reason == "time_exhausted"
+    assert ev.get("terminal") is True
+    assert ev.get("reason_origin") == "closing_phase"
 
 
 def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_reason():
@@ -491,21 +475,17 @@ def test_compute_next_phase_framework_does_not_advance_on_plateau():
     assert phase_state.compute_next_phase(state, framework_agent_phase_enabled=True) is None
 
 
-def test_compute_next_phase_framework_agent_force_exit_passes_max_hours_through():
+def test_compute_next_phase_framework_holds_on_a_nearly_spent_session():
+    """A reloop into FRAMEWORK late in the run must not bounce straight out.
+
+    FRAMEWORK is the preferred macro-cycle reloop target, and every reloop
+    happens once most of the session is gone.
+    """
     state = _State(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         remaining_minutes_value=30.0,
     )
-    out = phase_state.compute_next_phase(
-        state,
-        framework_agent_phase_enabled=True,
-        max_hours=2.0,
-    )
-    assert out is not None
-    next_phase, reason, ev = out
-    assert next_phase == phase_state.PHASE_EXPLORE
-    assert reason == "framework_agent_force_exit_low_budget"
-    assert ev["max_hours"] == 2.0
+    assert phase_state.compute_next_phase(state, framework_agent_phase_enabled=True) is None
 
 
 def test_compute_next_phase_framework_stays_when_no_signal():
@@ -513,7 +493,6 @@ def test_compute_next_phase_framework_stays_when_no_signal():
     out = phase_state.compute_next_phase(
         state,
         framework_agent_phase_enabled=True,
-        max_hours=10.0,
     )
     assert out is None
 

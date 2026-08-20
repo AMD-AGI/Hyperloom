@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from types import SimpleNamespace
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.cli import bootstrap as cb
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -42,7 +45,6 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_force_exit_hours_remaining=1.25,
         explore_force_exit_budget_pct=0.2,
         explore_overtime_kill_ratio="bad",
         explore_variant_timeout_sec="bad",
@@ -62,6 +64,14 @@ def _args(**overrides):
     )
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def _state_with_stamp(*, elapsed_h: float, remaining_h: float) -> SharedState:
+    now = time.time()
+    start = datetime.fromtimestamp(now - elapsed_h * 3600.0, tz=timezone.utc).isoformat()
+    state = SharedState(session_id="s", start_ts=start, max_minutes=int((elapsed_h + remaining_h) * 60))
+    state.deadline_unix = now + remaining_h * 3600.0
+    return state
 
 
 def test_seed_shared_state_populates_geak_and_cli_overrides(
@@ -328,7 +338,6 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
         session_id="s",
         model_name="m",
         baseline_tput=10.0,
-        cumulative_gain=1.25,
         cumulative_gain_validated=1.0,
         cumulative_gain_validated_ts="2026-01-01T00:00:00Z",
         cumulative_gain_validated_stack_len=0,
@@ -417,6 +426,139 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     assert cb._resolve_session_dir_for_summary(None) == tmp_path
     monkeypatch.setenv("HYPERLOOM_SESSION_DIR", str(tmp_path / "missing"))
     assert cb._resolve_session_dir_for_summary(None) is None
+
+
+def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
+    """start_ts stays the budget anchor, so the resume timestamp is the only leg boundary."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=1)
+    state.deadline_unix = 1_700_000_000.0
+    state.teardown_timings_sec = {"total": 1.5}
+
+    cb._begin_resume_leg(state, reanchor_budget=False)
+
+    assert state.start_ts == "2026-08-01T00:00:00+00:00"
+    assert state.resumed_ts > state.start_ts
+    assert state.crash_count == 1
+    assert state.deadline_unix == 1_700_000_000.0
+    assert state.teardown_timings_sec == {"total": 1.5}
+
+
+def test_clean_stop_resume_notes_follow_the_stamp_not_a_larger_cli_budget() -> None:
+    """Raising --max-hours on a clean-stop resume must not be reported as time left."""
+    state = _state_with_stamp(elapsed_h=2.0, remaining_h=1.0)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
+    text = "\n".join(lines)
+    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
+    assert match is not None
+    assert abs(float(match.group(1)) - 2.0) < 0.05
+    assert abs(float(match.group(2)) - 1.0) < 0.05
+    assert "this invocation's --max-hours 8.00 does not extend or shrink that stamp" in text
+    assert "raise --max-hours or start a fresh session" not in text
+
+
+def test_clean_stop_resume_notes_do_not_tell_the_operator_to_raise_max_hours() -> None:
+    state = _state_with_stamp(elapsed_h=3.5, remaining_h=-0.5)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
+    text = "\n".join(lines)
+    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
+    assert match is not None
+    assert abs(float(match.group(1)) - 3.5) < 0.05
+    assert abs(float(match.group(2)) - 0.0) < 0.05
+    assert "WARNING: the stamped deadline is already spent" in text
+    assert "start a fresh session" in text
+    assert "does not extend the stamp" in text
+    assert "raise --max-hours or start a fresh session" not in text
+
+
+def test_clean_stop_resume_notes_omit_the_cli_mismatch_when_hours_match_the_stamp() -> None:
+    state = _state_with_stamp(elapsed_h=1.0, remaining_h=2.0)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=3.0)
+    text = "\n".join(lines)
+    assert "does not extend or shrink that stamp" not in text
+    assert "WARNING:" not in text
+
+
+def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4)
+    state.set_stop_reason("time_exhausted")
+    state.closing_phase = True
+    state.deadline_unix = 1_700_000_000.0
+    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.start_ts == state.resumed_ts
+    assert state.stop_reason == ""
+    assert state.stop_ts == ""
+    assert state.closing_phase is False
+    assert state.crash_count == 0
+    assert state.deadline_unix == 0.0
+    assert state.teardown_timings_sec == {}
+    stamped = state.stamp_deadline_unix(budget_minutes=60)
+    start = to_unix(state.start_ts)
+    assert abs(stamped - (start + 3600.0)) < 2.0
+
+
+def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
+    """A phase segment is only durable once banked, and stopping never banks it."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.set_stop_reason("time_exhausted")
+    # Pin where the leg ended so the banked segment is a checkable number.
+    state.stop_ts = "2026-08-01T00:30:00+00:00"
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.phase_elapsed_totals["PRELUDE"] == 1800.0
+    assert state.stop_ts == ""
+
+
+def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
+    """The first leg's segment is already durable; re-banking it would double-charge the phase."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = "2026-08-01T00:30:00+00:00"
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    # A second leg picked up a day later and ran an hour, still in PRELUDE.
+    state.resumed_ts = "2026-08-02T00:00:00+00:00"
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = "2026-08-02T01:00:00+00:00"
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert state.phase_elapsed_totals["PRELUDE"] == 1800.0 + 3600.0
+
+
+def test_a_resume_does_not_bank_a_stop_stamped_after_the_present() -> None:
+    """Banking past now charges the phase for time no leg ran, which ends it early."""
+    started = time.time() - 60.0
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = datetime.fromtimestamp(started, tz=timezone.utc).isoformat()
+    state.phase_started_unix = started
+    state.set_stop_reason("time_exhausted")
+    state.stop_ts = datetime.fromtimestamp(started + 10 * 86400.0, tz=timezone.utc).isoformat()
+
+    cb._begin_resume_leg(state, reanchor_budget=True)
+
+    assert 60.0 <= state.phase_elapsed_totals["PRELUDE"] < 120.0
+
+
+def test_a_resume_with_no_recorded_stop_leaves_the_segment_unbanked() -> None:
+    """A clean stop records no end time; under-charge the phase rather than guess one."""
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
+    state.phase = "PRELUDE"
+    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
+    state.phase_started_unix = 1785_542_400.0
+
+    cb._begin_resume_leg(state, reanchor_budget=False)
+
+    assert state.phase_elapsed_totals == {}
 
 
 def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> None:

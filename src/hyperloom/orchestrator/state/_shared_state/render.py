@@ -97,19 +97,23 @@ class _RenderMixin:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
-        geak_pending_tag = (
-            " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
+        geak_pending_status = (
+            str(self.geak_pending.get("status") or "")
             if isinstance(getattr(self, "geak_pending", None), dict)
-            and self.geak_pending.get("status") == "awaiting_rebench"
             else ""
         )
+        if geak_pending_status == "awaiting_rebench":
+            geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
+        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
+            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
+        else:
+            geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry
 
         lines = [
             f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
             f"current   : {self._format_current_best_for_mission()}",
-            f"gain      : per-round-sum={self.cumulative_gain:.2f}% "
-            f"validated={self.cumulative_gain_validated:.2f}%{validated_age}",
+            f"gain      : validated={self.cumulative_gain_validated:.2f}%{validated_age}",
             f"stack     : {len(self.optimization_stack)} entries "
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
             f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
@@ -150,7 +154,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate; the mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
+        """Render the per-tick ``=== Phase ===`` block (≤7 lines). EXPLORE adds a ``force_exit`` line showing the budget fraction left before the hard force-exit gate; the mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -162,7 +166,6 @@ class _RenderMixin:
         """
         from ...phases.machine_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-            DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
@@ -210,23 +213,12 @@ class _RenderMixin:
         # EXPLORE-only: distance to hard force-exit alongside the soft budget.
         if phase == PHASE_EXPLORE:
             overrides = self.plateau_overrides or {}
-            hours_thresh = float(
-                overrides.get(
-                    "force_exit_hours_remaining",
-                    DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
-                )
-            )
             pct_thresh = float(
                 overrides.get(
                     "force_exit_budget_pct",
                     DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
                 )
             )
-            session_remaining = session_remaining_seconds(
-                self,
-                now_unix=now_unix,
-            )
-            session_buffer = int(session_remaining - hours_thresh * 3600.0) if session_remaining is not None else None
             # Same effective-total helper as `remaining` so the fraction stays in
             # one unit (charge-back against the session for short runs, against
             # the cycle-window-capped base for long bounded runs).
@@ -235,9 +227,7 @@ class _RenderMixin:
                 phase_remaining_pct = remaining / phase_total_sec
             else:
                 phase_remaining_pct = None
-            force_line = f"force_exit: hours_thresh={hours_thresh:.1f}h pct_thresh={pct_thresh:.2f}"
-            if session_buffer is not None:
-                force_line += f" session_buffer_sec={session_buffer}"
+            force_line = f"force_exit: pct_thresh={pct_thresh:.2f}"
             if phase_remaining_pct is not None:
                 force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
             lines.append(force_line)
@@ -580,7 +570,6 @@ class _RenderMixin:
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self.current_best or '(none)'}",
             f"optimization_stack={self._format_optimization_stack()}",
-            f"cumulative_gain={self.cumulative_gain}%",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "

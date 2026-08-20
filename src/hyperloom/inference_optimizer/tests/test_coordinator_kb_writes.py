@@ -423,7 +423,6 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     ss.current_best = {"action": "baseline", "name": "baseline", "tput": 2813.5}
     ss.optimization_stack = []
     ss.cumulative_gain_validated = 0.0
-    ss.cumulative_gain = 0.0
     coord.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2532.0, "bare-baseline CLOSE clobbered a validated best_throughput"

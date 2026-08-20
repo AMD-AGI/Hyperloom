@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-import os
 from pathlib import Path
 import subprocess
 
@@ -45,16 +44,26 @@ class _StubSharedState:
     explore_search: dict = field(default_factory=dict)
     optimization_stack: list = field(default_factory=list)
     gain_per_stack_entry: list = field(default_factory=list)
-    cumulative_gain: float = 0.0
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
     cumulative_gain_validated_stack_len: int = 0
     current_best: dict = field(default_factory=dict)
     tick: int = 0
     phase: str = "PRELUDE"
+    conc: int = 64
+    isl: int = 0
+    osl: int = 0
+    max_model_len: int = 0
 
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
+
+    def append_stack_gain_entry(self, *, action, variant_name, new_tput, extra_server_args="", ts=None):
+        from hyperloom.common.gain_math import gain_pct
+
+        entry_gain_pct = gain_pct(float(new_tput or 0.0), float(self.baseline_tput or 0.0))
+        self.gain_per_stack_entry.append(entry_gain_pct)
+        return entry_gain_pct
 
     def set_stop_reason(self, reason: str) -> None:
         self.stop_reason = reason
@@ -244,6 +253,12 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "runtime" / "draft"))
     monkeypatch.setenv("KB_WARM_START_DIR", str(warm_dir))
+    framework_root = tmp_path / "framework"
+    framework_root.mkdir()
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: str(framework_root),
+    )
     coord = _make_coord(
         tmp_path,
         warm_start_recipe={
@@ -391,6 +406,142 @@ def _patch_current_sdk_readers(
         "open",
         classmethod(lambda cls: _Replay()),
     )
+
+
+@pytest.mark.asyncio
+async def test_current_recipe_skips_undersized_context_for_target_workload(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_current_sdk_readers(
+        monkeypatch,
+        tmp_path,
+        timeline=[],
+        explore_refs=[],
+        framework_refs=[],
+        explore_config={"extra_server_args": "--context-length 6144"},
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+                "validated_gain_pct": 12.0,
+            },
+        },
+    )
+    coord.shared_state.isl = 8192
+    coord.shared_state.osl = 1024
+    coord.shared_state.max_model_len = 32768
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
+    assert "context_length=6144 < isl+osl=9216" in (
+        coord.shared_state.warm_replay_outcome["reason"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_recipe_skips_undersized_context_for_target_workload(
+    tmp_path,
+):
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(
+            extra_server_args="--context-length 6144 --watchdog-timeout 1800"
+        ),
+    )
+    coord.shared_state.isl = 8192
+    coord.shared_state.osl = 1024
+    coord.shared_state.max_model_len = 32768
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
+    assert "context_length=6144 < isl+osl=9216" in (
+        coord.shared_state.warm_replay_outcome["reason"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_does_not_misclassify_preflight_code_bug(
+    tmp_path,
+    monkeypatch,
+):
+    from hyperloom.orchestrator.actions.executors import _grid_server_args
+
+    def _bug(*_args, **_kwargs):
+        raise AttributeError("preflight implementation bug")
+
+    monkeypatch.setattr(
+        _grid_server_args,
+        "validate_warm_replay_context_length",
+        _bug,
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe=_warm_recipe_t1(),
+    )
+
+    with pytest.raises(AttributeError, match="preflight implementation bug"):
+        await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert coord.tasks.calls == []
+    assert "reason" not in coord.shared_state.warm_replay_outcome
+
+
+@pytest.mark.asyncio
+async def test_current_recipe_patch_skips_without_active_framework_root(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_current_sdk_readers(
+        monkeypatch,
+        tmp_path,
+        timeline=["explore/p.patch"],
+        explore_refs=["explore/p.patch"],
+        framework_refs=[],
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: "",
+    )
+    coord = _make_coord(
+        tmp_path,
+        warm_start_recipe={
+            "tier": "exact",
+            "confidence": 1.0,
+            "recipe": {
+                "canonical_id": "inference:test",
+                "record_kind": "hyperloom_recipe",
+            },
+        },
+    )
+    prepared = 0
+
+    async def _prepare(*_args, **_kwargs):
+        nonlocal prepared
+        prepared += 1
+        return {"status": "prepared"}
+
+    coord.phase_prelude._prepare_warm_kernel_kb = _prepare
+
+    task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
+
+    assert task is None
+    assert prepared == 0
+    assert coord.shared_state.warm_replay_outcome == {
+        "status": "skipped",
+        "reason": "active_framework_root_missing",
+    }
 
 
 @pytest.mark.parametrize(
@@ -711,7 +862,7 @@ async def test_warm_replay_falls_back_to_recipe_when_context_not_hit(tmp_path):
 def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     tmp_path,
 ):
-    """When measured gain ≥ expected × min_reproduce, push the warm config onto the stack and bump cumulative_gain."""
+    """When measured gain ≥ expected × min_reproduce, push the warm config onto the stack and bump the validated gain."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -741,11 +892,10 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert entry["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
     assert entry["tput"] == 738.0
     assert coord.shared_state.gain_per_stack_entry == [23.0]
-    assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
     assert coord.shared_state.cumulative_gain_validated_ts
     assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
@@ -778,7 +928,7 @@ def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
         "replay_warm_recipe",
     ]
     assert coord.shared_state.gain_per_stack_entry == [None, 23.0]
-    assert coord.shared_state.cumulative_gain == 23.0
+    assert coord.shared_state.cumulative_gain_validated == 23.0
     assert coord.shared_state.cumulative_gain_validated_stack_len == 2
 
 
@@ -820,7 +970,7 @@ def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
     assert outcome["quality_gate"]["passed"] is False
     assert coord.shared_state.optimization_stack == []
     assert coord.shared_state.current_best == {}
-    assert coord.shared_state.cumulative_gain == 0.0
+    assert coord.shared_state.cumulative_gain_validated == 0.0
 
 
 @pytest.mark.parametrize(
@@ -888,7 +1038,7 @@ def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
     outcome = coord.shared_state.warm_replay_outcome
     assert outcome["status"] == "reproduced"
     assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
 def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
@@ -918,16 +1068,16 @@ def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
     coord._promote_warm_replay(result, task=task)
 
     cb = coord.shared_state.current_best
-    assert cb["action"] == "warm_replay"
+    assert cb["action"] == "replay_warm_recipe"
     assert cb["tput"] == 738.0
-    assert cb["hot_tput"] == 738.0
-    assert cb["cold_tput"] == 690.0
+    # The measured rounds are audit metadata on the stack entry, not config.
+    assert "hot_tput" not in cb
+    assert "cold_tput" not in cb
     entry = coord.shared_state.optimization_stack[0]
     assert entry["tput"] == 738.0
     assert entry["hot_tput"] == 738.0
     assert entry["cold_tput"] == 690.0
     assert entry["gain_pct"] == 23.0
-    assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
 
 
@@ -954,7 +1104,7 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     assert outcome["actual_gain_pct"] == 10.0
     assert outcome.get("below_historical_reproduce_pct") is True
     assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.current_best["action"] == "warm_replay"
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
 def test_promote_warm_replay_no_gain_is_drift(tmp_path):
@@ -977,7 +1127,7 @@ def test_promote_warm_replay_no_gain_is_drift(tmp_path):
     outcome = coord.shared_state.warm_replay_outcome
     assert outcome["status"] == "drift"
     assert coord.shared_state.optimization_stack == []
-    assert coord.shared_state.cumulative_gain == 0.0
+    assert coord.shared_state.cumulative_gain_validated == 0.0
 
 
 def test_promote_warm_replay_succeeded_but_zero_gain_is_drift(tmp_path):
@@ -1036,6 +1186,117 @@ def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
         )
         is True
     )
+
+
+def test_multi_file_kernel_targets_share_one_framework_root(
+    tmp_path,
+    monkeypatch,
+):
+    coord = _make_coord(tmp_path)
+    framework_root = tmp_path / "framework"
+    existing = framework_root / "python/sglang/srt/models/qwen3.py"
+    added = framework_root / "python/sglang/srt/models/qwen3_fused_ops.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("original\n", encoding="utf-8")
+    patch = tmp_path / "fusion.patch"
+    patch.write_text(
+        "diff --git a/python/sglang/srt/models/qwen3.py "
+        "b/python/sglang/srt/models/qwen3.py\n"
+        "--- a/python/sglang/srt/models/qwen3.py\n"
+        "+++ b/python/sglang/srt/models/qwen3.py\n"
+        "@@ -1 +1 @@\n"
+        "-original\n"
+        "+patched\n"
+        "diff --git a/python/sglang/srt/models/qwen3_fused_ops.py "
+        "b/python/sglang/srt/models/qwen3_fused_ops.py\n"
+        "--- /dev/null\n"
+        "+++ b/python/sglang/srt/models/qwen3_fused_ops.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+new\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: str(framework_root),
+    )
+
+    targets = coord.phase_prelude._resolve_kernel_target_paths(
+        {
+            "patch_path": str(patch),
+        }
+    )
+
+    assert targets == [str(existing), str(added)]
+
+
+def test_kernel_targets_do_not_scan_other_framework_roots(tmp_path, monkeypatch):
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    stale_root = tmp_path / "stale"
+    stale_target = stale_root / "src/kernel.py"
+    active_root.mkdir()
+    stale_target.parent.mkdir(parents=True)
+    stale_target.write_text("old\n", encoding="utf-8")
+    patch = tmp_path / "kernel.patch"
+    patch.write_text(
+        "diff --git a/src/kernel.py b/src/kernel.py\n"
+        "--- a/src/kernel.py\n"
+        "+++ b/src/kernel.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: str(active_root),
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
+        lambda: (str(stale_root),),
+    )
+
+    entry = {"patch_path": str(patch)}
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert entry["resolution_error"] == f"existing target is missing: {active_root / 'src/kernel.py'}"
+
+
+def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monkeypatch):
+    coord = _make_coord(tmp_path)
+    patch = tmp_path / "create.patch"
+    patch.write_text(
+        "diff --git a/src/new.py b/src/new.py\n"
+        "--- /dev/null\n"
+        "+++ b/src/new.py\n"
+        "@@ -0,0 +1 @@\n+new\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        lambda: "",
+    )
+
+    entry = {"patch_path": str(patch)}
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert entry["resolution_error"] == "Session active framework root is unset"
+
+
+def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):
+    coord = _make_coord(tmp_path)
+    existing = tmp_path / "framework/existing.py"
+    created = tmp_path / "framework/created.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("original\n", encoding="utf-8")
+    snapshots = [
+        coord.phase_prelude._snapshot_warm_kernel_target(str(existing), 0),
+        coord.phase_prelude._snapshot_warm_kernel_target(str(created), 1),
+    ]
+    existing.write_text("patched\n", encoding="utf-8")
+    created.write_text("new\n", encoding="utf-8")
+
+    result = coord.phase_prelude._restore_warm_kernel_snapshots(snapshots)
+
+    assert result == {"ok": True, "errors": []}
+    assert existing.read_text(encoding="utf-8") == "original\n"
+    assert not created.exists()
 
 
 @pytest.mark.asyncio
@@ -1177,6 +1438,51 @@ async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
     await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
     assert len(coord.tasks.calls) == 2
     assert coord.tasks.calls[1]["idempotency_key"] == ("internal-analysis-prelude_initial")
+    assert coord.shared_state.auto_roofline_pending_task_id
+
+
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_dropped_when_it_would_cost_the_optimization_phases(
+    tmp_path,
+):
+    """A roofline is worth an hour only if the session can still use what it finds.
+
+    The Qwen3.5-397B shape: 51 minutes of baseline, then an 81-minute TraceLens
+    arm that left FRAMEWORK_AGENT 46 minutes against its 108-minute threshold.
+    """
+    coord = _make_coord(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 600.0
+    state.max_minutes = 180
+    state.baseline_runtime_sec = 2705.7
+    state.phase_elapsed_totals = {"PRELUDE": 3090.0}
+    state.phase_history = [{"to_phase": "PRELUDE", "evidence": {}}]
+    state.session_budget_usable_sec = lambda: 7700.0
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
+
+    assert coord.tasks.calls == []
+    assert not coord.shared_state.auto_roofline_pending_task_id
+    dropped = state.phase_history[-1]["evidence"]["budget_dropped_arms"]
+    assert dropped[0]["arm"] == "initial_analysis"
+    assert dropped[0]["expected_cost_sec"] == pytest.approx(2705.7)
+
+
+@pytest.mark.asyncio
+async def test_prelude_initial_analysis_runs_when_the_budget_covers_it(tmp_path):
+    """Same wiring, ordinary session: the arm is not dropped just because the guard exists."""
+    coord = _make_coord(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 600.0
+    state.max_minutes = 180
+    state.baseline_runtime_sec = 300.0
+    state.phase_elapsed_totals = {"PRELUDE": 320.0}
+    state.phase_history = [{"to_phase": "PRELUDE", "evidence": {}}]
+    state.session_budget_usable_sec = lambda: 10_300.0
+
+    await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
+
+    assert len(coord.tasks.calls) == 1
     assert coord.shared_state.auto_roofline_pending_task_id
 
 
@@ -1408,7 +1714,6 @@ def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):
     # baseline 600, measured 738 -> gain = 23% via tput ratio.
     result = {"status": "succeeded", "output_throughput": 738.0}
     coord._promote_warm_replay(result, task=task)
-    assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated == 23.0
 
 
@@ -1752,9 +2057,8 @@ def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
     return repo, patch
 
 
-def test_combined_keep_promotes_validated_checkout_without_reapply(
+def test_combined_keep_retains_validated_framework_root_without_reapply(
     tmp_path,
-    monkeypatch,
 ):
     checkout, patch_content = _git_repo_for_required_patch(tmp_path)
     subprocess.run(
@@ -1764,7 +2068,6 @@ def test_combined_keep_promotes_validated_checkout_without_reapply(
         check=True,
         capture_output=True,
     )
-    monkeypatch.setenv("INFERENCEX_PATH", "/original/inferencex")
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -1808,9 +2111,13 @@ def test_combined_keep_promotes_validated_checkout_without_reapply(
     )
 
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
-    assert coord.shared_state.active_inferencex_path == str(checkout.resolve())
-    assert os.environ["INFERENCEX_PATH"] == str(checkout.resolve())
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(
+        checkout.resolve()
+    )
+    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(
+        checkout.resolve()
+    )
     assert coord.shared_state.warm_replay_pending == {}
 
 

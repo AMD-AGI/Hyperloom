@@ -12,6 +12,7 @@ from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
+from ..state.task_registry import TERMINAL_STATES
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -23,9 +24,44 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# Task states past which the same idempotency key may be reused for a retry.
-_TERMINAL_TASK_STATES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 _MAX_IDEMPOTENCY_ATTEMPTS: int = 6
+
+
+def apply_critic_grid_filter(
+    params: dict[str, Any],
+    *,
+    original_grid: list[Any],
+    approved_variant_names: set[str] | None,
+) -> bool:
+    """Restrict ``params['grid']`` to Critic-approved variant names.
+
+    ``None`` leaves the grid untouched. Non-dict slots cannot carry a name:
+    they pass through only when there is no filter.
+
+    Args:
+        params: Task params mutated in place; must already hold ``grid``.
+        original_grid: The proposer's grid, used for the filter audit count.
+        approved_variant_names: Names that may run; ``None`` keeps the full grid.
+
+    Returns:
+        ``False`` when a filter was set and no variant survived; ``True`` otherwise.
+    """
+    stamped_grid: list[Any] = []
+    for variant in original_grid:
+        if not isinstance(variant, dict):
+            if approved_variant_names is None:
+                stamped_grid.append(variant)
+            continue
+        vname = str(variant.get("name") or "").strip()
+        if approved_variant_names is not None and vname not in approved_variant_names:
+            continue
+        stamped_grid.append(dict(variant))
+    params["grid"] = stamped_grid
+    if approved_variant_names is None:
+        return True
+    original_grid_len = len([v for v in original_grid if isinstance(v, dict)])
+    params["critic_filtered_count"] = max(0, original_grid_len - len(stamped_grid))
+    return bool(stamped_grid)
 
 
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
@@ -399,26 +435,9 @@ class ProposalsCollaborator:
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)
-        keep = self._decaying_keep_threshold_pct()
-        if keep is not None:
-            params.setdefault("keep_threshold_pct", keep)
-            params.setdefault("stack_stable_threshold_pct", keep / 2.0)
-
-    def _decaying_keep_threshold_pct(self) -> float | None:
-        """Per-cycle KEEP threshold to inject, or ``None`` to keep executor defaults.
-
-        The bar shrinks along the shared decaying curve as macro-cycles accrue.
-
-        Returns:
-            The decayed per-cycle KEEP threshold percentage.
-        """
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
-        return _phase_state.decaying_keep_threshold_pct(
-            cycle,
-            multi_node=is_multi_node(),
-        )
+        keep = _phase_state.resolve_keep_threshold(self.shared_state)
+        params.setdefault("keep_threshold_pct", keep)
+        params.setdefault("stack_stable_threshold_pct", keep / 2.0)
 
     async def _materialize_approved_proposal(
         self,
@@ -446,28 +465,24 @@ class ProposalsCollaborator:
             )
         # Filter the grid to the Critic-approved subset.
         if pending.action_name == "explore" and isinstance(params.get("grid"), list):
-            stamped_grid: list[dict[str, Any]] = []
-            for variant in params["grid"]:
-                if not isinstance(variant, dict):
-                    # Non-dict slots can't carry a name: dropped under a filter, pass-through otherwise.
-                    if approved_variant_names is None:
-                        stamped_grid.append(variant)
-                    continue
-                vname = str(variant.get("name") or "").strip()
-                # Drop variants the Critic rejected before they hit the executor.
-                if approved_variant_names is not None and vname not in approved_variant_names:
-                    continue
-                stamped_grid.append(dict(variant))
-            params["grid"] = stamped_grid
-            # Audit hint: how many variants the Critic filtered.
-            if approved_variant_names is not None:
-                original_grid_len = len(
-                    [v for v in (pending.payload.get("params") or {}).get("grid", []) if isinstance(v, dict)]
+            original_grid = list(params["grid"])
+            if not apply_critic_grid_filter(
+                params,
+                original_grid=original_grid,
+                approved_variant_names=approved_variant_names,
+            ):
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "proposal_materialize_skipped",
+                        "reason": "critic_filter_empty_grid",
+                        "proposal_msg_id": pending.proposal_msg_id,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                    },
                 )
-                params["critic_filtered_count"] = max(
-                    0,
-                    original_grid_len - len(approved_variant_names),
-                )
+                return
         if pending.action_name == "profile":
             # Stamp the server config that produced this trace.
             inject_stack_base_params(params, self.shared_state)
@@ -479,9 +494,7 @@ class ProposalsCollaborator:
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
-            keep = self._decaying_keep_threshold_pct()
-            if keep is not None:
-                params.setdefault("keep_threshold_pct", keep)
+            params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
             # Seed the patched-eval server with the same base args/config every
             # other eval server uses, else it launches on bare framework defaults
             # and crashes at startup regardless of the patch.
@@ -506,7 +519,7 @@ class ProposalsCollaborator:
             )
             if not was_existing:
                 break
-            if task.state not in _TERMINAL_TASK_STATES:
+            if task.state not in TERMINAL_STATES:
                 await self._record_observation(
                     "coordinator",
                     "observation",

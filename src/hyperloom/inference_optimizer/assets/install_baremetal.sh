@@ -28,7 +28,7 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0b1}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0b2}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
@@ -46,13 +46,13 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang v0.5.16, ROCm 7.2).
+# Framework versions track docs/compatibility.rst (SGLang v0.5.17, ROCm 7.2).
 # vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
-# vllm-v0.27.1-rocm7.2.3 Docker image. The rocm723 variant puts the vLLM ROCm
-# layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
+# vllm/vllm-openai-rocm:v0.27.1 Docker image. The rocm723 variant puts the
+# vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-v0.5.16}"
+SGLANG_REF="${SGLANG_REF:-v0.5.17}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
@@ -164,8 +164,9 @@ warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x, or \
-install an equivalent ROCm torch + framework stack), then re-run."
+SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x or \
+vllm/vllm-openai-rocm:v0.27.1, or install an equivalent ROCm torch + \
+framework stack), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -487,6 +488,30 @@ PY
   fi
 }
 
+# Resolve the in-tree ROCm kernel build directory for a SGLang checkout.
+# Legacy tags (<= v0.5.16): sgl-kernel/setup_rocm.py
+# v0.5.17+ tags: python/sglang/kernels/aot/setup_rocm.py
+sglang_kernel_rocm_build_dir() {
+  local sglang_root="$1"
+  if [ -f "${sglang_root}/sgl-kernel/setup_rocm.py" ]; then
+    printf '%s' "${sglang_root}/sgl-kernel"
+    return 0
+  fi
+  if [ -f "${sglang_root}/python/sglang/kernels/aot/setup_rocm.py" ]; then
+    printf '%s' "${sglang_root}/python/sglang/kernels/aot"
+    return 0
+  fi
+  return 1
+}
+
+install_sglang_kernel_rocm() {
+  local py="$1" sglang_root="$2" arch="$3" kernel_dir=""
+  kernel_dir="$(sglang_kernel_rocm_build_dir "$sglang_root")" \
+    || die "no in-tree ROCm sglang-kernel build path under ${sglang_root} (checked sgl-kernel/ and python/sglang/kernels/aot/)"
+  log "building in-tree ROCm kernel from ${kernel_dir} (arch=${arch})"
+  (cd "$kernel_dir" && AMDGPU_TARGET="$arch" "$py" setup_rocm.py install)
+}
+
 # Install SGLang from source for Python versions not supported by AMD wheels.
 install_sglang_from_source() {
   local py="$1" deps_root="$2" sglang_root arch constraint_file
@@ -506,7 +531,7 @@ install_sglang_from_source() {
   fi
 
   "$py" -m pip install --upgrade pip wheel setuptools
-  (cd "${sglang_root}/sgl-kernel" && AMDGPU_TARGET="$arch" "$py" setup_rocm.py install)
+  install_sglang_kernel_rocm "$py" "$sglang_root" "$arch"
   if [ -f "${sglang_root}/python/pyproject_other.toml" ]; then
     cp "${sglang_root}/python/pyproject_other.toml" "${sglang_root}/python/pyproject.toml"
   fi
@@ -641,7 +666,13 @@ PY
     if [ "$py_mm" = "3.10" ]; then
       log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
     else
-      log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
+      local sglang_root="${SGLANG_ROOT:-${deps_root}/sglang}" kernel_dir=""
+      log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${sglang_root}"
+      if kernel_dir="$(sglang_kernel_rocm_build_dir "$sglang_root" 2>/dev/null)"; then
+        log "would build in-tree ROCm kernel via ${kernel_dir}/setup_rocm.py"
+      else
+        log "would build in-tree ROCm kernel via setup_rocm.py after clone (sgl-kernel/ legacy or python/sglang/kernels/aot/ for v0.5.17+)"
+      fi
       log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
     fi
     if [ -n "$AITER_REF" ]; then

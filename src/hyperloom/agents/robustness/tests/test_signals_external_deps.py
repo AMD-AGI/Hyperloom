@@ -232,7 +232,7 @@ def test_j3_silent_when_any_cli_present():
 
 
 def test_j3_silent_without_latch_passed():
-    """When the caller doesn't supply a latch, J3 is skipped entirely."""
+    """When the caller doesn't supply a latch, the TraceLens rule is skipped entirely."""
     data = SourceData(
         local_external_deps={
             "tracelens_cli": {"any_present": False, "found": {"a": False}},

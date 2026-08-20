@@ -90,7 +90,7 @@ def _section_mission() -> list[str]:
         "## 1. MISSION",
         "",
         "You are the Orchestration agent of an autonomous inference-optimization loop.",
-        "Your single most important goal is to maximise the run's **cumulative_gain**",
+        "Your single most important goal is to maximise the run's **cumulative_gain_validated**",
         "(percent over baseline_tput) within the wall-clock budget.",
         "",
         "Every tick, ask yourself:",
@@ -99,9 +99,8 @@ def _section_mission() -> list[str]:
         "",
         'An optimization is only "real" once it has been validated as part of the',
         "full optimization_stack. ``explore`` inlines a per-KEEP stack rebench, so",
-        "the validated cumulative gain advances automatically — sums of per-round",
-        "gains still do NOT compose linearly, so drive the loop until ``explore``",
-        "has produced at least one KEEP that survived the stack rebench.",
+        "cumulative_gain_validated advances automatically — drive the loop until",
+        "``explore`` has produced at least one KEEP that survived the rebench.",
     ]
 
 
@@ -432,7 +431,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "specialist_task_id=<completed specialist task_id>, "
             "patches?=[<patch paths from specialist_done>], "
             "config_changes?={ENV_VAR: value}, "
-            "keep_threshold_pct?=1.0, "
+            "keep_threshold_pct?=<session-cycle default>, "
             "accuracy_baseline?=<float>}}"
         )
     return f"propose_action{{action_name='{meta.name}', predicted_gain_pct=<your estimate>}}"
@@ -456,7 +455,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
+            "keep_threshold_pct?: <session-cycle default>, stack_stable_threshold_pct?: <keep/2>}}`. "
             "Variants run serially; each KEEP triggers an inlined stack "
             "rebench. Variant identity is content-based (args+envs+"
             "remove_args+unset_envs+args_mode); only exact duplicates within "
@@ -555,7 +554,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "These are reference heuristics and objective facts, not a forced",
         "sequence. Read the dynamic SharedState section and decide:",
         "",
-        "1. **Stop**: if `stop_reason` is set OR `cumulative_gain >= target_gain_pct`,",
+        "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
@@ -771,7 +770,7 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
   Backend policy: DO NOT add a `backends` field. Current GEAK owns the
   KERNEL phase by default. Forge per-kernel mode is available only when the
   operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`.
-  Read `kernel_opt_attempts` +
+  Read `kernel_opt_task_attempts` +
   `pending_keep_kernels` to
   see what's still queueable; the batch handler filters
   rejected/in-flight/exhausted candidates.
@@ -787,7 +786,7 @@ allowed action until the patch lands on `optimization_stack`:
 
   Omit `base_tput` / `patch_path` / `source_file` and the Coordinator
   fills them from `current_best.tput` and the per-kernel
-  `kernel_opt_attempts` ledger (this is what drains a multi-KEEP queue).
+  `kernel_opt_task_attempts` ledger (this is what drains a multi-KEEP queue).
   PARTIAL / REVERT → do NOT integrate; pick the next action normally.
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)

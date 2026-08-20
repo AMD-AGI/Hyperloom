@@ -11,7 +11,7 @@ headers. For the robustness role the expected blocks are:
     ...
 
     === Shared session state ===
-    session_id=...
+    tick=...
     ...
 
     === Time budget ===
@@ -48,10 +48,18 @@ log = logging.getLogger(__name__)
 
 
 # Anchored to the two-space row prefix; ``\S+`` topic guards against payloads
-# whose dict repr contains a literal ``topic=``.
+# whose dict repr contains a literal ``topic=``. ``msg_id`` is absent on
+# messages carrying none, and the fields after ``topic`` are per-topic
+# (``_format_inbox_event``), so the remainder is captured as a tail.
 _INBOX_LINE_RE = re.compile(
-    r"^\s+seq=(?P<seq>\d+)\s+msg_id=(?P<msg_id>\S+)\s+from=(?P<from_agent>\S+)\s+"
-    r"topic=(?P<topic>\S+)\s+payload=(?P<payload>.+)$"
+    r"^\s+seq=(?P<seq>\d+)\s+(?:msg_id=(?P<msg_id>\S+)\s+)?from=(?P<from_agent>\S+)\s+"
+    r"topic=(?P<topic>\S+)\s*(?P<tail>.*)$"
+)
+
+# One ``key=<python literal>`` pair of a tail. Quoted values are matched whole so
+# a ``k=v`` inside a rendered ``error=``/``notes=`` string cannot split it.
+_INBOX_FIELD_RE = re.compile(
+    r"(?P<key>\w+)=(?P<value>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
 )
 
 _SHARED_HEADER = "=== Shared session state ==="
@@ -78,9 +86,7 @@ _CONVERSATION_PROGRESS_LINE_RE = re.compile(
 
 # SharedState lines we care about.
 _SCALAR_KEYS = {
-    "session_id",
     "baseline_tput",
-    "cumulative_gain",
     "cumulative_gain_validated",
     "crash_count",
     "current_action",
@@ -175,17 +181,15 @@ class InboxItem:
 class SharedStateSnapshot:
     """Subset of the Coordinator SharedState the robustness reactor reads.
 
-    Only the fields the M1 reactor consumes are parsed; every other
+    Only the fields the reactor consumes are parsed; every other
     rendered line is ignored. All fields default to a neutral value so a
     parse miss degrades to "no signal" rather than raising.
 
     Attributes:
-        session_id (str): Current session id, or ``""`` when unset.
         model_name (str): Target model name, or ``""`` when unset.
         model_class (str): Target model class, or ``""`` when unset.
         baseline_tput (float): Baseline throughput reported by the
             Coordinator.
-        cumulative_gain (float): Cumulative (unvalidated) gain percentage.
         cumulative_gain_validated (float): Cumulative validated gain
             percentage.
         crash_count (int): Number of crashes recorded this session.
@@ -204,17 +208,15 @@ class SharedStateSnapshot:
             means no budget configured.
         closing_phase (bool): True when the Coordinator signals the
             closing phase.
-        kernel_opt_attempts_count (int): Count of unique kernel ids with at
+        kernel_opt_attempts_count (int): Count of unique kernel task identities with at
             least one recorded kernel_opt attempt.
         has_keep_pending_integrate (bool): True when a multi-KEEP integrate
             queue still has work pending.
     """
 
-    session_id: str = ""
     model_name: str = ""
     model_class: str = ""
     baseline_tput: float = 0.0
-    cumulative_gain: float = 0.0
     cumulative_gain_validated: float = 0.0
     crash_count: int = 0
     current_action: str = ""
@@ -235,9 +237,8 @@ class SharedStateSnapshot:
 class ReactorContext:
     """Per-tick input for :class:`Reactor`.
 
-    Built by :func:`from_coordinator_prompt` (SINGLE_PROC) or
-    :func:`from_inbox_jsonl` (MULTI_CLI; M3).  The reactor does not need
-    to know which transport produced the context.
+    Built by :func:`from_coordinator_prompt` from the rendered Coordinator
+    prompt, which is the only transport.
 
     Attributes:
         tick_index (int): In-process tick counter.
@@ -470,9 +471,7 @@ def _coerce_cumulative_gain_validated(head: str) -> float:
 #: attr name differs from its rendered key. Explore-family keys are handled
 #: separately because they set a shared flag idempotently rather than a 1:1 attr.
 _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
-    "session_id": ("session_id", lambda head: "" if head == "(unset)" else head),
     "baseline_tput": ("baseline_tput", lambda head: to_float(head, default=0.0)),
-    "cumulative_gain": ("cumulative_gain", lambda head: to_float(head.rstrip("%"), default=0.0)),
     "cumulative_gain_validated": ("cumulative_gain_validated", _coerce_cumulative_gain_validated),
     "crash_count": ("crash_count", lambda head: to_int(head, default=0)),
     "current_action": ("current_action", lambda head: "" if head == "(idle)" else head),
@@ -649,20 +648,50 @@ def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
         except ValueError:
             warnings.append(f"non-integer seq in {raw!r}")
             continue
-        payload_text = match.group("payload")
-        payload, payload_warn = _decode_payload(payload_text)
-        if payload_warn:
-            warnings.append(payload_warn)
+        payload, tail_warnings = _decode_tail(match.group("tail"))
+        warnings.extend(tail_warnings)
         items.append(
             InboxItem(
                 seq=seq,
-                msg_id=match.group("msg_id"),
+                msg_id=match.group("msg_id") or "",
                 from_agent=match.group("from_agent"),
                 topic=match.group("topic"),
                 payload=payload,
             )
         )
     return items, warnings
+
+
+def _decode_tail(tail: str) -> tuple[dict[str, Any], list[str]]:
+    """Decode the per-topic field tail of an inbox line into a payload dict.
+
+    ``payload=`` carries the whole dict and wins; the summary fields rendered
+    before it are folded in underneath, so a topic that emits no ``payload=``
+    (``delegated_result``) still yields ``kind`` / ``state`` / ``error``.
+
+    Args:
+        tail (str): Everything after ``topic=<topic>`` on the line.
+
+    Returns:
+        tuple[dict[str, Any], list[str]]: The payload dict and any decode
+        warnings.
+    """
+    head, sep, payload_text = tail.strip().partition("payload=")
+    fields: dict[str, Any] = {}
+    warnings: list[str] = []
+    for match in _INBOX_FIELD_RE.finditer(head):
+        key, raw = match.group("key"), match.group("value")
+        try:
+            fields[key] = ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            fields[key] = raw
+            warnings.append(f"field {key} not a python literal: {raw!r}")
+    if not sep:
+        return fields, warnings
+    payload, payload_warn = _decode_payload(payload_text)
+    if payload_warn:
+        warnings.append(payload_warn)
+    return {**fields, **payload}, warnings
 
 
 def _decode_payload(text: str) -> tuple[dict[str, Any], str | None]:

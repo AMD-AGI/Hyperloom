@@ -131,127 +131,194 @@ formally adopted optimization results. It normalizes Warm Replay, Explore,
 Framework Agent, and Kernel Agent KEEPs without exposing internal action names
 such as `integrate_patch`.
 
+The section is projected from what the producers recorded while they worked —
+the operation, adoption, measurement, and artifact streams — and from nothing
+else. It is never rebuilt from `state.json`. That is what makes
+`available` meaningful: a session whose records never landed reports as
+unavailable instead of as a session that optimized nothing.
+
 ```text
 optimizations
-├── schema_version
-├── entries[]
-│   ├── id
-│   ├── stack_index
-│   ├── source
-│   ├── source_method
-│   ├── optimization_kind
-│   ├── name
-│   ├── backend
-│   ├── execution_mode
-│   ├── kernel_id
-│   ├── adopted_attempt_id
-│   ├── action
-│   ├── variant_name
-│   ├── fingerprint
-│   ├── scope
-│   ├── source_phase
-│   ├── gain_method
-│   ├── accepted_heads
-│   ├── extra_server_args_is_invariant
-│   ├── candidate_flags
-│   ├── gain_pct
-│   ├── cumulative_gain_pct
-│   ├── throughput_before
-│   ├── throughput_after
-│   ├── validated
-│   ├── task_id
-│   ├── ts
-│   ├── provenance
-│   ├── configuration
-│   └── artifacts[]
+├── schema_version              5
+├── source_of_truth             "recorder"
+├── available                   bool — always present, on both paths
+├── unavailable_reason          string — present only when available=false
+├── attempts[]                  every attempt, adopted or not
+├── entries[]                   the adopted ledger, in adoption order
 ├── backend_attempts[]
-│   ├── attempt_id
-│   ├── kernel_id
-│   ├── backend
-│   ├── decision
-│   ├── sequence
-│   ├── duration_sec
-│   ├── error_class
-│   └── error
+├── summary_by_agent
 ├── summary_by_source
-    ├── warm_replay
-    ├── explore
-    ├── framework_agent
-    ├── kernel_agent
-    │   └── by_backend
-    │       ├── geak
-    │       ├── forge
-    │       └── unattributed
-    └── unattributed
 ├── summary_by_kind
 ├── validation
-│   ├── method
-│   ├── validated_at_stack_len
-│   ├── validated_total_gain_pct
-│   ├── attributed_total_gain_pct
-│   ├── attribution_gap_pct
-│   ├── notes
-│   ├── source_breakdown
-│   ├── phase_breakdown
-│   └── domain_attribution
 └── gemm_tuning_runs[]
 ```
 
-`source` is one of `warm_replay`, `explore`, `framework_agent`,
-`kernel_agent`, or `unattributed`. Kernel entries additionally identify
-`backend=geak|forge` and `execution_mode=whole_pipeline|per_kernel`.
-Only validated entries contribute to `summary_by_source` and
-`summary_by_kind`. The former answers which agent or phase produced the
-gain; the latter groups the same entries by `optimization_kind`. These
-summaries are alternate views of the same gains and must not be added
-together.
+### `available` — records missing vs nothing adopted
+
+**Consumers must read `available` before reading anything else in this
+section.** It is present on both paths: `true` on a normal export, `false`
+when the recorder projection could not be built, alongside an
+`unavailable_reason` (`"no operations were recorded for this session"` or
+`"the recorder projection failed"`). When it is `false`, every array in the
+section is empty and `validation.method` is `"unavailable"` — those empty
+arrays mean *unknown*, not *none*.
+
+An unavailable section is also cross-checked against `state.json`: if the run
+state carries an optimization stack the recorder never captured, the export
+says so in `warnings` rather than quietly emitting an empty section.
+
+### `attempts[]` — every attempt, adopted or not
+
+New in V5. One row per recorded unit of optimization work, whichever way it
+was decided. `entries[]` covers only what was adopted; `attempts[]` is where a
+REVERT, a failure, or a KEEP that nothing credited remains visible. Adopted
+entries join back to their attempt through `entries[].adopted_attempt_id`.
+
+| Group | Fields |
+|---|---|
+| Identity | `attempt_id`, `adoption_id`, `producer`, `kind`, `name`, `subject` (`{type,name}`), `kernel_id`, `backend`, `phase`, `macro_cycle` |
+| Timing | `started_at`, `ended_at`, `duration_sec` |
+| Ownership | `agent`, `agent_method` |
+| Verdict | `status`, `decision`, `decision_source`, `decision_reason`, `adopted`, `integrated`, `validation_basis`, `attribution_eligible`, `keep_threshold_pct`, `keep_threshold_source` |
+| Numbers | `local_gain_pct`, `local_gain_source`, `throughput_before`, `throughput_before_source`, `throughput_after`, `throughput_after_source`, `alias_conflicts` |
+| Evidence | `gates[]`, `backend_attempts[]`, `measurements[]`, `measurement_source`, `measurement_occurrences`, `artifacts[]` |
+
+`kind` is one of `kernel_optimization`, `kernel_collective`, `gemm_tuning`,
+`integrate_patch`, `framework_agent`, `explore`, or `replay_warm_recipe`.
+
+Several fields exist to say where a contested value came from, because the
+value alone cannot:
+
+* `agent_method` — `recorded` when the producer stamped the owner,
+  `derived` when the read side had to infer one.
+* `decision_source` — a verdict an executor stated is a different claim from
+  a status inferred from the operation around it.
+* `keep_threshold_source` — one of `gate.inputs`, `gate.evidence`,
+  `decision.evidence`, or `outputs`. A bar recorded on the gate is the one
+  that gate ruled against; one recorded on the outputs is the executor's
+  configuration, which need not be what applied.
+* `throughput_before_source` / `throughput_after_source` — `adoption` means
+  the number was frozen when the decision was made; `measurement.<name>`
+  means it was read back afterwards and could since have moved.
+* `alias_conflicts` — roles that more than one recorded measurement name laid
+  claim to with readings that disagree. The first name won; this records that
+  the choice was not free.
+* `local_gain_source` — deliberately never named `gain_pct`. `local_gain_pct`
+  is what the executor measured against its own starting point, which is not
+  the session baseline once anything has been adopted. **These must not be
+  summed across attempts**; `entries[].gain_pct` is the summable figure.
+
+### `entries[]` — the adopted ledger
+
+One row per adopted optimization, in adoption order, carrying only what the
+chained arithmetic needs. Descriptive evidence (artifacts, kernel id, the
+starting throughput, gates, measurements) lives on the attempt and is reached
+through `adopted_attempt_id`.
+
+| Field | Description |
+|---|---|
+| `id` | `<session_id>:optimization:<stack_index>` |
+| `stack_index` | Position in the adopted ledger. |
+| `adopted_attempt_id` | Join key into `attempts[]`. |
+| `adoption_id` | The adoption record that credited this step. |
+| `source` | `warm_replay`, `explore`, `framework_agent`, `kernel_agent`, or `unattributed`. |
+| `source_method` | `recorded` or `derived`, as on the attempt. |
+| `optimization_kind` | The attempt's `kind`. |
+| `name` | Operation name, typically the kernel or variant. |
+| `backend` | Producing engine, e.g. `geak` or `forge`. |
+| `gain_pct` | Gain against the **session baseline**. The only figure that may be summed. |
+| `gain_method` | How `gain_pct` was arrived at; see below. |
+| `chain_continuous` | `false` when this step recorded no finishing throughput, so the drift across it could not be measured. |
+| `local_gain_pct` | The executor's own figure, kept beside `gain_pct` so the two are visibly different numbers. Not summable. |
+| `cumulative_gain_pct` | Running total including unattributed drift. |
+| `throughput_after` | Finishing throughput, when recorded. |
+| `validated` | Always `true`; only adopted steps become entries. |
+| `ts` | The attempt's `ended_at`. |
+
+`gain_method` is one of:
+
+* `baseline_chain` — measured against the previous step's finishing
+  throughput. The trustworthy case.
+* `local_gain_projected` — the finishing throughput was never recorded, so
+  the step's own percentage was projected onto the chain.
+* `recorded_adoption` — taken from the adoption record directly.
+* `missing` — no gain figure could be established.
 
 A `kernel_agent` entry's `optimization_kind` records which lane produced it:
-`gemm_tuning`, `kernel_fusion`, `kernel_collective`, or `kernel_patch` for a
-generic source-level rewrite. A `kernel_collective` entry comes from the
-Coordinator-owned collective lane, so it carries `action=collective` with
-`variant_name=forge_collective` and `backend=forge`, and retains
-`collective_op`, `world_size`, `collective_attempt_id`, and `integration_id` as
-optional evidence joining the entry back to its campaign record. Collective
-gain is bucketed into its own `collective` attribution family
-(`collective_pct_of_total`) so multi-rank communication wins get a dedicated
-row instead of falling through to `other`; its phase attribution still
-resolves to `kernel_agent`.
+`gemm_tuning`, `kernel_collective`, or `kernel_optimization` for a generic
+source-level rewrite. `kernel_collective` comes from the collective lane,
+which records its promotion as an operation of that kind with the integrate
+that settled it; it attributes to `kernel_agent` like any other kernel work.
+
+Only adopted entries contribute to `summary_by_source`, `summary_by_agent`,
+and `summary_by_kind`. The first answers which agent produced the gain, the
+second adds a per-kind split under each agent, and the third groups the same
+gains by kind alone. These are alternate views of one set of gains and **must
+not be added together**.
+
+### `validation` — reconciliation, not arithmetic
+
+The headline figure and the ledger's own sum are reported side by side so the
+two can be seen to disagree. When the run recorded an end-to-end validated
+gain, `validated_total_gain_pct` is that measurement and
+`ledger_total_gain_pct` is what the adopted steps add up to; when it did not,
+they are the same number by construction and nothing here can be checked.
+
+| Field | Description |
+|---|---|
+| `method` | `recorded_session_validation`, `ledger_sum`, or `unavailable`. |
+| `validation_basis` / `validation_source` | How and by which promote path the session figure was measured. |
+| `validated_at_stack_len` | Ledger length the session figure was measured at. |
+| `validated_total_gain_pct` | What the session was measured to have gained. |
+| `ledger_total_gain_pct` | What the adopted steps sum to on their own. |
+| `reconciliation_gap_pct` | The difference between the two. `null` when there is no measured figure to compare against. |
+| `attributed_total_gain_pct` | Gain claimed by adopted steps. |
+| `unattributed_gain_pct` | Gain sitting between adopted steps, credited to nobody rather than to whoever follows. |
+| `attribution_gap_pct` | Session figure minus attributed. |
+| `attempt_count` / `keep_count` | Attempts recorded, and how many were adopted. |
+| `non_attributable_keep_count` | Adoptions explicitly marked not attributable. |
+| `unmeasured_keep_count` | Adopted with nothing measured behind them. |
+| `projected_keep_count` | Adopted steps whose gain came from `local_gain_projected`. |
+| `stale_evidence_count` | Adopted steps whose evidence trail no longer resolves. |
+| `unclaimed_integration_count` | Operations recording an integrated change with no adoption crediting it. Any number here means `unattributed_gain_pct` is overstated by whatever those steps earned. |
+| `unscored_keep_count` | Adopted on a KEEP verdict alone, with no accuracy gate having ruled. |
+| `notes` | Free-text provenance of the projection. |
+
+### Remaining arrays
 
 `backend_attempts` retains adopted and non-adopted GEAK/Forge attempts,
 including KEEP, PARTIAL, REVERT, and FAILED outcomes. `sequence` is ordered
 within each kernel. Adopted kernel entries link back through
-`adopted_attempt_id`. Missing producer attempt IDs receive a stable
-session/kernel/backend/sequence ID. When multiple KEEP attempts match the
-same entry and the producer did not identify the adopted one, the link stays
-`null` and a warning is emitted rather than guessing.
+`adopted_attempt_id`. When multiple KEEP attempts match the same entry and the
+producer did not identify the adopted one, the link stays `null` and a warning
+is emitted rather than guessing.
 
-GEAK's candidate-time `kernel_journey.e2e` values are provisional until the
-orchestrator rebench completes. If the measured candidate does not beat
-`current_best`, the journey row is rewritten with `validated=false`,
-`decision=REVERT`, and `integrated=false`. The original claimed gain remains
-available only as `self_reported_e2e_gain_pct`, alongside the measured and
-comparison throughput used by the rejection.
-
-`validation` carries the attribution lineage and reconciliation diagnostics
-previously available only through the legacy attribution projection.
-`validation.source_breakdown` retains non-entry gain categories such as
-Sweep, params, and backend exploration without treating `sweep`,
-`conc_sweep`, or `validate_stack` as adopted optimizations.
 `gemm_tuning_runs` retains the complete tuning run records; the corresponding
 adopted gain remains represented exactly once by a `gemm_tuning` entry.
 
-`gain_method` is `ledger`, `legacy_ledger_derived`, `reconstructed`,
-`throughput_derived`, or `missing`; `source_phase` and
-`validated_at_stack_len` preserve the evidence needed to audit historical
-source, validation, and gain inference. V4 conversion reconstructs backend
-attempts and GEMM runs from canonical operation streams when that evidence is
-present, and marks validation as synthesized from validated adoptions.
-
 The historical `optimization_stack`, attribution, GEAK invocation, Forge
-invocation, and GEMM-tuning result projections are not emitted in the new wire
+invocation, and GEMM-tuning result projections are not emitted in the V5 wire
 shape. Their required downstream evidence is instead normalized into the
 canonical fields above.
+
+### Migrating from the V4 shape
+
+`entries[]` no longer carries `action`, `variant_name`, `fingerprint`,
+`scope`, `source_phase`, `task_id`, `provenance`, `configuration`,
+`execution_mode`, `accepted_heads`, `candidate_flags`, or
+`extra_server_args_is_invariant`. Three of the removed fields moved rather
+than disappeared and are reachable through `adopted_attempt_id`:
+
+| Was on `entries[]` | Now |
+|---|---|
+| `artifacts` | `attempts[].artifacts` |
+| `kernel_id` | `attempts[].kernel_id` |
+| `throughput_before` | `attempts[].throughput_before` |
+
+`validation.source_breakdown`, `validation.phase_breakdown`, and
+`validation.domain_attribution` are gone. Per-agent totals are now
+`summary_by_agent`; the gain belonging to no adopted step is
+`validation.unattributed_gain_pct` rather than a bucket inside a breakdown.
 
 When Warm Replay uses a donor recipe, `kb_provenance.warm_replay` also
 preserves the available `donor_canonical_id`, `donor_model`,
@@ -443,6 +510,17 @@ that way; absolute otherwise. Consumers that need to pull raw
 artifacts (for example, for a replay) should resolve relative paths against
 `session.session_dir`.
 
+Terminal Recipe publication is reported alongside the artifact paths:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `recipe_finalize` | dict | Secret-free outcome from the latest finalize attempt, including its source, attempt number, timestamp, and write/skip/error details |
+| `recipe_finalize_status` | string | Durable lifecycle state: `pending`, `written`, `skipped`, `disabled`, or `failed` |
+| `recipe_finalize_attempts` | int | Number of idempotent finalize attempts across CLOSE and graceful-teardown fallback paths |
+
+`failed` is retryable during the same process lifetime. Terminal statuses
+(`written`, `skipped`, and `disabled`) suppress duplicate publication.
+
 ### `telemetry.orchestration_context`
 
 Health of the orchestration conversation's compaction loop (`OrchestrationContext`).
@@ -625,12 +703,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "pid": 12345,
     "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
     "tick_count": 89,
-    "image": "rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x"
+    "image": "rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x"
   },
 
   "workload": {
     "framework_name": "sglang",
-    "framework_version": "0.5.11",
+    "framework_version": "0.5.17",
     "model_name": "GLM-5-FP8",
     "model_path": "/models/GLM-5-FP8",
     "model_class": "moe_mla_nsa",
@@ -674,7 +752,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
   "final": {
     "throughput_tok_s_per_gpu": 150.0,
     "cumulative_gain_pct_validated": 50.0,
-    "cumulative_gain_pct_per_round_sum": 50.0,
     "validated_at_stack_len": 4,
     "validated_ts": "2026-05-17T13:48:01Z",
     "stack_changed_after_validation": false,

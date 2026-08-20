@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.session.session_paths import manifest_path, s
 SUMMARY_KEYS = (
     "stop_reason",
     "baseline_tput",
-    "cumulative_gain",
+    "cumulative_gain_validated",
     "current_best",
     "last_kernel_opt",
     "last_trace_analyze",

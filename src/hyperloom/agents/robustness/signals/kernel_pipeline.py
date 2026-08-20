@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-pipeline / external-backend health signals (F1-F5).
+"""Kernel-pipeline / external-backend health signals.
 
-* **F1 ``ray_pending_starvation``** — non-zero ``ray status`` Pending across
+* **``ray_pending_starvation``** — non-zero ``ray status`` Pending across
   ``min_pending_ticks`` consecutive ticks (cluster quota ledger wedged).
-* **F2 ``geak_budget_starvation``** — same kernel_id's GEAK attempt SIGTERM'd across
+* **``geak_budget_starvation``** — same kernel_id's GEAK attempt SIGTERM'd across
   ``min_geak_sigterm_attempts`` rows; budget too short for ``select_patch``.
-* **F5 ``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids where
+* **``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids where
   no backend attempt reached a >=1.2x microbench speedup and no integrate row recorded a
   KEEP decision (>=2 distinct backends tried); prune kernel_opt toward params/sweep.
 """
@@ -39,18 +39,18 @@ _GEAK_SIGTERM_MARKERS: tuple[str, ...] = (
 class KernelPipelineConfig:
     """Tunables for :func:`evaluate_kernel_pipeline_signals`."""
 
-    # F1 — pending count above this for N consecutive ticks → fire.
+    # Pending count above this for N consecutive ticks → fire.
     pending_count_threshold: int = 1
     min_pending_ticks: int = 3
-    # F2 — same kernel_id has GEAK backend SIGTERM'd this many times.
+    # Same kernel_id has GEAK backend SIGTERM'd this many times.
     min_geak_sigterm_attempts: int = 2
-    # F5 — kernel_ids with no >=1.2x microbench speedup and no KEEP integrate
+    # kernel_ids with no >=1.2x microbench speedup and no KEEP integrate
     # decision across the recent oob_attempts window.
     min_kernels_with_no_progress: int = 3
 
 
 # ---------------------------------------------------------------------------
-# F1 — Ray pending starvation (stateful — counts consecutive ticks)
+# Ray pending starvation (stateful — counts consecutive ticks)
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ class RayPendingDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Advance the pending streak and fire F1 once it crosses threshold.
+        """Advance the pending streak and fire once it crosses threshold.
 
         Resets the streak when Ray data is missing, the head is unhealthy, or
         the pending count is at/below the configured threshold.
@@ -161,7 +161,7 @@ class RayPendingDetector:
 
 
 # ---------------------------------------------------------------------------
-# F2 — GEAK budget starvation
+# GEAK budget starvation
 # ---------------------------------------------------------------------------
 
 
@@ -169,7 +169,7 @@ def _geak_budget_symptoms(
     data: SourceData,
     cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
-    """F2: fire ``geak_budget_starvation`` for kernels whose GEAK runs SIGTERM.
+    """Fire ``geak_budget_starvation`` for kernels whose GEAK runs SIGTERM.
 
     Args:
         data (SourceData): Collected source data including the decision-audit
@@ -232,7 +232,7 @@ def _geak_budget_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# F5 — Kernel-opt no-progress
+# Kernel-opt no-progress
 # ---------------------------------------------------------------------------
 
 
@@ -346,7 +346,7 @@ def _kernel_opt_no_progress_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# Public entry point — module-level helper (stateful F1 lives in the class)
+# Public entry point — module-level helper (the stateful rule lives in the class)
 # ---------------------------------------------------------------------------
 
 
@@ -356,9 +356,10 @@ def evaluate_kernel_pipeline_signals(
     *,
     config: KernelPipelineConfig | None = None,
 ) -> list[Symptom]:
-    """Evaluate the stateless kernel-pipeline signals (F2 / F5).
+    """Evaluate the stateless kernel-pipeline signals.
 
-    F1 is stateful and lives in :class:`RayPendingDetector`.
+    ``ray_pending_starvation`` is stateful and lives in
+    :class:`RayPendingDetector`.
 
     Args:
         ctx: Reactor context for the current tick.

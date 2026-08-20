@@ -202,6 +202,83 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 800.0
 
 
+class TestVendorPlaybookDeployBlocked:
+    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach
+    apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle
+    config copy, not a rewrite of the real installed operator source
+    (PR #1191 review finding #1)."""
+
+    def test_backfilled_from_kernel_opt_attempts_ledger(self, session_dir):
+        state = SharedState.load_or_init(session_dir)
+        state.kernel_opt_attempts = {
+            "k010": {
+                "vendor_playbook_deploy_blocked": True,
+                "vendor_playbook_id": "mori_ep_dispatch_combine",
+            }
+        }
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k010"},
+            session_dir=session_dir,
+        )
+
+        assert out["_vendor_playbook_deploy_blocked"] is True
+
+    def test_backfilled_from_last_kernel_opt_when_ledger_missing(self, session_dir):
+        """An LLM-initiated integrate can name a kernel_id that never made it
+        into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
+        state = SharedState.load_or_init(session_dir)
+        state.last_kernel_opt = {
+            "kernel_id": "k010",
+            "vendor_playbook_deploy_blocked": True,
+        }
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k010"},
+            session_dir=session_dir,
+        )
+
+        assert out["_vendor_playbook_deploy_blocked"] is True
+
+    def test_normal_kernel_is_not_blocked(self, session_dir):
+        state = SharedState.load_or_init(session_dir)
+        state.kernel_opt_attempts = {"k001": {"vendor_playbook_deploy_blocked": False}}
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k001"},
+            session_dir=session_dir,
+        )
+
+        assert "_vendor_playbook_deploy_blocked" not in out
+
+    @pytest.mark.asyncio
+    async def test_integrate_handler_refuses_before_touching_filesystem(
+        self, session_dir
+    ):
+        _seed_state(session_dir, baseline_tput=800.0)
+        state = SharedState.load_or_init(session_dir)
+        state.kernel_opt_attempts = {
+            "k010": {
+                "vendor_playbook_deploy_blocked": True,
+                "vendor_playbook_id": "mori_ep_dispatch_combine",
+                "last_artifact_path": "/tmp/forge/session1/mori_ep_config.py",
+            }
+        }
+        state.save(session_dir)
+
+        result = await krh.integrate_handler(
+            {"kernel_id": "k010"},
+            session_dir=session_dir,
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "vendor_playbook_not_deployable"
+        assert result["decision"] == "NEEDS_REVIEW"
+
+
 class TestIntegrateRebaselineTimeout:
     def test_explicit_budget_wins(self, tmp_path):
         config = tmp_path / "config.yaml"

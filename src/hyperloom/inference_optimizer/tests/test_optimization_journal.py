@@ -22,6 +22,7 @@ from hyperloom.orchestrator.state.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
+    OUTCOME_SKIP,
     classify_change_kind,
     derive_journal_outcome,
     summarize_change,
@@ -381,6 +382,18 @@ def test_derive_journal_outcome_integrate_patch_kept_is_keep():
     assert out == OUTCOME_KEEP
 
 
+def test_derive_journal_outcome_refused_promotion_is_no_promote():
+    """A KEEP the anchor gate declined to lift adopted nothing, so it is not a KEEP."""
+    from hyperloom.orchestrator.state.optimization_journal import PROMOTION_REFUSED_KEY
+
+    out = derive_journal_outcome(
+        "integrate_patch",
+        {"status": "kept", "delta_pct": 7.5, PROMOTION_REFUSED_KEY: True},
+        promotable=True,
+    )
+    assert out == OUTCOME_NO_PROMOTE
+
+
 def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
     out = derive_journal_outcome(
         "integrate_patch",
@@ -419,6 +432,24 @@ def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
     assert derive_journal_outcome("baseline", {"status": "succeeded"}, promotable=True) == OUTCOME_KEEP
     assert derive_journal_outcome("explore", {}, promotable=False) == OUTCOME_REVERT
     assert derive_journal_outcome("profile", {"status": "reverted"}, promotable=True) == OUTCOME_KEEP
+
+
+def test_a_step_that_declined_to_run_is_neither_a_keep_nor_a_dead_end():
+    """A conc_sweep with nothing to compare succeeds without doing anything."""
+    out = derive_journal_outcome(
+        "conc_sweep",
+        {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
+        promotable=True,
+    )
+    assert out == OUTCOME_SKIP
+
+
+def test_a_stray_was_skipped_cannot_demote_a_kept_patch():
+    """No integrate_patch producer sets the key; a future one must not silently rewrite the verdict."""
+    assert (
+        derive_journal_outcome("integrate_patch", {"status": "kept", "was_skipped": True}, promotable=True)
+        == OUTCOME_KEEP
+    )
 
 
 def test_operation_kind_for_maps_kind_and_action():

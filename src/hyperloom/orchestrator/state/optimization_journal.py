@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-session optimization journal — structured JSON record of every KEEP / REVERT / no_promote decision.
+"""Per-session optimization journal — structured JSON record of every KEEP / REVERT / no_promote / skipped decision.
 
 Lives at ``<session_dir>/reports/optimization_journal.json``; rewritten
 incrementally (atomic tmp + ``os.replace``) so a mid-session crash leaves a usable artifact.
@@ -31,14 +31,26 @@ JOURNAL_FILENAME: str = "optimization_journal.json"
 OUTCOME_KEEP: str = "KEEP"
 OUTCOME_REVERT: str = "REVERT"
 OUTCOME_NO_PROMOTE: str = "no_promote"
+# A step that declined to run. Distinct from ``no_promote``, which readers take
+# as "we tried this and it did not pay" and harvest as a direction to stop
+# exploring (see ``knowledge.trajectory_reviewer``); a step that never ran is
+# evidence of nothing.
+OUTCOME_SKIP: str = "skipped"
 
 # Task kinds whose result carries an authoritative per-status verdict the
 # journal outcome must follow rather than the coarse dispatcher ``promotable``
 # flag (a ``reverted`` patch is promotable yet was rolled back).
 _STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "framework_agent"})
 
+# Task kinds whose result can legitimately declare ``was_skipped``. Scoped so
+# reusing that key elsewhere cannot silently demote a kept patch.
+_SKIPPABLE_JOURNAL_KINDS: frozenset[str] = frozenset({"conc_sweep"})
+
 # The only status meaning the change was adopted into current_best.
 _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
+
+# Stamped on the result when the anchor gate refused an executor-granted KEEP.
+PROMOTION_REFUSED_KEY: str = "promotion_refused"
 
 # Statuses meaning a real change was tested/applied then rolled back or rejected
 # on measured grounds → REVERT. Everything else is ``no_promote``.
@@ -79,7 +91,7 @@ def _optional_int(value: Any) -> int | None:
 
 @dataclass
 class JournalEntry:
-    """One KEEP / REVERT / no_promote decision (``None`` distinguishes "not measured" from "measured zero")."""
+    """One KEEP / REVERT / no_promote / skipped decision (``None`` distinguishes "not measured" from "measured zero")."""
 
     phase: str
     iter: int
@@ -357,13 +369,19 @@ def derive_journal_outcome(
     For source-patch kinds (``integrate_patch`` / ``framework_agent``) the
     outcome follows the executor's authoritative per-status verdict:
 
-    - ``status == "kept"`` → ``OUTCOME_KEEP``
+    - ``status == "kept"`` → ``OUTCOME_KEEP``, unless the promote path stamped
+      :data:`PROMOTION_REFUSED_KEY` because the anchor gate declined to lift it
     - ``status in {reverted, accuracy_unavailable_reject, regression}`` →
       ``OUTCOME_REVERT``
     - any other status → ``OUTCOME_NO_PROMOTE``
 
     For every other task kind the binary behaviour applies (``promotable`` →
     KEEP, else REVERT).
+
+    A result from a skippable kind declaring ``was_skipped`` outranks both
+    rules. A skip succeeds by design -- a concurrency sweep with no
+    optimization to compare has nothing to do and says so -- but a success that
+    changed nothing is neither a KEEP nor a measured dead end.
 
     Args:
         task_kind: The settled task's kind.
@@ -372,11 +390,17 @@ def derive_journal_outcome(
 
     Returns:
         One of :data:`OUTCOME_KEEP` / :data:`OUTCOME_REVERT` /
-        :data:`OUTCOME_NO_PROMOTE`.
+        :data:`OUTCOME_NO_PROMOTE` / :data:`OUTCOME_SKIP`.
     """
-    if (task_kind or "").lower() in _STATUS_DRIVEN_JOURNAL_KINDS:
-        status = str((result_dict or {}).get("status") or "").strip().lower()
+    result = result_dict or {}
+    kind = (task_kind or "").lower()
+    if kind in _SKIPPABLE_JOURNAL_KINDS and result.get("was_skipped"):
+        return OUTCOME_SKIP
+    if kind in _STATUS_DRIVEN_JOURNAL_KINDS:
+        status = str(result.get("status") or "").strip().lower()
         if status in _JOURNAL_KEEP_STATUSES:
+            if result.get(PROMOTION_REFUSED_KEY):
+                return OUTCOME_NO_PROMOTE
             return OUTCOME_KEEP
         if status in _JOURNAL_REVERT_STATUSES:
             return OUTCOME_REVERT
@@ -524,6 +548,8 @@ __all__ = [
     "OUTCOME_KEEP",
     "OUTCOME_NO_PROMOTE",
     "OUTCOME_REVERT",
+    "OUTCOME_SKIP",
+    "PROMOTION_REFUSED_KEY",
     "classify_change_kind",
     "derive_journal_outcome",
     "summarize_change",

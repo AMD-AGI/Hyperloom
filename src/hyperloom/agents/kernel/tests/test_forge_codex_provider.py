@@ -31,6 +31,9 @@ _PROVIDER_ENV = (
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
     "CODEX_MODEL",
+    "CLAUDE_MODEL",
+    "FORGE_CODEX_MODEL",
+    "FORGE_CLAUDE_MODEL",
 )
 
 
@@ -106,6 +109,64 @@ def _flag_value(command: list[str], flag: str) -> str:
     return command[command.index(flag) + 1]
 
 
+def _capture_rewrite_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], dict[str, str]]:
+    """Run ``_run_rewrite_via_cli`` with a stubbed child and return argv + env."""
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    driver = workspace / "driver.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "rewrite_result.json"
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4322
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return '{"success": true}', ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs.get("env") or {}
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    forge_submit._run_rewrite_via_cli(
+        source_kernel=str(kernel),
+        driver=str(driver),
+        logical_op_name="test::op",
+        source_entry="entry",
+        source_language="triton",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=["entry"],
+        shapes=[{"M": 8, "N": 8, "dtype": "fp16"}],
+        invocation_spec_file="",
+        driver_preparation=False,
+        snr_threshold=30.0,
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+        max_iters=1,
+        max_hours=1.0,
+        branch="forge/test/rewrite",
+        framework="vllm",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+    return captured["command"], captured["env"]
+
+
 def test_openai_only_selects_the_codex_provider(tmp_path, monkeypatch):
     """OpenAI-only must pick codex explicitly instead of inheriting ``auto``."""
     _use_openai_only(monkeypatch)
@@ -125,11 +186,78 @@ def test_openai_only_forwards_the_session_codex_model(tmp_path, monkeypatch):
     assert _flag_value(command, "--model") == "gpt-5.5"
 
 
+def test_openai_only_prefers_forge_codex_model_over_codex_model(tmp_path, monkeypatch):
+    """FORGE_CODEX_MODEL is the rewrite counterpart of the fusion/codex override."""
+    _use_openai_only(monkeypatch)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-orchestration")
+    monkeypatch.setenv("FORGE_CODEX_MODEL", "gpt-forge-only")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "gpt-forge-only"
+
+
 def test_openai_only_omits_the_model_flag_without_codex_model(tmp_path, monkeypatch):
     """With no CODEX_MODEL pinned, defer to the codex provider's own default."""
     _use_openai_only(monkeypatch)
 
     command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert "--model" not in command
+
+
+def test_anthropic_path_forwards_forge_claude_model(tmp_path, monkeypatch):
+    """Claude-side rewrite must honor FORGE_CLAUDE_MODEL over CLAUDE_MODEL."""
+    _use_anthropic_only(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
+    monkeypatch.setenv("FORGE_CLAUDE_MODEL", "claude-forge-only")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "claude-forge-only"
+    assert "--agent-backend" not in command
+
+
+def test_anthropic_path_forwards_claude_model_without_forge_override(tmp_path, monkeypatch):
+    """With no FORGE_CLAUDE_MODEL, rewrite still forwards CLAUDE_MODEL."""
+    _use_anthropic_only(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
+
+    command = _capture_forge_loop_argv(tmp_path, monkeypatch)
+
+    assert _flag_value(command, "--model") == "claude-orchestration"
+
+
+def test_flydsl_rewrite_openai_only_prefers_forge_codex_model(tmp_path, monkeypatch):
+    """FlyDSL rewrite must resolve FORGE_CODEX_MODEL; KernelForge does not."""
+    _use_openai_only(monkeypatch)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-orchestration")
+    monkeypatch.setenv("FORGE_CODEX_MODEL", "gpt-forge-only")
+
+    command, env = _capture_rewrite_argv(tmp_path, monkeypatch)
+
+    assert env["FORGE_AGENT_BACKEND"] == "codex"
+    assert env["FORGE_AGENT_FALLBACK_PROVIDER"] == "none"
+    assert _flag_value(command, "--model") == "gpt-forge-only"
+
+
+def test_flydsl_rewrite_anthropic_path_prefers_forge_claude_model(tmp_path, monkeypatch):
+    """FlyDSL rewrite must pass FORGE_CLAUDE_MODEL via --model, not ambient env alone."""
+    _use_anthropic_only(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
+    monkeypatch.setenv("FORGE_CLAUDE_MODEL", "claude-forge-only")
+
+    command, env = _capture_rewrite_argv(tmp_path, monkeypatch)
+
+    assert "FORGE_AGENT_BACKEND" not in env
+    assert _flag_value(command, "--model") == "claude-forge-only"
+
+
+def test_flydsl_rewrite_omits_model_without_configured_ids(tmp_path, monkeypatch):
+    """With no FORGE_*/CLAUDE/CODEX model pinned, defer to KernelForge defaults."""
+    _use_anthropic_only(monkeypatch)
+
+    command, _env = _capture_rewrite_argv(tmp_path, monkeypatch)
 
     assert "--model" not in command
 

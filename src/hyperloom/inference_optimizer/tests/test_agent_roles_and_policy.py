@@ -696,6 +696,61 @@ def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
         assert exc.value.rule == "state_field", field_name
 
 
+def test_gate_update_state_cannot_move_the_resume_boundary(gate):
+    # resumed_ts dates the current run leg: moving it hands the previous leg's
+    # CLOSE transition back the right to speak for this one.
+    assert "resumed_ts" in CORE_STATE_FIELDS
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {"resumed_ts": "2026-01-01T00:00:00+00:00"}},
+            ),
+        )
+    assert exc.value.rule == "state_field"
+
+
+def test_the_model_cannot_rewrite_the_budget_the_closing_reserve_leaves_it(gate):
+    """The reserve decides how much of ``max_minutes`` is spendable, so it is budget too."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(type=IntentType.UPDATE_STATE, payload={"changes": {"closing_grace_sec": 0.0}}),
+        )
+    assert exc.value.rule == "state_field"
+
+
+def test_gate_update_state_cannot_move_a_session_end_time(gate):
+    # stop_ts is the timestamp half of stop_reason, written by the same setter:
+    # locking only the reason lets a model post-date the session's end.
+    assert "stop_ts" in CORE_STATE_FIELDS
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.UPDATE_STATE,
+                payload={"changes": {"stop_ts": "2026-01-01T00:01:00+00:00"}},
+            ),
+        )
+    assert exc.value.rule == "state_field"
+
+
+def test_a_forged_closing_reserve_would_have_spent_the_session_outright():
+    """Names what the lock prevents: one field, and the run has no usable time left."""
+    state = SharedState(session_id="s", max_minutes=100)
+    # Freeze elapsed time: two live ``session_budget_usable_sec`` reads race
+    # the clock by tens of microseconds, which is enough for ``==`` to fail.
+    state.elapsed_minutes = lambda **_kw: 90.0  # type: ignore[method-assign]
+    honest = state.session_budget_usable_sec()
+
+    applied = state.apply_changes({"closing_grace_sec": 1e9}, allow_core=False)
+
+    assert applied == {}
+    assert honest > 0.0
+    assert state.session_budget_usable_sec() == honest
+
+
 def test_core_state_fields_synced_with_robustness_envelope():
     # gate.CORE_STATE_FIELDS and the robustness
     # envelope copy must stay byte-identical. This direct assertion never skips

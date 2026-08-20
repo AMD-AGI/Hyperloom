@@ -434,15 +434,6 @@ def test_attribution_of_an_unknown_switch_is_ignored():
     assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0, source="additive") is False
 
 
-def test_levers_can_be_selected_by_state():
-    """The explore seeder needs the dormant and active sets separately."""
-    state = _state()
-    state.record_authored_framework_levers([_entry_parsed("HL_ON")], default_on=True)
-    state.record_authored_framework_levers([_entry_parsed("HL_OFF")], default_on=False)
-    assert [r["switch"] for r in state.framework_levers_by_state(default_on=True)] == ["HL_ON"]
-    assert [r["switch"] for r in state.framework_levers_by_state(default_on=False)] == ["HL_OFF"]
-
-
 def _entry_parsed(switch: str) -> dict[str, Any]:
     """Return a single parsed manifest entry for ``switch``."""
     switches, _ = manifest.parse_manifest([_entry(switch)])
@@ -641,6 +632,7 @@ async def _run_rewrite_integrate(
     parity_accuracy_pass: bool | None = True,
     parity_tput_missing: bool = False,
     patch_body: str | None = None,
+    extra_params: "dict[str, Any] | None" = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench.
 
@@ -719,17 +711,20 @@ async def _run_rewrite_integrate(
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
+    task_params: dict[str, Any] = {
+        "specialist_task_id": "t-spec-rw",
+        "framework_source_root": str(repo),
+        "base_tput": base_tput,
+        "accuracy_baseline": 1.0,
+        "enable_stack_rebench": False,
+    }
+    if extra_params:
+        task_params.update(extra_params)
     task = Task(
         task_id="t-int-rw",
         kind="integrate_patch",
         state="queued",
-        params={
-            "specialist_task_id": "t-spec-rw",
-            "framework_source_root": str(repo),
-            "base_tput": base_tput,
-            "accuracy_baseline": 1.0,
-            "enable_stack_rebench": False,
-        },
+        params=task_params,
         idempotency_key="t-int-rw",
         requires_lanes=tuple(),
     )
@@ -1234,3 +1229,51 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_env_gated_patch_proceeds_to_bench_when_the_proposal_arms_it(tmp_path, monkeypatch):
+    """An enablement round may arm its gate through the proposal instead of the manifest.
+
+    Only the manifest feeds ``switch_env``, so an enablement fix that sets the gate
+    in its proposal is self-consistent even with no manifest: the env is on for the
+    bench. Refusing it would force env-shaped fixes to be rewritten as source
+    patches. The gate stays recorded as an auditable problem.
+    """
+    result_en, _, _, legs_en = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        switches=[],
+        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
+        extra_params={"enablement": True, "extra_envs": {"HL_UNDECLARED_CACHE": "1"}},
+    )
+    assert result_en.get("error_class") != "framework_switch_gates_undeclared", (
+        "an enablement gate armed by the proposal must not be refused"
+    )
+    assert legs_en, "enablement round must have attempted a bench"
+    problems = result_en.get("framework_switch_problems") or []
+    assert any("undeclared environment switch" in p for p in problems), (
+        f"the demoted gate must stay auditable in the result, got {problems!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_gated_patch_refused_when_nothing_arms_it(tmp_path, monkeypatch):
+    """An enablement gate armed by neither manifest nor proposal benches inert.
+
+    ``switch_env`` only turns on manifest entries, so letting this through spends a
+    leg reproducing the same failure and feeds the stall streak.
+    """
+    result_en, _, _, legs_en = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        switches=[],
+        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
+        extra_params={"enablement": True},
+    )
+    assert result_en["status"] == "reverted"
+    assert result_en["error_class"] == "framework_switch_gates_undeclared"
+    assert "HL_UNDECLARED_CACHE" in result_en["reason"]
+    assert not legs_en, "a gate nothing turns on must not spend a bench leg"

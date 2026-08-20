@@ -45,7 +45,7 @@ def test_shared_state_defaults_blank():
     s = SharedState()
     assert s.session_id == ""
     assert s.baseline_tput == 0.0
-    assert s.cumulative_gain == 0.0
+    assert s.cumulative_gain_validated == 0.0
     assert s.crash_count == 0
     assert s.pruned_families == []
     assert s.current_best == {}
@@ -56,7 +56,7 @@ def test_save_load_round_trip(tmp_path):
         session_id="abc",
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         baseline_tput=1840.0,
-        cumulative_gain=12.5,
+        cumulative_gain_validated=12.5,
         pruned_families=["deep_kernel"],
         current_best={"action": "backends", "tput": 2010.0},
         last_fusion={"status": "complete", "kept": False},
@@ -67,7 +67,7 @@ def test_save_load_round_trip(tmp_path):
     assert s2.session_id == "abc"
     assert s2.model_name == "meta-llama/Llama-3.1-8B-Instruct"
     assert s2.baseline_tput == 1840.0
-    assert s2.cumulative_gain == 12.5
+    assert s2.cumulative_gain_validated == 12.5
     assert s2.pruned_families == ["deep_kernel"]
     assert s2.current_best == {"action": "backends", "tput": 2010.0}
     assert s2.last_fusion == {"status": "complete", "kept": False}
@@ -132,12 +132,12 @@ def test_from_dict_drops_unknown_fields():
 def test_apply_changes_only_known_fields():
     s = SharedState()
     applied = s.apply_changes(
-        {"current_action": "baseline", "bogus": 1, "cumulative_gain": 5.0},
+        {"current_action": "baseline", "bogus": 1, "cumulative_gain_validated": 5.0},
         allow_core=True,
     )
-    assert applied == {"current_action": "baseline", "cumulative_gain": 5.0}
+    assert applied == {"current_action": "baseline", "cumulative_gain_validated": 5.0}
     assert s.current_action == "baseline"
-    assert s.cumulative_gain == 5.0
+    assert s.cumulative_gain_validated == 5.0
 
 
 def test_add_pruned_family_idempotent():
@@ -165,7 +165,7 @@ def test_to_prompt_summary_contains_key_fields():
         session_id="s1",
         model_name="Llama-3",
         baseline_tput=1840.0,
-        cumulative_gain=10.0,
+        cumulative_gain_validated=10.0,
         current_action="backends",
         pruned_families=["deep_kernel"],
     )

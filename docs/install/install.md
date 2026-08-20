@@ -2,13 +2,13 @@
 myst:
     html_meta:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
-        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, Install, ROCm"
+        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Claude, Dev Containers, Install, ROCm"
 ---
 # Hyperloom Installation Instructions
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
-dedicated workspace, open that directory in Cursor, Claude Code, or Codex, and
+dedicated workspace, open that directory in Claude Code and
 install the wheel into the current directory with `pip install --target .`. The
 source-clone path is kept at the end for developers and manual debugging.
 
@@ -16,8 +16,8 @@ source-clone path is kept at the end for developers and manual debugging.
 
 This is the recommended path to install and get started with Hyperloom. The
 current directory is both the install target and the agent workspace. Prepare a
-dedicated clean directory first, then open that directory in Cursor, Claude Code,
-or Codex before running the install command.
+dedicated clean directory first, then open that directory in Claude Code before
+running the install command.
 
 > **Recommended run mode: Docker.** Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
@@ -38,7 +38,7 @@ or Codex before running the install command.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.0.0b1 --target .
+pip install hyperloom-inference-optimizer==1.0.0b2 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -52,9 +52,6 @@ With the agent still opened in the same workspace, run:
 ```text
 /hyperloom-setup
 ```
-
-In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
-`$hyperloom-setup`.
 
 This command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../../src/hyperloom/skills/hyperloom-setup/SKILL.md).
@@ -259,9 +256,8 @@ must never be printed.
 - The current workspace contains many package folders after `pip install
   --target .` - this is the expected behavior.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
-  (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
-  `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`;
+  restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
   framework torch wheel expects different ROCm user-space libraries; align
   `ROCM_PATH` and `LD_LIBRARY_PATH`.
@@ -375,15 +371,15 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`
-- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
-- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
+- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x`
+- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3
+export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.27.1
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \

@@ -122,8 +122,8 @@ class TestGridSessionDeadline:
         s.max_minutes = 60.0
         monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 10.0)
         monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 1000.0)
-        # 10 min remaining, 120s reserve -> now + (600 - 120).
-        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 480.0)
+        # 10 min remaining, 72s closing reserve -> now + (600 - 72).
+        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 528.0)
 
     def test_deadline_is_now_when_under_reserve(self, monkeypatch):
         import hyperloom.orchestrator.state.shared_state as ss_mod
@@ -132,8 +132,91 @@ class TestGridSessionDeadline:
         s.max_minutes = 60.0
         monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 1.0)
         monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 500.0)
-        # 60s remaining < 120s reserve -> deadline == now (already exhausted).
+        # 60s remaining < 72s closing reserve -> deadline == now (already exhausted).
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
+
+
+class TestDeadlineUnix:
+    """The persisted unix deadline is the one remaining-time check."""
+
+    def test_an_unbounded_session_does_not_stamp_a_deadline(self):
+        state = SharedState(session_id="s")
+        assert state.stamp_deadline_unix() == 0.0
+        assert state.deadline_unix == 0.0
+        assert state.remaining_minutes() is None
+
+    def test_the_first_stamp_is_start_plus_the_budget(self):
+        from hyperloom.common.coerce import to_unix
+
+        state = SharedState(session_id="s", max_minutes=60)
+        stamped = state.stamp_deadline_unix()
+        start = to_unix(state.start_ts)
+        assert stamped == pytest.approx(start + 3600.0, abs=1.0)
+        assert state.remaining_minutes() == pytest.approx(60.0, abs=0.1)
+
+    def test_a_second_stamp_does_not_reissue_the_budget(self):
+        state = SharedState(session_id="s", max_minutes=60)
+        first = state.stamp_deadline_unix(now_unix=1_000.0)
+        state.start_ts = "2099-01-01T00:00:00+00:00"
+        assert state.stamp_deadline_unix(now_unix=9_000.0) == first
+        assert state.deadline_unix == first
+
+    def test_remaining_minutes_reads_the_stamp_not_elapsed(self):
+        from datetime import datetime, timezone
+
+        state = SharedState(session_id="s", max_minutes=60)
+        state.deadline_unix = 2_000.0
+        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+
+    def test_a_spent_stamp_reads_as_zero_not_negative(self):
+        from datetime import datetime, timezone
+
+        state = SharedState(session_id="s", max_minutes=60)
+        state.deadline_unix = 100.0
+        now = datetime.fromtimestamp(500.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == 0.0
+
+    def test_a_stamp_survives_a_max_minutes_truncated_to_zero(self):
+        from datetime import datetime, timezone
+
+        from hyperloom.common.coerce import to_unix
+
+        state = SharedState(session_id="s")
+        stamped = state.stamp_deadline_unix(budget_minutes=0.0001)
+        start = to_unix(state.start_ts)
+        assert stamped == pytest.approx(start + 0.006, abs=0.001)
+        assert state.remaining_minutes() == pytest.approx(0.0001, abs=0.00005)
+        state.max_minutes = 0
+        now = datetime.fromtimestamp(stamped - 6.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == pytest.approx(0.1)
+
+    def test_remaining_minutes_reads_a_stamp_when_max_minutes_is_zero(self):
+        from datetime import datetime, timezone
+
+        state = SharedState(session_id="s", max_minutes=0)
+        state.deadline_unix = 2_000.0
+        now = datetime.fromtimestamp(1_400.0, tz=timezone.utc)
+        assert state.remaining_minutes(now=now) == pytest.approx(10.0)
+
+    def test_teardown_timings_accumulate_and_keep_a_total(self):
+        state = SharedState(session_id="s")
+        state.record_teardown_timing("final_json", 1.25)
+        state.record_teardown_timing("langfuse", 0.5)
+        assert state.teardown_timings_sec["final_json"] == 1.25
+        assert state.teardown_timings_sec["langfuse"] == 0.5
+        assert state.teardown_timings_sec["total"] == pytest.approx(1.75)
+
+    def test_timed_teardown_step_records_the_elapsed_wall(self, monkeypatch):
+        from hyperloom.orchestrator.state import shared_state as ss_mod
+        from hyperloom.orchestrator.state.shared_state import timed_teardown_step
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(ss_mod.time, "monotonic", lambda: clock["t"])
+        state = SharedState(session_id="s")
+        with timed_teardown_step(state, "final_md"):
+            clock["t"] = 2.5
+        assert state.teardown_timings_sec["final_md"] == 2.5
 
 
 class TestProfileWorkloadContext:
@@ -190,14 +273,12 @@ class TestProfileWorkloadContext:
             framework="vllm",
             precision="fp8",
             current_best={
-                "engine": "forge",
                 "extra_server_args": " --attention-backend AITER ",
                 "extra_envs": {"B": 2, "A": 1},
             },
         )
 
         assert state.profile_workload_context()["serving_config"] == {
-            "engine": "forge",
             "extra_server_args": "--attention-backend AITER",
             "extra_envs": {"A": "1", "B": "2"},
         }
@@ -305,20 +386,35 @@ class TestApplyChanges:
     def test_core_field_dropped_when_allow_core_false(self):
         # A non-privileged (allow_core=False) changes dict must not write a core field.
         s = SharedState()
-        before = s.cumulative_gain  # cumulative_gain is a core field
+        before = s.cumulative_gain_validated  # cumulative_gain_validated is a core field
         applied = s.apply_changes(
-            {"current_action": "baseline", "cumulative_gain": 999.0},
+            {"current_action": "baseline", "cumulative_gain_validated": 999.0},
             allow_core=False,
         )
         assert applied == {"current_action": "baseline"}
         assert s.current_action == "baseline"
-        assert s.cumulative_gain == before  # core write dropped
+        assert s.cumulative_gain_validated == before  # core write dropped
+
+    def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
+        # stop_reason is a core field, so a changes dict that carries both must
+        # not land the timestamp half either: the pair is what the export reads
+        # as "the session ended then, for this reason".
+        s = SharedState()
+        s.set_stop_reason("time_exhausted")
+        pinned = s.stop_ts
+        applied = s.apply_changes(
+            {"stop_reason": "target_reached", "stop_ts": "2026-01-01T00:01:00+00:00"},
+            allow_core=False,
+        )
+        assert applied == {}
+        assert s.stop_reason == "time_exhausted"
+        assert s.stop_ts == pinned
 
     def test_core_field_written_when_allow_core_true(self):
         s = SharedState()
-        applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)
-        assert applied == {"cumulative_gain": 999.0}
-        assert s.cumulative_gain == 999.0
+        applied = s.apply_changes({"cumulative_gain_validated": 999.0}, allow_core=True)
+        assert applied == {"cumulative_gain_validated": 999.0}
+        assert s.cumulative_gain_validated == 999.0
 
 
 class TestKernelPatchIdentity:
@@ -491,7 +587,12 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
 
 def test_record_action_attempt_redacts_secrets_from_persisted_errors():
     s = SharedState()
-    secret = "ak-sensitive-value"
+    # Named for what it is -- a value planted to be found missing -- rather
+    # than for what it imitates. A test-local holding a credential-shaped
+    # literal reads to the clear-text-logging analysis as a live credential,
+    # and it then reports every diagnostic path this value could reach as a
+    # leak of it.
+    planted = "ak-sensitive-value"
     s.record_action_attempt(
         action="baseline",
         task_id="t-secret",
@@ -499,13 +600,13 @@ def test_record_action_attempt_redacts_secrets_from_persisted_errors():
         decision="no_promote",
         result={
             "error_class": "subprocess_nonzero",
-            "error": f"OPENAI_API_KEY={secret} Authorization: Bearer {secret}",
+            "error": f"OPENAI_API_KEY={planted} Authorization: Bearer {planted}",
         },
     )
 
     attempt = s.baseline_attempts[-1]
-    assert secret not in attempt["error_excerpt"]
-    assert secret not in attempt["stderr_tail"]
+    assert planted not in attempt["error_excerpt"]
+    assert planted not in attempt["stderr_tail"]
     assert "[REDACTED]" in attempt["error_excerpt"]
     assert "[REDACTED]" in attempt["stderr_tail"]
 

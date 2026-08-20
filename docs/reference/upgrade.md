@@ -236,7 +236,7 @@ For any minor or patch upgrade:
    ```
 4. If you have ongoing sessions you want to resume across the upgrade,
    verify `manifest.json` and `state.json` are intact, then run
-   `python -m hyperloom.inference_optimizer.cli optimize --resume`.
+   `python -m hyperloom.inference_optimizer.cli optimize --resume-from "$SESSION_DIR"`.
 
 Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
 sessions. The one-time implicit Recipe-root migration described above is the

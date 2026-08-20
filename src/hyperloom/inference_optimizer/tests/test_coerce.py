@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import pytest
 
@@ -144,6 +145,18 @@ class TestToUnix:
 
     def test_numeric_string_fallback(self):
         assert to_unix("1700000000") == 1_700_000_000.0
+
+    def test_a_timestamp_without_an_offset_is_utc(self, monkeypatch):
+        """iso_z reads a naive timestamp as UTC; both feed the same comparisons."""
+        monkeypatch.setenv("TZ", "Asia/Shanghai")
+        time.tzset()
+        try:
+            ts = to_unix("2021-01-01T00:00:00")
+        finally:
+            monkeypatch.delenv("TZ")
+            time.tzset()
+        assert ts is not None
+        assert math.isclose(ts, 1_609_459_200.0)
 
     @pytest.mark.parametrize("value", [None, True, False, "not-a-ts", object()])
     def test_reject_to_default(self, value):

@@ -1,20 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""External-dependency signals (J1 / J2 / J3).
+"""External-dependency signals.
 
 Failure modes originating outside Hyperloom but manifesting as opaque
 hangs / 401 storms:
 
-* **J1 ``gateway_auth_outage``** — gateway ``/models`` returns 401/403
+* **``gateway_auth_outage``** — gateway ``/models`` returns 401/403
   (key lost/revoked); every claude/codex CLI will fail at the gateway.
-* **J2 ``wekafs_degraded``** — ``stat`` on a source mount errored or
+* **``wekafs_degraded``** — ``stat`` on a source mount errored or
   exceeded the latency budget; ``trace_analyze`` / external CLI hang silently.
-* **J3 ``tracelens_cli_missing``** — neither TraceLens perf-report CLI
+* **``tracelens_cli_missing``** — neither TraceLens perf-report CLI
   is on ``PATH``. Boot-time-only, so the detector latches after first fire.
-
-J4 ``cluster_gpu_quota_anomaly`` is covered by F1
-``ray_pending_starvation`` in ``signals/kernel_pipeline.py``.
 """
 
 from __future__ import annotations
@@ -34,7 +31,7 @@ from .symptom import Symptom, SymptomSeverity
 class ExternalDepsConfig:
     """Tunables for :func:`evaluate_external_deps_signals`."""
 
-    # J2 mount stat latency budget; ``ok=False`` fires HIGH regardless of latency.
+    # Mount stat latency budget; ``ok=False`` fires HIGH regardless of latency.
     mount_latency_warn_ms: float = 5000.0
     mount_latency_critical_ms: float = 15000.0
 
@@ -59,7 +56,7 @@ class TraceLensCliFiredOnce:
 
     @property
     def value(self) -> bool:
-        """Whether the J3 symptom has already fired this session.
+        """Whether the ``tracelens_cli_missing`` symptom has already fired this session.
 
         Returns:
             bool: ``True`` once the latch has tripped, otherwise ``False``.
@@ -85,7 +82,7 @@ def evaluate_external_deps_signals(
     config: ExternalDepsConfig | None = None,
     tracelens_latch: TraceLensCliFiredOnce | None = None,
 ) -> list[Symptom]:
-    """Run the J1/J2/J3 external-dependency rules and aggregate symptoms.
+    """Run the external-dependency rules and aggregate symptoms.
 
     Args:
         ctx (ReactorContext): Reactor context for the current tick.
@@ -94,7 +91,7 @@ def evaluate_external_deps_signals(
         config (ExternalDepsConfig | None): Tunables; defaults to
             :class:`ExternalDepsConfig` when ``None``.
         tracelens_latch (TraceLensCliFiredOnce | None): One-shot latch for the
-            J3 rule; when ``None`` the J3 check is skipped.
+            TraceLens rule; when ``None`` that check is skipped.
 
     Returns:
         list[Symptom]: All external-dependency symptoms found this tick,
@@ -118,14 +115,14 @@ def evaluate_external_deps_signals(
 
 
 # ---------------------------------------------------------------------------
-# J1 — Upstream gateway 401 / forbidden
+# Upstream gateway 401 / forbidden
 # ---------------------------------------------------------------------------
 
 
 def _gateway_symptoms(
     gateway: dict[str, Any],
 ) -> list[Symptom]:
-    """J1: fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
+    """Fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
 
     Args:
         gateway (dict[str, Any]): Gateway probe result (status/status_code/url).
@@ -166,7 +163,7 @@ def _gateway_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# J2 — WekaFS / external mount degraded
+# WekaFS / external mount degraded
 # ---------------------------------------------------------------------------
 
 
@@ -174,7 +171,7 @@ def _mount_symptoms(
     mounts: list[Any],
     cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
-    """J2: fire ``wekafs_degraded`` for unreachable or slow external mounts.
+    """Fire ``wekafs_degraded`` for unreachable or slow external mounts.
 
     Unreachable mounts (``ok`` falsey) fire HIGH; reachable-but-slow mounts
     fire HIGH/MEDIUM based on the configured latency thresholds.
@@ -257,7 +254,7 @@ def _mount_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# J3 — TraceLens CLI missing
+# TraceLens CLI missing
 # ---------------------------------------------------------------------------
 
 
@@ -265,7 +262,7 @@ def _tracelens_symptoms(
     cli_info: dict[str, Any],
     latch: TraceLensCliFiredOnce,
 ) -> list[Symptom]:
-    """J3: fire ``tracelens_cli_missing`` once when no TraceLens CLI is on PATH.
+    """Fire ``tracelens_cli_missing`` once when no TraceLens CLI is on PATH.
 
     Latches via ``latch`` so the symptom is emitted at most once per session.
 

@@ -39,7 +39,10 @@ from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.timeutil import iso_z, now_iso
+
+from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from .trace import trace_skip
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +55,18 @@ _FORGE_BACKENDS = frozenset({"forge"})
 
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 _VALID_PRODUCER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Statuses an action executor uses to state an adoption verdict itself. These
+# outrank a caller-supplied routing label when the two disagree.
+_EXECUTOR_ADOPTION_VERDICTS = frozenset(
+    {
+        "KEPT",
+        "KEPT_INERT",
+        "REVERTED",
+        "REJECTED",
+        "ACCURACY_UNAVAILABLE_REJECT",
+    }
+)
 
 
 def _now_iso_safe() -> str:
@@ -115,6 +130,50 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}:{readable}:{digest}"
 
 
+def _measurement_occurrence(*run_identity: Any, value: Any = None) -> str:
+    """Tell measuring something again apart from measuring it once.
+
+    A measurement id is derived from its operation, and an operation is
+    deliberately stable across a subject's retries -- one kernel, one
+    operation, however many times it is tried. Measurements inherited that
+    collapsing, so re-measuring a kernel wrote over the very numbers an
+    earlier adoption had been decided on, leaving the adoption citing evidence
+    that no longer agreed with it.
+
+    ``run_identity`` names the run that produced the reading -- an attempt id,
+    a benchmark report path, the timestamp the producer stamped on the entry.
+    That is what should be passed. Readings taken by one run share a key, which
+    is correct: they are one act of measuring, and a key drawn from the run is
+    unmoved when one of its metrics is later filled in or corrected. A key
+    drawn from the values is not, and re-recording a run to add its end-to-end
+    numbers used to re-id the untouched micro reading beside them, splitting
+    one reading into two and reporting a re-measure that never happened.
+
+    ``value`` is a last resort for callers with no run to name, and only ever
+    this metric's own reading -- never a sibling's, which is what made the key
+    move. It can only tell apart readings that differ.
+
+    Neither form may be a counter the recorder keeps: several producers replay
+    their records from state after a resume, so an id has to be reproducible
+    from what is being recorded rather than from how many parts already exist.
+    The plain ordinal a reader wants is assigned at assembly instead, where the
+    whole set is in hand at once.
+    """
+    parts = [
+        str(part).strip()
+        for part in run_identity
+        if part is not None and str(part).strip()
+    ]
+    if not parts:
+        numeric = to_float(value)
+        rendered = f"{numeric:.10g}" if numeric is not None else str(value or "")
+        parts = [rendered] if rendered.strip() else []
+    if not parts:
+        return ""
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
+
+
 def _operation_status(status: Any) -> str:
     """Normalize action status while preserving terminal failures."""
     value = str(status or "").strip().lower()
@@ -125,6 +184,59 @@ def _operation_status(status: Any) -> str:
     if value in {"skipped", "discarded", "reverted", "revert", "rejected", "no_promote"}:
         return value
     return "failed" if value in _FAILED_STATUSES or value else "unknown"
+
+
+_AGENT_BY_ACTION = {
+    "framework_agent": "framework_agent",
+    "framework": "framework_agent",
+    "explore": "explore",
+    "backends": "explore",
+    "params": "explore",
+    "specialist": "explore",
+    "replay_warm_recipe": "warm_replay",
+    "warm_replay": "warm_replay",
+    "baseline": "coordinator",
+    "profile": "coordinator",
+    "roofline": "coordinator",
+    "sweep": "coordinator",
+    "conc_sweep": "coordinator",
+    "validate": "coordinator",
+    "validate_stack": "coordinator",
+    "trace_analyze": "coordinator",
+    "critic": "critic",
+    "robustness": "robustness",
+}
+
+def _resolve_agent(
+    action: str,
+    *,
+    result: Mapping[str, Any] | None = None,
+    phase: str = "",
+) -> str:
+    """Name the agent that owns this unit of work, at the moment it settles.
+
+    Ownership is a fact the producer knows and the exporter cannot recover: by
+    the time a delayed ``integrate_patch`` lands, the active phase has usually
+    moved on. Returning ``unattributed`` means the producer genuinely has no
+    evidence of an owner, which is a reportable data gap rather than a guess.
+    """
+    name = str(action or "").strip().lower()
+    result = result or {}
+
+    if name.startswith("integrate_patch") or name == "integrate":
+        return patch_author(result)
+
+    direct = _AGENT_BY_ACTION.get(name)
+    if direct:
+        return direct
+    if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
+        return "kernel_agent"
+
+    return (
+        agent_from_phase(result.get("source_phase"))
+        or agent_from_phase(phase)
+        or UNATTRIBUTED
+    )
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
@@ -259,13 +371,18 @@ def _record_action_measurements(
         "samples": list(result.get("samples") or []) if isinstance(result.get("samples"), (list, tuple)) else [],
         "aggregation": result.get("aggregation") or "result_scalar",
     }
+    # Every metric below is read from one execution of the action, so they share
+    # the stamp that execution carries: a later pass that fills in one of them
+    # must not re-id the ones it did not touch.
+    occurrence_run = str(common["measured_at"] or "")
     seen_names: set[str] = set()
     for field, name, unit in metric_fields:
         value = result.get(field)
         if value is None or name in seen_names:
             continue
         seen_names.add(name)
-        measurement_id = _stable_id("measurement", operation_id, name)
+        occurrence = _measurement_occurrence(occurrence_run, value=value)
+        measurement_id = _stable_id("measurement", operation_id, name, occurrence)
         measurement_ids.append(measurement_id)
         record_measurement(
             session_dir,
@@ -310,7 +427,14 @@ def _record_action_measurements(
             ):
                 if point.get(field) is None:
                     continue
-                measurement_id = _stable_id("measurement", operation_id, group, point_key, name)
+                measurement_id = _stable_id(
+                    "measurement",
+                    operation_id,
+                    group,
+                    point_key,
+                    name,
+                    _measurement_occurrence(occurrence_run, value=point.get(field)),
+                )
                 measurement_ids.append(measurement_id)
                 record_measurement(
                     session_dir,
@@ -534,36 +658,110 @@ def _mirror_action_v4(
                     "evaluated_at": ended_at,
                 }
             )
+    agent = _resolve_agent(action, result=result, phase=phase)
+    gain_pct = to_float(result.get("delta_pct") or result.get("best_gain_pct"))
+    keep_threshold_pct = to_float(result.get("keep_threshold_pct"))
+    decision_reason = str(result.get("decision_reason") or result.get("reason") or "")
+    if keep_threshold_pct is not None:
+        # Without the threshold the verdict is unfalsifiable after the fact:
+        # "+0.55%" alone never explains why the run declined to keep it.
+        gates.append(
+            {
+                "gate_id": _stable_id("gate", operation_id, "keep_threshold"),
+                "kind": "keep_threshold",
+                "name": "keep_threshold",
+                "status": (
+                    "passed"
+                    if gain_pct is not None and gain_pct >= keep_threshold_pct
+                    else "failed"
+                    if gain_pct is not None
+                    else "partial"
+                ),
+                "decision": (
+                    "allow" if gain_pct is not None and gain_pct >= keep_threshold_pct else "deny"
+                ),
+                "reason": decision_reason,
+                "evaluated_at": ended_at,
+                "inputs": {"keep_threshold_pct": keep_threshold_pct},
+                "evidence": {
+                    "gain_pct": gain_pct,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "base_tput": to_float(result.get("base_tput")),
+                    "output_throughput": to_float(result.get("output_throughput")),
+                },
+            }
+        )
     adoption_ids: list[str] = []
     verdict = str(entry.get("decision") or result.get("decision") or result.get("status") or "").strip().upper()
+    # The executor owns the adoption verdict. A caller's coarse routing label
+    # ("discarded") must never overwrite a KEEP the executor already committed.
+    executor_verdict = str(result.get("status") or "").strip().upper()
+    if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
+        verdict = executor_verdict
     adoptable_actions = {
         "framework_agent",
         "explore",
         "integrate",
+        "integrate_patch",
         "replay_warm_recipe",
         "warm_replay",
         "warm_recipe",
     }
-    keep_verdict = verdict in {"KEEP", "KEPT", "PROMOTED", "ADOPTED"}
-    revert_verdict = verdict in {"REVERT", "REVERTED", "REJECTED", "FAILED"}
-    validation_passed = bool(result.get("validated", result.get("accuracy_pass", keep_verdict)))
+    keep_verdict = verdict in {"KEEP", "KEPT", "KEPT_INERT", "PROMOTED", "ADOPTED"}
+    revert_verdict = verdict in {
+        "REVERT",
+        "REVERTED",
+        "REJECTED",
+        "FAILED",
+        "ACCURACY_UNAVAILABLE_REJECT",
+    }
+    validated = result.get("validated", result.get("accuracy_pass"))
+    # An accuracy gate that ran but returned no verdict is a first-class
+    # outcome, not a failure: a session with no eval configured, or a baseline
+    # accuracy of zero, reaches here with ``None``. Reading that as "did not
+    # pass" would zero out the whole ledger for such a run. The KEEP stands;
+    # what gets recorded alongside it is that nothing checked the accuracy.
+    validation_passed = keep_verdict if validated is None else bool(validated)
+    validation_basis = "keep_verdict_unscored" if validated is None else "accuracy_pass"
     if action in adoptable_actions and ((keep_verdict and validation_passed) or revert_verdict):
         adoption_id = _stable_id("adoption", operation_id)
         adoption_ids.append(adoption_id)
+        # Enablement and inert keeps are genuine adoptions that must not be
+        # counted as gain: the code lands, the measured delta is not its own.
+        attribution_eligible = result.get("attribution_eligible")
+        if attribution_eligible is None:
+            attribution_eligible = not (
+                bool(result.get("enablement"))
+                or bool(result.get("baseline_enablement"))
+                or verdict == "KEPT_INERT"
+            )
         _record_adoption_transition(
             session_dir,
             adoption_id=adoption_id,
             operation_id=operation_id,
             adopted=keep_verdict and validation_passed,
-            reason=str(result.get("decision_reason") or result.get("reason") or verdict),
+            reason=decision_reason or verdict,
             transitioned_at=ended_at,
             subject={"subject_id": subject_id, "subject_type": subject_type},
             artifact_ids=artifact_ids,
             measurement_ids=measurement_ids,
             kind=action,
-            gain_pct=to_float(result.get("delta_pct") or result.get("best_gain_pct")),
+            agent=agent,
+            attribution_eligible=bool(attribution_eligible),
+            gain_pct=gain_pct,
+            throughput_before=to_float(result.get("base_tput")),
+            throughput_after=to_float(
+                result.get("output_throughput") or result.get("tput")
+            ),
             configuration=dict(result.get("configuration") or {}),
+            validation_basis=validation_basis,
             producer=producer,
+            metadata={
+                "keep_threshold_pct": keep_threshold_pct,
+                "executor_status": str(result.get("status") or ""),
+                "provenance": str(result.get("provenance") or ""),
+                "domain": str(result.get("domain") or ""),
+            },
         )
     record_operation(
         session_dir,
@@ -580,8 +778,14 @@ def _mirror_action_v4(
             "validation" if action == "baseline" else "optimization"
         ),
         scope=str(extras.get("scope") or ""),
+        agent=agent,
         strategy_group=action,
-        strategy=str(extras.get("provenance") or result.get("strategy") or action),
+        strategy=str(
+            extras.get("provenance")
+            or result.get("provenance")
+            or result.get("strategy")
+            or action
+        ),
         producer=producer,
         sequence=int(tick or 0),
         ended_at=ended_at,
@@ -592,10 +796,16 @@ def _mirror_action_v4(
             {
                 "decision_id": _stable_id("decision", operation_id),
                 "kind": action,
-                "verdict": decision,
+                "verdict": verdict or decision,
+                "reason": decision_reason,
                 "decided_at": ended_at,
                 "component": producer,
-                "evidence": extras,
+                "evidence": {
+                    **extras,
+                    "gain_pct": gain_pct,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "executor_status": str(result.get("status") or ""),
+                },
             }
         ],
         outputs=dict(result),
@@ -671,6 +881,7 @@ def record_phase_event(
             Coordinator).
     """
     if not session_dir or not isinstance(entry, dict):
+        trace_skip(reason="no session_dir" if not session_dir else "entry is not a dict", section="phase_transitions")
         return
     try:
         task_id = str(entry.get("task_id") or "")
@@ -703,8 +914,9 @@ def record_phase_event(
             tick=tick,
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_phase_event failed", exc_info=True)
+        trace_skip(reason="writer raised", section="phase_transitions", error=exc)
 
 
 def record_action_operation(
@@ -723,6 +935,7 @@ def record_action_operation(
 ) -> None:
     """Mirror an action into v4 without changing legacy action ledgers."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     try:
         _mirror_action_v4(
@@ -741,8 +954,9 @@ def record_action_operation(
             tick=tick,
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_action_operation failed", exc_info=True)
+        trace_skip(reason="writer raised", section="operations", error=exc)
 
 
 def snapshot_state_sections(
@@ -765,31 +979,32 @@ def snapshot_state_sections(
             Coordinator).
     """
     if not session_dir or state is None:
+        trace_skip(reason="no session_dir" if not session_dir else "no state", section="run_snapshot")
         return
     rec = None
     try:
         rec = _recorder(session_dir, producer)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("recorder unavailable", exc_info=True)
+        trace_skip(reason="writer raised", section="run_snapshot", error=exc)
         return
 
     for name, fn in (
         ("session", _snapshot_session),
-        ("workload", _snapshot_workload),
-        ("final", _snapshot_final),
         ("explore_search", _snapshot_explore_search),
-        ("sweep", _snapshot_sweep),
         ("optimization_stack", _snapshot_optimization_stack),
         ("roofline", _snapshot_roofline),
     ):
         try:
             fn(rec, state)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.debug("snapshot section %s failed", name, exc_info=True)
+            trace_skip(reason="writer raised", section=name, error=exc)
     try:
         _snapshot_v4_run(rec, state)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("snapshot v4 run failed", exc_info=True)
+        trace_skip(reason="writer raised", section="run_snapshot", error=exc)
 
 
 def _snapshot_v4_run(rec, st: Any) -> None:
@@ -853,7 +1068,6 @@ def _snapshot_v4_run(rec, st: Any) -> None:
                 "baseline_throughput": to_float(getattr(st, "baseline_tput", None)),
                 "baseline_accuracy": to_float(getattr(st, "baseline_accuracy", None)),
                 "current_best": current_best,
-                "cumulative_gain_pct": to_float(getattr(st, "cumulative_gain", None)),
                 "cumulative_gain_validated_pct": to_float(
                     getattr(st, "cumulative_gain_validated", None)
                 ),
@@ -866,6 +1080,15 @@ def _snapshot_v4_run(rec, st: Any) -> None:
 def _snapshot_session(rec, st: Any) -> None:
     """Snapshot the ``session`` singleton from ``st`` (no-op without a session id).
 
+    A session that has stopped carries ``ended_at_utc``, taken from the state's
+    own stop timestamp: without it the exporter has no end to measure against
+    and reports the run as still going. ``start_ts`` is what the exported
+    elapsed time is measured from; a resume re-anchors it on the new leg only
+    when the previous one crashed or stopped for a recorded reason, so after a
+    clean stop it still names the original start. The manifest-derived fields
+    the live state cannot know (image, host, pid) are filled in by the
+    collector at export.
+
     Args:
         rec: the recorder used to write the singleton.
         st (Any): the live ``SharedState`` to snapshot.
@@ -873,6 +1096,7 @@ def _snapshot_session(rec, st: Any) -> None:
     session_id = str(getattr(st, "session_id", "") or "")
     if not session_id:
         return
+    stop_reason = str(getattr(st, "stop_reason", "") or "")
     rec.record_singleton(
         "session",
         {
@@ -880,89 +1104,16 @@ def _snapshot_session(rec, st: Any) -> None:
             "claw_session_id": getattr(st, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
             "start_ts": str(getattr(st, "start_ts", "") or ""),
-            "stop_reason": str(getattr(st, "stop_reason", "") or ""),
+            # A resumed run clears its reason but not necessarily the stale
+            # timestamp, so the pair is only ever emitted together.
+            "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
+            "stop_reason": stop_reason,
             "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
             "tick_count": int(getattr(st, "tick", 0) or 0),
             "phase": str(getattr(st, "phase", "") or ""),
         },
     )
 
-
-def _snapshot_workload(rec, st: Any) -> None:
-    """Snapshot the ``workload`` singleton from ``st``.
-
-    A no-op when neither a framework nor a model is set.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    framework = str(getattr(st, "framework", "") or "")
-    model = str(getattr(st, "model_name", "") or getattr(st, "model_path", "") or "")
-    if not framework and not model:
-        return
-    rec.record_singleton(
-        "workload",
-        {
-            "framework": framework,
-            "model_name": str(getattr(st, "model_name", "") or ""),
-            "model_path": str(getattr(st, "model_path", "") or ""),
-            "model_class": str(getattr(st, "model_class", "") or ""),
-            "gpu_type": str(getattr(st, "gpu_type", "") or ""),
-            "tp": int(getattr(st, "tp", 0) or 0),
-            "ep": int(getattr(st, "ep", 0) or 0),
-            "precision": str(getattr(st, "precision", "") or ""),
-            "conc": int(getattr(st, "conc", 0) or 0),
-            "isl": int(getattr(st, "isl", 0) or 0),
-            "osl": int(getattr(st, "osl", 0) or 0),
-            "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
-        },
-    )
-
-
-def _snapshot_final(rec, st: Any) -> None:
-    """Snapshot the ``final`` singleton (current best + cumulative gains) from ``st``.
-
-    A no-op when there is neither a current best nor an optimization stack.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    cb = getattr(st, "current_best", None) or {}
-    stack = getattr(st, "optimization_stack", None) or []
-    if not cb and not stack:
-        return
-    from ... import framework_registry
-
-    framework = str(getattr(st, "framework", "") or "")
-    tput = to_float(cb.get("tput"))
-    # Latency is the primary result for scriptable/diffusion (xDiT) image models
-    # (throughput_tok_s_per_gpu is only ``1 / latency`` there and misleading as a
-    # headline). Emit e2el/ttft alongside the throughput-unit + primary-metric
-    # markers so consumers pick the right result field per framework. e2el falls
-    # back to the tput-derived per-image latency when no measured value exists.
-    e2el = to_float(cb.get("e2el_mean_ms"))
-    if e2el is None and framework_registry.is_scriptable(framework) and tput is not None and tput > 0:
-        derived = framework_registry.primary_metric_value(framework, tput)
-        e2el = round(float(derived), 4) if derived is not None and derived > 0 else None
-    rec.record_singleton(
-        "final",
-        {
-            "current_best_action": str(cb.get("action") or ""),
-            "throughput_tok_s_per_gpu": tput,
-            "throughput_unit": framework_registry.throughput_unit(framework),
-            "primary_metric": framework_registry.primary_metric_name(framework),
-            "e2el_mean_ms": e2el,
-            "ttft_mean_ms": to_float(cb.get("ttft_mean_ms")),
-            "cumulative_gain_pct_validated": to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
-            "cumulative_gain_pct_per_round_sum": to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
-            "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),
-            "stack_len": len(stack),
-            "extra_server_args": str(cb.get("extra_server_args") or ""),
-            "extra_envs": dict(cb.get("extra_envs") or {}),
-        },
-    )
 
 
 def _snapshot_explore_search(rec, st: Any) -> None:
@@ -984,19 +1135,6 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
     search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
-
-
-def _snapshot_sweep(rec, st: Any) -> None:
-    """Snapshot the ``sweep`` singleton from ``st.last_sweep`` (no-op when empty).
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    last_sweep = dict(getattr(st, "last_sweep", None) or {})
-    if not last_sweep:
-        return
-    rec.record_singleton("sweep", last_sweep)
 
 
 def _snapshot_optimization_stack(rec, st: Any) -> None:
@@ -1242,6 +1380,7 @@ def record_kernel_strategy_selection(
 ) -> None:
     """Record the GEAK/native XOR decision and the selected route only."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     selected = str(selected_strategy or "").strip()
     paths = ["geak", "kernel_agent_forge"]
@@ -1391,6 +1530,7 @@ def record_native_kernel_run_start(
 ) -> None:
     """Upsert the selected native Kernel Agent plus Forge route as running."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="kernel_journey")
         return
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
         _kernel_route_context_key(session_dir),
@@ -1441,6 +1581,7 @@ def record_native_kernel_run_result(
 ) -> None:
     """Finalize the native Kernel Agent plus Forge route from its result."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="kernel_journey")
         return
     value = dict(result or {})
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
@@ -1538,6 +1679,7 @@ def record_geak_operation(
 ) -> None:
     """Upsert the GEAK route across runner, candidate, rebench, and final validation."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     value = dict(result or {})
     context = _KERNEL_ROUTE_CONTEXT.get(_kernel_route_context_key(session_dir), {})
@@ -1576,6 +1718,16 @@ def record_geak_operation(
         },
     }
     measurement_refs: list[str] = []
+    # The bench run these numbers were read from. A rebench of the same route
+    # writes a new report and so is kept as its own reading, while re-recording
+    # a stage that already reported lands back on the reading it first wrote.
+    occurrence_run = str(
+        value.get("report_path")
+        or value.get("eval_dir")
+        or value.get("run_id")
+        or value.get("task_id")
+        or ""
+    )
     workload = value.get("workload") if isinstance(value.get("workload"), Mapping) else {}
     harness = value.get("bench_client") or value.get("harness") or "geak_e2e"
     samples = value.get("samples") or value.get("throughput_samples")
@@ -1592,7 +1744,13 @@ def record_geak_operation(
         numeric = to_float(raw)
         if numeric is None:
             continue
-        measurement_id = _stable_id("measurement", route_id, label, source_name)
+        measurement_id = _stable_id(
+            "measurement",
+            route_id,
+            label,
+            source_name,
+            _measurement_occurrence(occurrence_run, value=numeric),
+        )
         metadata = _measurement_metadata(
             source_name,
             harness=validation_source if headline and validation_source else harness,
@@ -1738,9 +1896,19 @@ def record_geak_operation(
             artifact_ids=artifact_refs,
             kind="kernel_optimizer",
             configuration=dict(value.get("accepted_config") or {}),
+            validation_basis="e2e_validation",
             metadata={"validation_tier": "orchestrator_final"},
         )
     else:
+        # A stage that has not reached final validation has nothing to adopt
+        # yet. Traced because "not yet" and "never arrived" produce the same
+        # absence downstream.
+        trace_skip(
+            reason=f"stage {stage!r} has not reached final validation",
+            section="adoptions",
+            entity=adoption_id,
+            producer=producer,
+        )
         return
     record_operation(
         session_dir,
@@ -1792,6 +1960,7 @@ def record_gemm_tuning_operation(
 ) -> None:
     """Record the independent Kernel-phase GEMM tuning run and KEEP adoption."""
     if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
         return
     inputs = dict(payload or {})
     value = dict(result or {})
@@ -1845,16 +2014,22 @@ def record_gemm_tuning_operation(
             }
         )
     measurement_refs: list[str] = []
-    for name, raw, basis, unit in (
-        ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio"),
-        ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s"),
-        ("final_throughput", value.get("new_tput") or value.get("final_throughput"), "output", "tok/s"),
-        ("e2e_gain_pct", value.get("e2e_gain_pct"), "output", "percent"),
+    # The tuning attempt reads the kernel-time ratio once; the end-to-end
+    # numbers beside it are filled in later, by a validation run of its own.
+    # Keying each to the run it came from is what keeps that second pass from
+    # re-issuing the ratio it never re-measured.
+    e2e_run = str(value.get("final_report_path") or value.get("workspace") or "")
+    for name, raw, basis, unit, occurrence_run in (
+        ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio", attempt_key),
+        ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s", e2e_run),
+        ("final_throughput", value.get("new_tput") or value.get("final_throughput"), "output", "tok/s", e2e_run),
+        ("e2e_gain_pct", value.get("e2e_gain_pct"), "output", "percent", e2e_run),
     ):
         numeric = to_float(raw)
         if numeric is None:
             continue
-        measurement_id = _stable_id("measurement", operation_id, name)
+        occurrence = _measurement_occurrence(occurrence_run, value=numeric)
+        measurement_id = _stable_id("measurement", operation_id, name, occurrence)
         record_measurement(
             session_dir,
             measurement_id=measurement_id,
@@ -1933,11 +2108,26 @@ def record_gemm_tuning_operation(
         error=value.get("error") or value.get("error_class"),
         **timing_fields,
     )
-    if result is None:
-        return
     adoption_id = _stable_id("adoption", operation_id, "keep")
+    if result is None:
+        trace_skip(
+            reason="no result to adopt on",
+            section="adoptions",
+            entity=adoption_id,
+            producer=producer,
+        )
+        return
     e2e_keep = decision == "KEEP" and value.get("e2e_validated") is True
     if not e2e_keep and decision not in {"REVERT", "REJECTED"}:
+        # A KEEP that end-to-end validation has not confirmed is not an
+        # adoption. The operation is on the ledger either way, so without this
+        # the missing adoption reads exactly like one that failed to write.
+        trace_skip(
+            reason=f"decision {decision!r} is not an e2e-validated keep or a revert",
+            section="adoptions",
+            entity=adoption_id,
+            producer=producer,
+        )
         return
     _record_adoption_transition(
         session_dir,
@@ -1955,8 +2145,174 @@ def record_gemm_tuning_operation(
         kind="gemm_tuning",
         gain_pct=to_float(value.get("e2e_gain_pct")),
         configuration=dict(value.get("recommended_env") or value.get("extra_envs") or {}),
+        validation_basis="e2e_validation",
     )
     record_operation(session_dir, operation_id=operation_id, producer=producer, adoption_refs=[adoption_id])
+
+
+def record_collective_promotion(
+    session_dir: Path | str | None,
+    *,
+    integration_id: str,
+    kernel_id: str = "",
+    baseline_tput: float | None = None,
+    new_tput: float | None = None,
+    gain_pct: float | None = None,
+    patch_path: str = "",
+    target_file: str = "",
+    backend: str = "forge",
+    collective_op: str = "",
+    world_size: Any = None,
+    kernel_speedup: Any = None,
+    configuration: Mapping[str, Any] | None = None,
+    ts: str | None = None,
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record an end-to-end validated collective KEEP as it is promoted.
+
+    The collective lane reaches its verdict through its own recovery path
+    rather than the kernel integrate queue, so none of the kernel recorders
+    fire for it. Left unrecorded, the read model cannot see the change at all:
+    the patch lands, the workload moves, and the whole gain reports as
+    belonging to no step. Recorded here, it is one attempt of kind
+    ``kernel_collective`` with the adoption that credits it.
+
+    Args:
+        session_dir: The session directory; a falsy value is a no-op.
+        integration_id: The integrate this promotion settled, which is what
+            keeps two promotions of the same kernel apart.
+        kernel_id: The kernel the collective change targets.
+        baseline_tput: Session baseline throughput the gain is stated against.
+        new_tput: Throughput measured after the change landed.
+        gain_pct: The end-to-end gain the integrate measured.
+        patch_path: The applied patch.
+        target_file: The file the patch changed.
+        backend: The engine that produced the change.
+        collective_op: The collective operation optimized, for evidence.
+        world_size: The world size it was measured at, for evidence.
+        kernel_speedup: The kernel-time ratio behind the end-to-end figure.
+        configuration: Environment carried by the change.
+        ts: Author-time stamp the caller already minted for this promotion.
+        producer: The breakdown producer label.
+    """
+    if not session_dir or not integration_id:
+        trace_skip(
+            reason="no session_dir" if not session_dir else "no integration_id",
+            section="kernel_collective",
+            entity=kernel_id,
+        )
+        return
+    try:
+        now = str(ts or _now_iso_safe())
+        operation_id = _stable_id(
+            "op",
+            "kernel_collective",
+            _session_key(session_dir),
+            f"integration:{integration_id}",
+        )
+        subject = {
+            "subject_id": _kernel_subject_id(session_dir, str(kernel_id or integration_id)),
+            "subject_type": "kernel",
+            "role": "optimization_target",
+            "name": str(kernel_id or "forge_collective"),
+        }
+        measurement_refs: list[str] = []
+        for name, raw, unit, basis in (
+            ("baseline_throughput", baseline_tput, "tok/s", "output"),
+            ("final_throughput", new_tput, "tok/s", "output"),
+            ("e2e_gain_pct", gain_pct, "percent", "output"),
+            ("best_speedup", kernel_speedup, "ratio", "kernel_time_ratio"),
+        ):
+            numeric = to_float(raw)
+            if numeric is None:
+                continue
+            # Keyed by the integrate these came off, so re-running the lane
+            # measures beside these rather than over them.
+            occurrence = _measurement_occurrence(integration_id, value=numeric)
+            measurement_id = _stable_id("measurement", operation_id, name, occurrence)
+            record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                producer=producer,
+                operation_id=operation_id,
+                kind="kernel_collective",
+                name=name,
+                value=numeric,
+                unit=unit,
+                status="validated",
+                measured_at=now,
+                metric_basis=basis,
+                dimensions={"engine": backend, "collective_op": str(collective_op or "")},
+                **_measurement_metadata("collective_integrate_e2e"),
+            )
+            measurement_refs.append(measurement_id)
+        artifact_refs: list[str] = []
+        for kind, path in (("patch", patch_path), ("target_file", target_file)):
+            if not path:
+                continue
+            artifact_id = _stable_id("artifact", operation_id, kind, path)
+            record_artifact(
+                session_dir,
+                artifact_id=artifact_id,
+                producer=producer,
+                operation_id=operation_id,
+                producer_operation_id=operation_id,
+                subject=subject,
+                kind=kind,
+                path=str(path),
+                coverage={"status": "reference_only"},
+            )
+            artifact_refs.append(artifact_id)
+        adoption_id = _stable_id("adoption", operation_id, "collective")
+        _record_adoption_transition(
+            session_dir,
+            adoption_id=adoption_id,
+            producer=producer,
+            operation_id=operation_id,
+            adopted=True,
+            reason="collective_integrate_e2e_passed",
+            transitioned_at=now,
+            subject=subject,
+            measurement_ids=measurement_refs,
+            artifact_ids=artifact_refs,
+            kind="kernel_collective",
+            agent="kernel_agent",
+            gain_pct=to_float(gain_pct),
+            throughput_before=to_float(baseline_tput),
+            throughput_after=to_float(new_tput),
+            configuration=dict(configuration or {}),
+            validation_basis="e2e_validation",
+            metadata={"validation_tier": "collective_integrate_e2e"},
+        )
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind="kernel_collective",
+            name=str(kernel_id or "forge_collective"),
+            phase="KERNEL_AGENT",
+            scope="kernel",
+            strategy_group="kernel_optimizer",
+            strategy=backend,
+            executor_class="deterministic",
+            status="succeeded",
+            ended_at=now,
+            subject=subject,
+            outputs={
+                "integrated": True,
+                "decision": "KEEP",
+                "validated": True,
+                "collective_op": str(collective_op or ""),
+                "world_size": world_size,
+                "integration_id": str(integration_id),
+            },
+            measurement_refs=measurement_refs,
+            artifact_refs=artifact_refs,
+            adoption_refs=[adoption_id],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("record_collective_promotion failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_collective", error=exc)
 
 
 def record_kernel_invocations(
@@ -1982,6 +2338,7 @@ def record_kernel_invocations(
             kernel-agent).
     """
     if not session_dir or not isinstance(result, dict):
+        trace_skip(reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_invocations")
         return
     try:
         rec = _recorder(session_dir, producer)
@@ -2059,7 +2416,15 @@ def record_kernel_invocations(
         if section is None:
             # The backend could not be determined; do not fabricate a GEAK
             # invocation. The failure stays visible via the kernel_dispatch /
-            # kernel_backend_result journey lanes.
+            # kernel_backend_result journey lanes, and this says which lane to
+            # go looking in rather than leaving the invocation view short by
+            # one with no explanation.
+            trace_skip(
+                reason=f"backend {backend!r} names no invocation stream",
+                section="kernel_invocations",
+                entity=kid,
+                producer=producer,
+            )
             return
         payload = {
             "kernel_id": kid,
@@ -2074,8 +2439,9 @@ def record_kernel_invocations(
             "pre_dispatch_failure": True,
         }
         rec.record_item(section, payload, key=f"{kid}-predispatch" if kid else None)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_invocations failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_invocations", error=exc)
 
 
 def _to_bool(value: Any) -> bool | None:
@@ -2366,6 +2732,7 @@ def record_kernel_discovery(
             kernel-agent).
     """
     if not session_dir:
+        trace_skip(reason="no session_dir", section="kernel_discovery")
         return
     try:
         kernels = [_normalize_hot_kernel(k) for k in (hot_kernels or []) if isinstance(k, dict)]
@@ -2398,6 +2765,16 @@ def record_kernel_discovery(
         )
         route = str(route_strategy or "kernel_agent_forge")
         if route == "legacy_only":
+            # The legacy route stays out of the canonical streams by design, so
+            # a session run on it has no operations at all. That is the same
+            # shape as a session whose records were lost, and this is what
+            # tells the two apart.
+            trace_skip(
+                reason="legacy_only route is not on the canonical streams",
+                section="operations",
+                entity="kernel_discovery",
+                producer=producer,
+            )
             return
         if route == "geak_internal":
             for kernel in kernels:
@@ -2436,8 +2813,9 @@ def record_kernel_discovery(
                     }
                 ],
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_discovery failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_discovery", error=exc)
 
 
 def record_tool_version(
@@ -2468,6 +2846,7 @@ def record_tool_version(
             kernel-agent).
     """
     if not session_dir or not tool:
+        trace_skip(reason="no session_dir" if not session_dir else "no tool", section="versions")
         return
     try:
         meta = _tool_metadata(
@@ -2481,8 +2860,9 @@ def record_tool_version(
             meta,
             key=str(tool).lower(),
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_tool_version failed", exc_info=True)
+        trace_skip(reason="writer raised", section="versions", error=exc)
 
 
 def record_kernel_dispatch(
@@ -2518,6 +2898,7 @@ def record_kernel_dispatch(
             kernel-agent).
     """
     if not session_dir or not kernel_id:
+        trace_skip(reason="no session_dir" if not session_dir else "no kernel_id", section="kernel_dispatch")
         return
     try:
         payload = {
@@ -2535,6 +2916,12 @@ def record_kernel_dispatch(
             key=str(kernel_id),
         )
         if str(route_strategy or "") == "legacy_only":
+            trace_skip(
+                reason="legacy_only route is not on the canonical streams",
+                section="operations",
+                entity=str(kernel_id),
+                producer=producer,
+            )
             return
         if str(route_strategy or "") == "geak_internal":
             _record_geak_internal_ref(
@@ -2542,6 +2929,15 @@ def record_kernel_dispatch(
                 kernel_id=str(kernel_id),
                 stage="dispatch",
                 payload=payload,
+                producer=producer,
+            )
+            # Recorded, but on the GEAK-internal reference stream rather than
+            # as an operation, so this kernel is absent from the ledger by
+            # routing rather than by loss.
+            trace_skip(
+                reason="geak_internal route recorded as an internal reference",
+                section="operations",
+                entity=str(kernel_id),
                 producer=producer,
             )
             return
@@ -2589,8 +2985,9 @@ def record_kernel_dispatch(
                 }
             ],
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_dispatch failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_dispatch", error=exc)
 
 
 def record_kernel_backend_result(
@@ -2616,6 +3013,7 @@ def record_kernel_backend_result(
             kernel-agent).
     """
     if not session_dir or not isinstance(result, dict):
+        trace_skip(reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_backend_result")
         return
     try:
         rec = _recorder(session_dir, producer)
@@ -2736,7 +3134,16 @@ def record_kernel_backend_result(
                     )
                 numeric_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
                 if numeric_speedup is not None:
-                    measurement_id = _stable_id("measurement", operation_id, canonical_attempt_id, "micro_speedup")
+                    measurement_id = _stable_id(
+                        "measurement",
+                        operation_id,
+                        canonical_attempt_id,
+                        "micro_speedup",
+                        _measurement_occurrence(
+                            att.get("ended_at") or att.get("started_at"),
+                            value=numeric_speedup,
+                        ),
+                    )
                     record_measurement(
                         session_dir,
                         measurement_id=measurement_id,
@@ -2912,8 +3319,9 @@ def record_kernel_backend_result(
                 version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_backend_result", error=exc)
 
 
 def record_kernel_e2e(
@@ -2930,6 +3338,7 @@ def record_kernel_e2e(
     result: Mapping[str, Any] | None = None,
     route_strategy: str = "kernel_agent_forge",
     validation_tier: str = "",
+    occurrence: Any = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record the latest end-to-end integrate outcome for one kernel (stage 4).
@@ -2951,13 +3360,34 @@ def record_kernel_e2e(
         patch_path (str | None): the applied patch path.
         target_file (str | None): the integrated target file.
         extra_server_args (str): extra server args carried by the change.
+        occurrence (Any): which integrate of this kernel these numbers were read
+            from, as named by the caller; defaults to the integration id, then
+            to the benchmark the integrate was graded on. Keeps a later
+            re-measure from landing on the readings an earlier KEEP was decided
+            on, and is recorded so a replay after resume reproduces the ids.
         producer (str): the breakdown producer label (defaults to the
             kernel-agent).
     """
     if not session_dir or not kernel_id:
+        trace_skip(reason="no session_dir" if not session_dir else "no kernel_id", section="kernel_e2e")
         return
     try:
         evidence = dict(result or {})
+        # Which integrate these numbers were read from. ``integration_id`` names
+        # it whenever the kernel-patch queue issued one, but an env-only
+        # integrate carries no artifact, so it never enters that queue and never
+        # gets an id -- it is graded on its runtime bundle alone. Naming those by
+        # the benchmark they were graded on keeps them apart, and a replay hands
+        # back the same report path rather than a fresh count. Relative, since
+        # this is recorded: the run is what identifies it, not where it ran.
+        graded_on = str(evidence.get("report_path") or evidence.get("workspace") or "")
+        recorded_occurrence = (
+            occurrence
+            if occurrence is not None
+            else str(evidence.get("integration_id") or "")
+            or (_rel(Path(graded_on), session_dir) if graded_on else "")
+            or None
+        )
         payload = {
             "kernel_id": str(kernel_id),
             "integrated": bool(integrated),
@@ -2968,6 +3398,10 @@ def record_kernel_e2e(
             "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
             "ts": _now_iso_safe(),
+            # Carried on the record so the replay paths that re-record this
+            # outcome from state pass the same value back instead of counting
+            # a fresh occurrence on every pass.
+            "occurrence": recorded_occurrence,
         }
         for field in (
             "self_reported_e2e_gain_pct",
@@ -2986,6 +3420,15 @@ def record_kernel_e2e(
             key=str(kernel_id),
         )
         if str(route_strategy or "") == "legacy_only":
+            # No operation and no adoption for this integrate. On a KEEP that
+            # is a change the workload carries with nothing on the ledger
+            # claiming it, which is precisely the shape a lost write leaves.
+            trace_skip(
+                reason="legacy_only route is not on the canonical streams",
+                section="adoptions",
+                entity=str(kernel_id),
+                producer=producer,
+            )
             return
         if str(route_strategy or "") == "geak_internal":
             _record_geak_internal_ref(
@@ -2993,6 +3436,12 @@ def record_kernel_e2e(
                 kernel_id=str(kernel_id),
                 stage="e2e",
                 payload={**payload, "result": evidence},
+                producer=producer,
+            )
+            trace_skip(
+                reason="geak_internal route recorded as an internal reference",
+                section="adoptions",
+                entity=str(kernel_id),
                 producer=producer,
             )
             return
@@ -3005,6 +3454,10 @@ def record_kernel_e2e(
         }
         decision_value = str(decision or "").upper()
         measurement_refs: list[str] = []
+        # One integrate of one kernel is one occurrence. Re-integrating the
+        # same kernel later measures it again, and those numbers must not
+        # displace the ones an earlier KEEP was decided on. All three readings
+        # below come off that single benchmark, so they share its key.
         for name, raw, role in (
             ("baseline_throughput", evidence.get("base_tput"), "baseline"),
             ("final_throughput", evidence.get("new_tput"), "final"),
@@ -3013,7 +3466,13 @@ def record_kernel_e2e(
             numeric = to_float(raw)
             if numeric is None:
                 continue
-            measurement_id = _stable_id("measurement", operation_id, "integrate", name)
+            measurement_id = _stable_id(
+                "measurement",
+                operation_id,
+                "integrate",
+                name,
+                _measurement_occurrence(recorded_occurrence, value=numeric),
+            )
             record_measurement(
                 session_dir,
                 measurement_id=measurement_id,
@@ -3026,6 +3485,11 @@ def record_kernel_e2e(
                 unit="percent" if role == "delta" else "tok/s",
                 status="validated" if validated is True else "provisional",
                 metric_basis="output",
+                **(
+                    {"occurrence": recorded_occurrence}
+                    if recorded_occurrence is not None
+                    else {}
+                ),
                 dimensions={"role": role, "baseline_source": "integrate_input", "final_source": "integrate_rebaseline"},
                 **_measurement_metadata(
                     "integrate_handler",
@@ -3090,11 +3554,17 @@ def record_kernel_e2e(
                 measurement_ids=measurement_refs,
                 kind="kernel_optimization",
                 gain_pct=to_float(e2e_gain_pct),
+                # Frozen inline, not just referenced: measurement ids are stable
+                # per kernel, so a later attempt on the same kernel overwrites
+                # the very numbers this adoption was decided on.
+                throughput_before=to_float(evidence.get("base_tput")),
+                throughput_after=to_float(evidence.get("new_tput")),
                 configuration={
                     "patch_path": patch_path,
                     "target_file": target_file,
                     "extra_server_args": str(extra_server_args or ""),
                 },
+                validation_basis="e2e_validation",
                 metadata={"validation_tier": validation_tier or "integrate_e2e"},
             )
             adoption_refs.append(adoption_id)
@@ -3130,8 +3600,9 @@ def record_kernel_e2e(
                 }
             },
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_e2e failed", exc_info=True)
+        trace_skip(reason="writer raised", section="kernel_e2e", error=exc)
 
 
 def record_specialist_round(
@@ -3151,6 +3622,7 @@ def record_specialist_round(
             Coordinator).
     """
     if not session_dir or not isinstance(entry, dict) or not entry:
+        trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
     try:
         key = str(entry.get("round_id") or "") or None
@@ -3248,8 +3720,9 @@ def record_specialist_round(
             ts=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_specialist_round failed", exc_info=True)
+        trace_skip(reason="writer raised", section="specialist_rounds", error=exc)
 
 
 def record_critic_iteration(
@@ -3286,6 +3759,7 @@ def record_critic_iteration(
         producer (str): the breakdown producer label (defaults to ``critic``).
     """
     if not session_dir:
+        trace_skip(reason="no session_dir", section="critic_iterations")
         return
     try:
         review = review if isinstance(review, dict) else {}
@@ -3402,8 +3876,9 @@ def record_critic_iteration(
                 ts=str(payload.get("ts") or ""),
                 producer=producer,
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_critic_iteration failed", exc_info=True)
+        trace_skip(reason="writer raised", section="critic_iterations", error=exc)
 
 
 def record_robustness_signal(
@@ -3428,6 +3903,7 @@ def record_robustness_signal(
             ``robustness``).
     """
     if not session_dir or not workdir:
+        trace_skip(reason="no session_dir" if not session_dir else "no workdir", section="robustness_signals")
         return
     try:
         wd = Path(workdir)
@@ -3470,8 +3946,9 @@ def record_robustness_signal(
             ts=str(payload.get("ts") or ""),
             producer=producer,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_robustness_signal failed", exc_info=True)
+        trace_skip(reason="writer raised", section="robustness_signals", error=exc)
 
 
 def record_singleton_section(
@@ -3492,6 +3969,7 @@ def record_singleton_section(
         producer (str): the breakdown producer label that owns the section.
     """
     if not session_dir or not isinstance(payload, dict) or not payload:
+        trace_skip(reason="no session_dir" if not session_dir else "empty payload", section=section)
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
@@ -3524,8 +4002,9 @@ def record_singleton_section(
                 ts=str(payload.get("ts") or ""),
                 producer=producer,
             )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_singleton_section %s failed", section, exc_info=True)
+        trace_skip(reason="writer raised", section=section, error=exc)
 
 
 def _v4_payload(
@@ -3542,9 +4021,25 @@ def _valid_v4_call(
     session_dir: Path | str | None,
     producer: str,
     payload: Mapping[str, Any],
+    *,
+    section: str = "",
 ) -> bool:
-    """Return whether a v4 helper call has usable routing metadata."""
-    return bool(session_dir and payload and _VALID_PRODUCER.fullmatch(str(producer or "")))
+    """Return whether a v4 helper call has usable routing metadata.
+
+    A caller that fails this is asking to record something and getting
+    nothing, which is the shape of gap the export can only report as an
+    absence, so say which of the three requirements was missing.
+    """
+    if not session_dir:
+        reason = "no session_dir"
+    elif not payload:
+        reason = "empty payload"
+    elif not _VALID_PRODUCER.fullmatch(str(producer or "")):
+        reason = f"invalid producer {producer!r}"
+    else:
+        return True
+    trace_skip(reason=reason, section=section, producer=str(producer or ""))
+    return False
 
 
 def _record_v4_entity(
@@ -3562,7 +4057,12 @@ def _record_v4_entity(
     stable_id = str(entity_id or value.get(id_field) or "").strip()
     if stable_id:
         value[id_field] = stable_id
-    if not _valid_v4_call(session_dir, producer, value) or not stable_id:
+    if not _valid_v4_call(session_dir, producer, value, section=section):
+        return
+    if not stable_id:
+        # An entity is merged by its id, so one without an id has nothing to
+        # be merged into and cannot be written at all.
+        trace_skip(reason=f"no {id_field}", section=section, producer=producer)
         return
     try:
         _recorder(session_dir, producer).record_upsert_item(
@@ -3570,8 +4070,15 @@ def _record_v4_entity(
             value,
             key=stable_id,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_%s failed", section, exc_info=True)
+        trace_skip(
+            reason="writer raised",
+            section=section,
+            producer=producer,
+            entity=stable_id,
+            error=exc,
+        )
 
 
 def _record_v4_event(
@@ -3585,7 +4092,7 @@ def _record_v4_event(
 ) -> None:
     """Best-effort writer for a v4 event with an optional stable key."""
     value = _v4_payload(payload, fields)
-    if not _valid_v4_call(session_dir, producer, value):
+    if not _valid_v4_call(session_dir, producer, value, section=section):
         return
     key = next((str(value.get(name) or "").strip() for name in key_fields if value.get(name)), "")
     try:
@@ -3594,8 +4101,15 @@ def _record_v4_event(
             recorder.record_upsert_item(section, value, key=key)
         else:
             recorder.record_item(section, value)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_%s failed", section, exc_info=True)
+        trace_skip(
+            reason="writer raised",
+            section=section,
+            producer=producer,
+            entity=key,
+            error=exc,
+        )
 
 
 def record_run_snapshot(
@@ -3607,12 +4121,18 @@ def record_run_snapshot(
 ) -> None:
     """Record a partial v4 run snapshot using author-time facts only."""
     value = _v4_payload(snapshot, fields)
-    if not _valid_v4_call(session_dir, producer, value):
+    if not _valid_v4_call(session_dir, producer, value, section="run_snapshot"):
         return
     try:
         _recorder(session_dir, producer).record_upsert_singleton("run_snapshot", value)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         log.debug("record_run_snapshot failed", exc_info=True)
+        trace_skip(
+            reason="writer raised",
+            section="run_snapshot",
+            producer=producer,
+            error=exc,
+        )
 
 
 def record_phase_transition(
@@ -3665,6 +4185,49 @@ def record_subject(
     )
 
 
+_AGENT_BY_PRODUCER = {
+    PRODUCER_KERNEL_AGENT: "kernel_agent",
+    "critic": "critic",
+    "robustness": "robustness",
+    "framework-kb": "framework_agent",
+}
+
+_AGENT_BY_OPERATION_KIND = {
+    "kernel_optimization": "kernel_agent",
+    "kernel_optimizer_run": "kernel_agent",
+    "kernel_optimizer_selection": "kernel_agent",
+    "strategy_selection": "kernel_agent",
+    "gemm_tuning": "kernel_agent",
+    "specialist": "explore",
+    "critic": "critic",
+    "kb_write": "critic",
+    "robustness": "robustness",
+}
+
+
+def _default_operation_agent(
+    value: Mapping[str, Any],
+    producer: str,
+) -> str:
+    """Fall back to the owning agent implied by the producer and work kind.
+
+    Explicit ``agent=`` at the call site always wins; this only keeps operations
+    recorded by paths that predate the field from landing without an owner.
+    """
+    kind = str(value.get("kind") or "").strip().lower()
+    by_kind = _AGENT_BY_OPERATION_KIND.get(kind)
+    if by_kind:
+        return by_kind
+    by_producer = _AGENT_BY_PRODUCER.get(str(producer or "").strip().lower())
+    if by_producer:
+        return by_producer
+    return _resolve_agent(
+        str(value.get("name") or kind),
+        result=value.get("outputs") if isinstance(value.get("outputs"), Mapping) else None,
+        phase=str(value.get("phase") or ""),
+    )
+
+
 def record_operation(
     session_dir: Path | str | None,
     operation: Mapping[str, Any] | None = None,
@@ -3674,11 +4237,17 @@ def record_operation(
     **fields: Any,
 ) -> None:
     """Upsert one v4 operation by stable ``operation_id``."""
+    value = _v4_payload(operation, fields)
+    # Only stamp an owner when this call actually defines the operation; a
+    # partial upsert that just patches one field must not overwrite the agent
+    # its defining call already recorded.
+    if not value.get("agent") and (value.get("kind") or value.get("name")):
+        value["agent"] = _default_operation_agent(value, producer)
     _record_v4_entity(
         session_dir,
         section="operations",
-        payload=operation,
-        fields=fields,
+        payload=value,
+        fields={},
         id_field="operation_id",
         entity_id=operation_id,
         producer=producer,
@@ -3715,6 +4284,10 @@ def record_adoption(
 ) -> None:
     """Upsert one v4 adoption by stable ``adoption_id``."""
     value = _v4_payload(adoption, fields)
+    if not value.get("agent") and value.get("kind"):
+        value["agent"] = _default_operation_agent(value, producer)
+    if value.get("attribution_eligible") is None and value.get("kind"):
+        value["attribution_eligible"] = True
     status = str(value.get("status") or "").lower()
     decision = str(value.get("decision") or "").upper()
     if status == "adopted" or (decision == "KEEP" and value.get("validated") is True):
@@ -3754,6 +4327,97 @@ def record_artifact(
         entity_id=artifact_id,
         producer=producer,
     )
+
+
+def record_session_validation(
+    session_dir: Path | str | None,
+    *,
+    baseline_tput: float | None,
+    validated_tput: float | None,
+    validated_gain_pct: float | None,
+    stack_len: int,
+    source: str,
+    measurement_basis: str,
+    ts: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+) -> str | None:
+    """Record what the session was measured to have gained, as it was decided.
+
+    Without this the breakdown's session total is the sum of its own ledger,
+    so the ledger can never be found to disagree with the end-to-end
+    measurement the run actually promoted -- the two numbers come from the
+    same addition. Recording the promoted figure at the moment it is promoted
+    gives the export something independent to reconcile against.
+
+    Each promotion is its own record rather than an overwrite of one, so a
+    session leaves behind the checkpoints it passed through. The id is drawn
+    from the stack length and the timestamp, never from the value: two
+    checkpoints that happen to measure the same number are still two
+    checkpoints.
+
+    Args:
+        session_dir: The hyperloom session directory.
+        baseline_tput: Throughput the gain is measured against.
+        validated_tput: Throughput just measured.
+        validated_gain_pct: The promoted gain, in percent of baseline.
+        stack_len: Adopted-stack length this figure was validated at.
+        source: The path that promoted it, e.g. ``integrate_patch``.
+        measurement_basis: ``e2e_rebench`` when the throughput was measured
+            end to end, ``derived_speedup`` when it was inferred from a
+            micro-benchmark's speedup.
+        ts: Author-time stamp; defaults to now.
+        producer: Recorder producer label.
+
+    Returns:
+        The operation id, or ``None`` when nothing could be recorded.
+    """
+    if not session_dir or validated_gain_pct is None:
+        return None
+    stamp = str(ts or _now_iso_safe())
+    operation_id = _stable_id("op", "session_validation", stack_len, stamp)
+    occurrence = _measurement_occurrence(operation_id)
+    measurement_ids: list[str] = []
+    for name, value, unit in (
+        ("baseline_throughput", baseline_tput, "tok/s"),
+        ("throughput", validated_tput, "tok/s"),
+        ("gain", validated_gain_pct, "percent"),
+    ):
+        if value is None:
+            continue
+        measurement_id = _stable_id("measurement", operation_id, name, occurrence)
+        measurement_ids.append(measurement_id)
+        record_measurement(
+            session_dir,
+            measurement_id=measurement_id,
+            operation_id=operation_id,
+            kind=name,
+            name=name,
+            value=float(value),
+            unit=unit,
+            measured_at=stamp,
+            metric_basis=measurement_basis,
+            source={"action": "session_validation", "role": name},
+            producer=producer,
+        )
+    record_operation(
+        session_dir,
+        operation_id=operation_id,
+        kind="session_validation",
+        name="cumulative_gain_validated",
+        agent="coordinator",
+        status="succeeded",
+        started_at=stamp,
+        ended_at=stamp,
+        measurement_refs=measurement_ids,
+        outputs={
+            "validated_at_stack_len": stack_len,
+            "source": source,
+            "measurement_basis": measurement_basis,
+            "validated_gain_pct": float(validated_gain_pct),
+        },
+        producer=producer,
+    )
+    return operation_id
 
 
 def record_trace_event(
@@ -3796,6 +4460,7 @@ __all__ = [
     "record_measurement",
     "record_operation",
     "record_robustness_signal",
+    "record_session_validation",
     "record_singleton_section",
     "record_specialist_round",
     "record_subject",

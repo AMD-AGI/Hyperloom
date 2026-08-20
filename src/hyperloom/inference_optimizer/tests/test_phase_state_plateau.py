@@ -32,6 +32,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     is_valid_stop_reason,
     kernel_work_pending,
 )
+from hyperloom.orchestrator.state import shared_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -349,7 +350,7 @@ def test_exit_normal_kernel_after_gemm_does_not_exit():
         max_minutes=0,
         phase_budget_pct={},
         kernel_integrate_attempts={},
-        kernel_opt_attempts={},
+        kernel_opt_task_attempts={},
         continue_kernel_after_gemm=False,
         rejected_kernel_ids=[],
         last_gemm_tuning={
@@ -443,7 +444,7 @@ def test_kernel_skip_to_sweep_waits_for_pending_keep():
 
 def test_kernel_skip_to_sweep_waits_for_partial_kernel_attempt():
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.kernel_opt_attempts = {
+    state.kernel_opt_task_attempts = {
         "k009": {
             "last_decision": "PARTIAL",
             "last_status": "ok",
@@ -516,7 +517,7 @@ def test_collective_only_waits_for_pending_integration():
 
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.kernel_opt_attempts = {
+    state.kernel_opt_task_attempts = {
         "k018": {
             "attempts": 1,
             "failure_count": 1,
@@ -535,7 +536,7 @@ def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.rejected_kernel_ids = ["k001"]
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k002"}]
-    state.kernel_opt_attempts = {
+    state.kernel_opt_task_attempts = {
         "k001": {
             "last_decision": "REVERT",
             "last_status": "ok",
@@ -613,6 +614,7 @@ def test_set_stop_reason_accepts_vocab():
     s = SharedState()
     assert s.set_stop_reason("target_reached") == "target_reached"
     assert s.stop_reason == "target_reached"
+    assert s.stop_ts != ""
 
 
 def test_set_stop_reason_lenient_maps_unknown_to_unknown(caplog):
@@ -635,6 +637,38 @@ def test_set_stop_reason_empty_string_clears():
     assert s.stop_reason == "target_reached"
     s.set_stop_reason("")
     assert s.stop_reason == ""
+    assert s.stop_ts == ""
+
+
+def test_a_later_stop_reason_does_not_move_the_stop_time(monkeypatch):
+    """CLOSE stops the session on entry and ships the breakdown; a later write must not re-date it."""
+    s = SharedState()
+    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    s.set_stop_reason("time_exhausted")
+    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T02:00:00.000000+00:00")
+    s.set_stop_reason("target_reached")
+    assert s.stop_reason == "target_reached"
+    assert s.stop_ts == "2026-08-08T00:00:00.000000+00:00"
+
+
+def test_rewriting_the_same_stop_reason_does_not_move_the_stop_time(monkeypatch):
+    """The Coordinator's ``finally`` re-asserts the reason CLOSE already wrote."""
+    s = SharedState()
+    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:00:00.000000+00:00")
+    s.set_stop_reason("time_exhausted")
+    monkeypatch.setattr(shared_state, "_now_iso", lambda: "2026-08-08T00:04:00.000000+00:00")
+    s.set_stop_reason(s.stop_reason)
+    assert s.stop_ts == "2026-08-08T00:00:00.000000+00:00"
+
+
+def test_saving_a_stopped_session_again_does_not_move_its_stop_time(tmp_path):
+    s = SharedState()
+    s.set_stop_reason("target_reached")
+    pinned = s.stop_ts
+    s.save(tmp_path)
+    s.save(tmp_path)
+    assert s.stop_ts == pinned
+    assert SharedState.load_or_init(tmp_path).stop_ts == pinned
 
 
 def test_stop_reason_vocab_has_v08_additions():

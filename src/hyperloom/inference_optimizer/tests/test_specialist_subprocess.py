@@ -1004,9 +1004,6 @@ class _FakeGpuSpecialistLease:
     def poll_started(self) -> int | None:
         return getattr(self, "_pid", None)
 
-    def pending_seconds(self) -> float:
-        return 0.0
-
     def is_alive(self) -> bool:
         return self.alive
 

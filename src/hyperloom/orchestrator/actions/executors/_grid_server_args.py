@@ -187,47 +187,6 @@ def compose_server_args(
     return merge_server_args(pruned, variant_extra_args)
 
 
-def split_config_changes(
-    config_changes: dict[str, str],
-) -> tuple[str, dict[str, str]]:
-    """Split a flat config_changes dict into (server_args_str, envs_dict).
-
-    Keys starting with ``-`` are CLI flags: they are rebuilt into an argv
-    string (``--flag value`` or bare ``--flag``) and returned as
-    ``server_args``.  All other keys are env vars and returned as ``envs``.
-    This translates the legacy flat representation produced by
-    ``_framework_config_levers_from_done`` into the structured form that
-    ``GridVariant`` expects so ``--``-prefixed flags reach ``EXTRA_{FW}_ARGS``
-    instead of being silently dropped by ``valid_env_key``.
-
-    Args:
-        config_changes: Flat dict from a framework specialist deliverable,
-            mixing ``--flag: value`` server-arg keys with ``ENV_VAR: value``
-            env keys.
-
-    Returns:
-        A ``(server_args, envs)`` tuple where ``server_args`` is an argv-like
-        string safe to assign to ``GridVariant.extra_server_args`` and
-        ``envs`` is a ``dict[str, str]`` for ``GridVariant.extra_envs``.
-    """
-    from ._grid_base import coerce_extra_envs
-
-    arg_tokens: list[str] = []
-    env_items: dict[str, str] = {}
-    for k, v in (config_changes or {}).items():
-        key = str(k).strip()
-        val = str(v).strip()
-        if key.startswith("-"):
-            if val:
-                arg_tokens.append(f"{key}={val}" if "=" not in key else f"{key} {val}")
-            else:
-                arg_tokens.append(key)
-        else:
-            if key:
-                env_items[key] = val
-    server_args = merge_server_args(*arg_tokens) if arg_tokens else ""
-    return server_args, coerce_extra_envs(env_items)
-
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted
 # JSON key or string value should be (letters/digits/underscore plus the ``.``,
@@ -767,6 +726,78 @@ def resolve_sglang_context_cap(isl: int, osl: int) -> int:
         DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     )
     return max(int(isl) + int(osl) + headroom, floor)
+
+
+def validate_warm_replay_context_length(
+    server_args: str | None,
+    framework: str | None,
+    isl: int,
+    osl: int,
+    max_model_len: int | str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Validate a replayed SGLang context window without changing its config.
+
+    Exact Recipe identities do not include workload shape. A champion may
+    therefore carry ``--context-length`` from a shorter run even though the
+    current ISL+OSL no longer fits. Compatible or absent pins are preserved
+    byte-for-byte; incompatible pins fail the replay preflight.
+    """
+    args = str(server_args or "")
+    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
+        return args, {"status": "not_sglang"}
+    required = max(0, int(isl or 0)) + max(0, int(osl or 0))
+    if required <= 0:
+        return args, {"status": "target_shape_unknown"}
+    max_len = optional_positive_int(max_model_len)
+    if max_len is not None and max_len < required:
+        raise ValueError(
+            "target workload exceeds MAX_MODEL_LEN: "
+            f"isl+osl={required} > max_model_len={max_len}"
+        )
+    parsed = tokenize_server_args_preserving_json(args)
+    if parsed is None:
+        raise ValueError("warm replay server args are not safely tokenizable")
+    _normalized, tokens = parsed
+    values: list[int] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == _SGLANG_CONTEXT_LENGTH_FLAG:
+            if index + 1 >= len(tokens):
+                raise ValueError("--context-length is missing its value")
+            raw_value = tokens[index + 1]
+            index += 2
+        elif token.startswith(f"{_SGLANG_CONTEXT_LENGTH_FLAG}="):
+            raw_value = token.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+            continue
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"--context-length must be an integer, got {raw_value!r}"
+            ) from exc
+        if value <= 0:
+            raise ValueError("--context-length must be positive")
+        values.append(value)
+    if not values:
+        return args, {
+            "status": "context_length_absent",
+            "required_context_length": required,
+        }
+    effective = values[-1]
+    if effective >= required:
+        return args, {
+            "status": "compatible",
+            "effective_context_length": effective,
+            "required_context_length": required,
+        }
+    raise ValueError(
+        "warm replay context length is incompatible with target workload: "
+        f"context_length={effective} < isl+osl={required}"
+    )
 
 
 def inject_sglang_context_length(

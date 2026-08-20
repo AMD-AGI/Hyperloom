@@ -15,13 +15,17 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
+from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .backends import _build_robustness_options
 from .parser import (
@@ -198,8 +202,6 @@ def _seed_shared_state(
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
     # EXPLORE hard force-exit thresholds.
-    if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
-        plateau_overrides["force_exit_hours_remaining"] = float(args.explore_force_exit_hours_remaining)
     if getattr(args, "explore_force_exit_budget_pct", None) is not None:
         plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
 
@@ -341,7 +343,7 @@ def _seed_shared_state(
         continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
-        cumulative_gain=0.0,
+        cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
         reference_model=_ref_model,
@@ -461,9 +463,9 @@ def _print_final_summary(
     """Print the end-of-run summary block to stdout.
 
     Reports the stop reason, session id, model, baseline throughput, the
-    per-round (informational) cumulative gain, the validated cumulative gain
-    (with a staleness warning when the optimization stack grew after the last
-    validation), the current best config, pruned families, and crash count.
+    validated cumulative gain (with a staleness warning when the optimization
+    stack grew after the last validation), the current best config, pruned
+    families, and crash count.
     On ``baseline_failed`` it also surfaces the real terminal root cause from
     ``reports/final.json``.
 
@@ -496,7 +498,6 @@ def _print_final_summary(
             )
             if failure_summary.get("server_log"):
                 print(f"  server_log           : {failure_summary.get('server_log')}")
-    print(f"  cumulative_gain      : {state.cumulative_gain:.2f}% (per-round sum — informational)")
     if state.cumulative_gain_validated_ts:
         stale = (
             " ⚠ stack changed since validation"
@@ -515,6 +516,129 @@ def _print_final_summary(
     print(f"  crash_count          : {state.crash_count}")
     _print_kernel_opt_summary_line(state)
     print("===============================================")
+
+
+def _bank_previous_leg_phase_segment(state: SharedState) -> None:
+    """Bank the phase time the stopped leg spent but never recorded.
+
+    Per-phase totals are banked at each transition out of a phase, so a leg that
+    stopped mid-phase left its last segment live — and the resume boundary is
+    about to floor that segment away as the idle gap it mostly is.
+    :attr:`SharedState.stop_ts` is the only recorded evidence of when the leg
+    ended; a clean stop or a crash leaves none, and then the segment stays
+    unbanked. That under-charges the phase, which is the direction the phase
+    clock tolerates: over-charging ends a phase early.
+
+    The end is clamped to the present for the same reason: no leg can have run
+    past the moment it is being resumed, so a ``stop_ts`` stamped ahead of now
+    would bank the difference as spend the phase never had.
+
+    Must run before ``resumed_ts`` is restamped, which would floor the segment
+    to nothing.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+    """
+    stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
+    if stop_unix <= 0.0:
+        return
+    bank_phase_segment(state, until_unix=stop_unix)
+
+
+def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
+    """Mark the start of a resumed run leg on ``state`` (caller persists).
+
+    Every resume stamps :attr:`SharedState.resumed_ts`. The previous leg's
+    CLOSE transition stays in ``phase_history`` and would otherwise keep
+    speaking for the resumed run — a report reads it as the session's stop
+    reason and end time — and this boundary is what dates it as a previous
+    leg's. It is also what stops the phase clock charging the gap between the
+    two legs to whichever phase the session stopped in.
+
+    Only a previous leg that stopped for a recorded reason, or crashed
+    repeatedly, re-anchors the wall-clock budget. That also clears
+    ``deadline_unix`` so ``Coordinator.run`` can stamp a new one from the
+    reset ``start_ts``; keeping the spent stamp would make ``--force-resume``
+    after ``time_exhausted`` stop immediately. After a clean stop ``start_ts``
+    and the stamp are deliberately kept, so remaining wall-clock is the
+    persisted deadline, not this invocation's ``--max-hours``. Raising that
+    flag on this path does not extend the stamp. The phase clock moves on
+    either branch: the two answer different questions, and neither answer
+    includes time nothing was running.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+        reanchor_budget (bool): Whether the budget restarts from this leg.
+
+    Returns:
+        str: The timestamp stamped as this leg's boundary.
+    """
+    _bank_previous_leg_phase_segment(state)
+    state.resumed_ts = now_iso()
+    if reanchor_budget:
+        # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats
+        # forever think the work is done.
+        state.stop_reason = ""
+        state.stop_ts = ""
+        state.closing_phase = False
+        state.closing_started_unix = 0.0
+        state.closing_report_task_id = ""
+        # Reset persisted crash_count so a fresh resume isn't immediately tripped into "emergency".
+        state.crash_count = 0
+        # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
+        state.start_ts = state.resumed_ts
+        # The stamp is the loop's budget. Leaving a spent one in place after
+        # resetting start_ts would make this leg look already exhausted.
+        state.deadline_unix = 0.0
+        state.teardown_timings_sec = {}
+    return state.resumed_ts
+
+
+def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> list[str]:
+    """Operator-facing resume notes when the wall-clock stamp is kept.
+
+    Remaining time is :meth:`SharedState.remaining_minutes` (the stamp), not
+    this invocation's ``--max-hours``. Raising that flag here does not extend
+    the deadline.
+
+    Args:
+        state: Loaded session state after :func:`_begin_resume_leg`.
+        max_hours: This invocation's ``--max-hours``.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
+    elapsed_h = state.elapsed_minutes() / 60.0
+    remaining_min = state.remaining_minutes()
+    lines = [
+        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
+        f"the persisted deadline is kept",
+    ]
+    if remaining_min is None:
+        lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
+        return lines
+    remaining_h = remaining_min / 60.0
+    lines.append(
+        f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp"
+    )
+    cli_hours = float(max_hours or 0.0)
+    if remaining_min <= 0.0:
+        lines.append(
+            "  → WARNING: the stamped deadline is already spent; start a fresh "
+            "session, or the run stops almost immediately"
+        )
+        lines.append(
+            "  → raising --max-hours on a clean-stop resume does not extend the "
+            "stamp; a recorded stop_reason re-anchors the budget"
+        )
+    elif cli_hours > 0.0:
+        cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
+        if abs(cli_left_min - remaining_min) > 1.0:
+            lines.append(
+                f"  → this invocation's --max-hours {cli_hours:.2f} does not "
+                f"extend or shrink that stamp"
+            )
+    return lines
 
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
@@ -603,7 +727,7 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     if args.target_gain:
         return (
             f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain to >= {args.target_gain}% within "
+            f"cumulative_gain_validated to >= {args.target_gain}% within "
             f"{args.max_hours}h."
         )
     if args.target_tput:
