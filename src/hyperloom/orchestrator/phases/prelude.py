@@ -516,13 +516,10 @@ class PreludePhase(PhaseHandler):
         except (OSError, ValueError) as exc:
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
         if not root_value:
-            detail = str(resolution.reason or "Session active kernel patch root is unset")
+            detail = resolution.reason
             if resolution.allowlist:
                 detail = f"{detail}; allowlist={list(resolution.allowlist)!r}"
-            return reject(
-                detail,
-                code=str(resolution.reason or "active_kernel_patch_root_missing"),
-            )
+            return reject(detail, code=resolution.reason)
         try:
             root = Path(root_value).resolve(strict=False)
             root_is_dir = root.is_dir()
@@ -887,7 +884,7 @@ class PreludePhase(PhaseHandler):
             if resolution.root:
                 continue
             return self._warm_replay_root_skip_outcome(
-                reason=resolution.reason or reason_code,
+                reason=resolution.reason,
                 resolution=resolution,
                 root_kind="kernel",
             )
@@ -1427,10 +1424,7 @@ class PreludePhase(PhaseHandler):
                 if not framework_resolution.root:
                     state.warm_replay_attempted = True
                     state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason=str(
-                            framework_resolution.reason
-                            or "active_framework_root_missing"
-                        ),
+                        reason=framework_resolution.reason,
                         resolution=framework_resolution,
                         root_kind="framework",
                     )
@@ -1695,10 +1689,7 @@ class PreludePhase(PhaseHandler):
                         state.set_stop_reason("warm_replay_rollback_failed")
                 state.warm_replay_attempted = True
                 state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                    reason=str(
-                        framework_resolution.reason
-                        or "active_framework_root_missing"
-                    ),
+                    reason=framework_resolution.reason,
                     resolution=framework_resolution,
                     root_kind="framework",
                     rollback=rollback,
