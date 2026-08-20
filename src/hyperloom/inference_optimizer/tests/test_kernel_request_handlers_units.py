@@ -249,6 +249,65 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_shapes(state, tmp_path) == str(shapes)
 
+    def test_resolve_forge_shapes_manifest_reads_artifact_paths(self, tmp_path):
+        state = SharedState()
+        manifest = tmp_path / "trace_shape_manifest.json"
+        manifest.write_text(
+            json.dumps({"manifest_kind": "trace_shape_manifest", "rows": []}),
+            encoding="utf-8",
+        )
+        state.last_trace_analyze = {"artifact_paths": {"trace_shape_manifest": str(manifest)}}
+
+        assert krh._resolve_forge_shapes_manifest(state, tmp_path) == str(manifest)
+
+    def test_resolve_forge_shapes_manifest_reads_trace_shape_manifest_block(self, tmp_path):
+        state = SharedState()
+        manifest = tmp_path / "trace_shape_manifest.json"
+        manifest.write_text(
+            json.dumps({"manifest_kind": "trace_shape_manifest", "rows": []}),
+            encoding="utf-8",
+        )
+        state.last_trace_analyze = {
+            "trace_shape_manifest": {"status": "ok", "path": str(manifest)},
+        }
+
+        assert krh._resolve_forge_shapes_manifest(state, tmp_path) == str(manifest)
+
+    def test_resolve_forge_shapes_manifest_falls_back_beside_candidates(self, tmp_path):
+        state = SharedState()
+        bypass_dir = tmp_path / "bypass"
+        bypass_dir.mkdir()
+        candidates = bypass_dir / "kernel_candidates.json"
+        candidates.write_text("{}", encoding="utf-8")
+        manifest = bypass_dir / "trace_shape_manifest.json"
+        manifest.write_text(
+            json.dumps({"manifest_kind": "trace_shape_manifest", "rows": []}),
+            encoding="utf-8",
+        )
+        state.last_trace_analyze = {"candidates_path": str(candidates)}
+
+        assert krh._resolve_forge_shapes_manifest(state, tmp_path) == str(manifest)
+
+    def test_resolve_forge_shapes_manifest_rejects_wrong_kind(self, tmp_path):
+        state = SharedState()
+        bad = tmp_path / "not_a_manifest.json"
+        bad.write_text(json.dumps({"manifest_kind": "other"}), encoding="utf-8")
+        state.last_trace_analyze = {"artifact_paths": {"trace_shape_manifest": str(bad)}}
+
+        assert krh._resolve_forge_shapes_manifest(state, tmp_path) == ""
+
+    def test_resolve_forge_shapes_manifest_skips_stale_profile_when_required(self, tmp_path, monkeypatch):
+        state = SharedState()
+        manifest = tmp_path / "trace_shape_manifest.json"
+        manifest.write_text(
+            json.dumps({"manifest_kind": "trace_shape_manifest", "rows": []}),
+            encoding="utf-8",
+        )
+        state.last_trace_analyze = {"artifact_paths": {"trace_shape_manifest": str(manifest)}}
+        monkeypatch.setattr(state, "profile_trace_matches_workload", lambda: False)
+
+        assert krh._resolve_forge_shapes_manifest(state, tmp_path, require_fresh_profile=True) == ""
+
     def test_resolve_forge_shapes_skips_incompatible_candidate(self, tmp_path):
         state = SharedState()
         bad = tmp_path / "bad.json"
