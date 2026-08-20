@@ -1139,6 +1139,137 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
 
 
+@pytest.mark.asyncio
+async def test_geak_revalidation_uses_three_warm_samples_and_median(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Required GEAK revalidation uses two discarded passes then 3 samples."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "geak-revalidate"
+
+    bench_calls: list[str] = []
+    sample_values = iter([900.0, 910.0, 3300.0, 3320.0, 3310.0])
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        bench_calls.append(str(slot))
+        _fake_workspace(slot, tput=next(sample_values))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    protocol = {
+        "prewarm_rounds": 2,
+        "measured_repeats": 3,
+        "aggregation": "median",
+        "run_eval_between_measurements": False,
+    }
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "source": "resume_stack_revalidate",
+            "geak_fallback": True,
+            "base_tput": 800.0,
+            "enable_stack_rebench": True,
+            "rebench_required": True,
+            "stack_rebench_repeats": 3,
+            "stack_rebench_max_spread_pct": 3.0,
+            "revalidation_protocol": protocol,
+            "grid": [
+                {
+                    "name": "geak_revalidate",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "geak_revalidate",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="geak-revalidate-series",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert len(bench_calls) == 5, bench_calls
+    winner = out["best_variant"]
+    assert winner["stack_rebench_samples"] == [3300.0, 3320.0, 3310.0]
+    assert winner["stack_rebench_sample_count"] == 3
+    assert winner["revalidation_protocol_complete"] is True
+    assert winner["revalidation_protocol"] == protocol
+    assert winner["tput"] == pytest.approx(3310.0)
+    assert out["output_throughput"] == pytest.approx(3310.0)
+
+
+@pytest.mark.asyncio
+async def test_geak_revalidation_without_lifecycle_does_not_grade_cold_repeats(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Required hot protocol becomes inconclusive when server reuse is unavailable."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "geak-no-lifecycle"
+    bench_calls: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        bench_calls.append(str(slot))
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "source": "resume_stack_revalidate",
+            "geak_fallback": True,
+            "base_tput": 800.0,
+            "rebench_required": True,
+            "stack_rebench_repeats": 3,
+            "grid": [
+                {
+                    "name": "geak_revalidate",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                }
+            ],
+            "variant_timeout_sec": 30,
+        },
+        idempotency_key="geak-no-lifecycle",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    assert len(bench_calls) == 1
+    assert res.result["output_throughput"] is None
+    assert not res.result["winners"]
+    unstable = res.result["keep_unstable_in_stack"][0]
+    assert unstable["revalidation_protocol_complete"] is False
+    assert "warm_rebench_lifecycle_unavailable" in unstable["stack_rebench_warnings"]
+
+
 def _run_eval_of(cmd: list[str]) -> str:
     """Read RUN_EVAL out of the materialized YAML a Magpie call was handed."""
     cfg_idx = cmd.index("--benchmark-config")

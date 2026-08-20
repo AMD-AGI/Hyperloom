@@ -232,8 +232,10 @@ class VariantResult:
         completed_requests (int | None): Number of completed requests.
         duration_seconds (float | None): Benchmark duration in seconds.
         ttft_mean_ms (float | None): Mean time-to-first-token (ms).
+        ttft_median_ms (float | None): Median time-to-first-token (ms).
         e2el_mean_ms (float | None): Mean end-to-end latency (ms).
         tpot_mean_ms (float | None): Mean time-per-output-token (ms).
+        tpot_median_ms (float | None): Median time-per-output-token (ms).
         workspace (str | None): Path to the located ``benchmark_*`` workspace.
         report_path (str | None): Path to ``benchmark_report.json`` if present.
         raw_result_path (str | None): Path to the raw result JSON, if salvaged.
@@ -267,8 +269,10 @@ class VariantResult:
     completed_requests: int | None = None
     duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
+    ttft_median_ms: float | None = None
     e2el_mean_ms: float | None = None
     tpot_mean_ms: float | None = None
+    tpot_median_ms: float | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -317,8 +321,10 @@ class VariantResult:
             "completed_requests": self.completed_requests,
             "duration_seconds": self.duration_seconds,
             "ttft_mean_ms": self.ttft_mean_ms,
+            "ttft_median_ms": self.ttft_median_ms,
             "e2el_mean_ms": self.e2el_mean_ms,
             "tpot_mean_ms": self.tpot_mean_ms,
+            "tpot_median_ms": self.tpot_median_ms,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,

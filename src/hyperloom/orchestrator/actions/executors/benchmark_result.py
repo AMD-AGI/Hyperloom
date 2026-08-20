@@ -708,10 +708,14 @@ def _merge_raw_result(
         )
     if measurement.get("ttft_mean_ms") is None:
         measurement["ttft_mean_ms"] = to_float(raw.get("mean_ttft_ms"))
+    if measurement.get("ttft_median_ms") is None:
+        measurement["ttft_median_ms"] = to_float(raw.get("median_ttft_ms"))
     if measurement.get("ttft_p99_ms") is None:
         measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
     if measurement.get("tpot_mean_ms") is None:
         measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
+    if measurement.get("tpot_median_ms") is None:
+        measurement["tpot_median_ms"] = to_float(raw.get("median_tpot_ms"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
@@ -789,8 +793,10 @@ def extract_benchmark_measurement(
         ),
         "duration_seconds": to_float(throughput.get("duration_seconds")),
         "ttft_mean_ms": to_float(ttft.get("mean_ms")),
+        "ttft_median_ms": to_float(ttft.get("median_ms")),
         "ttft_p99_ms": to_float(ttft.get("p99_ms")),
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
+        "tpot_median_ms": to_float(tpot.get("median_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
         "raw_result_path": None,
