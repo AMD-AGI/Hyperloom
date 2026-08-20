@@ -1343,16 +1343,7 @@ def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
     patches = params.get("patches") or []
     if not patches:
         return ""
-    patch_paths = []
-    for patch in patches:
-        if not isinstance(patch, dict):
-            continue
-        for key in ("patch_ref", "patch_path", "patch_file"):
-            raw = str(patch.get(key) or "").strip()
-            if raw:
-                patch_paths.append(Path(raw))
-                break
-    resolution = resolve_warm_replay_framework_root(patch_paths=patch_paths or None)
+    resolution = resolve_warm_replay_framework_root(patch_entries=patches)
     return str(resolution.root or "").rstrip("/")
 
 

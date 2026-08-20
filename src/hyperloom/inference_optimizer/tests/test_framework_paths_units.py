@@ -866,6 +866,69 @@ class TestWarmReplayPatchRootResolution:
         assert resolution.root == f"{fallback_root}/"
         assert resolution.source == "allowlist"
 
+    def test_inline_patch_content_matches_allowlist_root(self, monkeypatch, tmp_path):
+        """A legacy entry carrying only an inline diff still resolves a root."""
+        monkeypatch.delenv("FRAMEWORK", raising=False)
+        monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        root = tmp_path / "sgl-workspace" / "sglang"
+        target = root / "python" / "sglang" / "srt" / "models" / "qwen3.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("original\n", encoding="utf-8")
+        monkeypatch.setattr(
+            fp,
+            "_warm_replay_framework_patch_roots",
+            lambda: (f"{root}/",),
+        )
+
+        resolution = fp.resolve_warm_replay_framework_root(
+            patch_entries=[
+                {
+                    "patch_file": "framework/does-not-exist.patch",
+                    "patch_content": (
+                        "diff --git a/python/sglang/srt/models/qwen3.py "
+                        "b/python/sglang/srt/models/qwen3.py\n"
+                        "--- a/python/sglang/srt/models/qwen3.py\n"
+                        "+++ b/python/sglang/srt/models/qwen3.py\n"
+                        "@@ -1 +1 @@\n-original\n+patched\n"
+                    ),
+                }
+            ]
+        )
+
+        assert resolution.root == f"{root}/"
+        assert resolution.source == "allowlist"
+        assert resolution.reason == ""
+
+    def test_unresolvable_patch_file_no_longer_rejects_env_root(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """A KB-relative ref with no local file must not veto the env root."""
+        env_root = tmp_path / "env-sglang"
+        env_root.mkdir()
+        monkeypatch.setenv("FRAMEWORK", "SGLANG")
+        monkeypatch.setenv("SGLANG_REPO_PATH", str(env_root))
+
+        resolution = fp.resolve_warm_replay_framework_root(
+            patch_entries=[{"patch_file": "framework/0001-absent.patch"}]
+        )
+
+        assert resolution.root == f"{env_root}/"
+        assert resolution.source == "env"
+
+    def test_patch_sources_skip_entries_without_path_or_content(self):
+        assert fp.warm_replay_patch_sources(
+            [{"measured_gain_pct": 1.0}, "not-a-dict", {"patch_content": "   "}]
+        ) == ()
+
+    def test_patch_sources_prefer_ref_over_file(self):
+        sources = fp.warm_replay_patch_sources(
+            [{"patch_ref": "/abs/a.patch", "patch_file": "framework/a.patch"}]
+        )
+        assert [str(source.path) for source in sources] == ["/abs/a.patch"]
+
     def test_kernel_allowlist_miss_is_reported(self, monkeypatch, tmp_path):
         monkeypatch.delenv("FRAMEWORK", raising=False)
         monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
