@@ -2279,12 +2279,6 @@ def _validated_commit_lineage_and_timing(
     return best_commit, baseline_ms, best_ms
 
 
-# The schema KernelForge stamps into best_result.json
-# (``kernel_agents.loop.reporting.MANIFEST_SCHEMA_VERSION``). Pinned, not
-# ranged: a version this does not name is one nothing here has read.
-_FORGE_BEST_RESULT_SCHEMA_VERSION = 2
-
-
 def _validated_forge_best_result(
     payload: dict | None,
     *,
@@ -2298,10 +2292,14 @@ def _validated_forge_best_result(
     of what to keep. Re-verify the commit lineage and the speedup here anyway --
     the file is written by another process and may be stale from an earlier run
     against a different base.
+
+    ``schema_version`` is deliberately not gated on. Every field read below is
+    checked on its own -- the commit against the workspace history, the timings
+    for being positive numbers, the score for actually improving -- so pinning a
+    version bought nothing those checks do not, while a producer bump that
+    changed none of them silently rejected every published best for six days.
     """
     if not isinstance(payload, dict):
-        return None
-    if payload.get("schema_version") != _FORGE_BEST_RESULT_SCHEMA_VERSION:
         return None
     if payload.get("correctness_passed") is not True:
         return None

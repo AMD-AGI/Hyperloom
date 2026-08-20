@@ -113,7 +113,6 @@ def test_missing_manifest_yields_no_evidence(repo):
     "overrides",
     [
         pytest.param({"correctness_passed": False}, id="correctness_failed"),
-        pytest.param({"schema_version": 1}, id="superseded_schema"),
         pytest.param({"mean_case_speedup": 1.0}, id="no_mean_case_gain"),
         pytest.param({"mean_case_speedup": None}, id="missing_mean_case_speedup"),
         pytest.param({"baseline_wall_ms": 0.0}, id="unusable_baseline"),
@@ -377,17 +376,6 @@ def test_a_refused_applyback_names_the_clause_that_refused_it(repo):
     assert len(problems) == 1
     assert "framework" in problems[0]
     assert "torch" in problems[0]
-
-
-def test_the_pinned_best_result_schema_is_the_one_the_producer_stamps():
-    """The gate drifted silently once; this is what would have caught it."""
-    forge_submit._ensure_forge_on_path()
-    reporting = pytest.importorskip("kernel_agents.loop.reporting")
-
-    assert (
-        forge_submit._FORGE_BEST_RESULT_SCHEMA_VERSION
-        == reporting.MANIFEST_SCHEMA_VERSION
-    )
 
 
 def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
@@ -682,3 +670,22 @@ def test_nested_schema_one_best_result_is_never_consulted_for_an_applyback(repo)
         )
         is None
     )
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, None])
+def test_a_schema_bump_alone_does_not_discard_a_proven_best(repo, version):
+    """What actually broke: the producer went to 2, this stayed on 1, and every
+    published best was dropped for six days. The evidence is judged on its own
+    fields, so the version it is stamped with cannot decide the question."""
+    workspace, base_commit = repo
+    best_commit = _commit_improvement(workspace)
+    _publish(workspace, _manifest(best_commit, schema_version=version))
+
+    validated = forge_submit._validated_forge_best_result(
+        forge_submit._read_forge_best_result(str(workspace)),
+        workspace=str(workspace),
+        base_commit=base_commit,
+    )
+
+    assert validated is not None
+    assert validated["best_commit"] == best_commit
