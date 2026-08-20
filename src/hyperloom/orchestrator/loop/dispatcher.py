@@ -168,17 +168,6 @@ class DispatcherCollaborator:
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         return f"-c{cycle}" if cycle > 0 else ""
 
-    async def _cursor_advance_to_latest(self, agent_name: str) -> None:
-        """Advance an agent's read cursor to the latest message addressed to it.
-
-        Args:
-            agent_name (str): The agent whose inbox cursor to advance.
-        """
-        latest = await self.bus.tail(n=1, to_agent=agent_name)
-        if latest:
-            top = latest[0]
-            await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
-
     def _dispatch_paused_for_phase_budget(self) -> bool:
         """True when the current phase's budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
 
@@ -839,35 +828,21 @@ class DispatcherCollaborator:
     ) -> "SubAgentResult | None":
         """Run one task under the wall-clock defences, and hand back what it held.
 
-        The only way an action runs. Both dispatch paths arrive here: the pump,
-        which has already won the lanes and may be carrying GPU leases, and a
-        caller that has to watch the work finish before it can go on -- a
-        kernel-entry reprofile, a closing step. That second kind used to reach
-        for ``sub.run_task`` directly and so stayed out of ``_inflight_actions``:
-        no handle, no cancel scope, and :meth:`cancel_inflight_actions` -- the
-        one defence that reaches work already under way -- could not stop it at
-        shutdown or on a spent budget.
-
-        Binding the teardown to this coroutine's own lifecycle is what frees the
-        cards on completion, error, or cancellation even when the pump is
-        cancelled or the reap never runs; ``release`` is idempotent, so the one
-        in :meth:`_reap_dispatched_task` stays harmless.
+        The only way an action runs. Registering the handle is what lets
+        :meth:`cancel_inflight_actions` reach the work at shutdown or on a spent
+        budget, and binding the teardown to this coroutine frees the lanes and
+        cards on every exit, including one the reap never sees.
 
         Args:
             task: The task row to run.
-            prebound_lease: Lanes the caller already holds. When ``None`` and
-                the task needs lanes, they are taken here -- non-blocking, the
-                same answer the pump gives, so a contended lane leaves the row
-                queued for a later tick instead of raising into a caller that
-                only wanted a result.
+            prebound_lease: Lanes the caller already holds; when ``None`` and
+                the task needs lanes they are taken here, non-blocking.
             extra_context: Per-task extras (wall budget, gpu ids, …).
             gpu_lease: SQLite GPU-specialist accounting lease to release, if any.
             gpu_specialist_lease: Ray ``GpuSpecialistLease`` to close, if any.
-            cancel_scope: The action's cancel channel when the caller already
-                published one. The pump does, because it registers its handle
-                before the coroutine starts and a cancel landing in that window
-                must still find it; anyone else leaves this ``None`` and gets a
-                scope and a registration here.
+            cancel_scope: The caller's cancel channel. The pump passes one
+                because it registers its handle before this coroutine starts;
+                other callers leave it ``None`` and are registered here.
 
         Returns:
             The runner's result, or ``None`` when the task's lanes were busy, in
@@ -1884,16 +1859,10 @@ class DispatcherCollaborator:
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"
             )
-        # Registered for as long as the action runs. This path abandons its
-        # future once the caller's inline wait elapses -- the action keeps going
-        # by design, so without a handle nothing could stop it, including a
-        # teardown that is about to close the database underneath it. The handle
-        # is this coroutine's own task: cancelling it drops the audit publication
-        # below, which the runner's terminal transition already accounts for.
+        # This path abandons its future once the caller's inline wait elapses, so
+        # the handle registered below is the only thing that can still stop the
+        # action. Inline actions are lane-less by whitelist, so the run happens.
         result = await self.run_task_registered(task)
-        if result is None:
-            # Unreachable while the whitelist admits only lane-less actions.
-            return f"(run_action_now: {action_name!r} could not start; its lanes are busy)"
         result_payload = {
             "task_id": task.task_id,
             "kind": task.kind,
