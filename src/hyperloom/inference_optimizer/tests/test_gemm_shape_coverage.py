@@ -12,11 +12,15 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_padded_m_coarse,
     aiter_padded_m_fine,
     align_shapes_to_aiter_keys,
+    fmoe_dispatch_lookup_key,
+    fmoe_tuned_config_coverage,
     load_shapes_json,
     parse_aiter_consulted_tables,
+    parse_aiter_fused_moe_dispatches,
     parse_aiter_shape_lookups,
     tuned_config_coverage,
     tuned_csv_shapes,
+    tuned_fmoe_csv_keys,
     write_shapes_json,
 )
 
@@ -148,6 +152,50 @@ class TestServerLogParsing:
 
     def test_consulted_tables_of_empty_log(self):
         assert parse_aiter_consulted_tables("") == set()
+
+
+class TestFmoeDispatchParsing:
+    _DISPATCH = (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage ck for "
+        "(256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', 'torch.bfloat16', "
+        "'torch.float8_e4m3fn', 'torch.float8_e4m3fn', 'QuantType.per_1x128', True, False)"
+    )
+
+    def test_parses_dispatch_tuple(self):
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        assert record["token"] == "64"
+        assert record["model_dim"] == "7168"
+        assert record["inter_dim"] == "2048"
+        assert record["expert"] == "128"
+        assert record["topk"] == "8"
+        assert record["q_type"] == "QuantType.per_1x128"
+
+    def test_csv_key_matches_dispatch(self, tmp_path):
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,kernelName\n"
+            "gfx950,256,64,7168,2048,128,8,Silu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,tuned\n",
+            encoding="utf-8",
+        )
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        assert fmoe_dispatch_lookup_key(record) in tuned_fmoe_csv_keys(path)
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [record])
+        assert report["coverage_pct"] == 100.0
+
+    def test_csv_key_rejects_different_cu_count(self, tmp_path):
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,kernelName\n"
+            "gfx950,304,64,7168,2048,128,8,Silu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,tuned\n",
+            encoding="utf-8",
+        )
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [record])
+        assert report["covered"] == 0
 
 
 class TestTunedCsvCoverage:
