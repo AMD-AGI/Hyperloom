@@ -260,6 +260,24 @@ def test_historical_keep_survives_a_later_unproven_rebench() -> None:
     assert adopted[0]["validated"] is False
 
 
+def test_reverted_forge_kernel_with_prior_keep_is_not_adopted() -> None:
+    state = {
+        "kernel_integrate_attempts": {
+            "my_kernel": {
+                "kernel_id": "my_kernel",
+                "attempts": [
+                    {"decision": "KEEP", "gain_pct": 8.0},
+                    {"decision": "REVERT", "gain_pct": -2.0},
+                ],
+                "last_decision": "REVERT",
+                "best_gain_pct": 8.0,
+                "validated": True,
+            }
+        }
+    }
+    assert _collect_adopted_kernels(state) == []
+
+
 def test_two_kernels_on_one_rebench_share_no_invented_split() -> None:
     phase = _phase()
     result = {

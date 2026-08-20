@@ -790,14 +790,16 @@ def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
     if ent.get("last_decision") == "KEEP":
         return True
     source = str(ent.get("source") or "")
+    if source != "geak_e2e":
+        # Forge / integrate writers stamp REVERT on the entry itself; a prior
+        # KEEP attempt must not resurrect a kernel that was later rejected.
+        return False
     attempts = ent.get("attempts") or []
     has_keep = any(
         isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts
     )
-    if source == "geak_e2e":
-        if ent.get("overlay_loaded") is True:
-            return True
-        return has_keep
+    if ent.get("overlay_loaded") is True:
+        return True
     return has_keep
 
 
