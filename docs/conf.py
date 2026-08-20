@@ -48,23 +48,34 @@ html_theme_options = {
 # ``TypeError: cannot unpack non-iterable NoneType object`` rather than a
 # skipped button.
 #
-# Nothing in the stack supplies the key on its own. pydata-sphinx-theme has the
-# provider defaults, but only inside the "edit this page" path, and rocm-docs-core
-# defaults ``use_edit_page_button`` off -- so enabling the repository button
-# without also declaring the repository here is a latent misconfiguration that
-# fails as soon as anything upstream stops filling the gap by accident.
+# Nothing in the stack supplies the key on its own: pydata-sphinx-theme has the
+# provider defaults, but only inside the "edit this page" path, and
+# rocm-docs-core defaults ``use_edit_page_button`` off.
 #
-# Verified by building this tree three ways: unchanged (fails), with these keys
-# (builds, and the source-repository dropdown renders), and with the button
-# disabled (builds, no dropdown). Declaring the repository is the option that
-# keeps the feature. Nothing else in the rendered output changes.
-html_context = {
+# Injected per page rather than declared as ``html_context``. Assigning that
+# config directly is enough to fix the local build, but it suppresses
+# rocm-docs-core's own defaults (it only sets them when the user has not) and it
+# overwrites the context Read the Docs injects for its version switcher -- which
+# turned a green RTD build red. Adding the keys at render time leaves both
+# untouched, and ``setdefault`` means an explicit value elsewhere still wins.
+_SOURCE_REPO_CONTEXT = {
     "github_url": "https://github.com",
     "github_user": "AMD-AGI",
     "github_repo": "Hyperloom",
     "github_version": "main",
     "doc_path": "docs",
 }
+
+
+def setup(app):
+    """Supply the repository keys sphinx-book-theme unpacks without checking."""
+
+    def _add_source_repo_context(_app, _pagename, _templatename, context, _doctree):
+        for key, value in _SOURCE_REPO_CONTEXT.items():
+            context.setdefault(key, value)
+
+    # Ahead of sphinx-book-theme's own html-page-context handlers (default 500).
+    app.connect("html-page-context", _add_source_repo_context, priority=100)
 
 
 # Article info display
