@@ -162,7 +162,12 @@ _default_loader() {
 }
 # WEKA_LOADER_OVERRIDE is upstream's own per-recipe override; AGENTX_DATASET is
 # the Hyperloom-side name kept for compatibility. Either pins the loader.
-DS="${AGENTX_DATASET:-${WEKA_LOADER_OVERRIDE:-$(_default_loader "$MODEL")}}"
+# Derived once and reused by the deviation check below: two call sites 90 lines
+# apart would silently disagree the moment the derivation grows a second input.
+# AGENTX_CANONICAL_DATASET lets an operator declare the canonical corpus for a
+# model the family whitelist does not cover -- see the deviation check.
+CANON_DS="${AGENTX_CANONICAL_DATASET:-$(_default_loader "$MODEL")}"
+DS="${AGENTX_DATASET:-${WEKA_LOADER_OVERRIDE:-$CANON_DS}}"
 if [ -z "${AGENTX_DATASET:-}${WEKA_LOADER_OVERRIDE:-}" ]; then
   case "$DS" in
     *_256k) log "corpus: ${DS} (model family not in the 1M-context whitelist; set WEKA_LOADER_OVERRIDE to pin another)" ;;
@@ -251,14 +256,13 @@ FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
 CANON_ENTRIES=393
 CANON_DURATION=3600
 # The corpus this model family canonically replays, before any operator pin.
-# The family whitelist below is a derivation, not a registry -- a model upstream
-# runs on the full corpus but whose slug does not match will fall back to the
-# 256k set, and the log line at the corpus block tells the operator to pin the
-# right one. Flagging that pin as a deviation would make the correct run
-# permanently non-submittable, so AGENTX_CANONICAL_DATASET lets the operator
-# declare which corpus IS canonical for this model. It is deliberately a second,
-# explicit knob: pinning alone still counts as a deviation.
-CANON_DS="${AGENTX_CANONICAL_DATASET:-$(_default_loader "$MODEL")}"
+# CANON_DS is resolved with the corpus above. The family whitelist behind it is
+# a derivation, not a registry -- a model upstream runs on the full corpus but
+# whose slug does not match falls back to the 256k set, and the corpus log line
+# tells the operator to pin the right one. Flagging that pin as a deviation
+# would make the correct run permanently non-submittable, which is why
+# AGENTX_CANONICAL_DATASET exists as a second, explicit knob: pinning alone
+# still counts as a deviation.
 NONCANON=()
 # A pinned corpus is a different workload, and the scenario cannot object: its
 # allowlist admits every dated weka variant, so replaying the 061526 set (which
