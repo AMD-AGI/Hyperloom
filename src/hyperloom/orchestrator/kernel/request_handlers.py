@@ -3956,14 +3956,14 @@ async def _run_forge_gemm_tuning(
 
 
 def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, session_dir: Path) -> tuple[dict, str]:
-    """Make a forge GEMM tuned CSV durable + recipe-portable.
+    """Make forge GEMM tuned CSVs durable + recipe-portable.
 
-    The forge KEEP references the tuned CSV by its ephemeral tuner-workspace path,
+    The forge KEEP references tuned CSVs by their ephemeral tuner-workspace paths,
     so a recipe replayed after the workspace is gone (or on another box) loses the
     tuning and aiter falls back to its default config. Mirror integrate_patch's
-    durability: copy the CSV into the serving aiter's ``configs/model_configs/``
-    (where aiter loads it), repoint the env there, and snapshot the realized file
-    via :func:`snapshot_source_layer` so it travels with the recipe.
+    durability: copy each CSV into the serving aiter ``configs/model_configs/``
+    tree, repoint the env there, and snapshot the realized files via
+    :func:`snapshot_source_layer` so they travel with the recipe.
 
     The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
     durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
@@ -3973,14 +3973,33 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
     Returns ``(extra_envs, source_snapshot_dir)``.
     """
-    env_key = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
-    src_csv = str(extra_envs.get(env_key) or "").strip()
-    if not src_csv or not Path(src_csv).is_file():
+    _forge_durable_env_stems = {
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm",
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm",
+        "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm",
+        "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm",
+        "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm",
+        "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm",
+        "AITER_CONFIG_FMOE": "tuned_fmoe",
+    }
+    slug = (
+        "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name).strip("_").lower()
+        or "model"
+    )
+
+    pending: list[tuple[str, str, Path]] = []
+    for env_key, stem in _forge_durable_env_stems.items():
+        src_csv = str(extra_envs.get(env_key) or "").strip()
+        if not src_csv or not Path(src_csv).is_file():
+            continue
+        rel = f"configs/model_configs/{stem}_{slug}.csv"
+        pending.append((env_key, rel, Path(src_csv)))
+    if not pending:
         return extra_envs, ""
 
-    # Step 1 -- commit the durable copy + env repoint. This is what makes the
-    # KEEP survive: the CSV lands in aiter's default config dir and the env
-    # points there instead of the ephemeral tuner workspace.
+    # Step 1 -- commit durable copies + env repoints. This is what makes the
+    # KEEP survive: each CSV lands in aiter's config dir and the env points
+    # there instead of the ephemeral tuner workspace.
     try:
         import importlib.util
 
@@ -3988,24 +4007,20 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         if spec is None or not spec.origin:
             return extra_envs, ""
         aiter_pkg = Path(spec.origin).resolve().parent
-        slug = (
-            "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name).strip("_").lower()
-            or "model"
-        )
-        rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
-        dst = aiter_pkg / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_csv, dst)
         updated = dict(extra_envs)
-        updated[env_key] = str(dst)
+        rel_paths: list[str] = []
+        for env_key, rel, src_path in pending:
+            dst = aiter_pkg / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dst)
+            updated[env_key] = str(dst)
+            rel_paths.append(rel)
     except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
     # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
-    # snapshot failure must NOT discard the copy + repoint committed above (the
-    # tuned CSV already lives in aiter's config dir and the env already points
-    # at it), so this runs in its own guard and only affects the returned dir.
+    # snapshot failure must NOT discard the copy + repoint committed above.
     snap_dir = ""
     try:
         from ..source_snapshot import snapshot_source_layer
@@ -4013,12 +4028,13 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         snap = snapshot_source_layer(
             framework_root=aiter_pkg,
             base_sha=None,
-            rel_paths=[rel],
-            # Durable, run-cleanup-surviving location (mirrors integrate_patch),
-            # NOT the ephemeral runs/gemm_tuning workspace.
+            rel_paths=rel_paths,
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="forge_gemm_tune",
-            extra={"env_key": env_key, "model": slug},
+            extra={
+                "env_keys": [env_key for env_key, _, _ in pending],
+                "model": slug,
+            },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
     except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands
