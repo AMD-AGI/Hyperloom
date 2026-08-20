@@ -1757,6 +1757,43 @@ def _forge_fusion_wrapper_timeout_sec(timeout_sec: int) -> int:
     return max(1, int(timeout_sec)) + _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC
 
 
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _fusion_session_serve_args(
+    state: object,
+    payload: dict,
+    *,
+    framework: str,
+    model_path: str,
+) -> dict[str, int]:
+    """TP / KV block size / max-model-len the serving smoke must match."""
+    tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
+    max_model_len = _positive_int(
+        payload.get("max_model_len") or getattr(state, "max_model_len", 0)
+    )
+    block_size = _positive_int(payload.get("block_size"))
+    if block_size <= 0 and "vllm" in (framework or "").strip().lower():
+        from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
+            _sparse_kv_block_size,
+        )
+
+        block_size = _positive_int(_sparse_kv_block_size(model_path))
+    args: dict[str, int] = {}
+    if tp:
+        args["tp"] = tp
+    if block_size:
+        args["block_size"] = block_size
+    if max_model_len:
+        args["max_model_len"] = max_model_len
+    return args
+
+
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
@@ -4361,6 +4398,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "timeout": timeout,
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
         "verbose": bool(payload.get("verbose", False)),
+        **_fusion_session_serve_args(
+            state, payload, framework=framework, model_path=model_path
+        ),
     }
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -4374,16 +4414,29 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
+        from hyperloom.agents.kernel.tools.forge_fusion import (  # noqa: PLC0415
+            salvage_forge_fusion_from_workspace,
+        )
+
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
-            "decision": "REVERT",
-            "kept": False,
-        }
+        timeout_error = f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}"
+        salvaged = salvage_forge_fusion_from_workspace(str(workspace))
+        if salvaged:
+            result = {
+                **salvaged,
+                "error_class": "subprocess_timeout",
+                "error": timeout_error,
+            }
+        else:
+            result = {
+                "status": "failed",
+                "backend": "forge",
+                "engine": "forge_fusion",
+                "error_class": "subprocess_timeout",
+                "error": timeout_error,
+                "decision": "REVERT",
+                "kept": False,
+            }
 
     result.setdefault("backend", "forge")
     result.setdefault("engine", "forge_fusion")
