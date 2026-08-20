@@ -24,7 +24,6 @@ import pytest
 from .conftest import init_git_repo
 
 from hyperloom.orchestrator.specialists.runner import (
-    DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
@@ -291,33 +290,17 @@ def test_runner_accepts_subprocess_config_only():
     assert runner.backend_factory is None
 
 
-def test_default_tools_include_write_capabilities():
-    """Edit/Write/MultiEdit are lifted out of the denylist for worktree patch authoring."""
-    for tool in ("Edit", "Write", "MultiEdit"):
-        assert tool in DEFAULT_SPECIALIST_TOOLS
-        assert tool not in SPECIALIST_TOOL_DENYLIST
+def test_denylist_blocks_dangerous_process_tools():
+    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule
+    against global process cleanup that could kill the serving / benchmark process."""
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
 
 
-def test_kb_write_tools_not_in_default_specialist_tools():
-    """KB lifecycle stays Coordinator-owned; the specialist KB MCP was removed.
-
-    Asserted by shape rather than by a fixed tool name, so re-introducing a KB
-    MCP server under any name is caught (the old ``mcp__cortex_kb__*`` names no
-    longer exist to assert against).
-    """
-    kb_mcp_tools = [t for t in DEFAULT_SPECIALIST_TOOLS if t.startswith("mcp__") and "kb" in t.lower()]
-    assert kb_mcp_tools == [], f"specialist toolset exposes KB MCP tools: {kb_mcp_tools}"
+def test_kb_mcp_tools_not_in_denylist():
+    """KB MCP server names must not appear in the denylist."""
     denylisted_kb_mcp = [t for t in SPECIALIST_TOOL_DENYLIST if t.startswith("mcp__") and "kb" in t.lower()]
     assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
-
-
-def test_task_allowed_tools_override_default_patch_tools():
-    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig())
-    tools = runner._resolve_tools(["Read", "Grep", "Glob", "Write"])
-    assert tools == ("Read", "Grep", "Glob", "Write")
-    assert "Edit" not in tools
-    assert "MultiEdit" not in tools
-    assert "Bash" not in tools
 
 
 def test_pick_worktree_base_picks_first_git_root(
@@ -1046,7 +1029,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0, 1),
         wall_budget_sec=60.0,
@@ -1096,7 +1079,7 @@ async def test_run_clears_stale_wall_budget_extension(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=60.0,
         gpu_lease=lease,
@@ -1171,12 +1154,15 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         prompt_file=prompt,
         workspace=workspace,
         worktree=worktree,
-        allowed_tools=("Read", "Task", "emit_intent"),
+        disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
     )
 
     assert cmd[cmd.index("--model") + 1] == "claude-test"
-    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Task"
-    assert "emit_intent" not in cmd
+    assert "--allowedTools" not in cmd
+    deny_idx = cmd.index("--disallowedTools") + 1
+    denied = set(cmd[deny_idx].split(","))
+    assert "KillShell" in denied
+    assert "SlashCommand" in denied
     assert cmd[cmd.index("--agents") + 1] == cfg.leaf_agents_json
     assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/mcp.json"
     assert cmd[-1] == "--debug"

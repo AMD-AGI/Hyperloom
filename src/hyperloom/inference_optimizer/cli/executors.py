@@ -110,10 +110,7 @@ def _build_specialist_executor(
     import shutil
 
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
-    from hyperloom.orchestrator.specialists.runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SpecialistRunner,
-    )
+    from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
     from hyperloom.orchestrator.specialists.subprocess_ import (
         AGENT_BACKEND_CODEX,
@@ -194,10 +191,7 @@ def _build_specialist_executor(
         runner = SpecialistRunner(
             subprocess_config=sub_config,
             session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
-            knowledge_plane=knowledge_plane,
-            forced_mcp_servers=forced_mcp_servers,
         )
     else:
 
@@ -225,10 +219,7 @@ def _build_specialist_executor(
         runner = SpecialistRunner(
             backend_factory=_backend_factory,
             session_dir=session_dir,
-            default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
-            knowledge_plane=knowledge_plane,
-            forced_mcp_servers=(() if agent_backend == AGENT_BACKEND_CODEX else None),
         )
 
     async def _executor(ctx: Any) -> dict:
