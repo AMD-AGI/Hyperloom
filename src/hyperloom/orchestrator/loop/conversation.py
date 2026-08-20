@@ -518,7 +518,7 @@ class ConversationCollaborator:
                         "will likely be cut by the deadline."
                     )
 
-        # Time budget for Robustness — fires deadline_imminent → delegate(report) wind-down.
+        # Time budget for Robustness — drives the deadline_imminent alert.
         if agent_name == "robustness" and self._run_deadline is not None and self._run_started_monotonic is not None:
             remaining_min = max(
                 0.0,

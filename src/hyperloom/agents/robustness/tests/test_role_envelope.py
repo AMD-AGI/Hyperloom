@@ -139,7 +139,7 @@ def test_delegate_rejects_kernel_owned_action():
             build_delegate(kernel_owned)
 
 
-def test_delegate_accepts_only_handle_actions():
+def test_delegate_accepts_every_allowlisted_action():
     for action in ROBUSTNESS_DELEGATE_ACTIONS:
         intent = build_delegate(action)
         assert intent.payload["action_name"] == action

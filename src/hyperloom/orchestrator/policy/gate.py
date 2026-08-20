@@ -123,11 +123,12 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-_ROBUSTNESS_DELEGATE_SOURCE: frozenset[str] = frozenset({"robustness"})
+ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
-# Derived from ROBUSTNESS_DELEGATE_ONLY_ACTIONS so the two tables cannot drift apart.
+# Per-action delegate source allowlist, derived so it cannot drift from
+# ROBUSTNESS_DELEGATE_ONLY_ACTIONS; unlisted actions carry no source restriction.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
-    action: _ROBUSTNESS_DELEGATE_SOURCE for action in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+    action: ROBUSTNESS_ONLY_SOURCE_ALLOWLIST for action in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 }
 
 
@@ -390,7 +391,6 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
 )
-ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
 # Per-intent source override: PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE widen to orchestration.
 _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
@@ -773,10 +773,9 @@ class PolicyGate:
         Defense-in-depth for forged ``coordinator.db`` rows: replays path
         containment and structural delegate action gates. Coordinator-managed
         internal actions receive path checks only. Phase compatibility is
-        intentionally skipped so legitimately queued work is not rejected
-        after a phase transition. Per-action source rules are also skipped
-        because the originating role is not stored in the task row; those
-        rules are enforced exclusively at intent ingress.
+        skipped so legitimately queued work is not rejected after a phase
+        transition, and source rules are skipped because the task row does not
+        persist the originating role; both are enforced at intent ingress.
 
         Args:
             action_name: The task ``kind`` / delegate action name.
@@ -932,9 +931,9 @@ class PolicyGate:
                 (intent ingress). Dispatch-time replay passes False so
                 legitimately queued tasks are not rejected after a phase
                 transition.
-            check_source: When True, enforce the per-action source allowlist.
-                The task row's originating role is not persisted, so dispatch
-                replay passes False; source enforcement is ingress-only.
+            check_source: When True, enforce the role-scoped source rules.
+                Dispatch replay passes False because the task row does not
+                persist the originating role.
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -971,8 +970,7 @@ class PolicyGate:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         if check_source:
-            # Robustness is restricted to its own declared action set; all other roles
-            # use the per-action allowlist below.
+            # Robustness delegates nothing beyond its own declared action set.
             if role.name in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST and action_name not in ROBUSTNESS_DELEGATE_ONLY_ACTIONS:
                 raise PolicyDenied(
                     f"role={role.name!r} cannot delegate action={action_name!r}; "
