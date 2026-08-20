@@ -103,13 +103,10 @@ class ClosePhase(PhaseHandler):
     async def _maybe_run_close_post_opt_roofline(self) -> None:
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated.
 
-        Profiles the final optimized service once. What reaches the
-        optimization-progress chart is the snapshot this lands in
-        ``state.json#roofline_snapshots`` -- the chart reads that and
-        ``reports/kernel_roofline.json``, never the ``_opt`` report; the
-        separate ``reports/kernel_roofline_opt.json`` sidecar exists so this run
-        does not overwrite the PRELUDE baseline one, and is read back when the
-        snapshot's hot-kernel summaries are built. No-op for sessions without an
+        Profiles the final optimized service once. The optimization-progress
+        chart reads the snapshot this lands in ``state.json#roofline_snapshots``;
+        the separate ``reports/kernel_roofline_opt.json`` sidecar keeps it from
+        overwriting the PRELUDE baseline report. No-op for sessions without an
         integrate-class optimization; wrapped by the caller so a failure never
         blocks close.
         """
@@ -654,10 +651,8 @@ class ClosePhase(PhaseHandler):
             return state
         if state == _TASK_STATE_RUNNING:
             return await self._await_running_close_task(task, step=step)
-        # ``None`` means the lanes were busy and the row was left alone, which
-        # closing steps never hit -- they take no lanes -- so it reports the
-        # state the row still has rather than getting a branch of its own.
-        return getattr(await self.run_task_registered(task), "state", state)
+        # Closing steps take no lanes, so the run always happens.
+        return (await self.run_task_registered(task)).state
 
     async def _record_close_step(
         self,
