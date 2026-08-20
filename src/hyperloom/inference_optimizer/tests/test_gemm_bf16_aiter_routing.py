@@ -277,6 +277,21 @@ class TestWriteFmoeUntunedCsvFromLog:
         assert report["observed"] == 1
         assert report["tunable"] == 0
 
+    def test_unwritable_workspace_costs_only_the_moe_input(self, tmp_path, monkeypatch):
+        """A full disk must not take the dense tuners down with the MoE one."""
+        log = _log(tmp_path, _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"))
+
+        def _boom(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(krh.Path, "write_text", _boom)
+
+        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+
+        assert path == ""
+        assert report["tunable"] == 1
+        assert "No space left on device" in report["write_error"]
+
     def test_no_moe_evidence_yields_no_csv(self, tmp_path):
         path, report = krh._write_fmoe_untuned_csv_from_log(
             _log(tmp_path, "INFO server started\n"), [8], tmp_path / "ws"

@@ -2944,9 +2944,17 @@ def _write_fmoe_untuned_csv_from_log(
                 f"{1 if key['doweight_stage1'] == 'True' else 0}"
             )
 
-    workspace.mkdir(parents=True, exist_ok=True)
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
-    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # A full disk or a read-only workspace must cost the MoE tuner its input,
+        # not the whole tuning run: the dense tuners take their shapes from
+        # elsewhere and can still produce something useful.
+        report["write_error"] = f"{type(exc).__name__}: {exc}"
+        log.warning("Forge GEMM shapes: cannot write %s: %s", csv_path, exc)
+        return "", report
     log.info(
         "Forge GEMM shapes: derived %d MoE problem(s) x %d token(s) from %s%s",
         len(tunable),
@@ -3655,7 +3663,8 @@ async def _run_forge_gemm_tuning(
     Forge receives a validated local directory, while result provenance and
     durable artifact names retain the original logical model identifier.
     Missing inputs return ``model_path_missing``; inputs that cannot resolve to
-    a local directory return ``model_path_unavailable``.
+    a local directory return ``model_path_unavailable`` as a ``skipped`` result,
+    because forge never ran and so has no verdict to report.
     """
     from ..state.shared_state import SharedState
 
@@ -3689,16 +3698,26 @@ async def _run_forge_gemm_tuning(
     ).strip()
     if not raw_model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+    from hyperloom.common.model_paths import resolve_serving_model_path
     from hyperloom.inference_optimizer.model_config_utils import (
         resolve_local_model_dir,
     )
 
-    resolved_model_dir = resolve_local_model_dir(raw_model_path)
+    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
+    # serve; probing only the hub cache here would reject a repo id that the
+    # running server resolved fine.
+    resolved_model_dir = resolve_local_model_dir(
+        resolve_serving_model_path(raw_model_path) or raw_model_path
+    )
     if resolved_model_dir is None:
+        # Forge needs the config on disk to derive shapes, so it cannot run --
+        # but not running one tuning backend is a skip, not a session failure.
+        # Reporting it as failed spends a REVERT verdict on an experiment that
+        # never started, which is the misattribution this change set removes.
         return {
-            "status": "failed",
+            "status": "skipped",
             "error_class": "model_path_unavailable",
-            "error": (
+            "skip_reason": (
                 f"Model path {raw_model_path!r} is neither an existing local "
                 "directory nor an available Hugging Face cache snapshot"
             ),

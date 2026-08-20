@@ -81,6 +81,20 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
+def _safe_mtime(path: Path) -> float:
+    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+
+    Sorting server logs by mtime races the round that is still writing them, and
+    an ``exists()`` guard does not close the window. Ordering is a heuristic for
+    picking the newest log, so a vanished file is worth sorting last rather than
+    aborting the check that owns it.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _paired_measurement_basis(verdict: Any) -> str:
     """How the promoted gain was measured, so the ledger cannot overstate it.
 
@@ -1831,7 +1845,27 @@ class KernelPhase(PhaseHandler):
         still boots and benchmarks fine, so the gate sees an honest "no gain" and
         the real cause -- an artifact the runtime never applied -- stays invisible.
         Replaying the lookup against the round's ``server.log`` separates the two.
+
+        Its result can block a KEEP, so an unexpected failure must not: it would
+        turn a diagnostic into the very false REVERT this replaces. Any
+        exception degrades to "undetermined", matching ``_gemm_apply_verdict``.
         """
+        try:
+            return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "tuned-config coverage failed for %s; treating it as undetermined",
+                tuner_name,
+                exc_info=True,
+            )
+            return None
+
+    def _gemm_tuned_config_coverage_impl(
+        self,
+        tuner_name: str,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Replay aiter's lookup against the round's log (see the caller)."""
         from ..kernel.gemm_shape_coverage import (
             fmoe_tuned_config_coverage,
             parse_aiter_consulted_tables,
@@ -1846,13 +1880,29 @@ class KernelPhase(PhaseHandler):
         if not csv_paths:
             return None
         run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
         if not logs:
             return None
         try:
             log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
+
+        def _unreadable(kind: str) -> None:
+            """Log that the artifact could not be read, so the caller stays out of it.
+
+            A CSV we cannot parse is an absence of evidence, not evidence the
+            runtime ignored the table. Returning a 0% report would let that
+            absence block a KEEP whose throughput genuinely improved -- the
+            same conflation this change set exists to remove.
+            """
+            log.warning(
+                "gemm E2E: tuner=%s %s tuned CSV yielded no keys from %s; "
+                "coverage is undetermined and will not block the KEEP",
+                tuner_name,
+                kind,
+                csv_paths,
+            )
 
         if tuner_name == "fmoe_ck" or any("FMOE" in key for key in envs):
             requested_keys = _aiter_fused_moe_dispatch_keys(str(logs[-1]))
@@ -1861,6 +1911,9 @@ class KernelPhase(PhaseHandler):
             tuned: set[tuple[str, ...]] = set()
             for path in csv_paths:
                 tuned |= tuned_fmoe_csv_keys(path)
+            if not tuned:
+                _unreadable("fused-MoE")
+                return None
             report = fmoe_tuned_config_coverage(tuned, requested_keys)
             report["server_log"] = str(logs[-1])
             report["schema"] = "fmoe"
@@ -1876,6 +1929,9 @@ class KernelPhase(PhaseHandler):
         tuned: set[tuple[int, int, int]] = set()
         for path in csv_paths:
             tuned |= tuned_csv_shapes(path)
+        if not tuned:
+            _unreadable("dense")
+            return None
         report = tuned_config_coverage(tuned, requested)
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
@@ -1990,10 +2046,7 @@ class KernelPhase(PhaseHandler):
         if not csv_paths:
             return None
         run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(
-            run_dir.rglob("server.log"),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0,
-        )
+        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
         if not logs:
             # Say so. This whole change exists to stop checks from failing
             # quietly, and a missing log is the one way this one can.
@@ -2419,7 +2472,27 @@ class KernelPhase(PhaseHandler):
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
-        await self._validate_gemm_tuning_e2e(result)
+        try:
+            await self._validate_gemm_tuning_e2e(result)
+        except Exception as exc:  # noqa: BLE001
+            # Validation spans server restarts, log parsing and CSV merges, and
+            # is reached from two entrypoints that only guard the tuning call
+            # itself. An unexpected failure here has to read as "this candidate
+            # was never measured", not take the KERNEL phase down with it --
+            # tuning that produced nothing measurable is the outcome this whole
+            # change exists to record honestly.
+            log.exception("gemm E2E validation raised; recording it as a fault")
+            e2e = result.setdefault("e2e_results", {})
+            if isinstance(e2e, dict):
+                faults = e2e.setdefault("faults", [])
+                if isinstance(faults, list):
+                    faults.append(
+                        {
+                            "tuner": "*",
+                            "error_class": "e2e_validation_exception",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
