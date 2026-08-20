@@ -8,6 +8,7 @@ Verifies the extracted helpers in isolation (no git, no GPU, no gateway).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -985,3 +986,90 @@ def test_dry_run_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
     assert ok is False
     assert isinstance(feedback, af.ApplyFeedback)
     assert feedback.source_context == ""
+
+
+# _sanitize_git_index_lines — placeholder git index headers
+
+ZERO_INDEX_MODIFY_DIFF = """\
+diff --git a/vllm/fp8.py b/vllm/fp8.py
+index 0000000..1111111 100644
+--- a/vllm/fp8.py
++++ b/vllm/fp8.py
+@@ -1,2 +1,3 @@
+ # fp8 module
+ original = True
++patched = True
+"""
+
+ZERO_INDEX_CREATE_DIFF = """\
+diff --git a/vllm/new.py b/vllm/new.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/vllm/new.py
+@@ -0,0 +1 @@
++created = True
+"""
+
+
+def test_sanitize_drops_index_contradicting_modify_header():
+    """An all-zero old blob on a modification hunk contradicts ``---`` → dropped."""
+    out, dropped = ng._sanitize_git_index_lines(ZERO_INDEX_MODIFY_DIFF)
+    assert dropped == 1
+    assert out == ZERO_INDEX_MODIFY_DIFF.replace("index 0000000..1111111 100644\n", "")
+
+
+def test_sanitize_keeps_index_on_genuine_creation():
+    """A creation hunk (``--- /dev/null``) legitimately has an all-zero old blob."""
+    out, dropped = ng._sanitize_git_index_lines(ZERO_INDEX_CREATE_DIFF)
+    assert dropped == 0
+    assert out == ZERO_INDEX_CREATE_DIFF
+
+
+def test_sanitize_keeps_real_blob_hashes():
+    """A plausible old blob hash is never touched."""
+    text = ZERO_INDEX_MODIFY_DIFF.replace("0000000..1111111", "83db48f..bf269f4")
+    out, dropped = ng._sanitize_git_index_lines(text)
+    assert dropped == 0
+    assert out == text
+
+
+def test_sanitize_only_touches_the_contradicting_block():
+    """In a multi-file patch the creation block keeps its index line."""
+    out, dropped = ng._sanitize_git_index_lines(ZERO_INDEX_CREATE_DIFF + ZERO_INDEX_MODIFY_DIFF)
+    assert dropped == 1
+    assert "index 0000000..1111111\n--- /dev/null" in out
+    assert "index 0000000..1111111 100644" not in out
+
+
+def test_sanitize_no_op_returns_input_unchanged():
+    """Nothing to drop → the original object is handed back."""
+    out, dropped = ng._sanitize_git_index_lines(SIMPLE_DIFF)
+    assert dropped == 0
+    assert out is SIMPLE_DIFF
+
+
+@pytest.mark.skipif(shutil.which("patch") is None, reason="patch CLI unavailable")
+def test_apply_no_git_tolerates_placeholder_index_header(tmp_path):
+    """A modification hunk carrying a placeholder all-zero index still applies.
+
+    GNU ``patch`` reads the zero old blob as a creation and refuses the hunk
+    because the target already exists. Regression guard for the warm-replay
+    nogit cases, which only fail where the ``patch`` CLI is actually present.
+    """
+    root = tmp_path / "tree"
+    target = root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    original = "# fp8 module\noriginal = True\n"
+    target.write_text(original, encoding="utf-8")
+    patch_file = tmp_path / "patches" / "000_p.diff"
+    patch_file.parent.mkdir(parents=True)
+    patch_file.write_text(ZERO_INDEX_MODIFY_DIFF, encoding="utf-8")
+
+    ok, err, backups, _feedback = ng._apply_patch_no_git(root, patch_file, tmp_path / "bak")
+
+    assert ok is True, err
+    assert "patched = True" in target.read_text()
+
+    ng._revert_patches_no_git(backups)
+    assert target.read_text() == original
