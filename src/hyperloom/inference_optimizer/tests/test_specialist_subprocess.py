@@ -380,12 +380,12 @@ async def test_subprocess_path_harvests_done_file(
 
 
 @pytest.mark.asyncio
-async def test_local_specialist_spawn_uses_devnull_stdin(
+async def test_local_specialist_spawn_uses_file_stdin(
     tmp_path: Path,
     fake_framework_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The local specialist path must never inherit Coordinator stdin."""
+    """The local specialist path feeds the user prompt via stdin."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
@@ -411,10 +411,11 @@ async def test_local_specialist_spawn_uses_devnull_stdin(
         default_max_turns=2,
     )
 
-    result = await runner.run(_make_runner_ctx("t-spec-devnull"))
+    result = await runner.run(_make_runner_ctx("t-spec-stdin"))
 
     assert result.status == "succeeded"
-    assert seen_stdin == [subprocess.DEVNULL]
+    assert len(seen_stdin) == 1
+    assert seen_stdin[0] is not subprocess.DEVNULL
 
 
 @pytest.mark.asyncio
@@ -1140,8 +1141,9 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     framework = tmp_path / "framework"
     for path in (workspace, worktree, framework):
         path.mkdir(parents=True, exist_ok=True)
-    prompt = workspace / "prompt.md"
-    prompt.write_text("prompt", encoding="utf-8")
+    user_prompt = workspace / "prompt.md"
+    user_prompt.write_text("user-prompt", encoding="utf-8")
+    system_prompt_file = workspace / "system_prompt.md"
 
     cfg = SpecialistSubprocessConfig(
         model="claude-test",
@@ -1151,14 +1153,19 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         leaf_agents_json='{"researcher": {"description": "test"}}',
     )
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
-        prompt_file=prompt,
+        system_prompt_file=system_prompt_file,
+        system_prompt="SYSTEM",
+        user_prompt_file=user_prompt,
         workspace=workspace,
         worktree=worktree,
         disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
     )
 
     assert cmd[cmd.index("--model") + 1] == "claude-test"
+    assert cmd[cmd.index("--system-prompt-file") + 1] == str(system_prompt_file)
+    assert system_prompt_file.read_text() == "SYSTEM"
     assert "--allowedTools" not in cmd
+    assert "-p" not in cmd
     deny_idx = cmd.index("--disallowedTools") + 1
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied
