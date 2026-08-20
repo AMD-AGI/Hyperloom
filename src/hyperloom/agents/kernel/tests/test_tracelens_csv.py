@@ -2344,6 +2344,130 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
     assert str(first) in [str(p) for p in splitter]
 
 
+def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
+    """Write a CUDA-graph capture sidecar in its production shape.
+
+    ``kernels`` defaults to 2 on purpose. A capture records the graph being
+    built, so a couple of launches still reach the device while the rest of the
+    file is host-side call tree — the run this guards against had 2 kernels in
+    1.49M events. A sidecar with *zero* kernels would already be stopped by the
+    CPU-only preflight; two is the count that gets through it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return _rank_trace(path, kernels=kernels, cpu_events=200)
+
+
+def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
+    """A directory holding nothing but graph-capture sidecars must not analyse.
+
+    The sidecars carry kernels, so the CPU-only preflight passes them and the
+    splitter is handed a file with no iteration loop in it. It then reports
+    ``trace_split_no_steady_state``, which reads as "the profiled window was too
+    short" and sends the next person to lengthen a capture that was never a
+    workload timeline. The rejection has to name the real cause instead.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    capture = trace_dir / "capture_traces"
+    for bs in (2, 4, 8):
+        for rank in (0, 1):
+            _capture_sidecar(capture / f"bs_{bs}_rank{rank}.json.gz")
+
+    # Precondition: this is exactly the shape the old check waved through.
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert len(traces) == 6
+    assert tla._count_kernels_if_readable(traces[0])[1] > 0
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    assert _find_splitter_cmd(captured) is None, "the splitter must never be invoked"
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert "trace_input_capture_only" in result["error"]
+    # The message has to point at the profile, not at the splitter or the window.
+    assert "re-profile" in result["error"]
+
+
+def test_capture_sidecars_beside_a_real_trace_still_analyse(tmp_path):
+    """The healthy layout must be unaffected.
+
+    A normal profile writes its annotated trace *beside* the capture sidecars,
+    which is why the rejection tests ``all`` and not ``any``. Getting this
+    backwards would disable roofline for every well-formed profile.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    _capture_sidecar(trace_dir / "capture_traces" / "bs_2_rank0.json.gz")
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    splitter = _find_splitter_cmd(captured)
+    assert splitter is not None, "a real trace beside sidecars must still analyse"
+    assert str(real) in [str(p) for p in splitter]
+
+
+def test_lone_capture_sidecar_file_is_rejected_by_name(tmp_path, capsys):
+    """``--trace-input`` pointed straight at one sidecar is the same mistake."""
+    sidecar = _capture_sidecar(tmp_path / "torch_trace" / "bs_16_rank3.json.gz")
+
+    captured = _drive_main_over_capture_dir(tmp_path, sidecar)
+
+    assert _find_splitter_cmd(captured) is None
+    assert "trace_input_capture_only" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
+    """An ancestor named ``capture_traces`` must not condemn a real trace.
+
+    Paths arrive absolute, so an unbounded component test would reject every
+    candidate whenever the session happened to live under a directory of that
+    name — pointing ``--trace-input`` inside a previous capture, say.
+    """
+    root = tmp_path / "capture_traces" / "torch_trace"
+    root.mkdir(parents=True)
+    real = _rank_trace(root / "rank_0.trace.json.gz", kernels=7)
+
+    assert not tla._is_capture_fragment(real, tla._capture_classification_root(root))
+    # A genuine sidecar below the root is still caught.
+    nested = _capture_sidecar(root / "capture_traces" / "bs_2_rank0.json.gz")
+    assert tla._is_capture_fragment(nested, tla._capture_classification_root(root))
+
+
+def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
+    """``bs_`` without a batch number must not classify as a sidecar.
+
+    The classifier decides whether an input is rejected outright, not just how
+    it sorts, so matching three characters of a filename is too cheap a reason
+    to throw a real trace away. The sidecar shapes carry a batch number.
+    """
+    root = tmp_path / "torch_trace"
+    root.mkdir()
+    classify_root = tla._capture_classification_root(root)
+
+    assert tla._is_capture_fragment(root / "bs_2_rank0.json.gz", classify_root)
+    assert tla._is_capture_fragment(root / "bs_512.json.gz", classify_root)
+    assert tla._is_capture_fragment(root / "graph_capture_rank_0.pt.trace.json.gz", classify_root)
+    assert not tla._is_capture_fragment(root / "bs_baseline.trace.json.gz", classify_root)
+    assert not tla._is_capture_fragment(root / "rank_0.trace.json.gz", classify_root)
+
+
+def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
+    """Discovery ordering must keep sidecars behind the annotated trace.
+
+    The sort key and the preflight now share one classifier, so this pins the
+    ordering half: a sidecar that is *larger* than the real trace still sorts
+    behind it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+    big_sidecar = _capture_sidecar(trace_dir / "capture_traces" / "bs_2_rank0.json.gz", kernels=2)
+    assert big_sidecar.stat().st_size > real.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert traces[0] == real
+
+
 def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     """The promotion must hold on the route xDiT actually takes.
 
