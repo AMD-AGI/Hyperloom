@@ -1301,6 +1301,35 @@ def test_weaker_session_skips_before_upload(tmp_path: Path) -> None:
     assert [call[0] for call in store.calls] == ["get_rollup"]
 
 
+def test_empty_replay_material_skips_even_when_throughput_beats_champion(
+    tmp_path: Path,
+) -> None:
+    store = _FakeStore(champion=100.0)
+    bundle = KnowledgeBundle(
+        {
+            "knowledge_schema_version": 1,
+            "record_kind": "hyperloom_recipe",
+            "value": {
+                "config": {"extra_server_args": "", "extra_envs": {}},
+                "explore": {"extra_server_args": "", "extra_envs": {}, "patches": []},
+                "framework": {"extra_server_args": "", "extra_envs": {}, "patches": []},
+                "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
+                "patch_timeline": [],
+            },
+        }
+    )
+    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+        "inference:m:h:f:mt:a:v:p",
+        "session-1",
+        bundle,
+        optimized_throughput=200.0,
+        files_dir=tmp_path,
+    )
+    assert result.status == "skipped"
+    assert result.reason == "empty_replay_material"
+    assert store.calls == []
+
+
 @pytest.mark.parametrize(
     "rollup,match",
     [
