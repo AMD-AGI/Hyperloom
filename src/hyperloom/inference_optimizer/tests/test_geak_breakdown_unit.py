@@ -273,6 +273,47 @@ def test_collect_geak_full_success_maps_fields(tmp_path: Path) -> None:
     assert out["eval_dir"] == "runs/geak/eval"
 
 
+def test_collect_geak_result_reads_accepted_heads_lane(tmp_path: Path) -> None:
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [
+                {
+                    "short_name": "dsa_sparse_attn_prefill_main_kernel",
+                    "kind": "authored",
+                    "e2e_delta_pct": 12.5,
+                }
+            ],
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels_source"] == "result"
+    assert out["accepted_kernels"][0]["short_name"] == "dsa_sparse_attn_prefill_main_kernel"
+
+
+def test_collect_geak_result_excludes_env_kind(tmp_path: Path) -> None:
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [
+                {
+                    "short_name": "ck_gemm_selection",
+                    "kind": "env",
+                    "e2e_delta_pct": 8.0,
+                }
+            ],
+            "accepted_heads": [],
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 0
+    assert out["accepted_kernels"] == []
+
+
 def _write_kernel_journey(eval_dir: Path) -> Path:
     """Write a minimal kernel_journey.json with one integrated KEEP kernel."""
     eval_dir.mkdir(parents=True, exist_ok=True)

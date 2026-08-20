@@ -54,7 +54,9 @@ jobs:
       - name: Install documentation dependencies
         run: |
           pip install --upgrade pip
-          pip install -r docs/requirements.txt
+          # Match Read the Docs: the lockfile pins Sphinx 8.x. The short
+          # docs/requirements.txt cap is for local installs only.
+          pip install -r docs/sphinx/requirements.txt
 
       - name: Build HTML
         # conf.py mocks the heavy runtime imports (torch, triton, ray, ...), so

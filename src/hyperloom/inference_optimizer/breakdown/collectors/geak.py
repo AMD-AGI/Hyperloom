@@ -24,6 +24,47 @@ from ._common import (
 )
 
 
+def _geak_result_kernel_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return authored kernel specs from ``result.json``, both lanes, env excluded."""
+    try:
+        from hyperloom.orchestrator.loop.coordinator_helpers import (
+            _geak_accepted_kernel_specs,
+        )
+
+        return _geak_accepted_kernel_specs(result)
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+        out: list[dict[str, Any]] = []
+        kernels = result.get("accepted_kernels") or []
+        heads = result.get("accepted_heads") or []
+        if not isinstance(kernels, list):
+            kernels = []
+        if not isinstance(heads, list):
+            heads = []
+        for lane in kernels + heads:
+            if not isinstance(lane, dict):
+                continue
+            if str(lane.get("kind") or "").strip().lower() == "env":
+                continue
+            try:
+                delta = float(lane.get("e2e_delta_pct") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if delta <= 0.0:
+                continue
+            out.append(lane)
+        return out
+
+
+def _legacy_string_accepted_kernels(result: dict[str, Any]) -> list[str]:
+    """Preserve pre-schema bare-string ``accepted_kernels`` lists."""
+    raw = result.get("accepted_kernels") or []
+    if not isinstance(raw, list) or not raw:
+        return []
+    if not all(isinstance(item, str) for item in raw):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def _journey_paths(result: dict[str, Any]) -> list[Path]:
     """Every ``kernel_journey.json`` belonging to a GEAK session, pointer first.
 
@@ -300,6 +341,27 @@ def _journey_row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("name") or row.get("kernel_id") or "").strip()
 
 
+def _is_alias_twin_group(group: list[dict[str, Any]], is_cand_tag: Any) -> bool:
+    """Return True only when a group is a slot-tag + symbol alias pair.
+
+    Two unrelated kernels can share a run-level gain and the measured/unmeasured
+    gpu_pct split; collapsing on gain alone would drop one of them.
+    """
+    measured = [r for r in group if r.get("gpu_pct") is not None]
+    unmeasured = [r for r in group if r.get("gpu_pct") is None]
+    if not measured or not unmeasured:
+        return False
+    names: list[str] = []
+    for row in group:
+        for field in ("name", "kernel_id"):
+            text = str(row.get(field) or "").strip()
+            if text and text not in names:
+                names.append(text)
+    has_tag = any(is_cand_tag(n) for n in names)
+    has_symbol = any(not is_cand_tag(n) for n in names)
+    return has_tag and has_symbol
+
+
 def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse the twin rows GEAK writes for one accepted kernel.
 
@@ -345,7 +407,11 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
     groups: dict[Any, list[dict[str, Any]]] = {}
     for row in accepted:
         gain = row.get("e2e_gain_pct")
-        key = round(gain, 3) if isinstance(gain, (int, float)) else ("_", id(row))
+        op_kind = str(row.get("op_kind") or "")
+        if isinstance(gain, (int, float)):
+            key: Any = (op_kind, round(float(gain), 3))
+        else:
+            key = (op_kind, "_", id(row))
         groups.setdefault(key, []).append(row)
 
     collapsed: list[dict[str, Any]] = []
@@ -353,10 +419,10 @@ def _collapse_journey_aliases(accepted: list[dict[str, Any]]) -> list[dict[str, 
     for group in groups.values():
         if len(group) < 2:
             continue
+        if not _is_alias_twin_group(group, is_cand_tag):
+            continue
         measured = [r for r in group if r.get("gpu_pct") is not None]
         unmeasured = [r for r in group if r.get("gpu_pct") is None]
-        if not measured or not unmeasured:
-            continue
         primary = measured[0]
 
         # The unmeasured twin is the resolved symbol, by construction. When
@@ -922,26 +988,36 @@ def collect_geak(
     if not isinstance(accepted_heads, list):
         accepted_heads = []
 
-    # Back-fill per-kernel attribution from ``kernel_journey.json`` when
-    # ``result.json`` shipped the aggregate win but an empty ``accepted_kernels``.
-    # Fires on any run that completed and returned a workflow result with an
-    # empty list; a producer-populated list is always preserved verbatim.
-    #
-    # ``no_gain`` must be included. ``status`` is derived from
-    # ``throughput_speedup``, which GEAK reports on the run's headline basis --
-    # frequently ``cold``. A run can therefore be stamped ``no_gain`` on the cold
-    # basis while ``alignment_metrics.hot_geak_speedup`` records a large measured
-    # hot win and the journey holds genuine KEEP rows. Gating attribution on
-    # ``status == "ok"`` discarded those rows entirely. ``error`` / ``timeout``
-    # stay excluded: those runs never produced a trustworthy workflow return.
-    accepted_kernels_source = "result" if accepted_kernels else None
-    if not accepted_kernels and status in ("ok", "no_gain"):
-        backfilled = _geak_accepted_kernels_from_journey(
-            result, warnings, state.get("optimization_stack")
-        )
-        if backfilled:
-            accepted_kernels = backfilled
-            accepted_kernels_source = "kernel_journey_backfill"
+    normalized_result = {
+        **result,
+        "accepted_kernels": accepted_kernels,
+        "accepted_heads": accepted_heads,
+    }
+
+    # Normalize the direct result path through the same admission rules as the
+    # orchestrator ledger: both lanes, env selections excluded, alias twins
+    # collapsed. Journey backfill runs only when this yields nothing.
+    accepted_kernels_source: str | None = None
+    specs = _geak_result_kernel_specs(normalized_result)
+    if specs:
+        accepted_kernels = specs
+        accepted_kernels_source = "result"
+    else:
+        legacy_strings = _legacy_string_accepted_kernels(normalized_result)
+        if legacy_strings:
+            accepted_kernels = legacy_strings
+            accepted_kernels_source = "result"
+        elif status in ("ok", "no_gain"):
+            backfilled = _geak_accepted_kernels_from_journey(
+                result, warnings, state.get("optimization_stack")
+            )
+            if backfilled:
+                accepted_kernels = backfilled
+                accepted_kernels_source = "kernel_journey_backfill"
+            else:
+                accepted_kernels = []
+        else:
+            accepted_kernels = []
 
     section: dict[str, Any] = {
         "engaged": True,

@@ -22,6 +22,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.collectors.kernels import (
+    _collect_adopted_kernels,
+)
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
@@ -213,7 +216,23 @@ def test_an_unproven_overlay_records_the_row_without_a_gain() -> None:
     assert entry["validated"] is False
     assert entry["best_gain_pct"] is None
     assert entry["overlay_loaded"] is False
+    assert entry["last_decision"] == "UNATTRIBUTED"
+    assert entry["last_status"] == "unvalidated"
     assert entry["attempts"][0]["gain_pct"] is None
+    assert entry["attempts"][0]["decision"] == "UNATTRIBUTED"
+
+
+def test_unvalidated_geak_ledger_row_is_not_adopted() -> None:
+    phase = _phase()
+    _record(
+        phase,
+        {"accepted_kernels": [_spec("k", 5.0)]},
+        overlay_loaded=False,
+    )
+    adopted = _collect_adopted_kernels(
+        {"kernel_integrate_attempts": phase.shared_state.kernel_integrate_attempts}
+    )
+    assert adopted == []
 
 
 def test_two_kernels_on_one_rebench_share_no_invented_split() -> None:
