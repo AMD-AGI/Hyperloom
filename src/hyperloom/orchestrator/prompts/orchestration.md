@@ -215,8 +215,8 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries every executable specialist proposal this cycle that no explore round
-has benched, ranked by gap severity, with the ones already benched removed.
+carries the executable specialist proposals this cycle that no explore round
+has benched, ranked by gap severity and truncated to a count the block states.
 Draw from it first and copy an entry's fields verbatim — an entry marked
 ATOMIC is a coupled set that must go in as one variant, never split or
 re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
