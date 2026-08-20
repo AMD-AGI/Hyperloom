@@ -21,6 +21,7 @@ from .models import (
     MAX_FILE_BYTES,
     MAX_FILES,
     KnowledgeBundle,
+    RecipeScope,
     RemoteRecipeValidationError,
     RemoteWriteResult,
     validate_relative_path,
@@ -109,6 +110,11 @@ def flatten_recipe_document(envelope: dict[str, Any]) -> dict[str, Any]:
             if isinstance(envelope.get("view"), dict)
             else {}
         ),
+        "scope": (
+            dict(envelope.get("scope") or {})
+            if isinstance(envelope.get("scope"), dict)
+            else {}
+        ),
     }
     return {**business, **fixed}
 
@@ -171,6 +177,36 @@ def _validate_hyperloom_view(envelope: dict[str, Any]) -> dict[str, Any]:
     if reason is not None and not isinstance(reason, str):
         raise RemoteRecipeValidationError(
             "Hyperloom Recipe View replay_disabled_reason must be a string or null"
+        )
+    return envelope
+
+
+def _validate_recipe_scope(
+    envelope: dict[str, Any],
+    scope: RecipeScope,
+) -> dict[str, Any]:
+    if not scope.matches(envelope.get("scope")):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe View scope does not match the requested scope"
+        )
+    knowledge = envelope.get("knowledge")
+    if not isinstance(knowledge, dict):
+        raise RemoteRecipeValidationError("Hyperloom Recipe View knowledge is missing")
+    shape = knowledge.get("workload_shape")
+    expected = scope.as_dict()
+    if not isinstance(shape, dict) or any(
+        shape.get(key) != expected[key] for key in ("tp", "conc", "isl", "osl")
+    ):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe workload shape does not match the requested scope"
+        )
+    provenance = knowledge.get("provenance")
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("kernel_optimizer") != scope.kernel_optimizer
+    ):
+        raise RemoteRecipeValidationError(
+            "Hyperloom Recipe kernel optimizer does not match the requested scope"
         )
     return envelope
 
@@ -325,9 +361,16 @@ class RemoteRecipeClient:
             )
         return cls(KBStoreClient(base, token))
 
-    def get_view(self, canonical_id: str) -> dict[str, Any] | None:
+    def get_view(
+        self,
+        canonical_id: str,
+        scope: RecipeScope,
+    ) -> dict[str, Any] | None:
         """Read and validate one normalized View without downloading files."""
-        envelope = self.store.get_hyperloom_recipe_view(canonical_id)
+        envelope = self.store.get_hyperloom_recipe_view(
+            canonical_id,
+            scope=scope.as_dict(),
+        )
         if envelope is None:
             return None
         session_id = (
@@ -341,6 +384,7 @@ class RemoteRecipeClient:
             session_id=session_id,
         )
         envelope = _validate_hyperloom_view(envelope)
+        envelope = _validate_recipe_scope(envelope, scope)
         _view_artifact_manifest(envelope)
         return envelope
 
@@ -349,6 +393,7 @@ class RemoteRecipeClient:
         canonical_id: str,
         destination: str | Path,
         *,
+        scope: RecipeScope,
         envelope: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Activate a fully verified View bundle at the destination."""
@@ -360,7 +405,11 @@ class RemoteRecipeClient:
             ):
                 _deactivate_destination(stale_generation)
         try:
-            selected = envelope if envelope is not None else self.get_view(canonical_id)
+            selected = (
+                envelope
+                if envelope is not None
+                else self.get_view(canonical_id, scope)
+            )
             if selected is None:
                 _deactivate_destination(root)
                 return None
@@ -371,6 +420,7 @@ class RemoteRecipeClient:
                 session_id=session_id,
             )
             selected = _validate_hyperloom_view(selected)
+            selected = _validate_recipe_scope(selected, scope)
             view_manifest = _view_artifact_manifest(selected)
             document = flatten_recipe_document(selected)
             recipe_json = json.dumps(
@@ -484,6 +534,7 @@ class RemoteRecipeClient:
         session_id: str,
         bundle: KnowledgeBundle,
         *,
+        scope: RecipeScope,
         optimized_throughput: float,
         files_dir: Path,
         metric: str = "optimized_throughput",
@@ -511,7 +562,8 @@ class RemoteRecipeClient:
                 session_id,
                 optimized_throughput,
             )
-        rollup = self.store.get_rollup(canonical_id)
+        scope_payload = scope.as_dict()
+        rollup = self.store.get_rollup(canonical_id, scope=scope_payload)
         _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=metric)
         if optimized_throughput <= prior:
             return RemoteWriteResult(
@@ -535,7 +587,11 @@ class RemoteRecipeClient:
                     f"unexpected={sorted(unexpected)!r}"
                 )
         self.store.put_knowledge(
-            canonical_id, bundle.knowledge, session_id=session_id, mode="replace"
+            canonical_id,
+            bundle.knowledge,
+            session_id=session_id,
+            mode="replace",
+            scope=scope_payload,
         )
         try:
             self.store.set_champion(
@@ -543,12 +599,13 @@ class RemoteRecipeClient:
                 session_id,
                 metric=metric,
                 value=optimized_throughput,
+                scope=scope_payload,
             )
         except KBStoreError as exc:
             if "HTTP 409" not in str(exc):
                 raise
             _, winner, _ = _champion(
-                self.store.get_rollup(canonical_id),
+                self.store.get_rollup(canonical_id, scope=scope_payload),
                 validate_metric=True,
                 expected_metric=metric,
             )
@@ -558,6 +615,7 @@ class RemoteRecipeClient:
                     session_id,
                     metric=metric,
                     value=optimized_throughput,
+                    scope=scope_payload,
                 )
         return RemoteWriteResult(
             "written",

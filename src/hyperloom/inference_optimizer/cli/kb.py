@@ -376,6 +376,7 @@ def _bootstrap_recipe_kb(
     if kb is None:
         from hyperloom.orchestrator.knowledge.remote_recipe import (
             HyperloomRemoteKB,
+            RecipeScope,
             RemoteWarmRecipeAdapter,
         )
 
@@ -383,6 +384,7 @@ def _bootstrap_recipe_kb(
         t0_kb = RemoteWarmRecipeAdapter(
             HyperloomRemoteKB.from_env(),
             warm_start_dir,
+            RecipeScope.from_state(state),
         )
         _publish_section_dirs(session_dir, warm_start_dir)
     else:
