@@ -32,6 +32,7 @@ import yaml
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
@@ -2992,14 +2993,13 @@ class BaselineExecutor:
         _pre_patch_sha = ""
 
         timeout_sec = self._resolve_timeout(params)
-        # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
-        # if none, leave the YAML's hardcoded `model:` for fixture-based tests.
-        # Live state is read from ctx.extra (the executor is a module-level
-        # singleton with self.shared_state=None on the Coordinator path).
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-            or str(getattr(live_shared_state, "model_path", "") or "").strip()
+        # Model path: unified resolver (params → $MODEL_PATH → SharedState), then
+        # serving-path normalization (HL_MODEL_BASE / HF cache). If none, leave
+        # the YAML's hardcoded `model:` for fixture-based tests.
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=str(getattr(live_shared_state, "model_path", "") or ""),
+            for_serving=True,
         )
         # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
         resolved_gpu = (

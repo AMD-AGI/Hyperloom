@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -4053,7 +4054,7 @@ class IntegratePatchExecutor:
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {config_path}")
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_model = resolve_session_model_path(params=params, for_serving=True)
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
@@ -4319,7 +4320,7 @@ class IntegratePatchExecutor:
         run it is confirming for.
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_model = resolve_session_model_path(params=params, for_serving=True)
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )

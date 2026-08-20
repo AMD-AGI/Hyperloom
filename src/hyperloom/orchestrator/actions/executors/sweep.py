@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_int
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._grid_base import pareto_front
 from ._grid_runner import (
@@ -240,6 +241,7 @@ class SweepExecutor:
         if not config_path.exists():
             return {"status": "failed", "error_class": "missing_config", "error": f"config not found: {config_path}"}
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
         output_root = Path(
             params.get("output_dir") or extra.get("workspace") or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
         )
@@ -248,7 +250,11 @@ class SweepExecutor:
         # Workload-contract materialization: sweep overrides CONC/ISL/OSL/
         # NUM_PROMPTS per variant, but TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/
         # ROCR_VISIBLE_DEVICES still flow from env onto the variant base.
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=str(getattr(shared_state, "model_path", "") or "") if shared_state else "",
+            for_serving=True,
+        )
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
