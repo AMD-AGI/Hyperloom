@@ -1080,6 +1080,40 @@ _IDLE_PCT_TABLE_RE = re.compile(
     r"^\|\s*Idle\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
     re.IGNORECASE | re.MULTILINE,
 )
+_COMPUTE_PCT_TABLE_RE = re.compile(
+    r"^\|\s*Compute\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
+    re.IGNORECASE | re.MULTILINE,
+)
+_EXPOSED_COMM_PCT_TABLE_RE = re.compile(
+    r"^\|\s*Exposed\s+Communication\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_exec_summary_pct(md_path: Path, pattern: re.Pattern[str]) -> float | None:
+    """Extract one percentage row from an ``analysis.md`` Executive Summary table.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+        pattern: Row regex whose first group is the numeric percentage.
+
+    Returns:
+        The percentage, or ``None`` when the file or row is missing or
+        unparseable, so callers skip their gate gracefully.
+    """
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    match = pattern.search(text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
@@ -1094,20 +1128,38 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
         The idle percentage, or ``None`` when missing/unparseable so callers
         skip the gate gracefully.
     """
-    try:
-        text = md_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
+    return _extract_exec_summary_pct(md_path, _IDLE_PCT_TABLE_RE)
 
-    match = _IDLE_PCT_TABLE_RE.search(text)
-    if not match:
-        return None
 
-    raw = match.group(1)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+def extract_compute_pct_from_analysis_md(md_path: Path) -> float | None:
+    """Extract ``Compute %`` from an ``analysis.md`` Executive Summary table.
+
+    Used by the low-compute gate.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The compute percentage, or ``None`` when missing/unparseable so callers
+        skip the gate gracefully.
+    """
+    return _extract_exec_summary_pct(md_path, _COMPUTE_PCT_TABLE_RE)
+
+
+def extract_exposed_comm_pct_from_analysis_md(md_path: Path) -> float | None:
+    """Extract ``Exposed Communication %`` from an ``analysis.md`` summary table.
+
+    Context for the low-compute gate: it distinguishes a comm-dominated window
+    from a host-bound one.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The exposed-communication percentage, or ``None`` when
+        missing/unparseable.
+    """
+    return _extract_exec_summary_pct(md_path, _EXPOSED_COMM_PCT_TABLE_RE)
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
@@ -1735,6 +1787,8 @@ __all__ = [
     "aggregate_by_source_function",
     "build_orchestrator_prompt",
     "discover_capture_folder",
+    "extract_compute_pct_from_analysis_md",
+    "extract_exposed_comm_pct_from_analysis_md",
     "extract_idle_pct_from_analysis_md",
     "infer_analysis_mode",
     "normalize_upstream_category",

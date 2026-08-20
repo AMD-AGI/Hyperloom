@@ -60,6 +60,8 @@ from tracelens_skill_runner import (
     _resolve_launcher_to_abs_source,
     aggregate_by_source_function,
     discover_capture_folder,
+    extract_compute_pct_from_analysis_md,
+    extract_exposed_comm_pct_from_analysis_md,
     extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     parse_analysis_md,
@@ -77,7 +79,9 @@ from _paths import workspace_root
 from _idle_gate import (
     build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
+    build_low_compute_warning as _build_low_compute_warning,
     resolve_idle_pct_threshold,
+    resolve_min_compute_pct_threshold,
 )
 
 # Canonical roofline_source provenance enum, shared with the bypass route so both
@@ -488,6 +492,42 @@ def _evaluate_idle_gate_with_graph_guard(
         )
     _, high_idle_warning = _evaluate_high_idle_gate(idle_pct, report_path)
     return threshold, high_idle_warning, None
+
+
+def _evaluate_low_compute_gate(
+    compute_pct: float | None,
+    exposed_comm_pct: float | None,
+    report_path: Path,
+) -> tuple[float, dict[str, Any] | None]:
+    """Return the compute threshold plus a warning when the compute share is too low.
+
+    Complements :func:`_evaluate_idle_gate_with_graph_guard`. The idle gate
+    cannot see a window whose wall time is consumed by a spin-waiting
+    collective, because that wait is charged as GPU-busy time -- such a trace
+    reports ~0% idle alongside a single-digit compute share. Since a kernel
+    rewrite is bounded by the compute share, both regimes warrant the same
+    response: suppress the hot-kernel list and let the Coordinator route
+    elsewhere.
+
+    Args:
+        compute_pct: Compute share of trace wall time, or ``None`` when the
+            source report did not expose it (gate is skipped).
+        exposed_comm_pct: Exposed-communication share, for warning context.
+        report_path: Path to the source report, recorded in the warning.
+
+    Returns:
+        The resolved threshold and the ``low_gpu_compute_pct`` warning, or
+        ``None`` when the gate does not fire.
+    """
+    threshold = resolve_min_compute_pct_threshold()
+    if compute_pct is None or compute_pct >= threshold:
+        return threshold, None
+    return threshold, _build_low_compute_warning(
+        compute_pct=compute_pct,
+        threshold_pct=threshold,
+        report_path=report_path,
+        exposed_comm_pct=exposed_comm_pct,
+    )
 
 
 def _build_trace_split_warning(
@@ -3899,12 +3939,22 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
 
 
+# Provenance for a candidate's ``gpu_pct``. Only ``e2e_window`` is comparable
+# with the percentages ``parse_analysis_md`` lifts out of analysis.md; the other
+# two are best-effort and are recorded so a consumer can tell them apart instead
+# of silently ranking incomparable numbers against each other.
+GPU_PCT_BASIS_E2E = "e2e_window"
+GPU_PCT_BASIS_SIDECAR = "sidecar_reported"
+GPU_PCT_BASIS_LISTED_OPS = "listed_ops_sum"
+
+
 def recover_other_bucket_candidates(
     skill_output_dir: Path | str | None,
     existing_candidates: list[dict[str, Any]],
     *,
     top_k: int = 10,
     min_gpu_pct: float | None = None,
+    total_window_us: float | None = None,
     log: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover HIGH-GPU-time ops missing from analysis.md (any category).
@@ -3922,12 +3972,30 @@ def recover_other_bucket_candidates(
     Fires for ops that are (a) absent from ``existing_candidates`` by name and
     (b) at or above ``min_gpu_pct`` of total GPU time.
 
+    Whenever ``total_window_us`` is known, ``gpu_pct`` is normalized against it
+    -- the same denominator ``parse_analysis_md`` uses -- so both candidate
+    sources stay comparable inside one ranked ``hot_kernels[]``. The sidecar's
+    own percentage column is preferred only as a fallback, because its
+    denominator is not the trace wall span: ``ops_summary.csv`` normalizes
+    against total *op* time, which excludes collectives, so on a comm-dominated
+    trace its percentages run an order of magnitude above the end-to-end share.
+    Mixing the two bases in one field silently produced unrankable candidate
+    lists (a fallback op at "23.5% GPU" outranking an analysis.md op at "4.7%
+    GPU" when the true e2e shares were 0.5% and 4.7%). The basis actually used
+    is recorded on each candidate as ``gpu_pct_basis``.
+
     Args:
         skill_output_dir: The TraceLens skill output directory to scan.
         existing_candidates: Candidates already extracted from analysis.md.
         top_k: Maximum number of recovered candidates to return.
         min_gpu_pct: Minimum GPU-time percentage to qualify; defaults to the
-            ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` env value (10%).
+            ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` env value (10%). Compared
+            against whichever basis was used, so it is a materially higher bar
+            under ``e2e_window`` than under the pre-existing bases.
+        total_window_us: Wall span of the analyzed trace, in microseconds. When
+            omitted or non-positive the function falls back to the sidecar's
+            reported percentage, then to a share of the listed ops, and marks
+            the candidates accordingly.
         log: Optional logging callable for diagnostics.
 
     Returns:
@@ -3941,41 +4009,48 @@ def recover_other_bucket_candidates(
         min_gpu_pct = _resolve_other_bucket_min_gpu_pct()
 
     have = {str(c.get("name") or "").strip().lower() for c in existing_candidates if isinstance(c, dict)}
-    total_us = sum(r["gpu_us"] for r in ranking if r.get("gpu_us") is not None) or 0.0
+    listed_ops_us = sum(r["gpu_us"] for r in ranking if r.get("gpu_us") is not None) or 0.0
+    window_us = float(total_window_us) if total_window_us is not None and total_window_us > 0 else 0.0
 
-    def _pct(rec: dict[str, Any]) -> float | None:
-        """Return a record's GPU-time percentage.
+    def _pct(rec: dict[str, Any]) -> tuple[float, str] | None:
+        """Return a record's GPU-time percentage and the basis it was computed on.
 
         Args:
             rec: A ranking record.
 
         Returns:
-            The explicit ``gpu_pct`` when present, else the share of
-            ``total_us`` derived from ``gpu_us``, else ``None``.
+            A ``(percentage, basis)`` pair, or ``None`` when the record carries
+            neither a usable GPU time nor a reported percentage.
         """
+        gpu_us = rec.get("gpu_us")
+        if window_us > 0 and gpu_us is not None:
+            return gpu_us / window_us * 100.0, GPU_PCT_BASIS_E2E
+        # No trace wall span available (e.g. a JSON sidecar with no
+        # gpu_timeline.csv beside it): fall back to whatever the sidecar
+        # reported, then to a share of the rows we can see.
         if rec.get("gpu_pct") is not None:
-            return float(rec["gpu_pct"])
-        if total_us > 0 and rec.get("gpu_us") is not None:
-            return rec["gpu_us"] / total_us * 100.0
+            return float(rec["gpu_pct"]), GPU_PCT_BASIS_SIDECAR
+        if listed_ops_us > 0 and gpu_us is not None:
+            return gpu_us / listed_ops_us * 100.0, GPU_PCT_BASIS_LISTED_OPS
         return None
 
-    qualifying: list[tuple[float, dict[str, Any]]] = []
+    qualifying: list[tuple[float, str, dict[str, Any]]] = []
     for rec in ranking:
         name_l = str(rec.get("name") or "").strip().lower()
         if not name_l or name_l in have:
             continue
         # Gate on any high-GPU-time op missing from existing candidates.
-        pct = _pct(rec)
-        if pct is None or pct < min_gpu_pct:
+        scored = _pct(rec)
+        if scored is None or scored[0] < min_gpu_pct:
             continue
-        qualifying.append((pct, rec))
+        qualifying.append((scored[0], scored[1], rec))
 
     if not qualifying:
         return []
     qualifying.sort(key=lambda t: t[0], reverse=True)
 
     out: list[dict[str, Any]] = []
-    for pct, rec in qualifying[: max(1, top_k)]:
+    for pct, pct_basis, rec in qualifying[: max(1, top_k)]:
         gpu_us = rec.get("gpu_us")
         out.append(
             {
@@ -3987,6 +4062,7 @@ def recover_other_bucket_candidates(
                 "shapes": [],
                 "tracelens_category": rec.get("category") or "other",
                 "gpu_pct": round(pct, 3),
+                "gpu_pct_basis": pct_basis,
                 "candidate_source": "other_bucket_fallback",
             }
         )
@@ -3994,6 +4070,7 @@ def recover_other_bucket_candidates(
             log(
                 f"candidate recovery fallback (#514/#515): recovered "
                 f"high-GPU-time op {rec['name']!r} (~{pct:.1f}% GPU time, "
+                f"basis={pct_basis}, "
                 f"category={rec.get('category') or 'other'!r}) that has no "
                 f"analysis.md reasoning-candidate block; routing through "
                 f"classify_patchability so a reusable native kernel still "
@@ -5378,6 +5455,64 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
         # malformed CSV numeric field; treat as absent
         return None
     return None
+
+
+# TraceLens has spelled the compute / exposed-communication timeline rows
+# several ways across versions; accept every spelling seen in the wild rather
+# than silently reporting "no compute row" (which would disable the gate).
+_COMPUTE_TIMELINE_TYPES = ("computation_time", "compute_time", "computation", "compute")
+_EXPOSED_COMM_TIMELINE_TYPES = ("exposed_comm_time", "exposed_communication_time", "exposed_communication")
+
+
+def _extract_pct_from_gpu_timeline(output_dir: Path, row_types: tuple[str, ...]) -> float | None:
+    """Read a percentage from the first matching gpu_timeline.csv row type.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+        row_types: Accepted ``type`` spellings, in priority order.
+
+    Returns:
+        The percentage, or ``None`` when the CSV is absent or carries none of
+        the accepted row types.
+    """
+    try:
+        rows = _load_gpu_timeline_rows(output_dir)
+        by_type = {(row.get("type") or "").strip().lower(): row for row in rows}
+        for row_type in row_types:
+            row = by_type.get(row_type)
+            if row is not None:
+                return float(row.get("percent", 0))
+    except ValueError:
+        # malformed CSV numeric field; treat as absent
+        return None
+    return None
+
+
+def _extract_compute_pct_from_gpu_timeline(output_dir: Path) -> float | None:
+    """Read the GPU compute percentage from gpu_timeline.csv.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+
+    Returns:
+        The compute percentage, or ``None`` when unavailable.
+    """
+    return _extract_pct_from_gpu_timeline(output_dir, _COMPUTE_TIMELINE_TYPES)
+
+
+def _extract_exposed_comm_pct_from_gpu_timeline(output_dir: Path) -> float | None:
+    """Read the exposed-communication percentage from gpu_timeline.csv.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+
+    Returns:
+        The exposed-communication percentage, or ``None`` when unavailable.
+    """
+    return _extract_pct_from_gpu_timeline(output_dir, _EXPOSED_COMM_TIMELINE_TYPES)
 
 
 def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
@@ -7717,25 +7852,50 @@ def main() -> int:
                         raw_trace_path,
                     )
                 )
+                compute_pct_value = _extract_compute_pct_from_gpu_timeline(tracelens_dir)
+                exposed_comm_pct_value = _extract_exposed_comm_pct_from_gpu_timeline(
+                    tracelens_dir,
+                )
+                compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
+                    compute_pct_value,
+                    exposed_comm_pct_value,
+                    tracelens_dir / "analysis.md",
+                )
                 if graph_under_recorded_warning is not None:
+                    # Under-recording deflates every recorded share alike, so the
+                    # compute share is as unreliable as idle% here.
+                    low_compute_warning = None
                     trace_health_warnings.append(graph_under_recorded_warning)
                     append_log(
                         log_path,
                         "deterministic: high idle% is a graph under-recording "
                         "artifact (profiler captured ~1 of N graph replays); "
-                        "skipping the idle gate and keeping hot_kernels[].",
+                        "skipping the idle/compute gates and keeping hot_kernels[].",
                     )
-                if high_idle_warning is not None:
-                    assert idle_pct_value is not None
+                if high_idle_warning is not None or low_compute_warning is not None:
                     agent_candidates = []
                     allow_empty_candidates = True
-                    trace_health_warnings.append(high_idle_warning)
-                    append_log(
-                        log_path,
-                        f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
-                        f"(threshold {idle_pct_threshold:.2f}%); "
-                        "suppressing hot_kernels[]",
-                    )
+                    if high_idle_warning is not None:
+                        assert idle_pct_value is not None
+                        trace_health_warnings.append(high_idle_warning)
+                        append_log(
+                            log_path,
+                            f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
+                            f"(threshold {idle_pct_threshold:.2f}%); "
+                            "suppressing hot_kernels[]",
+                        )
+                    if low_compute_warning is not None:
+                        assert compute_pct_value is not None
+                        trace_health_warnings.append(low_compute_warning)
+                        append_log(
+                            log_path,
+                            f"deterministic: GPU Compute % = "
+                            f"{compute_pct_value:.2f}% (threshold "
+                            f"{compute_pct_threshold:.2f}%); suppressing "
+                            "hot_kernels[] — a kernel rewrite is bounded by "
+                            "the compute share and cannot move end-to-end "
+                            "latency here",
+                        )
                 else:
                     if idle_pct_value is not None and graph_under_recorded_warning is None:
                         append_log(
@@ -7838,31 +7998,61 @@ def main() -> int:
                             raw_trace_path,
                         )
                     )
+                    compute_pct_value = extract_compute_pct_from_analysis_md(
+                        skill_result.report_path,
+                    )
+                    exposed_comm_pct_value = extract_exposed_comm_pct_from_analysis_md(
+                        skill_result.report_path,
+                    )
+                    compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
+                        compute_pct_value,
+                        exposed_comm_pct_value,
+                        skill_result.report_path,
+                    )
                     if graph_under_recorded_warning is not None:
+                        # Under-recording deflates every recorded share alike, so
+                        # the compute share is as unreliable as idle% here.
+                        low_compute_warning = None
                         trace_health_warnings.append(graph_under_recorded_warning)
                         append_log(
                             log_path,
                             "TraceLens high idle% is a graph under-recording "
                             "artifact (profiler captured ~1 of N graph replays); "
-                            "skipping the idle gate and keeping hot_kernels[].",
+                            "skipping the idle/compute gates and keeping hot_kernels[].",
                         )
-                    if high_idle_warning is not None:
-                        assert idle_pct_value is not None
+                    if high_idle_warning is not None or low_compute_warning is not None:
                         agent_candidates = []
                         allow_empty_candidates = True
-                        trace_health_warnings.append(high_idle_warning)
-                        report_source = "skipped:high_gpu_idle_pct"
-                        append_log(
-                            log_path,
-                            f"TraceLens Executive Summary reports "
-                            f"Idle % = {idle_pct_value:.2f}% (threshold "
-                            f"{idle_pct_threshold:.2f}%); suppressing "
-                            "hot_kernels[] — kernel rewriting cannot move "
-                            "end-to-end latency in the high-idle regime. "
-                            "Coordinator will see this in "
-                            "trace_health_warnings[] and route to "
-                            "parameter optimization.",
-                        )
+                        if high_idle_warning is not None:
+                            assert idle_pct_value is not None
+                            trace_health_warnings.append(high_idle_warning)
+                            report_source = "skipped:high_gpu_idle_pct"
+                            append_log(
+                                log_path,
+                                f"TraceLens Executive Summary reports "
+                                f"Idle % = {idle_pct_value:.2f}% (threshold "
+                                f"{idle_pct_threshold:.2f}%); suppressing "
+                                "hot_kernels[] — kernel rewriting cannot move "
+                                "end-to-end latency in the high-idle regime. "
+                                "Coordinator will see this in "
+                                "trace_health_warnings[] and route to "
+                                "parameter optimization.",
+                            )
+                        if low_compute_warning is not None:
+                            assert compute_pct_value is not None
+                            trace_health_warnings.append(low_compute_warning)
+                            report_source = "skipped:low_gpu_compute_pct"
+                            append_log(
+                                log_path,
+                                f"TraceLens Executive Summary reports "
+                                f"Compute % = {compute_pct_value:.2f}% "
+                                f"(threshold {compute_pct_threshold:.2f}%); "
+                                "suppressing hot_kernels[] — a kernel rewrite "
+                                "is bounded by the compute share and cannot "
+                                "move end-to-end latency here. Coordinator "
+                                "will see this in trace_health_warnings[] and "
+                                "route to comm/parameter optimization.",
+                            )
                     else:
                         if idle_pct_value is not None and graph_under_recorded_warning is None:
                             append_log(
@@ -7884,6 +8074,9 @@ def main() -> int:
                             skill_result.output_dir,
                             report_cands,
                             top_k=args.top_k,
+                            total_window_us=_extract_total_time_us_from_gpu_timeline(
+                                skill_result.output_dir,
+                            ),
                             log=lambda msg: append_log(log_path, msg),
                         )
                         if fallback_cands:

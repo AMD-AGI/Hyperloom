@@ -4905,6 +4905,94 @@ def test_extract_total_time_us_returns_none_when_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Low-compute gate: gpu_timeline readers + gate evaluation
+# ---------------------------------------------------------------------------
+
+
+def _write_gpu_timeline(tmp_path, body: str):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir(exist_ok=True)
+    (csv_dir / "gpu_timeline.csv").write_text(body, encoding="utf-8")
+
+
+def test_extract_compute_pct_accepts_schema_spellings(tmp_path):
+    for label in ("computation_time", "compute_time", "computation", "compute"):
+        _write_gpu_timeline(
+            tmp_path,
+            f"type,time ms,percent\n{label},725.85,3.99\ntotal_time,18186.6,100.0\n",
+        )
+        assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) == 3.99
+
+
+def test_extract_exposed_comm_pct_accepts_schema_spellings(tmp_path):
+    for label in ("exposed_comm_time", "exposed_communication_time", "exposed_communication"):
+        _write_gpu_timeline(
+            tmp_path,
+            f"type,time ms,percent\n{label},17456.98,95.99\ntotal_time,18186.6,100.0\n",
+        )
+        assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) == 95.99
+
+
+def test_extract_compute_pct_returns_none_when_absent(tmp_path):
+    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,1000.0,100.0\n")
+    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
+    assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) is None
+
+
+def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
+    """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy.
+
+    A collective that spin-waits on peer ranks is charged as GPU-busy, so the
+    idle gate sees 0.02% and lets the window through. The compute share is what
+    exposes it.
+    """
+    monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    threshold, warning = tla._evaluate_low_compute_gate(3.99, 95.99, tmp_path / "analysis.md")
+    assert threshold == 10.0
+    assert warning is not None
+    assert warning["code"] == "low_gpu_compute_pct"
+    assert warning["compute_pct"] == 3.99
+    assert warning["exposed_comm_pct"] == 95.99
+
+
+def test_low_compute_gate_passes_healthy_window(monkeypatch, tmp_path):
+    monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    _, warning = tla._evaluate_low_compute_gate(99.3, 0.42, tmp_path / "analysis.md")
+    assert warning is None
+
+
+def test_low_compute_gate_skipped_when_pct_unknown(monkeypatch, tmp_path):
+    """No compute row in the report: fail open rather than suppress candidates."""
+    monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    _, warning = tla._evaluate_low_compute_gate(None, None, tmp_path / "analysis.md")
+    assert warning is None
+
+
+def test_extract_compute_and_comm_pct_from_analysis_md(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "# Analysis\n\n"
+        "| Metric | Value |\n"
+        "|--------|-------|\n"
+        "| Total Time | 18186.60 ms |\n"
+        "| Compute % | 3.99% |\n"
+        "| Idle % | 0.02% |\n"
+        "| Exposed Communication % | 95.99% |\n",
+        encoding="utf-8",
+    )
+    assert tlr.extract_compute_pct_from_analysis_md(md) == 3.99
+    assert tlr.extract_exposed_comm_pct_from_analysis_md(md) == 95.99
+    assert tlr.extract_idle_pct_from_analysis_md(md) == 0.02
+
+
+def test_extract_compute_pct_from_analysis_md_missing_row(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Analysis\n\n| Idle % | 1.0% |\n", encoding="utf-8")
+    assert tlr.extract_compute_pct_from_analysis_md(md) is None
+    assert tlr.extract_exposed_comm_pct_from_analysis_md(md) is None
+
+
+# ---------------------------------------------------------------------------
 # _normalize_profiler_op_name / graph-captured keyword recovery
 # ---------------------------------------------------------------------------
 
