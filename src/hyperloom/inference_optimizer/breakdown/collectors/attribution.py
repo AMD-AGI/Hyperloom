@@ -240,7 +240,12 @@ def _geak_contribution(entry: dict[str, Any]) -> str:
         ``"config"`` when only server arguments or env were, and ``"joint"``
         when both were and the measurement cannot separate them.
     """
-    kernels = _geak_kernel_names(entry)
+    # A stack entry can name kernels that never ran: the promote path copies GEAK's
+    # self-reported lanes, and a rebench that stripped a dead overlay still promotes on
+    # its config gain. ``overlay_loaded is False`` is proof of absence, so the row is
+    # config gain whatever the lanes say -- the same call the per-kernel ledger makes.
+    # A missing key means the writer predates the stamp; those are left to the lanes.
+    kernels = [] if entry.get("overlay_loaded") is False else _geak_kernel_names(entry)
     has_config = bool(
         str(entry.get("candidate_extra_server_args") or "").strip()
         or str(entry.get("extra_server_args") or "").strip()
