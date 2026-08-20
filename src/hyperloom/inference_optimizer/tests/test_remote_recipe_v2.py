@@ -230,13 +230,8 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
 def test_geak_recipe_keeps_kernel_partition_empty(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.kernel_optimizer = "geak"
-    scope = RecipeScope.from_state(state)
 
-    bundle = build_remote_knowledge(
-        state,
-        tmp_path / "files-geak",
-        scope=scope,
-    )
+    bundle = build_remote_knowledge(state, tmp_path / "files-geak")
 
     assert bundle.knowledge["provenance"]["kernel_optimizer"] == "geak"
     assert bundle.knowledge["workload_shape"]["tp"] == 8
