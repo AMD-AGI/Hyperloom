@@ -84,6 +84,16 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
+# SGLang graph-capture profiling flag shipped by the profile YAML, and the
+# eager flag that makes it a no-op. Literals rather than an import from
+# ``baseline``: that module imports this one, so the dependency only goes one
+# way.
+_SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
+_SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
+# ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
+# was attempted and did not apply. Distinct from "never attempted": patching can
+# be disabled for an image that already ships the patch.
+_TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
 _AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 # Quality-reference env names, in resolution order. Every scriptable workload
@@ -566,8 +576,19 @@ def _tracelens_patch_enabled() -> bool:
     """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
 
     Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
-    SGLang (keeps today's safe behaviour, no TraceLens-only flags injected).
-    Default on because the patches are backward-compatible.
+    SGLang. Default on because the patches are backward-compatible.
+
+    With the switch off, no *server flag* that only a patched build accepts is
+    injected (vLLM ``--profiler-config.detailed_trace_annotation``, SGLang
+    ``--enable-shape-discovery-for-cuda-graph-profile``), because an unpatched
+    argparse rejects them. The SGLang ``PROFILE_EXTRA_BODY`` annotations
+    (``shape_discovery`` / ``detailed_annotations``) are a different case and are
+    **kept**: they ride the ``/start_profile`` API, which an unpatched server
+    accepts, and the switch is also how a pre-patched image opts out of runtime
+    patching while still supporting them. Only a patch that was *attempted and
+    failed* clears them, which is why that gate reads
+    ``HYPERLOOM_PROFILE_DEGRADED_REASON`` (set solely on the attempted-and-failed
+    path) rather than ``tracelens_patch_ok``.
 
     Returns:
         True when runtime patching is enabled (default), else False.
@@ -1100,7 +1121,7 @@ def materialize_config_with_envs(
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
             if not tracelens_patch_ok:
                 envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = "tracelens_runtime_patch_unavailable"
+                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
                 log.warning(
                     "TraceLens runtime patch unavailable for framework=%s; "
                     "profile will omit annotation-only flags and roofline "
@@ -1185,8 +1206,21 @@ def materialize_config_with_envs(
                             "imprecise.",
                             _model,
                         )
+            # Both capture options are annotation-only and need TraceLens
+            # server-side support to land: without it the trace carries no
+            # ``kernel_shape_profiler`` events (trace-health check 5), so asking
+            # for them pays the capture cost for data nothing downstream reads.
+            # Keyed on the degraded *reason* rather than ``tracelens_patch_ok``:
+            # a patch that was never attempted (HYPERLOOM_ENABLE_PATCH=0) can
+            # still be baked into the image, and must keep the annotations.
+            _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
+            if _patch_degraded:
+                _shape_disc = False
             extra_body["shape_discovery"] = _shape_disc
-            extra_body.setdefault("detailed_annotations", True)
+            if _patch_degraded:
+                extra_body["detailed_annotations"] = False
+            else:
+                extra_body.setdefault("detailed_annotations", True)
             # NOTE: this write happens before the per-task ``extra_envs`` merge, so
             # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
             # start_step/num_steps the way ``args_mode="replace"`` used to drop
@@ -1298,6 +1332,21 @@ def materialize_config_with_envs(
     _final_args = str(envs.get(framework_env, "")).strip()
     if _final_args:
         envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
+    # An eager profile cannot capture a CUDA graph, so the profile YAML's
+    # ``--enable-profile-cuda-graph`` is dead weight the server still sets up
+    # for. The two flags reach the env from different layers -- the YAML
+    # template vs the eager fallback folded into ``extra_server_args`` -- and
+    # only meet here, after every merge above, so this is the first point that
+    # can see the contradiction.
+    if framework_env == "EXTRA_SGLANG_ARGS":
+        _sg_tokens = str(envs.get(framework_env, "")).split()
+        if _SGLANG_DISABLE_CUDA_GRAPH_FLAG in _sg_tokens and _SGLANG_PROFILE_CUDA_GRAPH_FLAG in _sg_tokens:
+            envs[framework_env] = " ".join(t for t in _sg_tokens if t != _SGLANG_PROFILE_CUDA_GRAPH_FLAG)
+            log.info(
+                "Dropping %s: %s is set, so there is no graph capture to profile.",
+                _SGLANG_PROFILE_CUDA_GRAPH_FLAG,
+                _SGLANG_DISABLE_CUDA_GRAPH_FLAG,
+            )
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
     # re-inject the quality reference here (the single scriptable choke point)

@@ -1098,7 +1098,21 @@ guess). Edit the example before copying if defaults need to change.
 
 ## Monitoring
 
-Poll at most every 5 minutes unless debugging a startup failure.
+Each poll is one fast read of persisted state, and you poll only when you are
+next invoked. **Never block to reach the next poll**: no `sleep`, no wait loop,
+no `tail -f`. The only sanctioned wait is the one-shot `sleep 30` health check
+right after launch. Recurring 5-minute polling is the Robustness Monitor's job
+and already runs in its own `setsid nohup` process (see above) — do not
+reimplement it here.
+
+**Why this is load-bearing, not style.** A blocking call holds the sandbox
+connection open for its whole duration. Overlap it with a `roofline` trace flush
+— 8 ranks serialising torch traces to NFS, which takes minutes on a large TP=8
+MoE — and the connection can drop; the agent harness reads that as an
+unreachable sandbox and rebuilds it, which kills the optimizer and the in-flight
+profile with it. Session `Kimi-K3_20260818T062936Z_a62853e5` lost 3/3 rooflines,
+its `analysis.md`, and its whole KERNEL phase to a `sleep 110; sleep 110;
+sleep 80` progress loop. Launch, check once, hand off to the monitor, report.
 
 Resolve `$SESSION` the same way the Robustness Monitor does — never from
 `$USER_DATA_PATH`, which is the workspace root, not the session dir.
