@@ -52,6 +52,14 @@ Requirements:
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
+```{note}
+`ISL` / `OSL` describe the synthetic request shape. Under the opt-in agentic
+trace-replay mode (`HYPERLOOM_AGENTX=1`) request lengths come from the recorded
+trace corpus instead, so these two values do not affect what is measured — the
+server's context window is sized from the model's own configuration rather than
+from `ISL+OSL`.
+```
+
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 for the full prompt field reference (every field maps to a CLI flag defined in
 `cli/parser.py`).
