@@ -538,8 +538,19 @@ def _tracelens_patch_enabled() -> bool:
     """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
 
     Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
-    SGLang (keeps today's safe behaviour, no TraceLens-only flags injected).
-    Default on because the patches are backward-compatible.
+    SGLang. Default on because the patches are backward-compatible.
+
+    With the switch off, no *server flag* that only a patched build accepts is
+    injected (vLLM ``--profiler-config.detailed_trace_annotation``, SGLang
+    ``--enable-shape-discovery-for-cuda-graph-profile``), because an unpatched
+    argparse rejects them. The SGLang ``PROFILE_EXTRA_BODY`` annotations
+    (``shape_discovery`` / ``detailed_annotations``) are a different case and are
+    **kept**: they ride the ``/start_profile`` API, which an unpatched server
+    accepts, and the switch is also how a pre-patched image opts out of runtime
+    patching while still supporting them. Only a patch that was *attempted and
+    failed* clears them, which is why that gate reads
+    ``HYPERLOOM_PROFILE_DEGRADED_REASON`` (set solely on the attempted-and-failed
+    path) rather than ``tracelens_patch_ok``.
 
     Returns:
         True when runtime patching is enabled (default), else False.
