@@ -921,12 +921,12 @@ class SpecialistSubprocessDispatcher:
                 )
                 env.update(launch_env_additions)
             else:
-                # Preserve the established Claude transport unchanged.
-                combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
-                prompt_file.write_text(combined, encoding="utf-8")
+                prompt_file.write_text(user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
                 cmd = self._build_claude_cmd(
-                    prompt_file=prompt_file,
+                    system_prompt_file=prompt_file.parent / "system_prompt.md",
+                    system_prompt=system_prompt,
+                    user_prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     disallowed_tools=frozenset(disallowed_tools),
@@ -989,7 +989,7 @@ class SpecialistSubprocessDispatcher:
                     cwd=str(worktree or workspace),
                     log_path=str(process_log),
                     env_mode="replace",
-                    stdin_path=(str(prompt_file) if backend == AGENT_BACKEND_CODEX else None),
+                    stdin_path=str(prompt_file),
                 )
             except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                 return SpecialistSubprocessResult(
@@ -1041,11 +1041,10 @@ class SpecialistSubprocessDispatcher:
             log_fh = process_log.open("w", encoding="utf-8")
             stdin_fh: Any = None
             try:
-                if backend == AGENT_BACKEND_CODEX:
-                    stdin_fh = prompt_file.open("rb")
+                stdin_fh = prompt_file.open("rb")
                 proc = subprocess.Popen(
                     cmd,
-                    stdin=stdin_fh if stdin_fh is not None else subprocess.DEVNULL,
+                    stdin=stdin_fh,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
                     env=env,
@@ -1190,15 +1189,15 @@ class SpecialistSubprocessDispatcher:
         """Assemble the argv for whichever agent CLI drives this specialist.
 
         Args:
-            prompt_file (Path): User prompt for Codex; combined prompt for Claude.
+            prompt_file (Path): User prompt file (stdin for both backends).
             workspace (Path): Task workspace surfaced as a writable dir.
             worktree (Path | None): Write-isolated worktree, when present.
             disallowed_tools: Tool names to remove from the available set.
                 Applied only on the Claude path; Codex uses sandbox policy.
             backend (str): Backend to build for; resolved from the config /
                 credential shape when empty.
-            system_prompt (str): Higher-priority Codex developer instructions.
-                Claude already reads its combined prompt file.
+            system_prompt (str): Developer instructions (Codex) or system
+                prompt content (Claude, written to system_prompt.md).
 
         Returns:
             list[str]: The full command argv to spawn.
@@ -1216,7 +1215,9 @@ class SpecialistSubprocessDispatcher:
                 system_prompt=system_prompt,
             )
         return self._build_claude_cmd(
-            prompt_file=prompt_file,
+            system_prompt_file=prompt_file.parent / "system_prompt.md",
+            system_prompt=system_prompt,
+            user_prompt_file=prompt_file,
             workspace=workspace,
             worktree=worktree,
             disallowed_tools=disallowed_tools,
@@ -1365,20 +1366,25 @@ class SpecialistSubprocessDispatcher:
     def _build_claude_cmd(
         self,
         *,
-        prompt_file: Path,
+        system_prompt_file: Path,
+        system_prompt: str,
+        user_prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         disallowed_tools: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
-        The Anthropic-side half of :meth:`_build_agent_cmd`. Builds the flag list
-        (output format, permission mode, system prompt file, tool denylist, mcp
-        config, ``--add-dir`` entries, operator escape-hatch args).
+        The Anthropic-side half of :meth:`_build_agent_cmd`. System and user
+        prompts travel through separate channels: system via
+        ``--system-prompt-file`` and user via stdin so untrusted task data
+        cannot reach the system-prompt slot.
 
         Args:
-            prompt_file (Path): Combined system+user prompt file passed via
-                ``--system-prompt-file``.
+            system_prompt_file (Path): Destination for the written system prompt;
+                passed to ``--system-prompt-file``.
+            system_prompt (str): The system prompt text to write.
+            user_prompt_file (Path): Pre-written user prompt file fed to stdin.
             workspace (Path): Task workspace surfaced as an ``--add-dir``.
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.
@@ -1387,6 +1393,18 @@ class SpecialistSubprocessDispatcher:
         Returns:
             list[str]: The full command argv to spawn.
         """
+        fd = os.open(system_prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(system_prompt)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        system_prompt_file.chmod(0o600)
+
         cfg = self.config
         cmd: list[str] = [
             cfg.claude_executable,
@@ -1397,10 +1415,7 @@ class SpecialistSubprocessDispatcher:
             "--permission-mode",
             cfg.permission_mode,
             "--system-prompt-file",
-            str(prompt_file),
-            "-p",
-            "Execute the task in your system prompt. Work autonomously. "
-            + "Write specialist_done.json as your absolute last action.",
+            str(system_prompt_file),
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])

@@ -135,15 +135,20 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     wt.mkdir()
     ws = tmp_path / "ws"
     ws.mkdir()
+    sys_file = ws / "system_prompt.md"
     cmd = d._build_claude_cmd(
-        prompt_file=tmp_path / "p.txt",
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=wt,
         disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
     )
     assert "--model" in cmd and "claude-opus-4-7" in cmd
+    assert cmd[cmd.index("--system-prompt-file") + 1] == str(sys_file)
     assert "--mcp-config" in cmd and "/cfg/mcp.json" in cmd
     assert "--allowedTools" not in cmd
+    assert "-p" not in cmd
     deny_idx = cmd.index("--disallowedTools") + 1
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied and "SlashCommand" in denied
@@ -155,14 +160,18 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
     d = _dispatcher()
     ws = tmp_path / "ws"
     ws.mkdir()
+    sys_file = ws / "system_prompt.md"
     cmd = d._build_claude_cmd(
-        prompt_file=tmp_path / "p.txt",
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
     )
     assert "--model" not in cmd
     assert "--mcp-config" not in cmd
     assert "--allowedTools" not in cmd
+    assert "-p" not in cmd
     assert "--agents" in cmd
 
 
@@ -173,8 +182,11 @@ def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) 
     d = _dispatcher()
     ws = tmp_path / "ws"
     ws.mkdir()
+    sys_file = ws / "system_prompt.md"
     cmd = d._build_claude_cmd(
-        prompt_file=tmp_path / "p.txt",
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
     )
