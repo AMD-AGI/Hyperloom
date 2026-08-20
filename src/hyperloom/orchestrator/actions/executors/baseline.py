@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -81,6 +81,7 @@ from ._accuracy_gate import (
 from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
+    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
     prepare_agentx_runtime,
@@ -592,6 +593,54 @@ def _classify_subprocess_error(
 
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
+
+# An AgentX baseline does not fit either of the caps above, and the cold-start
+# detector cannot see why. That detector counts .so files across the whole aiter
+# JIT dir and calls it warm above 20 -- but the signature it is really about is
+# (model, dtype, TP, max_model_len), and AgentX is the thing that moves
+# max_model_len (6144 -> the model's native window). So the first AgentX round on
+# any box that has run synthetic work is detected WARM, handed 7800s, and then
+# pays the 30+ minute first-compile for a signature it has never built. Measured
+# rounds are 4774s (SGLang) and 6676s (vLLM) before that compile; adding it, plus
+# a cold corpus mmap (~840s), lands at ~9316s. Neither cap covers it, and neither
+# escape hatch reaches it: the cold-cap env var is only read when the probe says
+# cold, and nothing in the tree writes params["timeout_sec"] for a baseline. So a
+# first AgentX run does not merely risk the timeout -- it hits it, and a baseline
+# timeout kills the session before the search starts.
+#
+# Derived rather than pinned, because the one part of the round that is chosen
+# rather than measured is the measurement window: total = setup + corpus + warmup
+# + AGENTX_DURATION + mapping. Deriving keeps the cap correct when an operator
+# changes the window, instead of leaving a second number to remember.
+AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
+AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
+
+
+def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
+    """Resolve the AgentX baseline cap: explicit, else duration + overhead.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The subprocess timeout in seconds for an AgentX baseline launch.
+    """
+    src = os.environ if env is None else env
+
+    def _int(name: str, default: int) -> int:
+        raw = (src.get(name) or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return value if value > 0 else default
+
+    explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
+    if explicit:
+        return explicit
+    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + _int(
+        "AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC
+    )
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
 # above for callers/tests that import them from this module.
 
@@ -1908,6 +1957,22 @@ class BaselineExecutor:
             timeout_sec = int(explicit)
             log.info(
                 "baseline_executor: timeout=%ds (explicit task param)",
+                timeout_sec,
+            )
+            return timeout_sec
+
+        # Ahead of the probe on purpose: the probe cannot answer this case. See
+        # AGENTX_BASELINE_OVERHEAD_SEC -- AgentX moves max_model_len, which is
+        # part of the JIT signature the cold/warm split is really about, while
+        # the probe only counts kernels globally. Asking it first would return
+        # WARM and the 7800s cap that a first AgentX round cannot meet.
+        if agentx_enabled():
+            timeout_sec = agentx_baseline_timeout_sec()
+            log.info(
+                "baseline_executor: timeout=%ds (AgentX: AGENTX_DURATION + overhead). "
+                "The aiter cold/warm probe is not consulted -- it counts kernels "
+                "globally and cannot see that AgentX changes the JIT signature, so "
+                "it reports WARM while the round pays a first-compile.",
                 timeout_sec,
             )
             return timeout_sec
@@ -4804,7 +4869,10 @@ baseline_executor = BaselineExecutor()
 __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "BASELINE_COLD_START_TIMEOUT_SEC",
+    "AGENTX_BASELINE_OVERHEAD_SEC",
+    "AGENTX_DEFAULT_DURATION_SEC",
     "BASELINE_DEFAULT_TIMEOUT_SEC",
+    "agentx_baseline_timeout_sec",
     "BaselineExecutor",
     "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",

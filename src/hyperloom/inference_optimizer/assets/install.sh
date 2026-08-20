@@ -224,8 +224,13 @@ MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${M
 # on the SemiAnalysisAI org repo. Only needed for AgentX mode (HYPERLOOM_AGENTX).
 # Installed fail-soft (see ensure_aiperf): a failure must never block the default
 # synthetic path. Operators can override AIPERF_BIN to skip this install.
+# Kept in lockstep with INFERENCEX_REF below: this is exactly the aiperf commit
+# that InferenceX@${INFERENCEX_REF} carries as its utils/aiperf submodule. The
+# leaderboard's scenario invariants live in aiperf, so a mismatched pair silently
+# benchmarks against different rules. The previous pin (dc975aaa) predates the
+# 062126 corpus and its scenario allowlist rejects it outright.
 AIPERF_REPO="${AIPERF_REPO:-https://github.com/SemiAnalysisAI/aiperf.git}"
-AIPERF_REF="${AIPERF_REF:-dc975aaa4491388defe28725934bd08348253fb8}"
+AIPERF_REF="${AIPERF_REF:-754356e9a39acc6cc6afb242d123bb57c3fb6f75}"
 AIPERF_PACKAGE_SPEC="${AIPERF_PACKAGE_SPEC:-aiperf @ git+${AIPERF_REPO}@${AIPERF_REF}}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at Magpie's import root. When unset by the
@@ -240,7 +245,11 @@ INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX
 # Pin InferenceX to a current default-branch HEAD *commit SHA* so the
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
 # can re-pin with INFERENCEX_REF=<tag|branch|sha>.
-INFERENCEX_REF="${INFERENCEX_REF:-a4bb43afa7fd74c1356583ed29e51421be010f0f}"
+# Re-pinned to the leaderboard's current head so AgentX replays the same
+# scenario, corpus generation and warmup contract the published rows were
+# produced with. Keep AIPERF_REF above in lockstep (it is this commit's
+# utils/aiperf submodule); re-sync when the corpus generation changes.
+INFERENCEX_REF="${INFERENCEX_REF:-3d5581562f643f9bdeb8410cd924e2c70906c966}"
 _INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
 INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 
@@ -1166,13 +1175,34 @@ ensure_aiperf() {
     log "would pip install aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
     return 0
   fi
+  # Presence is not enough. Measured: the previous pin (aiperf 0.8.0) carries
+  # weka-trace, --scenario and --benchmark-duration, and defines a scenario by
+  # the same name -- but with different invariants and an allowlist that predates
+  # the current corpus. A presence-only skip therefore left every already
+  # provisioned box on the old build after a pin bump, silently, while the
+  # preflight's own advice ("install via install.sh") pointed back at this no-op.
+  # Record what we installed and reinstall when it no longer matches.
+  local stamp="${HYPERLOOM_STATE_DIR:-${HOME}/.hyperloom}/aiperf_installed_ref"
+  local -a pip_args=("${PIP_EXTRA[@]}")
   if command -v aiperf >/dev/null 2>&1; then
-    log "aiperf already on PATH; skipping install"
-    return 0
+    if [ "$(cat "$stamp" 2>/dev/null)" = "$AIPERF_REF" ]; then
+      log "aiperf on PATH is the pinned ref ${AIPERF_REF:0:8}; skipping install"
+      return 0
+    fi
+    log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); reinstalling"
+    # Deliberately NOT --no-deps: a newer aiperf may need dependencies the old
+    # one did not, and installing the package without them is a worse failure
+    # than the stale build we are replacing.
+    pip_args+=(--force-reinstall)
   fi
   log "installing aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
-  if "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$AIPERF_PACKAGE_SPEC"; then
+  if "$PYTHON" -m pip install --quiet "${pip_args[@]}" "$AIPERF_PACKAGE_SPEC"; then
     log "aiperf installed OK"
+    # Stamp only after a success, so a failed upgrade retries next run instead
+    # of recording a ref that is not what is on disk. Best-effort: an unwritable
+    # state dir costs a redundant reinstall, never a wrong skip.
+    mkdir -p "$(dirname "$stamp")" 2>/dev/null && printf '%s\n' "$AIPERF_REF" > "$stamp" 2>/dev/null || \
+      warn "could not record the installed aiperf ref at ${stamp}; the next run will reinstall"
   else
     warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
   fi

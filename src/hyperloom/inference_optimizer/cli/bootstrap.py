@@ -22,6 +22,9 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    agentx_enabled as _agentx_enabled,
+)
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .backends import _build_robustness_options
@@ -77,6 +80,69 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
     if override:
         return override
     return Path(str(getattr(args, "model", "") or "")).name
+
+
+# Bump when a change makes previously recorded AgentX measurements
+# incomparable. Epoch 1: aligned to the InferenceX leaderboard invocation
+# (upstream scenario + 062126 corpus + native context window + error-rate gate);
+# everything measured before it used a context-truncated corpus with no error
+# gate, so those numbers describe a different workload.
+AGENTX_MEASUREMENT_EPOCH = 1
+
+
+def agentx_state_is_stale(state: Any) -> str:
+    """Return why a resumed session's AgentX state is unusable, or ``""``.
+
+    Two independent reasons, both of which would otherwise corrupt the KEEP
+    ledger silently: the session was measured in the other benchmark mode (the
+    ledger is keyed on server args alone, so rows collide), or it was measured
+    in an older AgentX epoch (same knobs, different workload).
+
+    Args:
+        state: The loaded :class:`SharedState`.
+
+    Returns:
+        A human-readable reason, or ``""`` when the state may be reused.
+    """
+    want_mode = "agentx" if _agentx_enabled() else "synthetic"
+    had_mode = str(getattr(state, "benchmark_mode", "") or "")
+    if had_mode and had_mode != want_mode:
+        return (
+            f"session was measured in benchmark_mode={had_mode!r} but this run is "
+            f"{want_mode!r}; the KEEP ledger keys on server args only, so the two "
+            "sets of measurements would overwrite each other"
+        )
+    if want_mode == "agentx":
+        had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
+        if had_epoch != AGENTX_MEASUREMENT_EPOCH:
+            return (
+                f"session carries AgentX epoch {had_epoch}, this build measures "
+                f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
+                "a different workload and cannot anchor or be compared against"
+            )
+    return ""
+
+
+def _flag_explicitly_set(args: argparse.Namespace, dest: str) -> bool:
+    """Whether the operator actually typed a ``BooleanOptionalAction`` flag.
+
+    ``argparse`` gives these flags a real default, so the parsed value alone
+    cannot distinguish "left at the default" from "explicitly set to the same
+    value as the default" -- and a mode-scoped default must never override an
+    explicit choice. Reading ``sys.argv`` is the only signal available without
+    changing the parser's public behaviour.
+
+    Args:
+        args: Parsed namespace (accepted for symmetry / future use).
+        dest: The action ``dest``, e.g. ``enable_conc_sweep``.
+
+    Returns:
+        bool: True when ``--<flag>`` or ``--no-<flag>`` appears in ``sys.argv``.
+    """
+    del args  # signature kept uniform with the other bootstrap helpers
+    flag = dest.replace("_", "-")
+    wanted = {f"--{flag}", f"--no-{flag}"}
+    return any(a.split("=", 1)[0] in wanted for a in sys.argv[1:])
 
 
 def _seed_shared_state(
@@ -306,7 +372,15 @@ def _seed_shared_state(
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
         explore_enabled=not bool(getattr(args, "no_explore", False)),
-        eval_disabled=bool(getattr(args, "no_eval", False)),
+        # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
+        # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
+        # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
+        # explicitly rejects "RUN_EVAL=false in a YAML" as an excuse and would
+        # stamp the baseline as an eval failure -- which blocks it from anchoring
+        # ``baseline_tput``, leaving every variant's gain None and stalling or
+        # stopping the session. Routing AgentX through the same channel as
+        # ``--no-eval`` is what makes the opt-out legible to that guard.
+        eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
         # FRAMEWORK config-exploration lane toggle (default OFF).
         framework_config_exploration_enabled=bool(
             getattr(args, "enable_framework_config_exploration", False),
@@ -319,7 +393,15 @@ def _seed_shared_state(
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default).
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        # A concurrency sweep is 16 runs. At AgentX's per-run cost that is the
+        # entire session budget spent without tuning a single server parameter,
+        # and the leaderboard treats each concurrency as a separate row anyway
+        # (so the "best" concurrency is not a thing to optimise toward). Default
+        # it off under AgentX; an explicit --enable-conc-sweep still wins.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True))
+        and not (_agentx_enabled() and not _flag_explicitly_set(args, "enable_conc_sweep")),
+        benchmark_mode="agentx" if _agentx_enabled() else "synthetic",
+        agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         conc_sweep_concs=_parse_conc_sweep_concs(args),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
