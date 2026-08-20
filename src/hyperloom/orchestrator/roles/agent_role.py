@@ -97,7 +97,8 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 
 # Specialist — single exit signal, optional heartbeats and alerts only.
 # Exact mirror of runner.py's accept-set (specialist_done | send_message | alert).
-_SPECIALIST_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+# Public because the specialist has no AgentRole record to reach it through.
+SPECIALIST_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.SPECIALIST_DONE,
     }
@@ -195,6 +196,6 @@ __all__ = [
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_API_KEY_ENV",
     "DEFAULT_CODEX_MODEL",
-    "_SPECIALIST_INTENTS",
+    "SPECIALIST_INTENTS",
     "default_role_registry",
 ]
