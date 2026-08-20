@@ -265,20 +265,29 @@ class MachinePhase(PhaseHandler):
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
+        elif (
+            str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
+            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
+            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
+        ):
+            # SWEEP already had an honest closeout, so skip_to_close was
+            # suppressed in _global_terminal. Consume it (not discard) here:
+            # the hint's intended outcome -- reaching CLOSE -- did happen, just
+            # via the more honest reason, so the next phase must not re-evaluate
+            # it as if it were still unclaimed.
+            state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint and target != _phase_state.PHASE_EXPLORE:
             # A phase change fired for a reason unrelated to the hint while one
             # was still pending (e.g. set by a different phase's agent turn and
-            # never claimed, or SWEEP closing honestly on its own conc_sweep
-            # result while skip_to_close was suppressed). skip_to_kernel/
-            # skip_to_sweep are consumed only inside exit_normal_explore, so a
-            # hint is still legitimately in flight not just when riding straight
-            # to EXPLORE, but also one hop earlier: PRELUDE -> FRAMEWORK_AGENT
-            # still has EXPLORE ahead of it whenever explore is enabled, and
-            # discarding here is the same bug this branch exists to fix, just
-            # moved upstream. Only discard once the transition moves to a phase
-            # from which EXPLORE can no longer be reached (including EXPLORE
-            # itself force-exiting past the hint via IR-6, or explore being
-            # disabled for this session).
+            # never claimed). skip_to_kernel/skip_to_sweep are consumed only
+            # inside exit_normal_explore, so a hint is still legitimately in
+            # flight not just when riding straight to EXPLORE, but also one hop
+            # earlier: PRELUDE -> FRAMEWORK_AGENT still has EXPLORE ahead of it
+            # whenever explore is enabled, and discarding here is the same bug
+            # this branch exists to fix, just moved upstream. Only discard once
+            # the transition moves to a phase from which EXPLORE can no longer
+            # be reached (including EXPLORE itself force-exiting past the hint
+            # via IR-6, or explore being disabled for this session).
             hint_still_reachable = target == _phase_state.PHASE_FRAMEWORK_AGENT and explore_enabled
             if not hint_still_reachable:
                 discarded_hint = state.discard_pending_escalate_hint()

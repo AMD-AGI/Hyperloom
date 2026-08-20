@@ -498,7 +498,6 @@ def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
     )
     out = phase_state.exit_normal_explore(
         state,
-        force_exit_hours_remaining=0.0,
         force_exit_budget_pct=0.0,
     )
     assert out is None
@@ -519,7 +518,6 @@ def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
     )
     out = phase_state.exit_normal_explore(
         state,
-        force_exit_hours_remaining=0.0,
         force_exit_budget_pct=0.0,
     )
     assert out is not None
