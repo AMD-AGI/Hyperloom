@@ -168,11 +168,15 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return _reserialize_json_blobs(" ".join(out))
 
 
-# Serving-ineligible harness flags. Enroll here; compose_server_args strips
-# them after merge so they cannot KEEP into EXTRA_*_ARGS / current_best.
-_BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = (
-    "--no-enable-prefix-caching",
-)
+# Serving-ineligible harness flags. Enroll here; two sites strip the set —
+# compose_server_args (what a grid launches) and _lift_to_current_best (what a
+# KEEP persists) — so neither the benchmark nor the recommendation carries them.
+_BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
+
+
+def strip_benchmark_harness_flags(server_args: str | None) -> str:
+    """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
+    return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
 
 
 def compose_server_args(
@@ -185,7 +189,7 @@ def compose_server_args(
 ) -> str:
     """Compose inherited/base/variant args with optional remove/replace semantics.
 
-    Always strips :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` from the result.
+    Always applies :func:`strip_benchmark_harness_flags` to the result.
     """
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
@@ -196,8 +200,7 @@ def compose_server_args(
         combined_base = merge_server_args(inherited_args, base_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
-    return remove_server_args(composed, _BENCHMARK_HARNESS_FLAG_DENYLIST)
-
+    return strip_benchmark_harness_flags(composed)
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted
