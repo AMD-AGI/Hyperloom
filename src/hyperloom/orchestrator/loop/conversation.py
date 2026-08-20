@@ -741,9 +741,6 @@ class ConversationCollaborator:
         if msgs:
             top = msgs[-1]
             self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
-        # Durable at-least-once-until-decided delivery of proposals to the
-        # Critic: the inbox tail is lossy, so re-present every still-undecided
-        # proposal from the durable ``pending_proposals`` registry.
         if agent_name == "critic":
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
@@ -759,17 +756,17 @@ class ConversationCollaborator:
         return "\n".join(sections)
 
     async def _advance_rendered_cursor(self, agent_name: str) -> None:
-        """Advance the durable read cursor to the watermark recorded by the most recent _compose_prompt call.
+        """Advance an agent's read cursor to the last message its prompt rendered.
 
-        Reads are write-through via self._coord to cross the collaborator boundary.
-        No-op when _compose_prompt found no new messages for this agent.
+        Args:
+            agent_name: The agent whose cursor to advance; a no-op when its
+                last composed prompt carried no new messages.
         """
         entry = self._coord._rendered_cursor.get(agent_name)
         if entry is None:
             return
         seq, msg_id = entry
         await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
-        del self._coord._rendered_cursor[agent_name]
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present.

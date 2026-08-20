@@ -825,8 +825,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
 
-        # Last (seq, msg_id) the prompt rendered for each agent; advanced after a
-        # successful turn or a NoIntentEmitted turn, not on BackendError.
+        # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
 
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
