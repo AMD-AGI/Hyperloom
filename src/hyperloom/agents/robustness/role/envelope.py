@@ -72,6 +72,8 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
+# Mirrors upstream ``ROBUSTNESS_DELEGATE_ONLY_ACTIONS``; every other remediation
+# rides an alert for Orchestration to act on.
 ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({"recover"})
 
 
@@ -416,10 +418,9 @@ def build_delegate(
 ) -> Intent:
     """Construct a ``delegate`` intent.
 
-    Robustness may only delegate handle actions listed in
-    :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Other action names will be
-    rejected by PolicyGate's ``KERNEL_AGENT_OWNED_ACTIONS`` / role check; we
-    fail fast locally to keep error context.
+    Robustness may only delegate the actions listed in
+    :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Upstream PolicyGate rejects anything
+    else for this role; we fail fast locally to keep error context.
 
     Args:
         action_name (str): Action to delegate; must be in
@@ -568,7 +569,7 @@ def _validate_delegate_payload(payload: dict[str, Any]) -> None:
             f"robustness; allowed: "
             f"{sorted(ROBUSTNESS_DELEGATE_ACTIONS)!r}",
             rule="delegate_action",
-            hint="kernel_agent-owned actions go via REQUEST(target_agent='kernel_agent')",
+            hint="raise an alert and let Orchestration own the remediation",
         )
 
 

@@ -112,10 +112,9 @@ free_mb_threshold).
 When the executor returns `state == "needs_review"`, the recover task
 itself is still marked `succeeded` by the SubAgentRunner (the dict
 shape is structurally valid), but the robustness event detector raises a
-`recover_unsuccessful` HIGH symptom (`signals/event.py`). On that same
-tick the ActionLadder converts it directly into `delegate(report)` with
-idempotency_key `report-recover-unsuccessful-tick-<N>`, so the session
-finalizes at the last validated gain instead of burning budget on further
-doomed recover attempts. The `gpu_memory_leaked` cooldown
+`recover_unsuccessful` HIGH symptom (`signals/event.py`). The ActionLadder
+turns that into a HIGH alert carrying the evidence; Orchestration owns the
+decision to finalize at the last validated gain instead of burning budget on
+further doomed recover attempts. The `gpu_memory_leaked` cooldown
 (`cooldown_ticks=5`) is per-dedup_key and only suppresses re-firing of that
-symptom; it does not delay the report delegation.
+symptom.
