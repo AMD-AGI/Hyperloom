@@ -2173,6 +2173,7 @@ class KernelPhase(PhaseHandler):
         A round the run stopped ends the sweep with its tuners unrecorded.
         """
         from ..kernel.request_handlers import integrate_handler
+        from hyperloom.common.model_paths import resolve_session_model_path
 
         backend = str(result.get("backend") or "geak").strip().lower()
         candidates = self._gemm_e2e_candidates(result)
@@ -2298,6 +2299,10 @@ class KernelPhase(PhaseHandler):
                 "kernel_id": f"gemm_tune_{tuner_name}",
                 "source": "forge_gemm_tuning",
                 "base_tput": running_tput,
+                "model_path": resolve_session_model_path(
+                    state_model_path=str(getattr(self.shared_state, "model_path", "") or ""),
+                    for_serving=True,
+                ),
                 "extra_server_args": extra_server_args,
                 "extra_envs": test_envs,
                 "keep_threshold_pct": 3.0,
