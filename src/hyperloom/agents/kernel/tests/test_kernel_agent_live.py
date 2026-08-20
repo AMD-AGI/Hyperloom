@@ -39,7 +39,7 @@ def load_dotenv(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         value = value.strip().strip('"').strip("'")
         env[key.strip()] = value
-    # Mirror parallel_e2e_runner.load_env_file: each side's aliases come from that
+    # Mirror ray_runtime.safe_runtime_env: each side's aliases come from that
     # side's own credentials, and the GEAK aliases are never derived.
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])

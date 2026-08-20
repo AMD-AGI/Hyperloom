@@ -28,6 +28,7 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
+    session_grid_bounds,
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -40,6 +41,7 @@ from .integrate_patch import (
     _accuracy_delta_pct,
     _git_apply_collect_feedback,
     _git_stash_if_dirty,
+    _restore_stash_logged,
     _with_stash_restore,
     _resolve_framework_root,
 )
@@ -710,6 +712,27 @@ class FrameworkAgentExecutor:
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
+
+        def _undo_candidate() -> None:
+            """Take the candidate back out of the tree and hand the stash back.
+
+            What a stop owes, as opposed to a verdict. The dispatcher cancels
+            in-flight actions on shutdown and on a spent wall-clock budget, and
+            ``CancelledError`` is not an ``Exception``, so none of the REVERT
+            handlers below see one. Unhandled it leaves the candidate applied and
+            the operator's uncommitted work in ``git stash`` indefinitely -- the
+            budget case does not end the process, so CLOSE would go on to report
+            against a tree carrying a patch nothing ever graded.
+
+            Reverting past a KEEP that was already committed is deliberate: the
+            result carrying that KEEP never reaches the Coordinator, so leaving
+            the commit would leave the tree claiming a win the session does not
+            record. Every step is synchronous, so no second cancel can be
+            delivered part-way through the undo.
+            """
+            self._revert_patches(framework_root, applied, pre_apply_sha=pre_apply_sha)
+            _restore_stash_logged(framework_root, stash_state, stash_note)
+
         # Structural safety gate on the (remote / untrusted) diff before it is
         # applied to the live framework tree: reject non-diff blobs and any
         # header path that escapes the tree (absolute / ``..``). Stale /
@@ -796,12 +819,21 @@ class FrameworkAgentExecutor:
                 },
             )
 
-        # Bench via run_grid (size=1).
+        # Bench via run_grid (size=1). Bound it by the session wall-clock, as the
+        # sweep and explore arms already are: without it the declared cap is the
+        # only limit, and that cap answers "how long before this counts as hung",
+        # not "how much budget is left" -- so a candidate benched near the end of
+        # a run could outlive the run itself.
+        session_deadline_sec, variant_expected_sec = session_grid_bounds(
+            extra.get("shared_state") or extra.get("state")
+        )
         try:
             bench_result, gate_evidence = await self._bench_candidate(
                 params=params,
                 output_root=output_root,
                 slug=slug,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         except FrameworkScriptMismatchError as exc:
             reverted = self._revert_patches(
@@ -847,6 +879,12 @@ class FrameworkAgentExecutor:
                     "workspace": str(output_root),
                 },
             )
+        except BaseException:
+            # A stop, not a verdict: let it through rather than grading it, since
+            # as a REVERT it would read as the patch having failed a bench that
+            # never ran. See :func:`_undo_candidate` for what the stop owes.
+            _undo_candidate()
+            raise
 
         # KEEP / REVERT decision.
         base_tput = float(params.get("base_tput") or 0.0)
@@ -881,6 +919,34 @@ class FrameworkAgentExecutor:
         gate_pass = tput_ok and not acc_block
         acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
 
+        async def _record_outcome(outcome: str) -> None:
+            """Write this candidate's KB record, undoing it if the write is stopped.
+
+            Both verdicts record the same measurements and differ only in the
+            outcome label, and both record them after the verdict is decided and
+            before the ``_with_stash_restore`` that returns it. That await is the
+            last one the candidate crosses while the auto-stash is still on the
+            stack, and no handler stands between it and the caller: a cancel
+            delivered here -- which is what a spent budget delivers, at whatever
+            await the action happens to be at -- would strand the operator's work
+            in the stash with nothing in the session saying so.
+
+            Args:
+                outcome: The KB outcome label for the verdict just decided.
+            """
+            try:
+                await self._write_kb_record(
+                    candidate=candidate,
+                    outcome=outcome,
+                    tps_delta_pct=float(delta_pct or 0.0),
+                    patch_path=str(applied[0]) if applied else "",
+                    extra=extra,
+                    accuracy_delta_pct=acc_delta_pct,
+                )
+            except BaseException:
+                _undo_candidate()
+                raise
+
         if not gate_pass:
             reverted = self._revert_patches(
                 framework_root,
@@ -899,14 +965,7 @@ class FrameworkAgentExecutor:
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and tput_ok) else "reverted"
             )
-            await self._write_kb_record(
-                candidate=candidate,
-                outcome=OUTCOME_REVERTED_SMOKE_FAIL,
-                tps_delta_pct=float(delta_pct or 0.0),
-                patch_path=str(applied[0]) if applied else "",
-                extra=extra,
-                accuracy_delta_pct=acc_delta_pct,
-            )
+            await _record_outcome(OUTCOME_REVERTED_SMOKE_FAIL)
             return _with_stash_restore(
                 framework_root,
                 stash_state,
@@ -966,14 +1025,7 @@ class FrameworkAgentExecutor:
                     },
                 )
 
-        await self._write_kb_record(
-            candidate=candidate,
-            outcome=OUTCOME_INTEGRATED,
-            tps_delta_pct=float(delta_pct or 0.0),
-            patch_path=str(applied[0]) if applied else "",
-            extra=extra,
-            accuracy_delta_pct=acc_delta_pct,
-        )
+        await _record_outcome(OUTCOME_INTEGRATED)
         return _with_stash_restore(
             framework_root,
             stash_state,
@@ -1127,6 +1179,8 @@ class FrameworkAgentExecutor:
         params: dict[str, Any],
         output_root: Path,
         slug: str,
+        session_deadline_sec: float | None = None,
+        variant_expected_sec: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy
         gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`.
@@ -1135,6 +1189,11 @@ class FrameworkAgentExecutor:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
             slug: The candidate slug used to name the variant.
+            session_deadline_sec: Monotonic-clock session budget deadline, or
+                ``None`` when unbounded. Resolved by the caller, which owns the
+                session context.
+            variant_expected_sec: Expected bench runtime used to decide whether
+                the remaining budget can fit this bench at all.
 
         Returns:
             A ``(bench, gate_evidence)`` tuple: the bench result dict and a
@@ -1205,6 +1264,8 @@ class FrameworkAgentExecutor:
                 benchmark_script=override_script,
                 result_dir=override_result_dir,
                 serving_lease=serving_lease,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
             )
         finally:
             if serving_lease is not None:

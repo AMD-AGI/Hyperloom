@@ -7,6 +7,7 @@ and the per-phase entry dispatcher (``_on_phase_entered``)."""
 from __future__ import annotations
 import logging as _logging
 from typing import Any
+from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
@@ -35,6 +36,9 @@ class MachinePhase(PhaseHandler):
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
+        if current == _phase_state.PHASE_CLOSE:
+            self._reopen_a_session_that_was_left_closed()
+            current = _phase_state.PHASE_PRELUDE
         if current in _phase_state.PHASE_NAMES:
             # Already initialised; keep the CLI-side budget override authoritative.
             state.phase_budget_pct = dict(self._phase_budget_pct)
@@ -53,6 +57,47 @@ class MachinePhase(PhaseHandler):
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: save after phase init failed")
+
+    def _reopen_a_session_that_was_left_closed(self) -> None:
+        """Put a session persisted in CLOSE back at the phase machine's entrance.
+
+        CLOSE is terminal -- the machine has no transition out of it -- so a
+        resumed session that loads it stays there for the whole leg. The run loop
+        does not stop on CLOSE either, so what such a leg actually does is tick
+        in a phase that admits only ``report``, ``session_breakdown`` and
+        ``recover``: it spends its new clock on none of the work it was resumed
+        for.
+
+        Reopened at PRELUDE rather than at the phase CLOSE was entered from,
+        because PRELUDE is the phase that works out where a session belongs. It
+        exits on its first evaluation when the anchor the run needs is already
+        measured, and it measures one when it is not. A session stopped for a
+        cold anchor is the second case, and re-measuring is the whole reason its
+        stop was worth resuming from.
+
+        A session that still cannot fund the work is not kept open by this: the
+        PRELUDE exits price the new clock and route it back to CLOSE, this time
+        against the budget it actually has.
+
+        Reached only from the constructor, so a session cannot reopen itself
+        mid-run -- within one leg, CLOSE is entered long after this has run.
+        """
+        state = self.shared_state
+        log.info(
+            "Coordinator: session resumed in CLOSE, a phase with no way out; "
+            "reopening at PRELUDE so the new budget can be spent on the work "
+            "the earlier leg stopped short of."
+        )
+        state.record_phase_transition(
+            to_phase=_phase_state.PHASE_PRELUDE,
+            reason="phase_entered",
+            evidence={"trigger": "resumed_from_close"},
+        )
+        # Locked True by the CLOSE sequencer and read by the end-of-run safety
+        # nets as "the sequencer already wrote the breakdown". Carried into a leg
+        # that then never reaches CLOSE, it suppresses the write that would have
+        # stood in for it, and the leg produces no breakdown at all.
+        state.close_sequence_done = False
 
     def _ensure_recipe_kb_t0_anchored(self) -> None:
         """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when recipe_kb is None or recipe_kb_session_id set."""
@@ -189,21 +234,16 @@ class MachinePhase(PhaseHandler):
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
 
-        Priority order (Inv-8.2): abort > exit_terminal > exit_normal, per phase_state.compute_next_phase.
+        Priority order (Inv-8.2): global terminal > exit_terminal > exit_normal, per phase_state.compute_next_phase.
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()
-        max_hours_arg: float | None = None
-        mm = float(getattr(state, "max_minutes", 0) or 0.0)
-        if mm > 0:
-            max_hours_arg = mm / 60.0
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
             explore_enabled=self._explore_enabled(),
-            max_hours=max_hours_arg,
         )
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
@@ -223,6 +263,15 @@ class MachinePhase(PhaseHandler):
         prior = state.phase
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
+            state.consume_pending_escalate_hint()
+        elif (
+            str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
+            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
+            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
+        ):
+            # SWEEP already had an honest closeout, so skip_to_close was
+            # suppressed. Drop it here or the next phase inherits it and
+            # becomes robustness_escalated.
             state.consume_pending_escalate_hint()
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
@@ -264,9 +313,15 @@ class MachinePhase(PhaseHandler):
         ):
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
         allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
+        target_phase = str(target or "").strip().upper()
         cancelled = await self.tasks.cancel_queued_not_allowed(
             allowed_kinds=allowed_kinds,
             reason=f"phase_transition:{str(prior or '').strip().upper()}->{target}",
+            spare_queued=lambda _task_id, kind, params: _geak_rebench.spare_geak_rebench_on_phase_transition(
+                target_phase=target_phase,
+                kind=kind,
+                params=params,
+            ),
         )
         if cancelled:
             log.info(

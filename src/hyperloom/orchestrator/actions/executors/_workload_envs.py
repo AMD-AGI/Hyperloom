@@ -31,7 +31,8 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
-    filter_benchmark_env_mapping,
+    BENCHMARK_SECRET_ENV_NAMES,
+    BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -758,7 +759,7 @@ def materialize_config_with_envs(
         extra_envs: Overrides applied last over any computed env values.
         remove_args: Inherited framework server args to remove before launch.
         unset_envs: Inherited env names to remove before applying
-            ``extra_envs``.
+            ``extra_envs``; workload pins are refused.
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
@@ -1084,12 +1085,6 @@ def materialize_config_with_envs(
                 ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
             if tracelens_patch_ok:
-                profiler_flags.append(
-                    (
-                        "capture_torch_profiler",
-                        "--profiler-config.capture_torch_profiler True",
-                    )
-                )
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
             # vLLM's AsyncLLM-side profiler tracks no iterations and captures the
             # whole start_profile..stop_profile range, so it has to stay off
@@ -1525,6 +1520,10 @@ def materialize_config_with_envs(
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
+        if str(key).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("Refusing to unset pinned benchmark env %s", key)
+            continue
         envs.pop(str(key), None)
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:
@@ -1564,12 +1563,15 @@ def materialize_config_with_envs(
             # _finalize_framework_server_args already ran, so re-apply the sink-side
             # guard it ends with rather than shipping an unvalidated string.
             envs[framework_env] = validate_server_args_shell_safe(merged)
-    filtered_envs = filter_benchmark_env_mapping(envs)
-    dropped_credentials = sorted(set(envs) - set(filtered_envs))
+    # The rendered YAML is persisted, so credentials must not reach it.
+    filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
+        envs,
+        allow_predicate=lambda key: key not in BENCHMARK_SECRET_ENV_NAMES,
+    )
     if dropped_credentials:
         log.warning(
             "Dropping control-plane credentials from benchmark envs: %s",
-            ", ".join(dropped_credentials),
+            ", ".join(sorted(dropped_credentials)),
         )
         envs.clear()
         envs.update(filtered_envs)

@@ -211,7 +211,7 @@ def _resolve_pd_args(
     pn = _intf(pd_prefill_nodes, "last_restart_pd_prefill_nodes", "PD_PREFILL_NODES")
     dn = _intf(pd_decode_nodes, "last_restart_pd_decode_nodes", "PD_DECODE_NODES")
     # Resume fallback: the restart path launches with ``pn or len(pods)`` but
-    # persists the raw arg (often 0), so a --resume that also lost the
+    # persists the raw arg (often 0), so a resume that also lost the
     # ``$PD_*_NODES`` env would leave pn/dn at 0 and wrongly fail the
     # disaggregated gate below (e.g. auto-roofline after resume). Recover the
     # group sizes from the discovered per-role pod lists the hand-off

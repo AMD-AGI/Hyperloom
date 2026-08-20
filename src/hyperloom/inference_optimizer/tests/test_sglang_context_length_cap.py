@@ -22,6 +22,9 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     inject_sglang_context_length,
     resolve_sglang_context_cap,
 )
+from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    validate_warm_replay_context_length,
+)
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
 )
@@ -251,6 +254,64 @@ def test_inject_does_not_override_existing(tmp_path, existing):
     assert out == existing
     assert out.count("--context-length") == 1
     assert "8192" not in out
+
+
+def test_warm_replay_rejects_undersized_context_length() -> None:
+    with pytest.raises(ValueError, match="context_length=6144 < isl\\+osl=9216"):
+        validate_warm_replay_context_length(
+            "--context-length 6144 --watchdog-timeout 1800",
+            "sglang",
+            8192,
+            1024,
+        )
+
+
+def test_warm_replay_rejects_undersized_last_duplicate_context() -> None:
+    with pytest.raises(ValueError, match="context_length=6144 < isl\\+osl=9216"):
+        validate_warm_replay_context_length(
+            "--context-length 11264 --foo bar --context-length=6144",
+            "sglang",
+            8192,
+            1024,
+        )
+
+
+def test_warm_replay_preserves_compatible_context_length() -> None:
+    original = "--context-length 12288 --foo bar"
+    out, evidence = validate_warm_replay_context_length(
+        original,
+        "sglang",
+        8192,
+        1024,
+    )
+
+    assert out == original
+    assert evidence["status"] == "compatible"
+
+
+def test_warm_replay_preserves_compatible_context_whitespace() -> None:
+    original = "  --context-length 12288 --foo bar  "
+
+    out, evidence = validate_warm_replay_context_length(
+        original,
+        "sglang",
+        8192,
+        1024,
+    )
+
+    assert out == original
+    assert evidence["status"] == "compatible"
+
+
+def test_warm_replay_rejects_target_above_max_model_len() -> None:
+    with pytest.raises(ValueError, match="exceeds MAX_MODEL_LEN"):
+        validate_warm_replay_context_length(
+            "--context-length 6144",
+            "sglang",
+            8192,
+            1024,
+            max_model_len=8192,
+        )
 
 
 @pytest.mark.parametrize("framework", ["vllm", "atom"])

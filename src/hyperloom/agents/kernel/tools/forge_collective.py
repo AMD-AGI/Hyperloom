@@ -198,6 +198,14 @@ def _build_cmd(
         raise ValueError("deadline_unix must be a positive integer")
     _add_opt(cmd, deadline_unix, "--deadline-unix")
     _add_opt(cmd, args.get("agent_timeout_sec"), "--agent-timeout-sec")
+    # Match forge_submit / forge-fusion: pin the provider when the coordinator
+    # resolved one, and disable the silent Claude fallback for Codex so a
+    # missing SDK fails here instead of degrading into an unauthenticated run.
+    agent_backend = str(args.get("agent_backend") or "").strip().lower()
+    if agent_backend == "codex":
+        cmd.extend(["--agent-backend", "codex", "--agent-fallback-provider", "none"])
+    elif agent_backend == "claude":
+        cmd.extend(["--agent-backend", "claude"])
     _add_opt(cmd, args.get("llm_model"), "--model")
     _add_opt(cmd, str(output_dir / "forge_result.json"), "--result-json")
     _add_opt(cmd, str(output_dir / "experiments"), "--experiments-dir")

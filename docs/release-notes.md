@@ -1,20 +1,87 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b1, including the remote Recipe KB Store cutover, session-wide accuracy-eval opt-out, Claude subscription OAuth support, and enterprise gateway header handling."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b2, including the official upstream vLLM ROCm image, the Magpie v0.2.0 upgrade, the single remote Recipe KB Store contract, the consolidated action catalogue, and a set of breaking removals."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0b1 (`pyproject.toml`). For the
+The current packaged version is 1.0.0b2 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
-## Unreleased
+## Hyperloom 1.0.0b2 release
+
+The [1.0.0b2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2)
+builds on 1.0.0b1 with the move to the official upstream vLLM ROCm image, the
+Magpie v0.2.0 benchmark upgrade, a single current remote Recipe KB Store
+contract, and a consolidation pass that removes several surfaces that never had
+a runtime effect. It carries breaking changes; review the list below before
+upgrading.
+
+### 1.0.0b2 highlights
+
+- **Official upstream vLLM ROCm image**: every vLLM image reference moves from
+  `rocm/hyperloom:vllm-v0.27.1-rocm7.2.3` to `vllm/vllm-openai-rocm:v0.27.1`,
+  since AMD deprecated `rocm/vllm` and `rocm/vllm-dev`. The tag is a 1:1
+  replacement, but its entrypoint is `vllm serve`, so override it (for example
+  `--entrypoint tail`) when starting a long-running Hyperloom container. SGLang
+  images are unchanged.
+
+- **Magpie benchmark upgraded to v0.2.0**: the default benchmark dependency
+  moves from v0.1.0 to v0.2.0. Both the installer and the runtime preflight stay
+  pinned to the immutable v0.2.0 release commit, so installs remain
+  reproducible.
+
+- **One current remote Recipe KB Store contract**: remote mode reads a single
+  identity-addressed inference Recipe carrying replay config, the ordered patch
+  timeline, and nested kernel columns, then publishes one final CLOSE session
+  with verified artifacts under the same throughput champion. Degraded
+  configuration donors now require exact precision, and a permanently missing
+  owner patch is dead-lettered instead of blocking publication of the remaining
+  Recipe sections. Local Recipe storage and non-Recipe GBrain integrations are
+  unchanged.
+
+- **`KERNEL_OPT_BACKEND_ORDER` is the single kernel-backend switch**: the GEAK
+  gate no longer falls back to the persisted `shared_state.kernel_optimizer`
+  field, so the backend choice is identical on a resume. The
+  `KERNEL_OPT_BACKENDS` environment variable is removed; no production code read
+  it. **(Breaking)**
+
+- **Action metadata consolidated into code**: `actions/_meta/*.yaml` and
+  `orchestrator/actions/registry.py` are replaced by `ACTION_CATALOGUE` in
+  `inference_optimizer/protocol/action_surfaces.py`. The `preferred_backend`,
+  `preferred_model`, `max_turns`, and `params_schema` fields are dropped because
+  no runtime code read them; the operational `verdict_class` is kept.
+  **(Breaking)**
+
+- **Three unexecutable kernel actions removed**: `vendor_kernel_config`,
+  `operator_tuning`, and `deep_kernel_analysis` never had an executor, so every
+  request for them was answered with `unknown_kernel_kind`. Sessions recorded
+  under the old build that carry these names in `state.json` / `coordinator.db`
+  are no longer resumable, and no migration is provided. **(Breaking)**
+
+- **Write-only artifacts no longer produced**: `agent_transcript.jsonl`,
+  `orchestration_turns.jsonl`, `mn_input_params_*.json`, and the work_dir copy
+  of `semantic_audit.json` had no reader, and the first three persisted secrets
+  or raw LLM transcripts past a redactor that inspected values but not keys.
+  **(Breaking)**
+
+- **Magpie leak salvage is now opt-in**: salvage no longer defaults to
+  `/workspace/` and runs only when `$INFERENCE_OPTIMIZER_RESCUE_PATHS` is set.
+  The generic `{framework}_{gpu_type}.sh` scripts respect `$RESULT_DIR` and never
+  needed salvage, but a script pinned through `params.benchmark_script` that
+  hardcodes `/workspace/` now fails the task with `no_report` unless the
+  environment variable is set explicitly. **(Breaking)**
+
+- **`kernel_optimization.py` drops `--test-command` and `--test-harness-path`**:
+  the unittest-harness contract they fed had no reachable caller. An external
+  invoker still passing either flag now fails in argparse rather than being
+  silently ignored. **(Breaking)**
 
 ## Hyperloom 1.0.0b1 release
 

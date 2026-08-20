@@ -70,9 +70,8 @@ async def _run_reactor_mode(config: Config) -> None:
             pass
 
     log.info(
-        "Reactor mode running tick=%.1fs server=%s session_dir=%s",
+        "Reactor mode running tick=%.1fs session_dir=%s",
         config.standalone_tick_interval_s,
-        config.robustness_server_url or "(local-only)",
         config.session_dir,
     )
 
@@ -80,7 +79,7 @@ async def _run_reactor_mode(config: Config) -> None:
         while not stop.is_set():
             ctx = ReactorContext(
                 tick_index=0,
-                shared_state=SharedStateSnapshot(session_id=config.session_dir.name),
+                shared_state=SharedStateSnapshot(),
                 inbox=[],
                 now_unix=time.time(),
             )
@@ -122,7 +121,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
             :func:`_parse_args`. Defaults to ``None``.
     """
     _parse_args(argv)
-    config = await Config.discover()
+    config = Config.discover()
     await _run_reactor_mode(config)
 
 

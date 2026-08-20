@@ -13,8 +13,10 @@ Any phase → CLOSE on terminal/abort; ``recover`` is phase-orthogonal.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
@@ -219,7 +221,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         # FRAMEWORK_AGENT phase transitions.
         "framework_agent_phase_done",  # FRAMEWORK_AGENT → EXPLORE normal completion (no more candidates)
         "framework_agent_plateau",  # FRAMEWORK_AGENT → EXPLORE; N consecutive resolved candidates with no KEEP (benchmarked or not)
-        "framework_agent_force_exit_low_budget",  # FRAMEWORK_AGENT → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
         "framework_agent_budget_cap",  # FRAMEWORK_AGENT → EXPLORE; per-phase wall-clock budget fraction reached
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
         "cycle_reloop",  # SWEEP → FRAMEWORK/EXPLORE; opens a new macro-cycle while budget + leverage remain
@@ -234,6 +235,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "recipe_kb_drain_failed",
         "recipe_kb_commit_failed",
         "prelude_baseline_failed",
+        "prelude_cold_anchor_low_budget",  # PRELUDE → CLOSE; only a cold anchor, nothing comparable to it affordable
         "prelude_policy_loop",
         "policy_loop",
         "crash_threshold_exceeded",
@@ -266,6 +268,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "robustness_escalated",
         "user_stop_requested",
         "prelude_baseline_failed",
+        "prelude_cold_anchor_low_budget",
         "prelude_policy_loop",
         "time_exhausted_during_prelude",
         "recipe_kb_t0_failed",
@@ -282,7 +285,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "explore_force_exit_low_budget",
         "framework_agent_phase_done",
         "framework_agent_plateau",
-        "framework_agent_force_exit_low_budget",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",
         # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
@@ -351,6 +353,34 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_CLOSE: 0.02,
 }
 
+# Share of the session held back for the phases that actually produce a result.
+#
+# PRELUDE's ``DEFAULT_PHASE_BUDGET_PCT`` entry is 3%, but nothing enforced it:
+# :func:`exit_normal_prelude` tests only whether a baseline landed, so the phase
+# ran to whatever its contents cost. Two sessions on unrelated models (different
+# quantization, different PRELUDE composition -- one baseline-dominated, one
+# split with a TraceLens roofline) spent 73.8% and 72.8% of a three-hour budget
+# in it, and both reached FRAMEWORK_AGENT with ~47 minutes left against its
+# 108-minute entry threshold. Both budgets were honoured; both sessions produced
+# nothing. Stopping the run on time is necessary and not sufficient -- the
+# phases that spend the budget have to be the ones that produce the result.
+#
+# This bounds the preparation rather than the session, and it is deliberately
+# looser than 3%: a baseline that legitimately takes an hour should still run,
+# it just cannot also buy an 80-minute roofline out of the optimization phases'
+# time.
+#
+# A second bound used to sit beside it -- a ceiling on PRELUDE's own banked
+# spend -- and it was removed because the two clocks it straddled can disagree.
+# Banked phase spend accumulates against the phase ledger; the reserve is read
+# off the session clock. A session resumed with a reanchored budget restarts the
+# session clock and carries the ledger over, so preparation was born over its
+# ceiling with hours genuinely left, and every resumed session was refused the
+# measured half of its baseline. The reserve alone answers the question that
+# decides the matter: after this work, is enough left for the phases that
+# produce the result?
+OPTIMIZATION_RESERVE_PCT: float = 0.50
+
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container
 # lifetime. Used both as the global deadline and as the basis for the absolute
 # per-phase cap so an unbounded run still forces phase rotation.
@@ -369,37 +399,16 @@ DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
-# EXPLORE hard force-exit thresholds (IR-6 HARD time gate; overrides plateau).
-# Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
-DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
+# EXPLORE hard force-exit (overrides plateau). Fires on the unspent fraction of
+# EXPLORE's own charge-back budget, which already reserves the later phases'
+# share, so no session-remaining floor belongs beside it.
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
-# FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
+# FRAMEWORK plateau knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT.
 DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 5
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
-import os as _os_fw_ratio  # noqa: E402
+import os as _os_env  # noqa: E402
 
-
-def _default_framework_force_exit_ratio() -> float:
-    """FRAMEWORK force-exit ratio; env-overridable via
-    ``INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO``.
-
-    Default 0.6 reserves the last 40% of budget for later phases; lower it when
-    the FRAMEWORK pipeline is the primary objective so it can process forced
-    candidates instead of force-exiting with a full pending queue.
-    """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", "") or "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            if 0.0 <= v <= 1.0:
-                return v
-        except (TypeError, ValueError):
-            pass  # malformed env override; fall through to the 0.6 default
-    return 0.6
-
-
-DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved
 # candidates without a KEEP (including non-benchmarked terminal outcomes), the
 # phase exits to EXPLORE. A KEEP — or a macro-cycle boundary — resets it.
@@ -424,7 +433,7 @@ def _default_cycle_reloop_min_remaining_sec() -> float:
     smaller of it and :data:`_CYCLE_RELOOP_BUDGET_RATIO` of their total budget,
     so a short session is not blocked by a threshold it can never satisfy.
     """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
+    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
     if raw:
         try:
             v = float(raw)
@@ -448,13 +457,32 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
 
-# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. The
-# KEEP threshold, stack-stable threshold (=keep/2) and convergence gain bar all
-# ride this single curve.
+# Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. It
+# is injected at dispatch for explore, integrate_patch and framework_agent, and
+# also sets the stack-stable threshold (=keep/2) and the convergence gain bar.
+# The kernel-owned families hold their own fixed thresholds instead.
 KEEP_THRESHOLD_FLOOR_PCT: float = 0.1
 KEEP_THRESHOLD_SPAN_PCT: float = 0.9
 # Multi-node baseline noise floor is ~2x single-node; scale the curve to match.
 MULTI_NODE_KEEP_THRESHOLD_FACTOR: float = 2.0
+
+
+def resolve_keep_threshold(state: Any) -> float:
+    """Current-cycle KEEP threshold for every path that injects ``keep_threshold_pct``.
+
+    Reads ``macro_cycle`` off ``state`` and the multi-node flag off the
+    environment so callers pass nothing but the state.
+
+    Args:
+        state: The SharedState (or any object carrying ``macro_cycle``).
+
+    Returns:
+        The gain percentage a variant must clear to be KEPT this cycle.
+    """
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    return decaying_keep_threshold_pct(cycle, multi_node=is_multi_node())
 
 
 def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -> float:
@@ -632,7 +660,7 @@ def _kernel_idle_max_ticks() -> int:
     still winding down promptly once candidates are genuinely exhausted, instead
     of spinning until the KERNEL wall-clock cap.
     """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
+    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
     try:
         val = int(raw)
         return val if val >= 1 else 3
@@ -655,7 +683,7 @@ def _kernel_idle_min_seconds() -> float:
     longer than any dispatch gap a healthy phase produces, while still cutting
     hours off a phase that has genuinely stopped moving.
     """
-    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
+    raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", "") or "").strip()
     try:
         val = float(raw)
         return val if val > 0.0 else 600.0
@@ -732,13 +760,18 @@ def normalize_budget_pct(
 ) -> dict[str, float]:
     """Return a sanitized ``phase -> pct`` mapping (budgets are upper bounds, not renormalized to 1.0).
 
+    ``0.0`` is kept, not dropped: it is the sentinel
+    :func:`redistribute_budget_pct` writes for a phase the run turned off, and
+    overlaying the default back on it would leak that phase's share into the
+    charge-back denominator of every earlier phase.
+
     Args:
         budget (dict[str, float] | None): Raw ``phase -> pct`` overrides;
             unknown phases and out-of-range / unparseable values are dropped.
 
     Returns:
         dict[str, float]: The defaults overlaid with the valid overrides (each
-        in the ``(0.0, 1.0]`` range).
+        in the ``[0.0, 1.0]`` range).
     """
     out = dict(DEFAULT_PHASE_BUDGET_PCT)
     if not budget:
@@ -751,7 +784,7 @@ def normalize_budget_pct(
             f = float(val)
         except (TypeError, ValueError):
             continue
-        if not (0.0 < f <= 1.0):
+        if not (0.0 <= f <= 1.0):
             continue
         out[canon] = f
     return out
@@ -847,6 +880,19 @@ def _phase_started_unix(state: Any) -> float:
         return 0.0
 
 
+def _resume_boundary_unix(state: Any) -> float:
+    """Return when the current run leg began, i.e. the most recent ``--resume``.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``resumed_ts``.
+
+    Returns:
+        float: Leg start in seconds since the epoch, or ``0.0`` for a session
+        that has only ever run once (or an unparseable stamp).
+    """
+    return max(0.0, to_unix(getattr(state, "resumed_ts", ""), 0.0) or 0.0)
+
+
 def _kernel_idle_since_unix(state: Any) -> float:
     """Return when the current KERNEL idle streak opened, defensively coerced.
 
@@ -935,6 +981,18 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     Returns ``0.0`` when the phase start timestamp is unset (phase not yet
     entered) so callers can treat "not started" as zero elapsed.
 
+    Exiting the process is not a phase transition, so ``phase_started_unix``
+    survives a ``--resume`` and the entry it stamps spans both run legs. The
+    current leg's boundary (:func:`_resume_boundary_unix`) therefore floors the
+    segment: the phase was not executing while nothing was, and a session
+    resumed days later would otherwise read as having overspent every phase
+    ceiling before it did any work. The floor only applies to the entry the
+    stop interrupted — a later entry stamps a newer ``phase_started_unix``.
+
+    The previous leg's own share of that entry is not measured here; a resume
+    banks it into ``phase_elapsed_totals`` when the stopped leg recorded when
+    it ended.
+
     Args:
         state (Any): Frozen SharedState view exposing ``phase_started_unix``.
         now_unix (float | None): Override for the current time; defaults to
@@ -946,6 +1004,7 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     started = _phase_started_unix(state)
     if started <= 0:
         return 0.0
+    started = max(started, _resume_boundary_unix(state))
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
 
@@ -959,9 +1018,14 @@ def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
     is deliberately excluded: :func:`phase_cumulative_seconds` adds the live
     segment itself, and double-counting it would over-charge the phase.
 
-    ``phase_history`` is capped, so a very long session reconstructs a LOWER
-    bound. That is the safe direction for a budget guard — it can under-charge a
-    resumed phase, but it can never invent time the phase did not spend.
+    The rebuild is an estimate, not a bound in either direction. ``phase_history``
+    is capped, so a very long session loses its oldest segments and is
+    under-charged. And no row marks the process exiting, so two rows either side
+    of a resume bound one "segment" spanning the idle gap between the legs, and
+    charge it to the phase the earlier row named — the over-charge direction
+    :func:`phase_elapsed_seconds` floors off the live segment. That floor reads
+    ``resumed_ts``, which dates the newest leg only; ``phase_history`` dates none
+    of them, so the rebuild cannot repeat it.
 
     Args:
         history (Any): The ``phase_history`` list; any other type yields ``{}``.
@@ -1082,20 +1146,27 @@ def _phase_budget_total_seconds(
             ``session_remaining_seconds`` / ``phase_elapsed_seconds``).
 
     Returns:
-        float | None: Effective total budget in seconds, or ``None`` when no
-        finite budget applies (unbounded window or the phase has no fraction).
+        float | None: Effective total budget in seconds, ``0.0`` when the phase
+        is explicitly allocated no budget, or ``None`` when no finite budget
+        applies (unbounded window, or an unset/unrecognized phase).
     """
     budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
     phase = (getattr(state, "phase", "") or "").strip().upper()
-    pct = float(budget.get(phase, 0.0))
-    if pct <= 0.0:
+    if phase not in budget:
         return None
+    pct = float(budget[phase])
+    if pct <= 0.0:
+        # Zero fraction = no time. ``None`` would read as "unbounded" to callers.
+        return 0.0
 
     session_remaining = session_remaining_seconds(state, now_unix=now_unix)
     if session_remaining is not None:
-        # Charge-back. remaining_at_entry reconstructs the time left when this
-        # phase started (session_remaining shrinks as phase_elapsed grows, so
-        # their sum is constant across the phase).
+        # Charge-back. remaining_at_entry reconstructs the time left when the
+        # phase's live segment opened: within one run leg session_remaining
+        # shrinks exactly as phase_elapsed grows, so their sum holds. A resume
+        # that keeps ``start_ts`` drops that sum by the idle gap between the
+        # legs — the session is charged for it, the phase is not — so a resumed
+        # phase charges back against a smaller, honest base.
         remaining_at_entry = max(0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix))
         if is_long_run(state):
             # Long bounded run: the per-cycle window caps the base as a planning
@@ -1185,12 +1256,17 @@ def phase_cap_seconds(
     :func:`is_long_run`.)
 
     Returns:
-        float | None: Cap in seconds, or ``None`` when no fraction applies.
+        float | None: Cap in seconds, ``0.0`` when the phase is explicitly
+        allocated no budget, or ``None`` when the phase is unset/unrecognized.
     """
     budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-    pct = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
-    if pct <= 0:
+    phase = (getattr(state, "phase", "") or "").upper()
+    if phase not in budget:
         return None
+    pct = float(budget[phase])
+    if pct <= 0.0:
+        # Zero fraction = no wall-clock allowed, as opposed to no cap at all.
+        return 0.0
     proportional = effective_max_minutes(state) * 60.0 * pct
     abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
     return float(min(proportional, abs_cap))
@@ -1226,24 +1302,37 @@ def phase_cap_exceeded(
     return phase_cumulative_seconds(state, now_unix=now_unix) >= cap
 
 
-# EXPLORE hard force-exit (HARD time gate)
 def session_remaining_seconds(
     state: Any,
     *,
     now_unix: float | None = None,
 ) -> float | None:
-    """Total wall-clock seconds remaining for the session (``None`` when ``max_minutes`` 0 or ``start_ts`` unparseable).
+    """Total wall-clock seconds remaining for the session (``None`` when unbounded).
+
+    Prefers a stamped ``deadline_unix`` when present so this agrees with
+    admission and the Coordinator loop, even when persisted ``max_minutes``
+    was truncated to 0. Falls back to ``start_ts + max_minutes`` for sessions
+    that predate the stamp.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes`` and
             ``start_ts``.
-        now_unix (float | None): Accepted for signature parity; the deadline is
-            computed against the current UTC time.
+        now_unix (float | None): Override for the current time; the deadline is
+            subtracted from this when stamped, otherwise compared against
+            ``start_ts``.
 
     Returns:
         float | None: Non-negative seconds left in the session, or ``None``
-        when ``max_minutes`` is 0 or ``start_ts`` is missing/unparseable.
+        when unbounded (no stamp and ``max_minutes`` is 0) or ``start_ts`` is
+        missing/unparseable.
     """
+    try:
+        deadline = float(getattr(state, "deadline_unix", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        deadline = 0.0
+    if deadline > 0.0:
+        now = float(now_unix) if now_unix is not None else time.time()
+        return max(0.0, deadline - now)
     mm = _max_minutes(state)
     if mm <= 0:
         return None
@@ -1271,70 +1360,39 @@ def session_remaining_seconds(
 def should_force_exit_explore(
     state: Any,
     *,
-    hours_remaining_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     budget_pct_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires (IR-6).
+    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires.
 
-    Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
-    pct ≤ budget_pct_threshold; ``evidence`` records which fired.
+    Fires when the unspent fraction of EXPLORE's own charge-back budget drops
+    to ``budget_pct_threshold`` or below. A freshly entered phase always reads
+    1.0, however little of the session is left.
 
     Args:
         state (Any): Frozen SharedState view.
-        hours_remaining_threshold (float): Session-hours-remaining gate;
-            non-positive disables it.
         budget_pct_threshold (float): Phase-budget-fraction gate; non-positive
-            disables it.
+            disables the force-exit entirely.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
 
     Returns:
         tuple[bool, dict[str, Any]]: ``(fired, evidence)`` — whether HARD
-        force-exit fires, and the evidence map recording which gate(s) fired.
+        force-exit fires, and the measurements behind that verdict.
     """
-    evidence: dict[str, Any] = {
-        "hours_remaining_threshold": float(hours_remaining_threshold),
-        "budget_pct_threshold": float(budget_pct_threshold),
-    }
-    fired = False
-    fired_reasons: list[str] = []
-
-    # Non-positive threshold = disabled; both disabled turns force-exit off.
-    hours_threshold_enabled = float(hours_remaining_threshold) > 0.0
-    pct_threshold_enabled = float(budget_pct_threshold) > 0.0
-
-    session_remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if session_remaining is not None and hours_threshold_enabled:
-        evidence["session_remaining_seconds"] = round(session_remaining, 2)
-        threshold_sec = float(hours_remaining_threshold) * 3600.0
-        if session_remaining <= threshold_sec:
-            fired = True
-            fired_reasons.append("session_remaining")
-
-    phase_remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if phase_remaining is not None:
-        # Fraction of the phase's EFFECTIVE total budget — same helper that
-        # produced phase_remaining, so numerator and denominator stay in the same
-        # units (charge-back against the session for short runs, against the
-        # cycle-window-capped base for long bounded runs, flat per-window for
-        # unbounded runs).
-        phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
-        if phase_total_sec and phase_total_sec > 0:
-            remaining_pct = phase_remaining / phase_total_sec
-            evidence["phase_remaining_pct"] = round(remaining_pct, 4)
-            evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
-            if pct_threshold_enabled and remaining_pct <= float(budget_pct_threshold):
-                fired = True
-                fired_reasons.append("phase_remaining_pct")
-
-    evidence["fired_reasons"] = fired_reasons
+    evidence: dict[str, Any] = {"budget_pct_threshold": float(budget_pct_threshold)}
+    phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    if not phase_total_sec:
+        evidence["fired_reasons"] = []
+        return False, evidence
+    phase_remaining = max(0.0, phase_total_sec - phase_cumulative_seconds(state, now_unix=now_unix))
+    remaining_pct = phase_remaining / phase_total_sec
+    evidence["phase_remaining_pct"] = round(remaining_pct, 4)
+    evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
+    fired = float(budget_pct_threshold) > 0.0 and remaining_pct <= float(budget_pct_threshold)
+    evidence["fired_reasons"] = ["phase_remaining_pct"] if fired else []
     return fired, evidence
 
 
@@ -1560,11 +1618,36 @@ def compute_plateau_kernel(
     }
 
 
+# Statuses on last_sweep / last_conc_sweep that exit_normal_sweep already
+# treats as SWEEP closeout. skip_to_close must not override those: the LLM
+# emits it when conc_sweep was refused, and mapping that to
+# robustness_escalated turns a successful run into a CI failure.
+_SWEEP_DONE_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed"})
+_CONC_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset(
+    {"succeeded", "partial", "completed", "skipped", "failed"}
+)
+
+
+def _sweep_has_recorded_closeout(state: Any) -> bool:
+    """Whether SWEEP already recorded a result the phase machine can close on."""
+    last_sweep = getattr(state, "last_sweep", None) or {}
+    if isinstance(last_sweep, dict):
+        if str(last_sweep.get("status") or "").lower() in _SWEEP_DONE_STATUSES:
+            return True
+    last_conc = getattr(state, "last_conc_sweep", None) or {}
+    if isinstance(last_conc, dict):
+        if str(last_conc.get("status") or "").lower() in _CONC_SWEEP_CLOSEOUT_STATUSES:
+            return True
+    return False
+
+
 # terminal / abort (global)
 def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
-    Priority: 1. ``skip_to_close`` → ``robustness_escalated``; 2. Coordinator ``stop_reason``.
+    Priority: 1. ``skip_to_close`` → ``robustness_escalated``, except in SWEEP
+    when a sweep/conc_sweep closeout is already recorded (the honest SWEEP
+    exit wins); 2. Coordinator ``stop_reason``.
 
     Args:
         state (Any): Frozen SharedState view exposing ``stop_reason`` and any
@@ -1576,6 +1659,9 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
+        current = (getattr(state, "phase", "") or "").strip().upper()
+        if current == PHASE_SWEEP and _sweep_has_recorded_closeout(state):
+            return None
         return "robustness_escalated", {
             "evidence": "llm_escalation",
             "hint": hint,
@@ -1588,6 +1674,25 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
             return sr, {"reason_origin": "shared_state.stop_reason", "vocab": "unknown"}
         return sr, {"reason_origin": "shared_state.stop_reason"}
     return None
+
+
+def _closing_phase_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Return a CLOSE stop when the wall-clock path has entered the closing phase.
+
+    PRELUDE with a baseline otherwise advances to FRAMEWORK_AGENT, whose
+    allowlist does not include ``report``. That transition would cancel the
+    closing report ``_enter_closing_phase`` just enqueued.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``closing_phase``.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("time_exhausted", evidence)``
+        when the closing phase is active, else ``None``.
+    """
+    if not bool(getattr(state, "closing_phase", False)):
+        return None
+    return "time_exhausted", {"reason_origin": "closing_phase"}
 
 
 # per-phase judgments
@@ -1688,12 +1793,8 @@ def compute_kernel_progress_fingerprint(
     import json
 
     attempts: list[list[str]] = []
-    for ledger in (
-        getattr(state, "kernel_opt_task_attempts", None),
-        getattr(state, "kernel_opt_attempts", None),
-    ):
-        if not isinstance(ledger, dict):
-            continue
+    ledger = getattr(state, "kernel_opt_task_attempts", None)
+    if isinstance(ledger, dict):
         for ledger_id, attempt in ledger.items():
             if not isinstance(attempt, dict):
                 continue
@@ -1814,11 +1915,7 @@ def kernel_work_pending(state: Any) -> bool:
             if source_file:
                 integrated_sources.add(source_file)
 
-    attempts = (
-        getattr(state, "kernel_opt_task_attempts", None)
-        or getattr(state, "kernel_opt_attempts", None)
-        or {}
-    )
+    attempts = getattr(state, "kernel_opt_task_attempts", None) or {}
     if not isinstance(attempts, dict):
         return False
     for ledger_id, attempt in attempts.items():
@@ -1911,6 +2008,14 @@ def enablement_engaged(state: Any) -> bool:
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``).
 
+    A figure whose hot pass was dropped for budget does not finish preparation,
+    even though it is a figure. It is depressed by the boot, the compile and the
+    graph capture it could not discard, so declaring PRELUDE done on it would
+    hand the optimization phases a denominator that was never the baseline. The
+    phase stays open instead, and what happens next is decided by the budget:
+    :func:`exit_cold_anchor_prelude` closes a session that still cannot afford a
+    comparable baseline, and one resumed with a fresh clock measures another.
+
     Args:
         state (Any): Frozen SharedState view exposing ``baseline_tput`` and the
             warm-replay outcome.
@@ -1921,13 +2026,417 @@ def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """
     if warm_replay_in_flight(state):
         return None
+    if bool(getattr(state, "baseline_measure_round_dropped", False)):
+        return None
     try:
         tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
     except (TypeError, ValueError):
         return None
     if tput > 0.0:
-        return "prelude_done", {"baseline_tput": tput}
+        return "prelude_done", {"baseline_tput": tput, **prelude_exit_viability(state)}
     return None
+
+
+def measured_seconds(state: Any, field: str) -> float | None:
+    """Read a duration an earlier round measured, or ``None`` when none did.
+
+    Every budget decision that prices work off a measurement has to tell "no
+    round has run" apart from "a round ran and took no time", because the first
+    means the decision cannot be made and the second would make everything look
+    free.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        field (str): The ``SharedState`` attribute holding the duration.
+
+    Returns:
+        float | None: The duration when one was measured, else ``None``.
+    """
+    try:
+        value = float(getattr(state, field, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
+
+
+def boot_cost_sec(state: Any) -> float | None:
+    """What bringing this workload's server up costs, or ``None`` when unmeasured.
+
+    The baseline's cold round is the one round that pays this in the open, so it
+    is where the figure comes from: its wall-clock less the part of it that ran
+    after the server reported ready.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Seconds spent before the server was ready, or ``None`` when
+        no round has reported the split (no baseline yet, or a scriptable
+        workload, which runs no server and so has no boot to separate).
+    """
+    total_sec = measured_seconds(state, "baseline_runtime_sec")
+    post_ready_sec = measured_seconds(state, "baseline_post_ready_runtime_sec")
+    if total_sec is None or post_ready_sec is None:
+        return None
+    return max(0.0, total_sec - post_ready_sec)
+
+
+def benchmark_cost_sec(state: Any) -> float | None:
+    """What one benchmark pass costs on a server already up, or ``None``.
+
+    Two figures can answer this and they are not equally good, so the better one
+    wins when it exists:
+
+    * The measured hot pass (``baseline_warm_runtime_sec``) is the answer, being
+      exactly a benchmark against a server someone else booted.
+    * The cold round's post-ready segment is the fallback, and it over-predicts:
+      that segment also pays the first request's kernel compile, which a pass on
+      a now-populated JIT cache does not. It is what a session has before its hot
+      pass runs, and over-predicting a benchmark is a smaller error than pricing
+      one at a whole cold round.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Seconds one benchmark pass costs, or ``None`` when neither
+        figure has been measured.
+    """
+    hot_sec = measured_seconds(state, "baseline_warm_runtime_sec")
+    if hot_sec is not None:
+        return hot_sec
+    return measured_seconds(state, "baseline_post_ready_runtime_sec")
+
+
+def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
+    """What a baseline round costs, or ``None`` when unmeasured.
+
+    A round is one or two passes and they are priced apart, because they buy
+    different things. The first brings a server up and benchmarks it cold, paying
+    the first request's kernel compile on the way; the session has measured that
+    whole pass directly, so it is read rather than reconstructed. The second
+    re-attaches to the server the first left running, so it costs a benchmark and
+    no second boot.
+
+    Reconstructing the first pass as boot-plus-hot-benchmark would drop the
+    compile and under-price the round, which matters because this figure guards
+    ignition while the post-warmup gate that follows prices the same work from
+    the pass it just watched. A round admitted here and then certainly refused
+    there costs a whole cold pass to learn nothing.
+
+    Reading the measured total also gives a price to rounds with no boot/benchmark
+    split to reconstruct from -- multi-node and scriptable workloads, which never
+    report one -- so those are gated rather than waved through.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        double_run (bool): Whether the round runs a warmup pass and a measured
+            one, or a single pass.
+
+    Returns:
+        float | None: Seconds the round costs, or ``None`` when the session has
+        measured nothing to price it from.
+    """
+    first_pass_sec = measured_seconds(state, "baseline_runtime_sec")
+    if first_pass_sec is None or not double_run:
+        return first_pass_sec
+    second_pass_sec = benchmark_cost_sec(state)
+    return first_pass_sec if second_pass_sec is None else first_pass_sec + second_pass_sec
+
+
+def one_more_measurement_sec(state: Any) -> float | None:
+    """What the next measured variant will cost, or ``None`` when unmeasured.
+
+    A variant is not a benchmark; it is a boot and then a benchmark. Its config
+    differs from the baseline's in the very knobs that decide how a server comes
+    up -- parallelism, quantization, kernel backends -- so it cannot re-attach to
+    a server already running and has to bring up its own.
+
+    This is the unit every "is there time left to use a result" question is asked
+    in, because a result nothing gets measured against is a result the session
+    could not have used.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Seconds one further measured variant costs, or ``None``
+        when either half of it is unmeasured.
+    """
+    boot_sec = boot_cost_sec(state)
+    benchmark_sec = benchmark_cost_sec(state)
+    if boot_sec is None or benchmark_sec is None:
+        return None
+    return boot_sec + benchmark_sec
+
+
+def prelude_exit_viability(state: Any) -> dict[str, Any]:
+    """Report whether the budget PRELUDE leaves behind can still fund one optimization round.
+
+    A session can honour its wall clock and still be over: both field sessions
+    left FRAMEWORK_AGENT ~47 minutes against a 108-minute threshold, and every
+    later phase then declined in turn, each for its own local reason. Nothing
+    said the plain thing — preparation had spent the run.
+
+    Stated here, on the exit that caused it, because this is the last moment
+    the answer is actionable and the first moment it is knowable: the baseline
+    is measured, so one benchmark round has a price rather than an estimate.
+
+    Priced as what an optimization round actually is -- one boot and one
+    benchmark (:func:`one_more_measurement_sec`) -- rather than as the baseline's
+    whole cold wall-clock, which also carries the first request's compile and so
+    over-reports a prepared session as a spent one. The cold figure remains the
+    fallback for a session whose baseline reported no split, with ``priced_by``
+    naming which ruler answered so two runs' evidence cannot be compared as
+    though they used the same one.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        dict[str, Any]: Evidence for the phase record; empty when the budget is
+        unbounded or no round has been measured.
+    """
+    usable = session_usable_seconds(state)
+    round_sec = one_more_measurement_sec(state)
+    priced_by = "boot_plus_benchmark"
+    if round_sec is None:
+        round_sec = measured_seconds(state, "baseline_runtime_sec")
+        priced_by = "cold_round"
+    if usable is None or round_sec is None:
+        return {}
+    return {
+        "session_usable_sec": round(usable, 1),
+        "measured_round_sec": round(round_sec, 1),
+        "priced_by": priced_by,
+        "affordable_rounds": round(usable / round_sec, 2),
+        "fits_one_optimization_round": usable >= round_sec,
+    }
+
+
+def append_phase_evidence_row(history: Any, *, key: str, row: dict[str, Any]) -> bool:
+    """Append ``row`` to the current phase's ``evidence[key]`` list.
+
+    Phases record what happened inside them on the newest ``phase_history``
+    row, which the session breakdown exports verbatim. Creates the ``evidence``
+    dict and the list under ``key`` when absent, and replaces a non-list value
+    rather than raising — a malformed row must not take a phase down.
+
+    Args:
+        history (Any): The ``phase_history`` list.
+        key (str): Evidence key holding the list of rows.
+        row (dict[str, Any]): The row to append.
+
+    Returns:
+        bool: ``True`` when the row landed; ``False`` when there was no usable
+        history row to attach it to.
+    """
+    if not isinstance(history, list) or not history:
+        return False
+    current = history[-1]
+    if not isinstance(current, dict):
+        return False
+    evidence = current.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+        current["evidence"] = evidence
+    rows = evidence.get(key)
+    if not isinstance(rows, list):
+        rows = []
+        evidence[key] = rows
+    rows.append(row)
+    return True
+
+
+def session_usable_seconds(state: Any) -> float | None:
+    """Seconds a unit of work may still claim, from the session's own accounting.
+
+    Prefers ``SharedState.session_budget_usable_sec`` — the single number
+    admission control and the grid deadline both read — so this policy cannot
+    disagree with them about how much budget is left. Falls back to the raw
+    remaining time for the frozen views and test doubles that expose attributes
+    only. Called rather than imported because ``shared_state`` imports this
+    module.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        float | None: Usable seconds, or ``None`` when the budget is unbounded.
+    """
+    getter = getattr(state, "session_budget_usable_sec", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001 — fall back to the attribute path
+            pass
+    return session_remaining_seconds(state)
+
+
+def prelude_affordable_seconds(state: Any) -> tuple[float | None, dict[str, Any]]:
+    """Seconds PRELUDE may still spend, and the numbers the figure is built from.
+
+    What is left on the session clock once the optimization phases' reserve
+    (:data:`OPTIMIZATION_RESERVE_PCT`) is held back, measured against the same
+    usable remainder every other budget decision reads, so the figure survives
+    a resume that reanchors the budget. Work that does not fit is not work the
+    session needed — it is work the session could not have used the result of.
+
+    Read directly by callers that have to *size* a unit of work rather than
+    judge one they can already price, which is the position a first baseline is
+    in: it has no measured runtime to judge against, but the share it may spend
+    is known before anything runs.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        tuple[float | None, dict[str, Any]]: The affordable seconds — which may
+        be negative once the reserve is eaten into — or ``None`` on an
+        unbounded budget, plus the evidence behind it.
+    """
+    max_sec = _max_minutes(state) * 60.0
+    usable = session_usable_seconds(state)
+    if max_sec <= 0.0 or usable is None:
+        return None, {"reason": "unbounded_budget"}
+    reserve_sec = max_sec * OPTIMIZATION_RESERVE_PCT
+    affordable_sec = usable - reserve_sec
+    return affordable_sec, {
+        "optimization_reserve_sec": round(reserve_sec, 1),
+        "session_usable_sec": round(usable, 1),
+        "affordable_sec": round(affordable_sec, 1),
+        "bound": "optimization_reserve",
+    }
+
+
+def prelude_can_afford(
+    state: Any,
+    *,
+    expected_cost_sec: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether PRELUDE can still buy an optional arm costing ``expected_cost_sec``.
+
+    The share itself is :func:`prelude_affordable_seconds`; this judges one cost
+    against it.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        expected_cost_sec (float): What the arm is expected to cost. Callers
+            should anchor this on something this session measured; the static
+            per-action estimates are calibrated on small models and understate
+            a large one by an order of magnitude.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(affordable, evidence)``. Evidence
+        carries the numbers behind the decision so a skip is legible in the log
+        and the phase record.
+    """
+    cost = max(0.0, float(expected_cost_sec or 0.0))
+    affordable_sec, evidence = prelude_affordable_seconds(state)
+    priced = {"expected_cost_sec": round(cost, 1), **evidence}
+    if affordable_sec is None:
+        return True, priced
+    return affordable_sec >= cost, priced
+
+
+def exit_time_exhausted_prelude(
+    state: Any,
+    *,
+    now_unix: float | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Route to CLOSE when the session clock runs out before PRELUDE lands a baseline.
+
+    ``time_exhausted_during_prelude`` was in the terminal-reason vocabulary and
+    in the report's reason glossary, but no code ever assigned it: the state
+    machine had a word for this failure and no way to reach it. A session that
+    burns its whole budget preparing then read as an ordinary exit.
+
+    Only fires while PRELUDE is still incomplete. Once a baseline exists the
+    later phases have their own force-exits, and reporting the run as "never
+    began optimizing" would be false.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        now_unix (float | None): Override for the current time.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("time_exhausted_during_prelude",
+        evidence)`` when the budget is gone, else ``None``.
+    """
+    usable = session_usable_seconds(state)
+    if usable is None or usable > 0.0:
+        return None
+    return "time_exhausted_during_prelude", {
+        "session_usable_sec": round(usable, 1),
+        "prelude_spent_sec": round(
+            phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
+            1,
+        ),
+    }
+
+
+def exit_cold_anchor_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Route to CLOSE when PRELUDE could only produce a cold anchor.
+
+    A baseline's hot pass is dropped when the budget cannot cover it together with
+    one variant to read against it. What survives is the cold pass's figure, and
+    it is depressed: it carries the server boot, the first request's kernel
+    compile and the graph capture in its throughput denominator.
+
+    Continuing on it is worse than stopping. Every variant measured against a
+    depressed denominator reads as an improvement over a baseline that was never
+    the baseline, so the session would spend the rest of its clock producing
+    findings that a later run cannot reproduce. Stopping keeps the number and the
+    marker that says what it is.
+
+    Fires only on the dropped-pass marker, not on a cold figure as such: a session
+    configured for a single-round baseline reports a cold figure by design, and
+    its comparisons are consistent because everything downstream is measured the
+    same way.
+
+    And only while the budget still cannot buy a comparable baseline. A session
+    resumed with a fresh clock carries the earlier leg's marker but not its
+    shortfall, and it can now do the thing it was stopped for: measure a hot
+    baseline. Firing on the marker alone would send it straight back to CLOSE on
+    the strength of a constraint that no longer holds, and no later baseline could
+    ever clear the marker because none would run.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("prelude_cold_anchor_low_budget",
+        evidence)`` when the hot pass was dropped and still cannot be afforded,
+        else ``None``.
+    """
+    if not bool(getattr(state, "baseline_measure_round_dropped", False)):
+        return None
+    usable = session_usable_seconds(state)
+    if usable is None:
+        return None
+    # Without the boot/benchmark split -- a scriptable workload runs no server, so
+    # it has no ready boundary to split on -- the cold round's whole wall-clock
+    # stands in for each half, the same upper bound the round's own gate falls
+    # back to. Undecidable rather than assumed only when nothing was measured at
+    # all, which cannot happen with the marker set but is not worth closing on.
+    cold_sec = measured_seconds(state, "baseline_runtime_sec")
+    round_sec = (
+        baseline_round_cost_sec(
+            state,
+            double_run=bool(getattr(state, "baseline_double_run", False)),
+        )
+        or cold_sec
+    )
+    use_sec = one_more_measurement_sec(state) or cold_sec
+    if round_sec is None or use_sec is None:
+        return None
+    if usable >= round_sec + use_sec:
+        return None
+    return "prelude_cold_anchor_low_budget", {
+        "baseline_anchor": "cold",
+        "retry_round_sec": round(round_sec, 1),
+        **prelude_exit_viability(state),
+    }
 
 
 def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
@@ -1956,27 +2465,6 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
-def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
-    """Detect a PRELUDE-aborting stop reason on the state.
-
-    Recognizes terminal stop reasons (e.g. ``recipe_kb_t0_failed``,
-    ``time_exhausted_during_prelude``) so phase history captures the
-    boundary.
-
-    Args:
-        state: Object exposing a ``stop_reason`` attribute.
-
-    Returns:
-        A ``(reason, metadata)`` tuple when an abort reason is present,
-        otherwise ``None``.
-    """
-    # Treat these stop reasons as a PRELUDE abort so phase_history records it.
-    sr = (getattr(state, "stop_reason", "") or "").strip()
-    if sr in ("recipe_kb_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
-        return sr, {"reason_origin": "shared_state.stop_reason"}
-    return None
-
-
 def exit_normal_explore(
     state: Any,
     *,
@@ -1985,7 +2473,6 @@ def exit_normal_explore(
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
     plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
     """EXPLORE normal exit.
@@ -2005,8 +2492,6 @@ def exit_normal_explore(
             which the plateau gain arm is active.
         plateau_empty_streak_threshold: Consecutive empty specialist rounds
             required for the plateau streak arm.
-        force_exit_hours_remaining (float): Session-hours-remaining force-exit
-            threshold.
         force_exit_budget_pct (float): Phase-budget-fraction force-exit
             threshold.
 
@@ -2016,7 +2501,6 @@ def exit_normal_explore(
     """
     forced, force_ev = should_force_exit_explore(
         state,
-        hours_remaining_threshold=force_exit_hours_remaining,
         budget_pct_threshold=force_exit_budget_pct,
         budget_pct=budget_pct,
         now_unix=now_unix,
@@ -2182,7 +2666,17 @@ def exit_normal_sweep(
         if cs_status == "failed":
             return "conc_sweep_failed", {"conc_sweep_status": cs_status}
         if cs_status in ("succeeded", "partial", "completed", "skipped"):
-            return "conc_sweep_done", {"conc_sweep_status": cs_status}
+            evidence: dict[str, Any] = {"conc_sweep_status": cs_status}
+            # A sweep that declined to run is also terminal, and the exit
+            # reason alone cannot tell the two apart afterwards. was_skipped
+            # covers both declining and spending the whole budget without a
+            # comparable pair, so it is only carried with the flag that
+            # separates them (see kernel.conc_sweep.conc_sweep_declined_to_run).
+            if last_conc.get("was_skipped"):
+                evidence["conc_sweep_was_skipped"] = True
+                evidence["conc_sweep_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
+                evidence["conc_sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
+            return "conc_sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
         state,
         budget_pct=budget_pct,
@@ -2397,27 +2891,20 @@ def _framework_agent_plateau_streak_threshold() -> int:
 def exit_normal_framework_agent(
     state: Any,
     *,
-    max_hours: float | None = None,
     now_unix: float | None = None,
-    force_exit_hours_remaining_ratio: float = (DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO),
     budget_pct: dict[str, float] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """FRAMEWORK normal exit.
 
-    Priority: 0. HARD force-exit when remaining < ratio*max_hours →
-    ``framework_agent_force_exit_low_budget``; 0.5. per-phase budget cap reached →
-    ``framework_agent_budget_cap``; 1. plateau when
-    :func:`_framework_agent_consecutive_no_keep` ≥ threshold →
-    ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else ``None``.
+    Priority: 0. per-phase budget cap reached → ``framework_agent_budget_cap``;
+    1. plateau when :func:`_framework_agent_consecutive_no_keep` ≥ threshold →
+    ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else
+    ``None``.
 
     Args:
-        state (Any): Frozen SharedState view; may expose a ``remaining_minutes``
-            callable and ``framework_agent_phase_done`` flag.
-        max_hours (float | None): Session wall-clock budget in hours; enables
-            the force-exit gate when positive.
+        state (Any): Frozen SharedState view; may expose a
+            ``framework_agent_phase_done`` flag.
         now_unix (float | None): Override for the current time.
-        force_exit_hours_remaining_ratio (float): Fraction of ``max_hours``
-            below which the force-exit gate fires.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct``. Enables the per-phase wall-clock cap.
 
@@ -2425,28 +2912,6 @@ def exit_normal_framework_agent(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
         FRAMEWORK exit, or ``None`` when the phase should continue.
     """
-    if max_hours and max_hours > 0:
-        remaining_min_fn = getattr(state, "remaining_minutes", None)
-        if callable(remaining_min_fn):
-            try:
-                remaining_minutes = float(remaining_min_fn(now_unix=now_unix))
-            except TypeError:
-                remaining_minutes = float(remaining_min_fn())
-            except Exception:  # noqa: BLE001
-                remaining_minutes = float("inf")
-        else:
-            remaining_minutes = float("inf")
-        threshold_minutes = float(force_exit_hours_remaining_ratio) * float(max_hours) * 60.0
-        if remaining_minutes < threshold_minutes:
-            return "framework_agent_force_exit_low_budget", {
-                "evidence": "force_exit",
-                "remaining_minutes": remaining_minutes,
-                "threshold_minutes": threshold_minutes,
-                "hours_remaining_ratio": float(force_exit_hours_remaining_ratio),
-                "max_hours": float(max_hours),
-                "pending_candidate_count": _framework_agent_pending_candidate_count(state),
-            }
-
     # Per-phase wall-clock budget cap: rotate to EXPLORE once the phase has
     # burned its share so it cannot monopolise the run.
     if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
@@ -2509,11 +2974,11 @@ def compute_next_phase(
     now_unix: float | None = None,
     framework_agent_phase_enabled: bool = False,
     explore_enabled: bool = True,
-    max_hours: float | None = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): global terminal first, then abort > exit_terminal > exit_normal.
+    Priority (Inv-8.2): global terminal first, then the wall-clock closing
+    phase, then exit_terminal > exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
@@ -2524,8 +2989,6 @@ def compute_next_phase(
         framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase runs
             after PRELUDE.
         explore_enabled (bool): Whether the EXPLORE phase is enabled.
-        max_hours (float | None): Session wall-clock budget in hours (used by
-            the FRAMEWORK force-exit gate).
 
     Returns:
         tuple[str, str, dict[str, Any]] | None: ``(next_phase, reason,
@@ -2540,14 +3003,27 @@ def compute_next_phase(
         reason, evidence = terminal
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
 
+    closing = _closing_phase_terminal(state)
+    if closing is not None and current != PHASE_CLOSE:
+        reason, evidence = closing
+        return PHASE_CLOSE, reason, {"terminal": True, **evidence}
+
     if current == PHASE_PRELUDE:
-        ab = abort_prelude(state)
-        if ab is not None:
-            return PHASE_CLOSE, ab[0], {"terminal": True, **ab[1]}
         term = exit_terminal_prelude(state)
         if term is not None:
             return PHASE_CLOSE, term[0], {"terminal": True, **term[1]}
+        # Asked before the normal exit, which sees only that a figure exists: a
+        # cold anchor is a figure the later phases cannot honestly compare to.
+        cold = exit_cold_anchor_prelude(state)
+        if cold is not None:
+            return PHASE_CLOSE, cold[0], {"terminal": True, **cold[1]}
         norm = exit_normal_prelude(state)
+        if norm is None:
+            # No baseline and no clock left: name the failure instead of
+            # letting the run read as an ordinary exit.
+            exhausted = exit_time_exhausted_prelude(state, now_unix=now_unix)
+            if exhausted is not None:
+                return PHASE_CLOSE, exhausted[0], {"terminal": True, **exhausted[1]}
         if norm is not None:
             if framework_agent_phase_enabled:
                 return PHASE_FRAMEWORK_AGENT, norm[0], norm[1]
@@ -2566,14 +3042,7 @@ def compute_next_phase(
     if current == PHASE_FRAMEWORK_AGENT:
         norm = exit_normal_framework_agent(
             state,
-            max_hours=max_hours,
             now_unix=now_unix,
-            force_exit_hours_remaining_ratio=float(
-                overrides.get(
-                    "framework_agent_force_exit_hours_ratio",
-                    DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO,
-                )
-            ),
             budget_pct=budget_pct,
         )
         if norm is not None:
@@ -2609,12 +3078,6 @@ def compute_next_phase(
                 overrides.get(
                     "explore_empty_streak",
                     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-                )
-            ),
-            force_exit_hours_remaining=float(
-                overrides.get(
-                    "force_exit_hours_remaining",
-                    DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
                 )
             ),
             force_exit_budget_pct=float(
@@ -2857,8 +3320,55 @@ def make_lifecycle_event(
 
 
 # Phase-transition / lifecycle write-owner functions (take ``state`` first and
-# own the phase_history / lifecycle bookkeeping). ``SharedState`` exposes
-# forwarding shims so existing callers reach these.
+# own the phase_history / lifecycle bookkeeping). ``SharedState`` keeps
+# forwarding shims for the two that were once its methods, so existing
+# ``state.record_*(...)`` call sites still reach them; ``bank_phase_segment``
+# never was one and is called by name, from here and from the resume path.
+def bank_phase_segment(state, *, until_unix: float) -> float:
+    """Bank the current phase's live segment, ending at ``until_unix``, into the durable totals.
+
+    ``phase_started_unix`` holds the live segment and is overwritten by the next
+    phase entry, so a phase's spend only survives once it is banked here. Called
+    at every transition out of a phase, and by a resume for the segment the
+    stopped leg never transitioned out of.
+
+    Args:
+        state: The live SharedState; ``phase_elapsed_totals`` (and the EXPLORE
+            accumulator) are mutated in place.
+        until_unix (float): When the segment ended, in seconds since the epoch.
+
+    Returns:
+        float: Seconds banked. ``0.0`` when no phase is set, which is the very
+        first transition of a fresh session — it has no segment to bank.
+    """
+    phase = (getattr(state, "phase", "") or "").strip().upper()
+    if not phase:
+        return 0.0
+    segment = phase_elapsed_seconds(state, now_unix=until_unix)
+    totals = getattr(state, "phase_elapsed_totals", None)
+    totals = dict(totals) if isinstance(totals, dict) else {}
+    try:
+        banked = max(0.0, float(totals.get(phase, 0.0) or 0.0))
+    except (TypeError, ValueError):
+        banked = 0.0
+    totals[phase] = banked + segment
+    state.phase_elapsed_totals = totals
+    # EXPLORE keeps its own accumulator: it carries a tri-state "unknown" for
+    # legacy resumes that status telemetry reports as absent, whereas
+    # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
+    # would read that as "no cap". The two answer different questions.
+    if phase == PHASE_EXPLORE:
+        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
+        if raw_accumulated is not None:
+            try:
+                accumulated = float(raw_accumulated or 0.0)
+            except (TypeError, ValueError):
+                state.explore_elapsed_accum_s = None
+            else:
+                state.explore_elapsed_accum_s = accumulated + segment
+    return segment
+
+
 def record_phase_transition(
     state,
     *,
@@ -2889,35 +3399,9 @@ def record_phase_transition(
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
-    if from_phase:
-        # Bank the finished segment for EVERY phase so the budget guards can
-        # charge a phase for the whole run instead of the current entry. Empty
-        # ``from_phase`` is the very first transition of a fresh session, which
-        # has no segment to bank.
-        totals = getattr(state, "phase_elapsed_totals", None)
-        totals = dict(totals) if isinstance(totals, dict) else {}
-        try:
-            banked = max(0.0, float(totals.get(from_phase, 0.0) or 0.0))
-        except (TypeError, ValueError):
-            banked = 0.0
-        totals[from_phase] = banked + phase_elapsed_seconds(state, now_unix=now_unix)
-        state.phase_elapsed_totals = totals
-    # EXPLORE keeps its own accumulator: it carries a tri-state "unknown" for
-    # legacy resumes that status telemetry reports as absent, whereas
-    # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
-    # would read that as "no cap". The two answer different questions.
-    if from_phase == PHASE_EXPLORE:
-        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
-        if raw_accumulated is not None:
-            try:
-                accumulated = float(raw_accumulated or 0.0)
-            except (TypeError, ValueError):
-                state.explore_elapsed_accum_s = None
-            else:
-                state.explore_elapsed_accum_s = accumulated + phase_elapsed_seconds(
-                    state,
-                    now_unix=now_unix,
-                )
+    # Bank the finished segment for EVERY phase so the budget guards can charge
+    # a phase for the whole run instead of the current entry.
+    bank_phase_segment(state, until_unix=now_unix)
     row = make_history_row(
         from_phase=from_phase,
         to_phase=to_phase,
@@ -3034,8 +3518,8 @@ def record_lifecycle_event(
 
 __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
-    "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
     "DEFAULT_PHASE_BUDGET_PCT",
+    "OPTIMIZATION_RESERVE_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
@@ -3073,17 +3557,17 @@ __all__ = [
     "make_lifecycle_event",
     "DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK",
     "DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT",
-    "DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO",
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_CYCLE_MIN_GAIN_PCT",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
+    "resolve_keep_threshold",
     "should_reloop_to_explore",
-    "abort_prelude",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
+    "bank_phase_segment",
     "compute_next_phase",
     "compute_plateau_explore",
     "compute_plateau_framework_agent",
@@ -3091,9 +3575,21 @@ __all__ = [
     "exit_normal_explore",
     "exit_normal_framework_agent",
     "exit_normal_kernel",
+    "exit_cold_anchor_prelude",
     "exit_normal_prelude",
     "exit_normal_sweep",
     "exit_terminal_prelude",
+    "exit_time_exhausted_prelude",
+    "append_phase_evidence_row",
+    "baseline_round_cost_sec",
+    "benchmark_cost_sec",
+    "boot_cost_sec",
+    "measured_seconds",
+    "one_more_measurement_sec",
+    "prelude_affordable_seconds",
+    "prelude_can_afford",
+    "prelude_exit_viability",
+    "session_usable_seconds",
     "is_action_allowed_in_phase",
     "is_action_llm_proposable_in_phase",
     "llm_proposable_actions_for",

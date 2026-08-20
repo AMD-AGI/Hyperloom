@@ -89,8 +89,8 @@ KubeRay cluster and Hyperloom drives them through the Ray Dashboard:
   its entrypoint to `tail -f /dev/null` so the cluster stays up instead of
   finishing a job and tearing itself down.
 
-Example: `…/custom/hyperloom-sglang:v0.5.16-rocm7.2.0-mi300x-ray2.44.1` adds
-`ray 2.44.1` to the `rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x` base, which
+Example: `…/custom/hyperloom-sglang:v0.5.17-rocm7.2.0-mi300x-ray2.44.1` adds
+`ray 2.44.1` to the `rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x` base, which
 does not ship it. Keep click below 8.2 whatever the Ray version claims:
 ray 2.44.1 declares only `click>=7.0`, but click 8.2 changed `Sentinel` and ray's
 CLI then dies on import, so KubeRay's `ray start` never runs.
@@ -114,8 +114,8 @@ ${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 ## What the agent produces
 
 A session under `$USER_DATA_PATH/<model_basename>/<UTC_timestamp>/` with launcher
-logs and a persisted `state.json` (holds `phase`, `cumulative_gain`,
-`crash_count`, `stop_reason`) for status and `--resume`. `$USER_DATA_PATH` comes
+logs and a persisted `state.json` (holds `phase`, `cumulative_gain_validated`,
+`crash_count`, `stop_reason`) for status and `--resume-from`. `$USER_DATA_PATH` comes
 from the environment (platform-injected).
 
 ---

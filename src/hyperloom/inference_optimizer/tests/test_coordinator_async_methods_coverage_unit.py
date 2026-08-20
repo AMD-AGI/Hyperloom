@@ -88,6 +88,157 @@ async def test_promote_single_round_baseline_clears_stale_warm_runtime(coord: Co
 
 
 @pytest.mark.asyncio
+async def test_promote_baseline_carries_the_boot_and_benchmark_split(coord: Coordinator) -> None:
+    """The two figures that let later work be priced on what it will spend.
+
+    The whole round and the part of it that ran after the server was ready; the
+    difference between them is what booting this workload costs, and every
+    variant boots again.
+    """
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 900.0,
+            "post_ready_runtime_sec": 550.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+
+    assert coord.shared_state.baseline_runtime_sec == 900.0
+    assert coord.shared_state.baseline_post_ready_runtime_sec == 550.0
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_clears_a_split_a_later_round_did_not_report(
+    coord: Coordinator,
+) -> None:
+    """A stale split would be subtracted from a fresh total and called the boot."""
+    coord.shared_state.baseline_post_ready_runtime_sec = 550.0
+
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 900.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+
+    assert coord.shared_state.baseline_post_ready_runtime_sec == 0.0
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_carries_a_dropped_hot_pass_to_the_session(
+    coord: Coordinator,
+) -> None:
+    """The marker drives a session-level decision, so it has to reach the session.
+
+    PRELUDE routes to CLOSE on it rather than optimizing against a denominator
+    that was never the baseline, and it is cleared by the next baseline that does
+    land a hot figure -- otherwise a session resumed with a fresh clock stays
+    condemned by the earlier leg's shortfall.
+    """
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1000.0,
+            "subprocess_runtime_sec": 900.0,
+            "measure_round_dropped": {"reason": "measure_round_reaped_by_the_run"},
+            "workspace": "/tmp/ws",
+        },
+    )
+    assert coord.shared_state.baseline_measure_round_dropped is True
+
+    await coord._promote_to_shared_state(
+        "baseline",
+        {
+            "output_throughput": 1200.0,
+            "subprocess_runtime_sec": 900.0,
+            "measure_round_runtime_sec": 400.0,
+            "workspace": "/tmp/ws",
+        },
+    )
+    assert coord.shared_state.baseline_measure_round_dropped is False
+
+
+class TestAHotPassCorrectsAColdAnchor:
+    """The escape from the marker, without which PRELUDE cannot finish.
+
+    A cold anchor holds the phase open until a hot pass replaces it. The rule
+    that keeps a later, lower re-baseline from displacing the anchor would reject
+    that replacement whenever the cold figure reads higher -- which it does
+    whenever the "cold" pass was not really cold, its weights already in page
+    cache and its kernels already compiled by an earlier run. The session would
+    then re-measure whole baseline rounds until the clock killed it, each one
+    landing the very measurement that was supposed to release it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_lower_hot_figure_replaces_a_marked_cold_one(self, coord: Coordinator) -> None:
+        coord.shared_state.baseline_tput = 1000.0
+        coord.shared_state.baseline_measure_round_dropped = True
+
+        await coord._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 980.0,
+                "subprocess_runtime_sec": 900.0,
+                "measure_round_runtime_sec": 400.0,
+                "workspace": "/tmp/ws",
+            },
+        )
+
+        assert coord.shared_state.baseline_tput == 980.0
+        assert coord.shared_state.baseline_measure_round_dropped is False
+        assert coord.shared_state.baseline_warm_runtime_sec == 400.0
+
+    @pytest.mark.asyncio
+    async def test_a_lower_cold_figure_does_not_replace_a_marked_cold_one(
+        self,
+        coord: Coordinator,
+    ) -> None:
+        """Only a hot pass corrects the anchor; another cold one is just noisier.
+
+        Two cold figures are comparable to each other, so the ordinary rule
+        applies and the better one stands. Nothing has been corrected, so the
+        marker stays and the phase stays open.
+        """
+        coord.shared_state.baseline_tput = 1000.0
+        coord.shared_state.baseline_measure_round_dropped = True
+
+        await coord._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 980.0,
+                "subprocess_runtime_sec": 900.0,
+                "workspace": "/tmp/ws",
+            },
+        )
+
+        assert coord.shared_state.baseline_tput == 1000.0
+        assert coord.shared_state.baseline_measure_round_dropped is True
+
+    @pytest.mark.asyncio
+    async def test_a_lower_hot_figure_still_loses_to_a_hot_anchor(self, coord: Coordinator) -> None:
+        """With no marker there is nothing to correct, so drift is refused again."""
+        coord.shared_state.baseline_tput = 1000.0
+        coord.shared_state.baseline_measure_round_dropped = False
+
+        await coord._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 980.0,
+                "subprocess_runtime_sec": 900.0,
+                "measure_round_runtime_sec": 400.0,
+                "workspace": "/tmp/ws",
+            },
+        )
+
+        assert coord.shared_state.baseline_tput == 1000.0
+
+
+@pytest.mark.asyncio
 async def test_promote_baseline_non_dict_is_noop(coord: Coordinator) -> None:
     await coord._promote_to_shared_state("baseline", "not-a-dict")  # type: ignore[arg-type]
 
@@ -719,7 +870,7 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -> None:
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
-    coord.shared_state.cumulative_gain = 5.0
+    coord.shared_state.cumulative_gain_validated = 5.0
     await coord._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == pytest.approx(15.0)
 
@@ -732,7 +883,7 @@ async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinato
     a shared-state dump assembled before the recompute, which renders both.
     """
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
-    coord.shared_state.cumulative_gain = 5.0
+    coord.shared_state.cumulative_gain_validated = 5.0
     text = await coord._compose_prompt("orchestration")
     assert "target_gap_pct=15.00" in text
     assert "target_gap_pct=0.00" not in text
@@ -741,7 +892,7 @@ async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinato
 @pytest.mark.asyncio
 async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
     coord._current_objective = TimeOnlyObjective()
-    coord.shared_state.cumulative_gain = 5.0
+    coord.shared_state.cumulative_gain_validated = 5.0
     await coord._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == 0.0
 

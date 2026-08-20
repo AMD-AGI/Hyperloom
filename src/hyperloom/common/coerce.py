@@ -20,7 +20,7 @@ creating an import cycle.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 
 _T = TypeVar("_T")
@@ -128,6 +128,11 @@ def to_unix(value: Any, default: _T | None = None) -> float | _T | None:
     tolerated). String parsing is ISO-first: an ISO-8601 timestamp is parsed to
     its epoch, falling back to a bare ``float`` cast for numeric strings.
 
+    A timestamp with no offset is read as UTC, matching
+    :func:`hyperloom.common.timeutil.iso_z`: every producer here writes UTC,
+    and letting the host's ``TZ`` decide would place the same string at
+    different instants for the two readers of it.
+
     Args:
         value: The raw timestamp value.
         default: Returned when *value* cannot be interpreted as a timestamp
@@ -143,12 +148,15 @@ def to_unix(value: Any, default: _T | None = None) -> float | _T | None:
     if isinstance(value, str):
         text = value.strip()
         try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             try:
                 return float(text)
             except ValueError:
                 return default
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
     return default
 
 

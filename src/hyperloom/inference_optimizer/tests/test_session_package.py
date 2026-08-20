@@ -286,3 +286,32 @@ def test_loose_does_not_wipe_dest_root(tmp_path: Path) -> None:
     assert keep.is_file()  # loose copy must never blow away the root
     assert keep.read_text(encoding="utf-8") == "keep me"
     assert (dest / "session_breakdown.json").is_file()  # loose copy still landed
+
+
+def test_current_setting_sh_is_included(tmp_path: Path) -> None:
+    """current_setting.sh at session root is collected."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "current_setting.sh", "#!/usr/bin/env bash\nvllm serve $MODEL\n")
+    dest = tmp_path / "ws"
+
+    out = package_session_artifacts(sd, session_id="cs-sid", dest_root=dest)
+    assert out is not None
+    assert "current_setting.sh" in _zip_names(out)
+
+
+def test_enablement_artifacts_are_included(tmp_path: Path) -> None:
+    """reports/enablement/** covers round.json, patches, and the setting script."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "reports" / "enablement" / "tid-abc" / "round.json", '{"status":"kept"}')
+    _write(sd / "reports" / "enablement" / "tid-abc" / "patches" / "001_fix.patch", "diff\n")
+    _write(sd / "reports" / "enablement" / "enablement_setting.sh", "#!/usr/bin/env bash\n")
+    dest = tmp_path / "ws"
+
+    out = package_session_artifacts(sd, session_id="en-sid", dest_root=dest)
+    assert out is not None
+    names = _zip_names(out)
+    assert "reports/enablement/tid-abc/round.json" in names
+    assert "reports/enablement/tid-abc/patches/001_fix.patch" in names
+    assert "reports/enablement/enablement_setting.sh" in names

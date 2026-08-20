@@ -217,7 +217,7 @@ EOF
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
 # re-pin with MAGPIE_REF=<tag|sha>.
-MAGPIE_REF="${MAGPIE_REF:-0171222c532db6fc5cb174667db66e34f1d9dd98}"
+MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
 # aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit

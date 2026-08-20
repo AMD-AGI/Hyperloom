@@ -27,9 +27,9 @@ In docker mode:
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/rocm/hyperloom:vllm-v0.27.1-rocm7.2.3`
-- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi300x`
-- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.16-rocm7.2.0-mi350x`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
+- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x`
+- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -193,5 +193,5 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 5. Report the session ID, log path, PID, and initial health check result.
 6. Monitor the process every 300 seconds until work is done.
-7. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+7. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 8. If `stop_reason` in the current session `state.json` is final, stop and exit.
