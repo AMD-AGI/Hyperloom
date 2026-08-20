@@ -17,7 +17,9 @@ import os
 import site
 import sys
 import sysconfig
+from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 #: Framework-agnostic way to name the source tree a session may patch. Accepted in
 #: addition to ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``, which keep
@@ -570,11 +572,173 @@ def summarise_framework_root_discovery(roots: str) -> str:
     return " ".join(parts)
 
 
+_WARM_REPLAY_FRAMEWORK_ROOT_TOKENS: tuple[str, ...] = ("sglang", "vllm")
+_WARM_REPLAY_KERNEL_ROOT_TOKENS: tuple[str, ...] = (
+    "aiter",
+    "aiter_meta",
+    "rocm",
+    "flydsl",
+)
+_WARM_REPLAY_FRAMEWORK_STATIC_ROOTS: tuple[str, ...] = (
+    "/sgl-workspace/sglang/",
+    "/sgl-workspace/vllm/",
+)
+_WARM_REPLAY_KERNEL_STATIC_ROOTS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/",
+    _AITER_META_CSRC_ROOT,
+    *_ROCM_HIP_SOURCE_ROOTS,
+    *_FLYDSL_DEFAULT_ROOTS,
+)
+
+
+class WarmReplayRootResolution(NamedTuple):
+    """Result of resolving one warm-replay patch apply root."""
+
+    root: str
+    source: str
+    reason: str
+    allowlist: tuple[str, ...]
+
+
+def _root_path_matches_tokens(root: str, tokens: tuple[str, ...]) -> bool:
+    normalized = root.lower().rstrip("/")
+    return any(f"/{token}/" in f"{normalized}/" for token in tokens)
+
+
+def _filter_roots_by_tokens(
+    roots: Sequence[str],
+    tokens: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        root
+        for root in roots
+        if root and _root_path_matches_tokens(root, tokens)
+    )
+
+
+def _warm_replay_framework_patch_roots() -> tuple[str, ...]:
+    """Return sglang/vllm roots warm-replay framework patches may target."""
+    return _merge_roots(
+        _WARM_REPLAY_FRAMEWORK_STATIC_ROOTS,
+        _filter_roots_by_tokens(
+            _discover_installed_framework_roots(),
+            _WARM_REPLAY_FRAMEWORK_ROOT_TOKENS,
+        ),
+    )
+
+
+def _warm_replay_kernel_patch_roots() -> tuple[str, ...]:
+    """Return aiter/ROCm/FlyDSL roots warm-replay kernel patches may target."""
+    return _merge_roots(
+        _WARM_REPLAY_KERNEL_STATIC_ROOTS,
+        _filter_roots_by_tokens(
+            _discover_installed_framework_roots(),
+            _WARM_REPLAY_KERNEL_ROOT_TOKENS,
+        ),
+    )
+
+
+def _root_contains_patch_files(root: Path, patch_paths: Sequence[Path]) -> bool:
+    from hyperloom.orchestrator.specialists.patch_safety import patch_targets_missing
+
+    if not root.is_dir():
+        return False
+    if not patch_paths:
+        return True
+    for patch_path in patch_paths:
+        if not patch_path.is_file():
+            return False
+        try:
+            patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if patch_targets_missing(patch_text, root):
+            return False
+    return True
+
+
+def _resolve_warm_replay_patch_root(
+    *,
+    patch_paths: Sequence[Path] | None,
+    allowlist: tuple[str, ...],
+    missing_patch_reason: str,
+    missing_allowlist_reason: str,
+) -> WarmReplayRootResolution:
+    paths = [Path(str(path)) for path in (patch_paths or ()) if str(path).strip()]
+    env_root = resolve_session_framework_root()
+    if env_root and _root_contains_patch_files(
+        Path(env_root.rstrip("/")),
+        paths,
+    ):
+        return WarmReplayRootResolution(
+            root=_normalize_root(env_root),
+            source="env",
+            reason="",
+            allowlist=(),
+        )
+
+    if not paths:
+        return WarmReplayRootResolution(
+            root="",
+            source="",
+            reason=missing_patch_reason,
+            allowlist=allowlist,
+        )
+
+    for candidate in allowlist:
+        root = Path(candidate.rstrip("/"))
+        if _root_contains_patch_files(root, paths):
+            return WarmReplayRootResolution(
+                root=_normalize_root(str(root)),
+                source="allowlist",
+                reason="",
+                allowlist=allowlist,
+            )
+
+    return WarmReplayRootResolution(
+        root="",
+        source="",
+        reason=missing_allowlist_reason,
+        allowlist=allowlist,
+    )
+
+
+def resolve_warm_replay_framework_root(
+    *,
+    patch_paths: Sequence[Path] | None = None,
+) -> WarmReplayRootResolution:
+    """Resolve the framework patch root for warm replay (env first, then allowlist)."""
+    allowlist = _warm_replay_framework_patch_roots()
+    return _resolve_warm_replay_patch_root(
+        patch_paths=patch_paths,
+        allowlist=allowlist,
+        missing_patch_reason="active_framework_root_missing",
+        missing_allowlist_reason="framework_patch_root_not_in_allowlist",
+    )
+
+
+def resolve_warm_replay_kernel_root(
+    *,
+    patch_paths: Sequence[Path] | None = None,
+) -> WarmReplayRootResolution:
+    """Resolve the kernel patch root for warm replay (env first, then allowlist)."""
+    allowlist = _warm_replay_kernel_patch_roots()
+    return _resolve_warm_replay_patch_root(
+        patch_paths=patch_paths,
+        allowlist=allowlist,
+        missing_patch_reason="active_kernel_patch_root_missing",
+        missing_allowlist_reason="kernel_patch_root_not_in_allowlist",
+    )
+
+
 __all__ = [
+    "WarmReplayRootResolution",
     "probe_framework_source_roots_for_env",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
     "resolve_session_framework_root",
     "resolve_source_file_allowlist",
+    "resolve_warm_replay_framework_root",
+    "resolve_warm_replay_kernel_root",
     "summarise_framework_root_discovery",
 ]
