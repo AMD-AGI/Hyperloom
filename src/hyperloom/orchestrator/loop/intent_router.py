@@ -738,7 +738,6 @@ class IntentRouter:
                         priority=1,
                     )
                 )
-                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
                 return
             handler = get_handler(kind)
             if handler is None:
@@ -763,7 +762,6 @@ class IntentRouter:
                         priority=1,
                     )
                 )
-                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
@@ -920,12 +918,6 @@ class IntentRouter:
                             result["gap_canonical_id"] = payload_gap
                     await self._record_integrate_keep(result)
                 self.shared_state.save(self.session_dir)
-            # Advance the kernel cursor past this request seq.
-            await self.cursors.advance(
-                target_agent,
-                seq=request_msg.seq,
-                msg_id=request_msg.msg_id,
-            )
         else:
             await self.bus.append_and_seq(
                 Message.new(
@@ -947,7 +939,6 @@ class IntentRouter:
                     priority=1,
                 )
             )
-            await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         """Route a RESPONSE intent back to the original requester.
