@@ -26,6 +26,7 @@ from .models import (
     validate_relative_path,
 )
 from .sanitize import sanitize_shared_knowledge
+from .values import has_replay_material
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
@@ -502,6 +503,14 @@ class RemoteRecipeClient:
         # construct a KnowledgeBundle directly.
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         bundle.validate()
+        if not has_replay_material({"knowledge": bundle.knowledge}):
+            return RemoteWriteResult(
+                "skipped",
+                "empty_replay_material",
+                canonical_id,
+                session_id,
+                optimized_throughput,
+            )
         rollup = self.store.get_rollup(canonical_id)
         _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=metric)
         if optimized_throughput <= prior:
