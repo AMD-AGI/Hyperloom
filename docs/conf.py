@@ -41,6 +41,31 @@ html_theme_options = {
     "link_main_doc": False,
 }
 
+# ``use_repository_button`` makes sphinx-book-theme call get_repo_parts(context),
+# which walks ["github", "bitbucket", "gitlab"] looking for a ``<provider>_url``
+# key and returns None -- not a tuple -- when it finds none. Its caller unpacks
+# that return value unconditionally, so a missing key is a build-time
+# ``TypeError: cannot unpack non-iterable NoneType object`` rather than a
+# skipped button.
+#
+# Nothing in the stack supplies the key on its own. pydata-sphinx-theme has the
+# provider defaults, but only inside the "edit this page" path, and rocm-docs-core
+# defaults ``use_edit_page_button`` off -- so enabling the repository button
+# without also declaring the repository here is a latent misconfiguration that
+# fails as soon as anything upstream stops filling the gap by accident.
+#
+# Verified by building this tree three ways: unchanged (fails), with these keys
+# (builds, and the source-repository dropdown renders), and with the button
+# disabled (builds, no dropdown). Declaring the repository is the option that
+# keeps the feature. Nothing else in the rendered output changes.
+html_context = {
+    "github_url": "https://github.com",
+    "github_user": "AMD-AGI",
+    "github_repo": "Hyperloom",
+    "github_version": "main",
+    "doc_path": "docs",
+}
+
 
 # Article info display
 setting_all_article_info = True
