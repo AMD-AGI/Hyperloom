@@ -20,11 +20,29 @@ from ._canonical_fingerprint import canonical_fingerprint
 
 
 __all__ = [
+    "coerce_args",
     "controls_of",
     "effective_fingerprint",
     "is_executable",
     "normalize_proposal",
 ]
+
+
+def coerce_args(value: Any) -> str:
+    """Coerce a payload ``extra_args`` / ``extra_server_args`` value to a shell-arg string.
+
+    The LLM sometimes emits the flags as a JSON list; ``str(list)`` would yield
+    a Python repr the server rejects, so lists are space-joined into tokens.
+
+    Args:
+        value: The raw payload value (string, list/tuple, or ``None``).
+
+    Returns:
+        The coerced shell-arg string.
+    """
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value or "").strip()
 
 
 def _args_mode_of(value: Any) -> str:
@@ -43,11 +61,10 @@ def normalize_proposal(proposal: Mapping[str, Any]) -> dict[str, Any]:
         ``unset_envs`` / ``args_mode`` / ``atomic`` / ``reason``, with the
         ``extra_args`` / ``extra_server_args`` alias resolved.
     """
-    args = str(proposal.get("extra_args") or proposal.get("extra_server_args") or "").strip()
     envs = proposal.get("extra_envs")
     return {
         "name": str(proposal.get("name") or "").strip(),
-        "extra_args": args,
+        "extra_args": coerce_args(proposal.get("extra_args") or proposal.get("extra_server_args")),
         "extra_envs": {str(k): str(v) for k, v in envs.items()} if isinstance(envs, Mapping) else {},
         "remove_args": to_str_list(proposal.get("remove_args")),
         "unset_envs": to_str_list(proposal.get("unset_envs")),

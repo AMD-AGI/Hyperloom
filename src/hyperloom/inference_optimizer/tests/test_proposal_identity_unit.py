@@ -120,3 +120,29 @@ def test_controls_of_drops_defaults():
         "remove_args": ["--x"],
         "args_mode": "replace",
     }
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (["--max-num-seqs", "128"], "--max-num-seqs 128"),
+        (("--a", "1"), "--a 1"),
+        (["--a", "", "  ", "1"], "--a 1"),
+        ("--a 1", "--a 1"),
+        (None, ""),
+    ],
+)
+def test_list_form_args_are_space_joined_not_repr(value, expected):
+    assert normalize_proposal({"extra_args": value})["extra_args"] == expected
+
+
+def test_the_queue_and_the_grid_parser_agree_on_a_list_form_variant():
+    from hyperloom.orchestrator.actions.executors.explore import _grid_variants_from_payload
+
+    payload = {"name": "v", "extra_args": ["--max-num-seqs", "128"], "extra_envs": {"E": "1"}}
+    parsed = _grid_variants_from_payload([payload])[0]
+    fields = normalize_proposal(payload)
+    assert fields["extra_args"] == parsed.extra_server_args
+    assert effective_fingerprint(
+        fields["extra_args"], fields["extra_envs"], controls=controls_of(fields)
+    ) == effective_fingerprint(parsed.extra_server_args, parsed.extra_envs, controls={})

@@ -60,7 +60,7 @@ from ._accuracy_gate import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._canonical_fingerprint import workload_signature
-from ._proposal_identity import effective_fingerprint
+from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -122,27 +122,6 @@ def _initial_explore_search_state() -> dict[str, Any]:
         "cursor": 0,
         "last_round": {},
     }
-
-
-def _coerce_args_str(value: Any) -> str:
-    """Coerce a payload ``extra_args`` / ``extra_server_args`` value into a
-    shell-arg string.
-
-    The LLM sometimes emits the server flags as a JSON list instead of a single
-    string; a naive ``str(list)`` yields the Python repr which the server
-    rejects. Lists/tuples are space-joined into individual tokens.
-
-    Args:
-        value: The raw payload value (string, list/tuple, or None).
-
-    Returns:
-        The coerced shell-arg string ("" when ``value`` is None).
-    """
-    if value is None:
-        return ""
-    if isinstance(value, (list, tuple)):
-        return " ".join(str(v).strip() for v in value if str(v).strip())
-    return str(value)
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being
@@ -221,17 +200,15 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = _coerce_args_str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
-        envs_raw = raw.get("extra_envs") or {}
-        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
+        fields = normalize_proposal(raw)
         gv = GridVariant(
-            name=str(raw["name"]),
-            extra_server_args=args,
-            extra_envs=envs,
+            name=fields["name"],
+            extra_server_args=fields["extra_args"],
+            extra_envs=fields["extra_envs"],
             note=str(raw.get("note") or raw.get("provenance") or ""),
-            remove_args=to_str_list(raw.get("remove_args")),
-            unset_envs=to_str_list(raw.get("unset_envs")),
-            args_mode=str(raw.get("args_mode") or "append"),
+            remove_args=fields["remove_args"],
+            unset_envs=fields["unset_envs"],
+            args_mode=fields["args_mode"],
         )
         # Stash extra metadata on the GridVariant so the ledger writer can
         # pull provenance/evidence.
