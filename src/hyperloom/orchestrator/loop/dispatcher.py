@@ -136,7 +136,7 @@ class DispatcherCollaborator:
         # whose handle lives in a frame can only be stopped by the frame that is
         # already blocked awaiting it, which is precisely the situation shutdown
         # and an exhausted wall-clock budget have to break. Entries remove
-        # themselves in :meth:`_run_dispatched_with_gpu_release`.
+        # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
 
     def __getattr__(self, name: str):
@@ -814,7 +814,7 @@ class DispatcherCollaborator:
                 pass
             cancel_scope = CancelScope()
             atask = asyncio.create_task(
-                self._run_dispatched_with_gpu_release(
+                self.run_task_registered(
                     task,
                     prebound_lease=lease,
                     extra_context=extra_context,
@@ -827,49 +827,79 @@ class DispatcherCollaborator:
             spawned.append((task, atask, gpu_lease))
         return spawned
 
-    async def _run_dispatched_with_gpu_release(
+    async def run_task_registered(
         self,
         task: Task,
         *,
-        prebound_lease: Any,
-        extra_context: dict[str, Any],
-        gpu_lease: Any,
+        prebound_lease: Any = None,
+        extra_context: dict[str, Any] | None = None,
+        gpu_lease: Any = None,
         gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
-    ) -> "SubAgentResult":
-        """Run a dispatched task, releasing its GPU lease in a structured finally.
+    ) -> "SubAgentResult | None":
+        """Run one task under the wall-clock defences, and hand back what it held.
 
-        Binding the GPU-lease release to the asyncio task's own lifecycle
-        guarantees the cards are freed on completion, error, or cancellation
-        even if the pump coroutine is cancelled or the reap never runs.
-        ``release`` is idempotent, so the release in
-        :meth:`_reap_dispatched_task` remains harmless. When a Ray
-        ``GpuSpecialistLease`` was acquired it is closed here too so
-        the ``num_gpus`` lease is released on every exit path. The same finally
-        retires this task's ``_inflight_actions`` handle, so the set cannot
-        outlive the work it points at.
+        The only way an action runs. Both dispatch paths arrive here: the pump,
+        which has already won the lanes and may be carrying GPU leases, and a
+        caller that has to watch the work finish before it can go on -- a
+        kernel-entry reprofile, a closing step. That second kind used to reach
+        for ``sub.run_task`` directly and so stayed out of ``_inflight_actions``:
+        no handle, no cancel scope, and :meth:`cancel_inflight_actions` -- the
+        one defence that reaches work already under way -- could not stop it at
+        shutdown or on a spent budget.
+
+        Binding the teardown to this coroutine's own lifecycle is what frees the
+        cards on completion, error, or cancellation even when the pump is
+        cancelled or the reap never runs; ``release`` is idempotent, so the one
+        in :meth:`_reap_dispatched_task` stays harmless.
 
         Args:
-            task: The dispatched task.
-            prebound_lease: The already-acquired resource-lane lease (or None).
-            extra_context: Per-task context (wall budget, gpu ids, …).
-            gpu_lease: The SQLite GPU-specialist accounting lease to release, or
-                None.
-            gpu_specialist_lease: The Ray ``GpuSpecialistLease`` to close
-                (release the ``num_gpus`` actor lease), or None on the local
-                path.
-            cancel_scope: The action's cancel channel, published here rather
-                than at the call site because a task copies its context when it
-                is created and never sees a value set afterwards.
+            task: The task row to run.
+            prebound_lease: Lanes the caller already holds. When ``None`` and
+                the task needs lanes, they are taken here -- non-blocking, the
+                same answer the pump gives, so a contended lane leaves the row
+                queued for a later tick instead of raising into a caller that
+                only wanted a result.
+            extra_context: Per-task extras (wall budget, gpu ids, …).
+            gpu_lease: SQLite GPU-specialist accounting lease to release, if any.
+            gpu_specialist_lease: Ray ``GpuSpecialistLease`` to close, if any.
+            cancel_scope: The action's cancel channel when the caller already
+                published one. The pump does, because it registers its handle
+                before the coroutine starts and a cancel landing in that window
+                must still find it; anyone else leaves this ``None`` and gets a
+                scope and a registration here.
 
         Returns:
-            SubAgentResult: The result from ``sub.run_task``.
+            The runner's result, or ``None`` when the task's lanes were busy, in
+            which case the row is untouched and still queued.
         """
+        lease = prebound_lease
+        if lease is None and task.requires_lanes:
+            lease = await self.locks.try_acquire_many(
+                list(task.requires_lanes),
+                holder_id=task.task_id,
+                task_id=task.task_id,
+                action=task.kind,
+                ttl_sec=task.lease_ttl_sec or 60,
+            )
+            if lease is None:
+                log.info(
+                    "dispatcher: %s (%s) not started; lanes %s are busy",
+                    task.task_id,
+                    task.kind,
+                    list(task.requires_lanes),
+                )
+                return None
+        if cancel_scope is None:
+            cancel_scope = CancelScope()
+            handle = asyncio.current_task()
+            if handle is not None:
+                self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
         try:
             with use_cancel_scope(cancel_scope):
                 return await self.sub.run_task(
                     task,
-                    prebound_lease=prebound_lease,
+                    prebound_lease=lease,
                     extra_context=extra_context,
                 )
         finally:
@@ -1854,21 +1884,16 @@ class DispatcherCollaborator:
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"
             )
-        # Publish a handle for as long as the action runs. This path abandons its
+        # Registered for as long as the action runs. This path abandons its
         # future once the caller's inline wait elapses -- the action keeps going
         # by design, so without a handle nothing could stop it, including a
         # teardown that is about to close the database underneath it. The handle
         # is this coroutine's own task: cancelling it drops the audit publication
         # below, which the runner's terminal transition already accounts for.
-        inline_handle = asyncio.current_task()
-        cancel_scope = CancelScope()
-        if inline_handle is not None:
-            self._inflight_actions[task.task_id] = _InflightAction(task.kind, inline_handle, cancel_scope)
-        try:
-            with use_cancel_scope(cancel_scope):
-                result = await self.sub.run_task(task)
-        finally:
-            self._inflight_actions.pop(task.task_id, None)
+        result = await self.run_task_registered(task)
+        if result is None:
+            # Unreachable while the whitelist admits only lane-less actions.
+            return f"(run_action_now: {action_name!r} could not start; its lanes are busy)"
         result_payload = {
             "task_id": task.task_id,
             "kind": task.kind,

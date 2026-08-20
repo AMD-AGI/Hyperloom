@@ -1156,7 +1156,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_dispatch_paused_for_phase_budget": "dispatcher",
         "_pump_dispatcher_once": "dispatcher",
         "_spawn_fitting_queued": "dispatcher",
-        "_run_dispatched_with_gpu_release": "dispatcher",
+        "run_task_registered": "dispatcher",
         "_specialist_wall_budget_sec": "dispatcher",
         "_specialist_progress_publisher": "dispatcher",
         "_resolve_serving_tp": "dispatcher",

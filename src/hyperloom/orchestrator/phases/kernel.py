@@ -254,7 +254,7 @@ class KernelPhase(PhaseHandler):
                     reprofile_task.state,
                 )
                 return
-            await self.sub.run_task(reprofile_task)
+            await self.run_task_registered(reprofile_task)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return

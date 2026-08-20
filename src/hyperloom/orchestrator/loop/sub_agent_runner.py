@@ -21,7 +21,7 @@ import logging
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskRegistry
+from ..state.task_registry import IllegalTransition, Task, TaskRegistry
 from ..trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
@@ -152,43 +152,33 @@ class SubAgentRunner:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
-    async def _transition_resilient(
+    async def _write_terminal(
         self,
         task_id: str,
         new_state: str,
         *,
         evidence: dict | None = None,
         context: str,
-        allow_terminal: bool = False,
     ) -> None:
-        """Transition a task to ``new_state``, tolerating a row lost to retention.
+        """Record a task's terminal state, tolerating a row already terminal.
+
+        The one place this runner leaves a task. A row can reach its terminal
+        state without us -- a TTL watchdog reclaims it, a policy denial
+        transitions it -- and losing that race says the outcome is already
+        recorded, not that
+        this call failed. The ``queued -> running`` claim deliberately does not
+        come through here: there the rejection is the double-spawn guard and
+        has to reach the caller.
 
         Args:
             task_id: The task to transition.
-            new_state: The target state.
+            new_state: The terminal state to record.
             evidence: Optional evidence dict recorded with the transition.
-            context: Short label describing the transition call site.
-            allow_terminal: Also tolerate an already-terminal row. Only for
-                terminal transitions; on ``queued -> running`` the rejection is
-                the double-spawn guard and must propagate.
-
-        Raises:
-            IllegalTransition: When the row is already terminal and
-                ``allow_terminal`` is False.
+            context: Short label describing the call site.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
-        except TaskNotFound:
-            log.warning(
-                "sub_agent_runner: tasks row for task_id=%s vanished before "
-                "transition→%s (context=%s); keeping the executor result",
-                task_id,
-                new_state,
-                context,
-            )
         except IllegalTransition:
-            if not allow_terminal:
-                raise
             log.warning(
                 "sub_agent_runner: task_id=%s already terminal before "
                 "transition→%s (context=%s); keeping the executor result",
@@ -204,10 +194,17 @@ class SubAgentRunner:
         prebound_lease: Lease | None = None,
         extra_context: dict | None = None,
     ) -> SubAgentResult:
-        """Acquire required lanes, transition queued→running, execute, transition out.
+        """Acquire required lanes, claim the row, execute, record the outcome.
+
+        The order is the contract: lanes are taken before the row is claimed,
+        and from the claim onwards every exit writes a terminal state. So a row
+        reads ``running`` only while a live coroutine owns it, which is what the
+        phase gates and the ``tasks.running()`` readers are actually asking.
+        Whoever acquired the lanes -- caller or runner -- gets them back from
+        the single finally, on every path including a rejected claim.
 
         With ``prebound_lease`` the runner skips its own acquire but still
-        owns the release in its finally block.
+        owns the release.
 
         Args:
             task: The task to execute.
@@ -220,80 +217,81 @@ class SubAgentRunner:
             The :class:`SubAgentResult` capturing terminal state and payload.
         """
         runner = self.executor_registry.get(task.kind)
+        lease: Lease | None = prebound_lease
+        try:
+            if self.policy is not None:
+                try:
+                    self.policy.validate_dispatched_task(
+                        task.kind,
+                        dict(task.params or {}),
+                        task_id=task.task_id,
+                    )
+                except PolicyDenied as denied:
+                    await self._write_terminal(
+                        task.task_id,
+                        "cancelled",
+                        evidence={
+                            "reason": "policy_denied",
+                            "rule": getattr(denied, "rule", None),
+                            "error": str(denied),
+                        },
+                        context="dispatch_policy_denied",
+                    )
+                    return SubAgentResult(
+                        task_id=task.task_id,
+                        state="failed",
+                        result={},
+                        error=str(denied),
+                    )
 
-        if self.policy is not None:
-            try:
-                self.policy.validate_dispatched_task(
-                    task.kind,
-                    dict(task.params or {}),
-                    task_id=task.task_id,
+            # Lanes are the caller's to win: both dispatch paths take them
+            # non-blocking and leave the row queued when a lane is busy, which
+            # is the answer a contended lane deserves. A runner that acquired
+            # its own would need the blocking variant, and its raise would land
+            # after the claim below -- stranding the row in ``running``, holding
+            # a phase open against work that never started. Getting here without
+            # them means a caller skipped that step, and running the action
+            # anyway would be running it unserialised.
+            if lease is None and task.requires_lanes:
+                raise ValueError(
+                    f"task {task.task_id} ({task.kind}) requires lanes "
+                    f"{list(task.requires_lanes)} but was dispatched without a lease"
                 )
-            except PolicyDenied as denied:
-                await self._transition_resilient(
+
+            # The claim. A rejection here is the double-spawn guard and belongs
+            # to the caller, so it propagates -- the finally below still hands
+            # back the lanes.
+            await self.tasks.transition(task.task_id, "running")
+
+            if runner is None:
+                await self._write_terminal(
                     task.task_id,
-                    "cancelled",
-                    evidence={
-                        "reason": "policy_denied",
-                        "rule": getattr(denied, "rule", None),
-                        "error": str(denied),
-                    },
-                    context="dispatch_policy_denied",
+                    "failed",
+                    evidence={"reason": "no_executor", "kind": task.kind},
+                    context="no_executor",
                 )
-                if prebound_lease is not None:
-                    await self.locks.release(prebound_lease)
                 return SubAgentResult(
                     task_id=task.task_id,
                     state="failed",
                     result={},
-                    error=str(denied),
+                    error=f"no runner registered for kind={task.kind!r}",
                 )
 
-        await self._transition_resilient(
-            task.task_id,
-            "running",
-            context="enter_running",
-        )
-
-        if runner is None:
-            await self._transition_resilient(
-                task.task_id,
-                "failed",
-                evidence={"reason": "no_executor", "kind": task.kind},
-                context="no_executor",
-                allow_terminal=True,
-            )
-            if prebound_lease is not None:
-                await self.locks.release(prebound_lease)
-            return SubAgentResult(
-                task_id=task.task_id,
-                state="failed",
-                result={},
-                error=f"no runner registered for kind={task.kind!r}",
-            )
-
-        lease: Lease | None = prebound_lease
-        owned_lease = prebound_lease is None
-        if owned_lease and task.requires_lanes:
-            lease = await self.locks.acquire_many(
-                list(task.requires_lanes),
-                holder_id=task.task_id,
-                task_id=task.task_id,
-                action=task.kind,
-                ttl_sec=task.lease_ttl_sec or 60,
-            )
-        try:
-            workspace = self._pre_mkdir_workspace(task)
-            extra: dict = {}
-            if workspace is not None:
-                extra["workspace"] = str(workspace)
-            if self.session_dir is not None:
-                extra["session_dir"] = str(self.session_dir)
-            if self.shared_state is not None:
-                extra["shared_state"] = self.shared_state
-            if extra_context:
-                extra.update(dict(extra_context))
-            ctx = RunnerContext(task=task, lease=lease, extra=extra)
+            # Everything past the claim writes a terminal state on the way out.
+            # Preparing the workspace is inside it because an ENOSPC there is a
+            # task that failed, not a task still running.
             try:
+                workspace = self._pre_mkdir_workspace(task)
+                extra: dict = {}
+                if workspace is not None:
+                    extra["workspace"] = str(workspace)
+                if self.session_dir is not None:
+                    extra["session_dir"] = str(self.session_dir)
+                if self.shared_state is not None:
+                    extra["shared_state"] = self.shared_state
+                if extra_context:
+                    extra.update(dict(extra_context))
+                ctx = RunnerContext(task=task, lease=lease, extra=extra)
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
@@ -304,21 +302,19 @@ class SubAgentRunner:
                 # and read as live work to every phase gate until the TTL sweep
                 # noticed. Recorded as ``cancelled`` rather than ``failed``
                 # because the action was never given the chance to fail.
-                await self._transition_resilient(
+                await self._write_terminal(
                     task.task_id,
                     "cancelled",
                     evidence={"reason": "cancelled_in_flight"},
                     context="executor_cancelled",
-                    allow_terminal=True,
                 )
                 raise
             except Exception as exc:  # noqa: BLE001 — surface to task.history
-                await self._transition_resilient(
+                await self._write_terminal(
                     task.task_id,
                     "failed",
                     evidence={"error": repr(exc)},
                     context="executor_exception",
-                    allow_terminal=True,
                 )
                 return SubAgentResult(
                     task_id=task.task_id,
@@ -326,12 +322,11 @@ class SubAgentRunner:
                     result={},
                     error=repr(exc),
                 )
-            await self._transition_resilient(
+            await self._write_terminal(
                 task.task_id,
                 "succeeded",
                 evidence={"result_keys": sorted(result_payload.keys())},
                 context="executor_success",
-                allow_terminal=True,
             )
             return SubAgentResult(
                 task_id=task.task_id,

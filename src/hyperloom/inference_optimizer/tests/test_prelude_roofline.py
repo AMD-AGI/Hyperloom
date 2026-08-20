@@ -318,7 +318,7 @@ class _StubSub:
         self._state = state
         self._landed_tput = landed_tput
 
-    async def run_task(self, task: Any) -> None:
+    async def run_task(self, task: Any, **_kwargs: Any) -> None:
         self.tasks_run.append(task)
         if self._state is not None and self._landed_tput is not None:
             self._state.roofline_snapshots.append(
@@ -448,7 +448,7 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
 
     class _RaisingSub:
-        async def run_task(self, _task: Any) -> None:
+        async def run_task(self, _task: Any, **_kwargs: Any) -> None:
             raise RuntimeError("profile crashed")
 
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
