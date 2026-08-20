@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from types import SimpleNamespace
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.cli import bootstrap as cb
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -63,6 +64,14 @@ def _args(**overrides):
     )
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def _state_with_stamp(*, elapsed_h: float, remaining_h: float) -> SharedState:
+    now = time.time()
+    start = datetime.fromtimestamp(now - elapsed_h * 3600.0, tz=timezone.utc).isoformat()
+    state = SharedState(session_id="s", start_ts=start, max_minutes=int((elapsed_h + remaining_h) * 60))
+    state.deadline_unix = now + remaining_h * 3600.0
+    return state
 
 
 def test_seed_shared_state_populates_geak_and_cli_overrides(
@@ -422,18 +431,59 @@ def test_snapshot_skeleton_and_session_dir_helpers(
 def test_a_clean_stop_resume_records_where_the_new_leg_began() -> None:
     """start_ts stays the budget anchor, so the resume timestamp is the only leg boundary."""
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=1)
+    state.deadline_unix = 1_700_000_000.0
+    state.teardown_timings_sec = {"total": 1.5}
 
     cb._begin_resume_leg(state, reanchor_budget=False)
 
     assert state.start_ts == "2026-08-01T00:00:00+00:00"
     assert state.resumed_ts > state.start_ts
     assert state.crash_count == 1
+    assert state.deadline_unix == 1_700_000_000.0
+    assert state.teardown_timings_sec == {"total": 1.5}
+
+
+def test_clean_stop_resume_notes_follow_the_stamp_not_a_larger_cli_budget() -> None:
+    """Raising --max-hours on a clean-stop resume must not be reported as time left."""
+    state = _state_with_stamp(elapsed_h=2.0, remaining_h=1.0)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
+    text = "\n".join(lines)
+    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
+    assert match is not None
+    assert abs(float(match.group(1)) - 2.0) < 0.05
+    assert abs(float(match.group(2)) - 1.0) < 0.05
+    assert "this invocation's --max-hours 8.00 does not extend or shrink that stamp" in text
+    assert "raise --max-hours or start a fresh session" not in text
+
+
+def test_clean_stop_resume_notes_do_not_tell_the_operator_to_raise_max_hours() -> None:
+    state = _state_with_stamp(elapsed_h=3.5, remaining_h=-0.5)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=8.0)
+    text = "\n".join(lines)
+    match = re.search(r"budget: ([0-9.]+)h elapsed, ([0-9.]+)h left on the persisted stamp", text)
+    assert match is not None
+    assert abs(float(match.group(1)) - 3.5) < 0.05
+    assert abs(float(match.group(2)) - 0.0) < 0.05
+    assert "WARNING: the stamped deadline is already spent" in text
+    assert "start a fresh session" in text
+    assert "does not extend the stamp" in text
+    assert "raise --max-hours or start a fresh session" not in text
+
+
+def test_clean_stop_resume_notes_omit_the_cli_mismatch_when_hours_match_the_stamp() -> None:
+    state = _state_with_stamp(elapsed_h=1.0, remaining_h=2.0)
+    lines = cb._clean_stop_resume_budget_lines(state, max_hours=3.0)
+    text = "\n".join(lines)
+    assert "does not extend or shrink that stamp" not in text
+    assert "WARNING:" not in text
 
 
 def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", crash_count=4)
     state.set_stop_reason("time_exhausted")
     state.closing_phase = True
+    state.deadline_unix = 1_700_000_000.0
+    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
 
     cb._begin_resume_leg(state, reanchor_budget=True)
 
@@ -442,6 +492,11 @@ def test_a_resume_after_a_stop_re_anchors_the_budget_on_the_new_leg() -> None:
     assert state.stop_ts == ""
     assert state.closing_phase is False
     assert state.crash_count == 0
+    assert state.deadline_unix == 0.0
+    assert state.teardown_timings_sec == {}
+    stamped = state.stamp_deadline_unix(budget_minutes=60)
+    start = to_unix(state.start_ts)
+    assert abs(stamped - (start + 3600.0)) < 2.0
 
 
 def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
