@@ -5,10 +5,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the shared idle-gate helpers (_idle_gate).
+"""Unit tests for the shared trace-health gate helpers (_idle_gate).
 
 Locks threshold resolution (default + env override + bad-value fallback) and
-the high-idle warning shape.
+the warning shapes for both the high-idle and low-compute gates.
 """
 
 from __future__ import annotations
@@ -54,3 +54,58 @@ def test_high_idle_warning_shape():
     assert w["source"] == "/tmp/analysis.md"
     assert "GPU was idle 91.23%" in w["message"]
     assert "parameter optimization" in w["message"]
+
+
+# ---------------------------------------------------------------------------
+# Low-compute gate
+# ---------------------------------------------------------------------------
+
+
+def test_min_compute_threshold_default(monkeypatch):
+    monkeypatch.delenv(ig.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    assert ig.resolve_min_compute_pct_threshold() == ig.LOW_COMPUTE_PCT_THRESHOLD_DEFAULT == 10.0
+
+
+def test_min_compute_threshold_env_override(monkeypatch):
+    monkeypatch.setenv(ig.LOW_COMPUTE_PCT_THRESHOLD_ENV, "20")
+    assert ig.resolve_min_compute_pct_threshold() == 20.0
+
+
+def test_min_compute_threshold_bad_value_falls_back(monkeypatch):
+    monkeypatch.setenv(ig.LOW_COMPUTE_PCT_THRESHOLD_ENV, "nope")
+    assert ig.resolve_min_compute_pct_threshold() == 10.0
+
+
+def test_min_compute_threshold_negative_falls_back(monkeypatch):
+    monkeypatch.setenv(ig.LOW_COMPUTE_PCT_THRESHOLD_ENV, "-1")
+    assert ig.resolve_min_compute_pct_threshold() == 10.0
+
+
+def test_low_compute_warning_shape():
+    w = ig.build_low_compute_warning(
+        compute_pct=3.994,
+        threshold_pct=10.0,
+        report_path=Path("/tmp/analysis.md"),
+        exposed_comm_pct=95.991,
+    )
+    assert w["code"] == "low_gpu_compute_pct"
+    assert w["severity"] == "warning"
+    assert w["compute_pct"] == 3.99  # rounded to 2 dp
+    assert w["threshold_pct"] == 10.0
+    assert w["exposed_comm_pct"] == 95.99
+    assert w["source"] == "/tmp/analysis.md"
+    assert "Only 3.99% of trace wall time is compute" in w["message"]
+    assert "95.99%" in w["message"]
+    # The warning must name the spin-wait failure mode, since a near-zero idle
+    # share is exactly what lets this trace slip past the idle gate.
+    assert "spin-waiting collective" in w["message"]
+
+
+def test_low_compute_warning_omits_comm_when_unknown():
+    w = ig.build_low_compute_warning(
+        compute_pct=5.0,
+        threshold_pct=10.0,
+        report_path=Path("/tmp/analysis.md"),
+    )
+    assert "exposed_comm_pct" not in w
+    assert "Exposed communication accounts for" not in w["message"]

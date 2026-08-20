@@ -421,3 +421,71 @@ def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
     # Triton .py under a reusable root -> routable to GEAK.
     assert item["source_type"] == "triton"
     assert item["reusable_native_kernel"] is True, item.get("skip_reason")
+
+
+# ---------------------------------------------------------------------------
+# gpu_pct basis — the denominator must match what parse_analysis_md reports
+# ---------------------------------------------------------------------------
+
+
+def test_recover_normalizes_gpu_pct_against_trace_window(tmp_path):
+    """With the trace wall span known, gpu_pct is an end-to-end share.
+
+    ``ops_summary.csv`` percentages are a share of total *op* time, which
+    excludes collectives. On a comm-dominated trace that inflates them by an
+    order of magnitude relative to the analysis.md candidates they get ranked
+    against, so the window total wins when it is available.
+    """
+    _write(
+        tmp_path / "ops_summary.csv",
+        _ops_summary_csv("fused_moe_kernel,other,121.821899\naten::mm,GEMM,48.708459\n"),
+    )
+    recovered = tla.recover_other_bucket_candidates(
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
+        # 18186.60 ms window against 121.82 ms of kernel -> 0.67% e2e.
+        total_window_us=18186603.0,
+        min_gpu_pct=0.5,
+    )
+    assert [c["name"] for c in recovered] == ["fused_moe_kernel"]
+    assert recovered[0]["gpu_pct"] == pytest.approx(0.67, abs=1e-2)
+    assert recovered[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_E2E
+
+
+def test_recover_drops_op_that_only_looks_hot_against_compute(tmp_path):
+    """GLM-5.2 regression: 16.8% of compute is 0.67% of the window — not a candidate.
+
+    Under the old share-of-listed-ops basis this op cleared the 10% floor and
+    was dispatched to kernel-opt; against the trace window it is noise.
+    """
+    _write(
+        tmp_path / "ops_summary.csv",
+        _ops_summary_csv("moe_flydsl_stage1,MoE_unfused,121.821899\n"),
+    )
+    assert (
+        tla.recover_other_bucket_candidates(
+            tmp_path,
+            [],
+            top_k=10,
+            total_window_us=18186603.0,
+        )
+        == []
+    )
+    # Same input, no window total: the legacy share-of-listed-ops basis still
+    # applies so behaviour is unchanged where we cannot do better.
+    legacy = tla.recover_other_bucket_candidates(tmp_path, [], top_k=10)
+    assert [c["name"] for c in legacy] == ["moe_flydsl_stage1"]
+    assert legacy[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_LISTED_OPS
+
+
+def test_recover_falls_back_to_sidecar_pct_without_window(tmp_path):
+    """A JSON sidecar carrying only a percentage keeps working, but is labelled."""
+    _write(
+        tmp_path / "priority_data.json",
+        json.dumps({"findings": [{"name": "fused_moe_kernel", "category": "other", "gpu_pct": 67.0}]}),
+    )
+    recovered = tla.recover_other_bucket_candidates(tmp_path, [], top_k=10)
+    assert [c["name"] for c in recovered] == ["fused_moe_kernel"]
+    assert recovered[0]["gpu_pct"] == 67.0
+    assert recovered[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_SIDECAR
