@@ -417,7 +417,6 @@ class ClosePhase(PhaseHandler):
                 params=params,
                 idempotency_key=key,
                 requires_lanes=[],
-                allowed_tools=["Read"],
                 side_effects=["writes_results"],
                 lease_ttl_sec=120,
             )
@@ -739,7 +738,6 @@ class ClosePhase(PhaseHandler):
             },
             idempotency_key=idempotency_key,
             requires_lanes=[],
-            allowed_tools=["Read"],
             side_effects=["writes_results"],
             lease_ttl_sec=120,
         )

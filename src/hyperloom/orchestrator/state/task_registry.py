@@ -75,7 +75,6 @@ class Task:
         params (dict): Action parameters.
         idempotency_key (str): UNIQUE key used to de-duplicate re-creations.
         requires_lanes (list[str]): Resource lanes the task needs.
-        allowed_tools (list[str]): Tool whitelist for the task.
         side_effects (list[str]): Declared side effects.
         lease_ttl_sec (int): Lease TTL in seconds.
         history (list[dict]): Recorded state transitions, plus the newest
@@ -91,7 +90,6 @@ class Task:
     params: dict
     idempotency_key: str
     requires_lanes: list[str] = field(default_factory=list)
-    allowed_tools: list[str] = field(default_factory=list)
     side_effects: list[str] = field(default_factory=list)
     lease_ttl_sec: int = 0
     history: list[dict] = field(default_factory=list)
@@ -116,7 +114,6 @@ class Task:
             params=json.loads(row["params"]),
             idempotency_key=row["idempotency_key"],
             requires_lanes=json.loads(row["requires_lanes"]),
-            allowed_tools=json.loads(row["allowed_tools"]),
             side_effects=json.loads(row["side_effects"]),
             lease_ttl_sec=row["lease_ttl_sec"],
             history=json.loads(row["history"]),
@@ -205,7 +202,6 @@ class TaskRegistry:
         params: dict,
         idempotency_key: str,
         requires_lanes: list[str] | None = None,
-        allowed_tools: list[str] | None = None,
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
@@ -217,7 +213,6 @@ class TaskRegistry:
             params: Task parameters serialised into the row.
             idempotency_key: Key used to detect and return an existing task.
             requires_lanes: Lanes the task must hold while running.
-            allowed_tools: Tools the task is permitted to use.
             side_effects: Declared side effects of the task.
             lease_ttl_sec: Lease time-to-live in seconds.
             task_id: Optional explicit task id; generated when omitted.
@@ -235,9 +230,9 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             cur.execute(
                 "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, "
-                "requires_lanes, allowed_tools, side_effects, lease_ttl_sec, "
+                "requires_lanes, side_effects, lease_ttl_sec, "
                 "history, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     kind,
@@ -245,7 +240,6 @@ class TaskRegistry:
                     json.dumps(params),
                     idempotency_key,
                     json.dumps(requires_lanes or []),
-                    json.dumps(allowed_tools or []),
                     json.dumps(side_effects or []),
                     lease_ttl_sec,
                     "[]",
@@ -261,7 +255,6 @@ class TaskRegistry:
                 params=params,
                 idempotency_key=idempotency_key,
                 requires_lanes=requires_lanes or [],
-                allowed_tools=allowed_tools or [],
                 side_effects=side_effects or [],
                 lease_ttl_sec=lease_ttl_sec,
                 history=[],
@@ -278,7 +271,6 @@ class TaskRegistry:
         params: dict,
         idempotency_key: str,
         requires_lanes: list[str] | None = None,
-        allowed_tools: list[str] | None = None,
         side_effects: list[str] | None = None,
         lease_ttl_sec: int = 0,
         task_id: str | None = None,
@@ -290,7 +282,6 @@ class TaskRegistry:
             params: Task parameters serialised into the row.
             idempotency_key: Key used to detect and return an existing task.
             requires_lanes: Lanes the task must hold while running.
-            allowed_tools: Tools the task is permitted to use.
             side_effects: Declared side effects of the task.
             lease_ttl_sec: Lease time-to-live in seconds.
             task_id: Optional explicit task id; generated when omitted.
@@ -303,7 +294,6 @@ class TaskRegistry:
             params=params,
             idempotency_key=idempotency_key,
             requires_lanes=requires_lanes,
-            allowed_tools=allowed_tools,
             side_effects=side_effects,
             lease_ttl_sec=lease_ttl_sec,
             task_id=task_id,

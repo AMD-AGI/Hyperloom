@@ -10,7 +10,7 @@ action-name lists.
 :data:`ACTION_CATALOGUE` models only the fields production code reads:
 
 * ``requires_lanes`` / ``lease_ttl_sec`` -- dispatch gate and GPU lease TTL
-* ``allowed_tools`` / ``side_effects`` -- stamped onto the dispatched task
+* ``side_effects`` -- stamped onto the dispatched task
 * ``pipeline_phase`` -- runs-workspace ownership plus prompt grouping
 * ``verdict_class`` -- selects the Critic prompt rule set
 * the rest -- rendered into the Orchestration prompt catalogue
