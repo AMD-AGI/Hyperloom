@@ -1448,9 +1448,8 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Return True when every prior KB/PR/research source is empty, so a
-    cold-start directive is injected instead of letting specialists return
-    an empty proposal_set.
+    """Return True when every prior KB/PR/research source is empty, so the
+    cold-start directive is injected in place of the KB block.
 
     Args:
         inp: The specialist prompt inputs.
@@ -1496,7 +1495,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             )
             return rows
         if cold:
-            # Cold-start directive: propose domain-focus defaults, not an empty set.
+            # Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
             rows.extend(
                 [
                     "**COLD-START MODE — no priors available.**",
