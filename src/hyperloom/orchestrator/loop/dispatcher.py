@@ -588,8 +588,20 @@ class DispatcherCollaborator:
                 # Already dispatched in a prior pass of this pump.
                 continue
             if task.kind == "targeted_build":
-                # Off-loop builds run in their own process group and are pumped/
-                # reaped by BuildLifecycleCollaborator; never drain them here.
+                # Register in _inflight_actions but not in ``spawned``; the
+                # pump's FIRST_COMPLETED drain must not wait on a long compile.
+                if task.task_id not in self._inflight_actions:
+                    cancel_scope = CancelScope()
+                    atask = asyncio.create_task(
+                        self.run_task_registered(
+                            task,
+                            cancel_scope=cancel_scope,
+                        )
+                    )
+                    self._inflight_actions[task.task_id] = _InflightAction(
+                        task.kind, atask, cancel_scope
+                    )
+                    exclude_ids.add(task.task_id)
                 continue
             if await self._cancel_queued_task_over_budget(task):
                 continue

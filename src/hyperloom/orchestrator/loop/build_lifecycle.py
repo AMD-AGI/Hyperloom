@@ -1,39 +1,18 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Off-loop targeted-build lifecycle.
-
-Drives compiled-component builds as resume-safe task rows that run OFF the
-coordinator tick loop: one build at a time (``build_lane`` capacity 1), spawned
-detached, and reaped across ticks against a wall-clock deadline. The build never
-runs inside ``_pump_dispatcher_once``'s inflight drain (the dispatcher skips
-``kind == "targeted_build"``); this collaborator pumps and reaps it instead.
-
-The in-flight handle is held in memory keyed by task_id; the durable copy is the
-``pending_targeted_build`` sentinel, so a crash/resume can reclaim the orphan
-(see ``writeback._resume_recover_pending_targeted_build``).
-"""
+"""Enqueues ``targeted_build`` rows; execution is handled by TargetedBuildExecutor."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
-from pathlib import Path
-from typing import Any
-
-import json as _json
 import sys as _sys
 
-from ..bus.resource_lock import Lease
 from ..framework.build_actions import TargetedBuildAction, build_novelty_key
-from ..framework.targeted_build import BuildHandle, poll_build, spawn_build
-
-log = logging.getLogger(__name__)
 
 _BUILD_KIND = "targeted_build"
-# Grace added to the wall-clock budget for the lease TTL reclaim backstop.
-_LEASE_GRACE_SEC = 300
+_LEASE_GRACE_SEC = 300  # added to build budget for the lease TTL reclaim backstop
 
 
 def _novelty_idempotency_key(action: TargetedBuildAction) -> str:
@@ -50,20 +29,14 @@ class BuildLifecycleCollaborator:
 
     def __init__(self, coordinator) -> None:
         self._coord = coordinator
-        # In-memory handles + leases for in-flight builds, keyed by task_id.
-        self._build_handles: dict[str, BuildHandle] = {}
-        self._build_leases: dict[str, Lease] = {}
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    def _attempt_root(self, task_id: str) -> str:
-        return str(self.session_dir / "enablement" / "builds" / task_id)
-
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
-        """Enqueue a resume-safe ``targeted_build`` row (idempotent by novelty).
+        """Enqueue a ``targeted_build`` row (idempotent by novelty key).
 
-        Returns the task id (an existing row's id on a repeat novelty tuple).
+        Returns the task id; returns an existing row's id on a repeat novelty tuple.
         """
         from ..framework.targeted_build import _resolve_budget_sec
 
@@ -77,151 +50,21 @@ class BuildLifecycleCollaborator:
         )
         return str(getattr(task, "task_id", "") or "")
 
-    async def _maybe_pump_targeted_build(self, *, tick: int) -> dict[str, Any] | None:
-        """Start the oldest queued build when ``build_lane`` is free.
-
-        One build at a time (derived single-in-flight gate: a running row
-        exists). Best-effort; never aborts the tick.
-        """
-        try:
-            running = [t for t in await self.tasks.by_state("running") if t.kind == _BUILD_KIND]
-            if running:
-                return None
-            queued = [t for t in await self.tasks.queued() if t.kind == _BUILD_KIND]
-            if not queued:
-                return None
-            task = queued[0]
-            lease = await self.locks.try_acquire_many(
-                ["build_lane"],
-                holder_id=task.task_id,
-                task_id=task.task_id,
-                action=_BUILD_KIND,
-                ttl_sec=task.lease_ttl_sec or 60,
-            )
-            if lease is None:
-                return None
-            try:
-                action = TargetedBuildAction.from_state(task.params)
-                attempt_root = self._attempt_root(task.task_id)
-                command = _driver_command(action, attempt_root)
-                handle = spawn_build(action, attempt_root=attempt_root, command=command)
-            except Exception as exc:  # noqa: BLE001 — spawn failure is a clean fail
-                await self.locks.release(lease)
-                log.exception("targeted_build: spawn failed for %s", task.task_id)
-                await self._fail_build_row(task.task_id, failure_class="compile_error", summary=repr(exc))
-                return {"tick": tick, "spawn_failed": task.task_id}
-            self._build_handles[task.task_id] = handle
-            self._build_leases[task.task_id] = lease
-            self.shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)
-            self.shared_state.save(self.session_dir)
-            await self.tasks.transition(task.task_id, "running", evidence={"build": action.component})
-            log.info("targeted_build: started %s (%s) pid=%d", task.task_id, action.component, handle.pid)
-            return {"tick": tick, "started": task.task_id}
-        except Exception:  # noqa: BLE001 — lifecycle never aborts the run loop
-            log.exception("targeted_build: pump failed")
-            return None
-
-    async def _maybe_reap_targeted_build(self, *, tick: int) -> dict[str, Any] | None:
-        """Poll the in-flight build; finalize + release on a terminal result."""
-        try:
-            running = [t for t in await self.tasks.by_state("running") if t.kind == _BUILD_KIND]
-            if not running:
-                return None
-            task = running[0]
-            handle = self._build_handles.get(task.task_id)
-            if handle is None:
-                # No in-memory handle (crash/resume): the reclaim path owns it.
-                return None
-            result = poll_build(handle)
-            if result is None:
-                return None
-            self._record_build_result(result)
-            await self._release_build(task.task_id)
-            new_state = "succeeded" if result.ok else "failed"
-            await self.tasks.transition(
-                task.task_id,
-                new_state,
-                evidence={"failure_class": result.failure_class},
-            )
-            self.shared_state.pending_targeted_build = {}
-            self.shared_state.save(self.session_dir)
-            log.info(
-                "targeted_build: %s -> %s (failure_class=%s)",
-                task.task_id,
-                new_state,
-                result.failure_class,
-            )
-            return {"tick": tick, "finished": task.task_id, "ok": result.ok}
-        except Exception:  # noqa: BLE001
-            log.exception("targeted_build: reap failed")
-            return None
-
-    def _record_build_result(self, result: Any) -> None:
-        """Append the manifest entry and record the failure carrier."""
-        state = self.shared_state
-        manifest = list(getattr(state.enablement, "build_manifest", []) or [])
-        manifest.append(result.to_state())
-        state.enablement.build_manifest = manifest
-        if not result.ok:
-            state.enablement.last_build_failure = {
-                "failure_class": result.failure_class,
-                "failure_summary": result.failure_summary or result.error,
-            }
-            # A killed build can wedge every later compile of a module. Best-effort
-            # sweep of the per-attempt jit dir: skipped entirely while a compiler is
-            # still alive, and otherwise only reaps locks older than
-            # AITER_LOCK_STALE_MINUTES, so locks from a just-killed build survive
-            # until a later attempt.
-            self._sweep_build_jit(result.attempt_root)
-
-    @staticmethod
-    def _sweep_build_jit(attempt_root: str) -> None:
-        from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
-
-        jit_dir = Path(str(attempt_root or "")) / "aiter_jit"
-        try:
-            sweep_stale_aiter_locks_if_dead(aiter_jit_dir=jit_dir)
-        except Exception:  # noqa: BLE001 — sweep is best-effort
-            log.debug("targeted_build: jit sweep failed for %s", jit_dir, exc_info=True)
-
-    async def _release_build(self, task_id: str) -> None:
-        self._build_handles.pop(task_id, None)
-        lease = self._build_leases.pop(task_id, None)
-        if lease is not None:
-            try:
-                await self.locks.release(lease)
-            except Exception:  # noqa: BLE001 — reclaim/reap is the backstop
-                log.debug("targeted_build: lease release raced for %s", task_id, exc_info=True)
-
-    async def _fail_build_row(self, task_id: str, *, failure_class: str, summary: str) -> None:
-        self.shared_state.enablement.last_build_failure = {
-            "failure_class": failure_class,
-            "failure_summary": summary,
-        }
-        self.shared_state.pending_targeted_build = {}
-        self.shared_state.save(self.session_dir)
-        try:
-            await self.tasks.transition(task_id, "failed", evidence={"failure_class": failure_class})
-        except Exception:  # noqa: BLE001
-            log.debug("targeted_build: fail transition raced for %s", task_id, exc_info=True)
-
 
 def _driver_command(action: TargetedBuildAction, attempt_root: str) -> list[str]:
-    """Return the argv that runs the off-loop driver for a real component.
+    """Return the spawn argv for this action.
 
-    If the action carries an explicit ``build_command``, that argv is returned
-    unchanged.  Otherwise the driver entrypoint is used so the full recipe runs
-    in the detached subprocess.
+    Passes ``action.build_command`` through verbatim when set; otherwise writes
+    ``plan.json`` into ``attempt_root`` and returns the driver module entrypoint.
     """
     if action.build_command:
         return list(action.build_command)
-    _plan = str(attempt_root)
     from pathlib import Path as _Path
 
-    root = _Path(_plan)
+    root = _Path(str(attempt_root))
     root.mkdir(parents=True, exist_ok=True)
     (root / "plan.json").write_text(
-        _json.dumps(action.to_state()), encoding="utf-8"
+        json.dumps(action.to_state()), encoding="utf-8"
     )
     return [
         _sys.executable,
@@ -232,4 +75,4 @@ def _driver_command(action: TargetedBuildAction, attempt_root: str) -> list[str]
     ]
 
 
-__all__ = ["BuildLifecycleCollaborator", "_driver_command"]
+__all__ = ["BuildLifecycleCollaborator", "_driver_command", "_novelty_idempotency_key"]
