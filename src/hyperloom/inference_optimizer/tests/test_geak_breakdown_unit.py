@@ -632,3 +632,29 @@ async def test_sweep_via_geak_requires_existing_bench_script(tmp_path: Path) -> 
 
     assert result["status"] == "failed"
     assert result["error_class"] == "missing_bench_script"
+
+
+def test_collect_gemm_tuning_prefers_e2e_gain_over_micro_speedup() -> None:
+    from hyperloom.inference_optimizer.breakdown.collectors.kernels import collect_gemm_tuning
+
+    out = collect_gemm_tuning(
+        {
+            "baseline_tput": 1000.0,
+            "gemm_tuning_attempts": [
+                {
+                    "engine": "forge",
+                    "status": "complete",
+                    "decision": "KEEP",
+                    "best_speedup": 1.5,
+                    "e2e_gain_pct": 9.26,
+                    "e2e_validated": True,
+                    "tuned_file": "/tmp/tuned.csv",
+                }
+            ],
+        }
+    )
+
+    run = out["runs"][0]
+    assert run["gain_pct"] == pytest.approx(9.26)
+    assert run["tuned_tput"] == pytest.approx(1092.6)
+    assert run["best_speedup"] == pytest.approx(1.5)
