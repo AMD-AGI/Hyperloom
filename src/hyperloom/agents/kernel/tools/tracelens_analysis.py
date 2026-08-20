@@ -1058,6 +1058,75 @@ _PHASE_FRAGMENT_RE = re.compile(
 )
 
 
+#: Directory both frameworks write CUDA-graph capture sidecars into.
+_CAPTURE_DIR_NAME = "capture_traces"
+
+#: Sidecar filename shapes: SGLang ``bs_<batch>[_rank<n>]``, vLLM
+#: ``graph_capture_*``. The batch number is required rather than a bare ``bs_``
+#: prefix because this classifier now *rejects* an input instead of only sorting
+#: it, and a real trace that merely starts with those three characters must not
+#: be thrown out. One definition, because both callers need the same answer:
+#: discovery demotes sidecars below a real capture, and the preflight refuses an
+#: input made of nothing else.
+_CAPTURE_FRAGMENT_RE = re.compile(r"^(?:bs_\d+|graph_capture)", re.IGNORECASE)
+
+
+def _is_capture_fragment(path: Path, root: Path | None = None) -> bool:
+    """Whether a trace path is a CUDA-graph capture sidecar.
+
+    Capture sidecars are recorded while the graph is being *built*, so the
+    launches in them go into the graph instead of onto the device. What lands is
+    a host-side Python call tree with a handful of stray kernels, one file per
+    (batch size, rank), each holding a single ``ProfilerStep``. There is no
+    iteration loop in one, which is what the steady-state splitter exists to cut
+    up.
+
+    Two signals, because either alone has a blind spot: the directory name
+    catches a sidecar whose filename nobody has seen before, and the filename
+    catches a flat layout that never made the directory.
+
+    ``root`` bounds the directory test to the input being analysed, the same way
+    :func:`_is_derived_trace` does it. Paths arrive absolute, so testing every
+    component would condemn every candidate whenever some ancestor happened to
+    be named ``capture_traces``. Callers pass the input directory, or a file's
+    parent so a single-file input is judged on its name alone.
+
+    Args:
+        path: The trace file path to classify.
+        root: Directory the classification is relative to, when known.
+
+    Returns:
+        True when ``path`` is a graph-capture sidecar rather than a workload
+        trace.
+    """
+    if _CAPTURE_FRAGMENT_RE.match(path.name) is not None:
+        return True
+    relative = path
+    if root is not None:
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = path
+    return any(part.lower() == _CAPTURE_DIR_NAME for part in relative.parts)
+
+
+def _capture_classification_root(trace_input: Path) -> Path:
+    """Root to classify candidates discovered from ``trace_input`` against.
+
+    A directory input is its own root, so a ``capture_traces/`` component below
+    it counts. A file input resolves to its parent, which leaves the filename as
+    the only component and keeps an unrelated ancestor directory out of the
+    decision.
+
+    Args:
+        trace_input: The ``--trace-input`` path.
+
+    Returns:
+        The directory candidate paths are made relative to.
+    """
+    return trace_input if trace_input.is_dir() else trace_input.parent
+
+
 def _is_derived_trace(path: Path, root: Path | None = None) -> bool:
     """Whether a trace path is splitter output rather than a raw capture.
 
@@ -1163,7 +1232,7 @@ def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, in
         return (0, -size, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
         return (2, -size, name)
-    if name.startswith("bs_") or name.startswith("graph_capture"):
+    if _is_capture_fragment(path, root):
         return (3, -size, name)
     return (1, -size, name)
 
@@ -7393,6 +7462,38 @@ def main() -> int:
         # push that None through every downstream call for a branch that cannot
         # be taken.
         analysis_trace_path = trace_files[0]
+
+        # Fail-fast when the input is nothing but CUDA-graph capture sidecars.
+        #
+        # Ahead of the kernel probe below because the two answer different
+        # questions and only this one is reliable here. A capture records the
+        # graph being built, so it carries a handful of stray kernels rather
+        # than none -- 2 out of 1.49M events on the run that prompted this --
+        # and a probe that asks "are there any kernels" therefore passes it and
+        # hands the splitter a file with no iteration loop in it. The splitter
+        # then fails with ``trace_split_no_steady_state``, which reads as "the
+        # window was too short" and sends the next person to lengthen a capture
+        # that was never a workload timeline to begin with.
+        #
+        # ``all`` rather than ``any``: a healthy profile writes the annotated
+        # trace *beside* its sidecars, and discovery already sorts those first.
+        # Only an input with nothing else in it is unanalysable.
+        if not args.dry_run and trace_files:
+            capture_root = _capture_classification_root(trace_input)
+            if all(_is_capture_fragment(p, capture_root) for p in trace_files):
+                raise RuntimeError(
+                    "trace_input_capture_only: "
+                    f"all {len(trace_files)} trace file(s) under {trace_input} "
+                    "are CUDA-graph capture sidecars. "
+                    "A capture records graph construction rather than "
+                    "execution, so it holds no per-iteration annotations for "
+                    "the steady-state splitter to cut on. "
+                    "The upstream profile produced no annotated workload trace: "
+                    "re-profile so the run writes one beside the sidecars. "
+                    "Sidecars are a supported auxiliary input -- pass them as "
+                    "--capture-folder alongside a real trace, never as "
+                    "--trace-input."
+                )
 
         # Fail-fast on CPU-only traces.
         #
