@@ -87,6 +87,12 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "roofline",
         "profile",
         "replay_warm_recipe",
+        # Off-loop compiled-component builds; dispatched by the Coordinator,
+        # never by an LLM agent.  Not in ACTION_CATALOGUE to avoid pulling the
+        # kind into PHASE_LLM_PROPOSABLE_ACTIONS or _RUNS_ACTIONS (which would
+        # create a runs/ workspace and collide with the enablement/builds/
+        # attempt-root contract).
+        "targeted_build",
     }
 )
 
