@@ -1285,6 +1285,50 @@ def test_replay_warm_recipe_double_run_forces_warmup_eval(tmp_path):
     assert captured[1]["benchmark"]["envs"]["RUN_EVAL"] == "false"
 
 
+def test_replay_warm_recipe_honours_no_eval(tmp_path):
+    """``--no-eval`` outranks the replay's forced warmup eval.
+
+    The flag is the operator saying no eval runs this session. Forcing one on
+    the warmup round would spend the time the flag was passed to save, and do
+    it silently -- the baseline path on the same executor already honours the
+    flag, so a replay that did not would be the odd one out.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    shared = SimpleNamespace(baseline_double_run=True, eval_disabled=True)
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=shared,
+    )
+    task = SimpleNamespace(
+        task_id="t-replay-no-eval",
+        kind="replay_warm_recipe",
+        params={
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+        },
+    )
+    ctx = SimpleNamespace(task=task, extra={"shared_state": shared})
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == [
+        "false",
+        "false",
+    ]
+
+
 def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch):
     """Focused callers may explicitly opt out of the default cold+hot baseline."""
     base = tmp_path / "base.yaml"

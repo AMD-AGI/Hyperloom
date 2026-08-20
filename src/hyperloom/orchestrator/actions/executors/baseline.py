@@ -3450,10 +3450,15 @@ class BaselineExecutor:
             # ``force_disable_eval`` marks the salvage retry taken when the eval
             # is itself what aborted the run; forcing it back on there would
             # reproduce the failure and lose the throughput baseline too.
+            # ``--no-eval`` is the operator saying no eval runs this session, and
+            # forcing one here would spend the time it was passed to save while
+            # silently overriding that. A replay is then promoted unjudged, which
+            # is the trade the flag already makes everywhere else.
             force_warmup_eval = (
                 str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
                 and not defer_accuracy_until_after_measure
                 and not force_disable_eval
+                and not eval_disabled
             )
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
