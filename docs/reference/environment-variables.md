@@ -560,7 +560,8 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | `bypassPermissions` | `--permission-mode` passed to the `claude` CLI for specialist subprocesses. Controls the Claude runtime approval-prompt behaviour only. Codex containment is resolved independently through `HYPERLOOM_CODEX_SANDBOX_MODE`. The default `bypassPermissions` is required for unattended operation; change only in setups where an external interactive approval flow is intended. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
