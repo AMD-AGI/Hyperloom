@@ -95,6 +95,27 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
+def _adopted_tuned_file(stack: Any) -> str:
+    """Return the tuned artifact the newest GEMM KEEP recorded on the stack.
+
+    One KEEP is described by three different path strings -- the durable copy in
+    aiter's config tree, the tuner-workspace original, and the E2E merge product
+    -- so an attempt row cannot re-derive the one the stack happens to hold.
+    Reading it back is what lets the breakdown match the two sides at all; every
+    attempt to reconstruct it matched none of them, and every forge KEEP was
+    reported as unadopted.
+
+    Only the newest entry counts: an older one names a previous run's artifact.
+    """
+    if not isinstance(stack, list):
+        return ""
+    for item in reversed(stack):
+        if not isinstance(item, dict) or item.get("action") != "gemm_tuning":
+            continue
+        return str(item.get("tuned_file") or "")
+    return ""
+
+
 def _paired_measurement_basis(verdict: Any) -> str:
     """How the promoted gain was measured, so the ledger cannot overstate it.
 
@@ -3044,6 +3065,13 @@ class KernelPhase(PhaseHandler):
                     source="forge_gemm_tuning_e2e",
                     measurement_basis=_paired_measurement_basis(paired),
                 )
+            # Name the artifact the stack recorded, so the breakdown can tell
+            # this run was adopted. Forge never set ``tuned_file`` (it reports
+            # per-tuner envs instead), which left the history row's path empty
+            # and the adoption lookup matching on "".
+            adopted_file = _adopted_tuned_file(self.shared_state.optimization_stack)
+            if adopted_file:
+                result["tuned_file"] = adopted_file
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),

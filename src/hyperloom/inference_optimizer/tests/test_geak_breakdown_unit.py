@@ -661,6 +661,93 @@ def test_collect_gemm_tuning_prefers_e2e_gain_over_micro_speedup() -> None:
     assert run["best_speedup"] == pytest.approx(1.5)
 
 
+def _gemm_state_with_keep(*, attempt_tuned_file: str) -> dict:
+    """A session whose forge run was kept and lifted onto the stack."""
+    return {
+        "baseline_tput": 1000.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "gemm_tuning",
+                "tuned_file": "/ws/merged_tuned_fmoe.csv",
+                "gain_pct": 9.26,
+            }
+        ],
+        "gemm_tuning_attempts": [
+            {
+                "engine": "forge",
+                "status": "complete",
+                "decision": "KEEP",
+                "e2e_gain_pct": 9.26,
+                "e2e_validated": True,
+                "tuned_file": attempt_tuned_file,
+            }
+        ],
+    }
+
+
+def test_collect_gemm_tuning_marks_a_kept_run_adopted() -> None:
+    """A forge run whose artifact reached the stack must read as adopted.
+
+    Across 419 real forge attempts this was never true: the attempt row carried
+    no ``tuned_file`` at all, so the stack lookup matched on the empty string
+    and every KEEP -- including ones measuring +49% -- was reported as not
+    adopted.
+    """
+    from hyperloom.inference_optimizer.breakdown.collectors.kernels import collect_gemm_tuning
+
+    out = collect_gemm_tuning(
+        _gemm_state_with_keep(attempt_tuned_file="/ws/merged_tuned_fmoe.csv")
+    )
+
+    run = out["runs"][0]
+    assert run["adopted"] is True
+    assert run["gain_pct"] == pytest.approx(9.26)
+
+
+def test_collect_gemm_tuning_leaves_an_unlifted_run_unadopted() -> None:
+    """Fail-open on the empty case must not make every run look adopted."""
+    from hyperloom.inference_optimizer.breakdown.collectors.kernels import collect_gemm_tuning
+
+    out = collect_gemm_tuning(_gemm_state_with_keep(attempt_tuned_file=""))
+
+    assert out["runs"][0]["adopted"] is False
+
+
+class TestAdoptedTunedFileBackfill:
+    """The attempt row has to name the same artifact the stack recorded.
+
+    Three paths hold a path for one KEEP -- the durable copy in aiter's config
+    dir, the tuner workspace original, and the E2E merge product -- and they are
+    all different strings. Only the one the stack entry recorded can match, so
+    it is read back rather than re-derived.
+    """
+
+    def test_returns_the_newest_gemm_entry(self) -> None:
+        from hyperloom.orchestrator.phases.kernel import _adopted_tuned_file
+
+        stack = [
+            {"action": "gemm_tuning", "tuned_file": "/ws/first.csv"},
+            {"action": "integrate_patch", "tuned_file": "/ws/unrelated.csv"},
+            {"action": "gemm_tuning", "tuned_file": "/ws/second.csv"},
+        ]
+        assert _adopted_tuned_file(stack) == "/ws/second.csv"
+
+    def test_ignores_other_lanes(self) -> None:
+        from hyperloom.orchestrator.phases.kernel import _adopted_tuned_file
+
+        stack = [{"action": "framework_agent", "tuned_file": "/ws/other.csv"}]
+        assert _adopted_tuned_file(stack) == ""
+
+    def test_tolerates_a_missing_or_malformed_stack(self) -> None:
+        from hyperloom.orchestrator.phases.kernel import _adopted_tuned_file
+
+        assert _adopted_tuned_file([]) == ""
+        assert _adopted_tuned_file(None) == ""
+        assert _adopted_tuned_file(["not-a-dict"]) == ""
+        assert _adopted_tuned_file([{"action": "gemm_tuning"}]) == ""
+
+
 def test_collect_geak_backfill_fires_on_no_gain(tmp_path: Path) -> None:
     # A run stamped ``no_gain`` on the COLD basis can still hold a measured hot
     # win and genuine KEEP rows in the journey. Attribution must not be dropped.
