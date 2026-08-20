@@ -2289,69 +2289,107 @@ class KernelPhase(PhaseHandler):
                 running_tput,
             )
 
-            try:
-                integrate_result = await integrate_handler(
-                    {
-                        "task_id": f"gemm_tune_e2e_{tuner_name}",
-                        "kernel_id": f"gemm_tune_{tuner_name}",
-                        "source": "forge_gemm_tuning",
-                        "base_tput": running_tput,
-                        "extra_server_args": extra_server_args,
-                        "extra_envs": test_envs,
-                        "keep_threshold_pct": 3.0,
-                        "budget_minutes": per_tuner_budget_minutes,
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "gemm E2E: integrate raised for %s: %s",
-                    tuner_name,
-                    exc,
-                )
-                faults.append(
-                    {
-                        **cand,
-                        "reason": "integrate_fault:handler_exception",
-                        "fault": True,
-                        "error_class": "handler_exception",
-                        "error": repr(exc),
-                    }
-                )
-                continue
+            from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
-            stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
-            if stopped is not None:
-                # Recording the rest would report a clock as a verdict on them.
-                log.info(
-                    "gemm E2E: %s left unmeasured — %s",
-                    tuner_name,
-                    stopped.interrupted,
-                )
+            integrate_verdict: dict[str, Any] | None = None
+            run_stopped = False
+            integrate_payload = {
+                "task_id": f"gemm_tune_e2e_{tuner_name}",
+                "kernel_id": f"gemm_tune_{tuner_name}",
+                "source": "forge_gemm_tuning",
+                "base_tput": running_tput,
+                "extra_server_args": extra_server_args,
+                "extra_envs": test_envs,
+                "keep_threshold_pct": 3.0,
+                "budget_minutes": per_tuner_budget_minutes,
+            }
+            for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
+                try:
+                    integrate_result = await integrate_handler(
+                        integrate_payload,
+                        session_dir=self.session_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
+                        log.warning(
+                            "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
+                            tuner_name,
+                            fault_attempt,
+                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                            exc,
+                        )
+                        continue
+                    log.warning(
+                        "gemm E2E: integrate raised for %s: %s",
+                        tuner_name,
+                        exc,
+                    )
+                    faults.append(
+                        {
+                            **cand,
+                            "reason": "integrate_fault:handler_exception",
+                            "fault": True,
+                            "error_class": "handler_exception",
+                            "error": repr(exc),
+                            "fault_attempts": fault_attempt,
+                        }
+                    )
+                    break
+
+                stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
+                if stopped is not None:
+                    log.info(
+                        "gemm E2E: %s left unmeasured — %s",
+                        tuner_name,
+                        stopped.interrupted,
+                    )
+                    run_stopped = True
+                    break
+
+                if self.shared_state._is_integrate_fault(integrate_result):
+                    error_class = str(
+                        integrate_result.get("error_class") or "integrate_fault"
+                    ).strip()
+                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
+                        log.warning(
+                            "gemm E2E: retrying tuner=%s after integrate fault %s "
+                            "(attempt %d/%d)",
+                            tuner_name,
+                            error_class,
+                            fault_attempt,
+                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                        )
+                        continue
+                    log.warning(
+                        "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, "
+                        "not a REVERT verdict",
+                        tuner_name,
+                        error_class,
+                    )
+                    faults.append(
+                        {
+                            **cand,
+                            "reason": f"integrate_fault:{error_class}",
+                            "fault": True,
+                            "error_class": error_class,
+                            "integrate_status": integrate_result.get("status"),
+                            "error": integrate_result.get("error"),
+                            "fault_attempts": fault_attempt,
+                        }
+                    )
+                    break
+
+                integrate_verdict = integrate_result
                 break
 
-            if self.shared_state._is_integrate_fault(integrate_result):
-                error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
-                log.warning(
-                    "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, not a REVERT verdict",
-                    tuner_name,
-                    error_class,
-                )
-                faults.append(
-                    {
-                        **cand,
-                        "reason": f"integrate_fault:{error_class}",
-                        "fault": True,
-                        "error_class": error_class,
-                        "integrate_status": integrate_result.get("status"),
-                        "error": integrate_result.get("error"),
-                    }
-                )
+            if run_stopped:
+                break
+            if integrate_verdict is None:
                 continue
 
-            decision = str(integrate_result.get("decision") or "").upper()
-            new_tput = float(integrate_result.get("new_tput") or 0.0)
-            gain_pct = float(integrate_result.get("gain_pct") or 0.0)
+            decision = str(integrate_verdict.get("decision") or "").upper()
+            new_tput = float(integrate_verdict.get("new_tput") or 0.0)
+            gain_pct = float(integrate_verdict.get("gain_pct") or 0.0)
 
             log.info(
                 "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
