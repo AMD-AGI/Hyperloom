@@ -11,6 +11,7 @@ spawn a duplicate optimizer that corrupts the shared leases / ``state.json``.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import subprocess
 import sys
@@ -70,8 +71,6 @@ def test_acquire_appends_pod_history(tmp_path):
 
     ``optimizer.lock`` is truncated by every acquirer, so a session whose sandbox
     is rebuilt mid-run would otherwise keep no record of the earlier pods."""
-    import json
-
     first = SessionLock(tmp_path)
     first.acquire()
     first.release()

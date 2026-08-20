@@ -1070,8 +1070,6 @@ def test_materialize_profile_sglang_drops_annotations_when_patch_fails(
     Without the server-side patch the trace carries no ``kernel_shape_profiler``
     events, so requesting shape discovery / detailed annotations only pays the
     capture cost. The vLLM branch already drops its equivalent flag."""
-    import json
-
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1090,8 +1088,6 @@ def test_materialize_profile_sglang_keeps_annotations_when_patch_succeeds(
     monkeypatch,
 ):
     """The healthy path is untouched: annotations stay on when the patch lands."""
-    import json
-
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1113,8 +1109,6 @@ def test_materialize_profile_sglang_keeps_annotations_when_patch_not_attempted(
 
     Patching disabled is not the same as patching failed: the image may ship the
     TraceLens patch already applied, in which case the annotations still work."""
-    import json
-
     import yaml
 
     _clear_workload_env(monkeypatch)
