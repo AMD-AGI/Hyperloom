@@ -95,25 +95,30 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
-def _adopted_tuned_file(stack: Any) -> str:
-    """Return the tuned artifact the newest GEMM KEEP recorded on the stack.
+def _candidate_tuned_file(env: Any, env_var: str) -> str:
+    """Return the tuned artifact a candidate's env points at.
 
     One KEEP is described by three different path strings -- the durable copy in
     aiter's config tree, the tuner-workspace original, and the E2E merge product
-    -- so an attempt row cannot re-derive the one the stack happens to hold.
-    Reading it back is what lets the breakdown match the two sides at all; every
-    attempt to reconstruct it matched none of them, and every forge KEEP was
-    reported as unadopted.
+    -- so an attempt row cannot re-derive the one the stack ends up holding, and
+    reconstructing it matched none of them: every forge KEEP read as unadopted.
 
-    Only the newest entry counts: an older one names a previous run's artifact.
+    Reading the newest stack entry back is not the way out either. The stack
+    append is skipped when ``(action, variant_name)`` already matches, and a GEMM
+    variant is named ``<backend>_<tuner>`` -- so a second macro cycle re-tuning
+    the same tuner finds its entry present, appends nothing, and the newest entry
+    is the previous round's. The attempt would then claim that round's artifact
+    along with its gain: the same misreport as before, inverted.
+
+    Both the stack entry and the attempt row take the value from here, which
+    makes them the same string by construction rather than by lookup.
     """
-    if not isinstance(stack, list):
+    if not isinstance(env, dict):
         return ""
-    for item in reversed(stack):
-        if not isinstance(item, dict) or item.get("action") != "gemm_tuning":
-            continue
-        return str(item.get("tuned_file") or "")
-    return ""
+    value = env.get(env_var)
+    if value in (None, ""):
+        value = next((v for v in env.values() if v not in (None, "")), "")
+    return str(value or "")
 
 
 def _paired_measurement_basis(verdict: Any) -> str:
@@ -2719,6 +2724,8 @@ class KernelPhase(PhaseHandler):
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
         faults: list[dict[str, Any]] = []
+        # Set by the last KEEP; the attempt row claims this exact string.
+        adopted_tuned_file = ""
         try:
             from ..actions.executors.explore import _compute_explore_variant_timeout
 
@@ -3002,6 +3009,11 @@ class KernelPhase(PhaseHandler):
                         "gain_pct": gain_pct,
                     }
                 )
+                # The one place this path names its artifact. The stack entry
+                # below and the attempt row further down both read it, so the
+                # breakdown's string match cannot be defeated by a stack append
+                # that was skipped as already-applied.
+                adopted_tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
 
                 lifted = self._lift_to_current_best(
                     "gemm_tuning",
@@ -3014,10 +3026,7 @@ class KernelPhase(PhaseHandler):
                         "workspace": result.get("workspace"),
                     },
                     entry_extra={
-                        "tuned_file": (
-                            env.get(cand["env_var"])
-                            or next(iter(env.values()), "")
-                        ),
+                        "tuned_file": adopted_tuned_file,
                         "gain_pct": gain_pct,
                         "backend": backend,
                         "source": "kernel_entry_auto",
@@ -3065,13 +3074,13 @@ class KernelPhase(PhaseHandler):
                     source="forge_gemm_tuning_e2e",
                     measurement_basis=_paired_measurement_basis(paired),
                 )
-            # Name the artifact the stack recorded, so the breakdown can tell
-            # this run was adopted. Forge never set ``tuned_file`` (it reports
-            # per-tuner envs instead), which left the history row's path empty
-            # and the adoption lookup matching on "".
-            adopted_file = _adopted_tuned_file(self.shared_state.optimization_stack)
-            if adopted_file:
-                result["tuned_file"] = adopted_file
+            # Name the artifact this run adopted, so the breakdown can tell it
+            # was. Forge never set ``tuned_file`` (it reports per-tuner envs
+            # instead), which left the history row's path empty and the adoption
+            # lookup matching on "". The value is the one the stack entry above
+            # carries, taken from the same call rather than looked up.
+            if adopted_tuned_file:
+                result["tuned_file"] = adopted_tuned_file
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),

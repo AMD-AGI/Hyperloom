@@ -2824,6 +2824,70 @@ class TestHandleGemmTuningResult:
         assert attempts[0]["tuned_file"] == stack[-1]["tuned_file"]
 
     @pytest.mark.asyncio
+    async def test_a_second_round_claims_its_own_artifact(self, tmp_path, monkeypatch):
+        """Re-tuning the same tuner must not inherit the earlier round's path.
+
+        ``_lift_to_current_best`` skips the stack append when
+        ``(action, variant_name)`` already matches, and a GEMM variant is named
+        ``<backend>_<tuner>`` -- so after a second macro cycle re-tunes the same
+        tuner, the newest stack entry still describes round one. Taking the
+        artifact from there would make the second attempt claim the first one's
+        file, and with it the first one's gain.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        # Keep the candidate env value verbatim so each round's path is distinct
+        # and the assertion is about provenance, not about merging.
+        monkeypatch.setattr(
+            KernelPhase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _self, _env_var, env_value: env_value,
+        )
+
+        def _result(env_value: str) -> dict:
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.5,
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": env_value},
+                "extra_envs": {"AITER_DENSE": env_value},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": env_value,
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}]),
+        )
+        await coord._handle_gemm_tuning_result(_result("/round1.json"))
+
+        first_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        assert first_file, "round one must name its artifact"
+        stack_len = len(coord.shared_state.optimization_stack)
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _make_integrate([{"decision": "KEEP", "new_tput": 160.0, "gain_pct": 23.1}]),
+        )
+        await coord._handle_gemm_tuning_result(_result("/round2.json"))
+
+        # Same (action, variant_name): the append is skipped by design.
+        assert len(coord.shared_state.optimization_stack) == stack_len
+        second_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        assert second_file and second_file != first_file
+
+    @pytest.mark.asyncio
     async def test_forge_e2e_revert_does_not_claim_an_artifact(
         self, tmp_path, monkeypatch
     ):
