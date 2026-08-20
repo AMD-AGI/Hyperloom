@@ -895,16 +895,6 @@ class FrameworkPhase(PhaseHandler):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            allowed_tools=[
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
@@ -1537,16 +1527,6 @@ class FrameworkPhase(PhaseHandler):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            allowed_tools=[
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
@@ -2098,16 +2078,6 @@ class FrameworkPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                allowed_tools=[
-                    "Read",
-                    "Grep",
-                    "Glob",
-                    "Write",
-                    "Edit",
-                    "Bash",
-                    "WebSearch",
-                    "WebFetch",
-                ],
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
             )
@@ -5566,7 +5536,6 @@ class FrameworkPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                allowed_tools=["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
                 side_effects=["writes_results"],
                 lease_ttl_sec=ttl,
             )

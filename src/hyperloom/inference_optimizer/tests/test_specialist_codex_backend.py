@@ -187,7 +187,7 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
         worktree_base=None,
         system_prompt="be a research scout",
         user_prompt="find the gap",
-        allowed_tools=("Read", "Bash"),
+        disallowed_tools=frozenset(),
         max_turns=2,
         wall_budget_sec=60.0,
     )
@@ -247,7 +247,7 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=60.0,
     )
@@ -303,7 +303,7 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
         prompt_file=prompt_file,
         workspace=workspace,
         worktree=worktree,
-        allowed_tools=("Read", "Bash", "emit_intent"),
+        disallowed_tools=frozenset(),
         system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
     )
 
@@ -544,7 +544,7 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=60.0,
     )
@@ -577,7 +577,7 @@ async def test_unconfigured_codex_gateway_fails_the_task(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=60.0,
     )
@@ -889,7 +889,7 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
         worktree_base=None,
         system_prompt="system",
         user_prompt="user",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=10.0,
         gpu_lease=lease,
@@ -953,7 +953,7 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
         worktree_base=None,
         system_prompt="SYSTEM_ROLE_SENTINEL",
         user_prompt="FULL_USER_PROMPT_SENTINEL",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=10.0,
     )
@@ -1008,7 +1008,7 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
         worktree_base=None,
         system_prompt="system",
         user_prompt="user",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=10.0,
     )
@@ -1072,7 +1072,7 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
         worktree_base=None,
         system_prompt="ray system",
         user_prompt="ray user prompt",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0,),
         wall_budget_sec=10.0,
@@ -1146,7 +1146,7 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
         worktree_base=None,
         system_prompt="mcp system",
         user_prompt="mcp user",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=10.0,
     )
@@ -1236,7 +1236,7 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
         worktree_base=None,
         system_prompt="system",
         user_prompt="user",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=10.0,
         gpu_lease=lease,
@@ -1338,7 +1338,7 @@ async def test_codex_structured_failure_is_propagated_and_redacted(
         worktree_base=None,
         system_prompt="system",
         user_prompt="user",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=10.0,
     )

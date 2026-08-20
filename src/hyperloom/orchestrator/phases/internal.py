@@ -94,14 +94,6 @@ class InternalTasksPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idempotency_key,
                 requires_lanes=["research_lane"],
-                allowed_tools=[
-                    "Read",
-                    "Grep",
-                    "Glob",
-                    "Write",
-                    "WebSearch",
-                    "WebFetch",
-                ],
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
@@ -225,12 +217,6 @@ class InternalTasksPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idempotency_key,
                 requires_lanes=["research_lane"],
-                allowed_tools=[
-                    "Read",
-                    "Grep",
-                    "Glob",
-                    "Write",
-                ],
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
@@ -320,7 +306,6 @@ class InternalTasksPhase(PhaseHandler):
                 params=params,
                 idempotency_key=f"internal-trajectory-review-cycle{cycle}",
                 requires_lanes=["research_lane"],
-                allowed_tools=["Read", "Grep", "Glob"],
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )

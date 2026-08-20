@@ -1621,7 +1621,6 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         task_id="t-atom-roofline",
         idempotency_key="t-atom-roofline",
         requires_lanes=[],
-        allowed_tools=[],
         side_effects=[],
         lease_ttl_sec=0,
     )
