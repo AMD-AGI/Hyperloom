@@ -20,6 +20,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
+from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -262,72 +263,68 @@ async def test_profile_trace_dir_without_json_not_promoted(session_dir):
         await c.stop()
 
 
+def _orchestration_turn(turn: MockTurn) -> dict[str, object]:
+    backends = _silent_backends()
+    backends["orchestration"] = MockBackend(ScriptedPlan(turns=[turn]), name="o")
+    return backends
+
+
 @pytest.mark.asyncio
 async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch):
-    """A kernel-request response must appear in the requester's next composed prompt."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    """The response to a kernel request reaches the requester's next prompt."""
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
+    async def fake_handler(payload, *, session_dir):
+        return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
+
+    monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "trace_analyze", fake_handler)
+    request = Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/t.json"}},
+    )
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
     try:
-        from hyperloom.orchestrator.kernel import request_handlers as krh
-
-        async def fake_handler(payload, *, session_dir):
-            return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
-
-        monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "trace_analyze", fake_handler)
-
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/t.json"}},
-        )
-        await c._handle_intent("orchestration", intent)
-
-        msgs = await c.bus.tail(n=20)
-        resp = next(m for m in msgs if m.topic == "response")
-
-        # Cursor must not have jumped past the response during intent handling.
-        cur_after_handle = await c.cursors.load("orchestration")
-        assert cur_after_handle.last_processed_seq < resp.seq or cur_after_handle.last_processed_seq == 0, (
-            "cursor must not be advanced by _handle_intent itself"
-        )
-
-        # Simulate _reactor_pass completing: _compose_prompt + _advance_rendered_cursor.
-        prompt = await c._compose_prompt("orchestration")
-        await c._advance_rendered_cursor("orchestration")
-
-        assert "trace_analyze_done" in prompt, "response not rendered in next prompt"
-        cur_after = await c.cursors.load("orchestration")
-        assert cur_after.last_processed_seq >= resp.seq, "cursor must reach the response seq"
+        await c._reactor_pass("orchestration")
+        assert "trace_analyze_done" in await c._compose_prompt("orchestration")
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_no_intent_turn_advances_cursor(session_dir):
-    """A turn where the backend raises NoIntentEmitted must still advance the cursor."""
-    c = Coordinator(session_dir, backends=_silent_backends())
+    """A reply carrying no parseable intent still consumes what its prompt rendered."""
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=NoIntentEmitted("no envelope"))))
     try:
-        bcast = await c.bus.append_and_seq(
-            __import__("hyperloom.orchestrator.bus.message_bus", fromlist=["Message"]).Message.new(
-                "robustness", "*", "alert", {"kind": "stall_warning"}
-            )
-        )
-
-        prompt = await c._compose_prompt("orchestration")
-        assert "stall_warning" in prompt
-
-        await c._advance_rendered_cursor("orchestration")
+        alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
+        await c.bus.append_and_seq(alert)
+        await c._reactor_pass("orchestration")
 
         cur = await c.cursors.load("orchestration")
-        assert cur.last_processed_seq >= bcast, "cursor must advance past the broadcast"
+        assert cur.last_processed_seq >= alert.seq
+        assert "stall_warning" not in await c._compose_prompt("orchestration")
+    finally:
+        await c.stop()
 
-        prompt2 = await c._compose_prompt("orchestration")
-        assert "stall_warning" not in prompt2, "already-rendered broadcast must not re-appear"
+
+@pytest.mark.asyncio
+async def test_backend_error_turn_does_not_advance_cursor(session_dir):
+    """A failed backend call leaves the messages its prompt rendered unread."""
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=BackendError("gateway down"))))
+    try:
+        alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
+        await c.bus.append_and_seq(alert)
+        await c._reactor_pass("orchestration")
+
+        cur = await c.cursors.load("orchestration")
+        assert cur.last_processed_seq == 0
+        assert "stall_warning" in await c._compose_prompt("orchestration")
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_failed_kernel_request_recorded_in_last_action_failures(session_dir):
-    """A kernel-request that fails must appear in last_action_failures so the model can read it."""
+    """A failed kernel request lands in the log the FAILURE RECOVERY block reads."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         await c._handle_intent(
@@ -337,49 +334,7 @@ async def test_failed_kernel_request_recorded_in_last_action_failures(session_di
                 payload={"target_agent": "kernel_agent", "kind": "no_such_kind"},
             ),
         )
-        failures = c.shared_state.last_action_failures
-        assert failures, "last_action_failures must be non-empty after a failed request"
-        assert failures[-1]["error_class"] == "unknown_kernel_kind"
-
-        summary = c.shared_state.to_prompt_summary()
-        assert "unknown_kernel_kind" in summary, "failure must be rendered in the shared-state prompt block"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_backend_error_turn_does_not_advance_cursor(session_dir):
-    """A turn that raises BackendError must leave the cursor unmoved."""
-    from hyperloom.orchestrator.bus.message_bus import Message
-
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        msg = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
-        await c.bus.append_and_seq(msg)
-
-        # Compose once so the watermark is established.
-        await c._compose_prompt("orchestration")
-        await c._advance_rendered_cursor("orchestration")
-        cur_after_first = await c.cursors.load("orchestration")
-
-        # A new broadcast arrives.
-        msg2 = Message.new("robustness", "*", "observation", {"kind": "tick"})
-        await c.bus.append_and_seq(msg2)
-
-        # Compose again — watermark now points to msg2.
-        await c._compose_prompt("orchestration")
-
-        # Simulate a BackendError: the watermark entry should NOT be consumed.
-        # In _reactor_pass, BackendError returns without calling _advance_rendered_cursor.
-        # Verify the cursor is still at the previous position.
-        cur_before_backend_err = await c.cursors.load("orchestration")
-        assert cur_before_backend_err.last_processed_seq == cur_after_first.last_processed_seq
-
-        # After the "failed" turn, a recovery turn must still see msg2.
-        prompt = await c._compose_prompt("orchestration")
-        await c._advance_rendered_cursor("orchestration")
-        assert "tick" in prompt, "message must be re-presented after a BackendError turn"
-        cur_final = await c.cursors.load("orchestration")
-        assert cur_final.last_processed_seq >= msg2.seq
+        assert c.shared_state.last_action_failures[-1]["error_class"] == "unknown_kernel_kind"
+        assert "unknown_kernel_kind" in c.shared_state.to_prompt_summary()
     finally:
         await c.stop()

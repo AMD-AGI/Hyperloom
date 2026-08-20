@@ -12,7 +12,7 @@ before any agent backend runs:
 
 1. `_sequence_denial_for_request` checks the baseline prerequisite — if
    `baseline_tput == 0` and the kind is not `trace_analyze`, the request is
-   policy-denied immediately (no bus record, no cursor advance).
+   policy-denied immediately (no bus record).
 2. Records the request on the message bus (`source: "orchestration"`).
 3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
    `False` (i.e. `--no-kernel`).
@@ -20,7 +20,9 @@ before any agent backend runs:
    `unknown_kernel_kind` (and a `valid_kinds` list) when none is found.
 5. Runs the handler inline: `result = await handler(payload, session_dir=...)`.
 6. Posts a `response{source: "programmatic_handler"}` directly to the bus.
-7. Advances the kernel cursor past the request sequence number.
+7. Appends any failure to `last_action_failures`.
+
+The requester reads the response from its inbox on its next turn.
 
 No PolicyGate path runs for the RESPONSE because it is written directly via
 `bus.append_and_seq`, not emitted by an LLM.

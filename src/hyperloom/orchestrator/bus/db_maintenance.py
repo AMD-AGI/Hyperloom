@@ -7,12 +7,10 @@ The ``events`` and ``tasks`` tables are otherwise append-only and would grow
 without bound over a multi-day run (no process restart clears them). These
 helpers bound them while preserving the two correctness invariants:
 
-* **Resume safety** — at resume, pending proposals are reconstructed from the
-  event log via a pending-proposal anti-join (``replay_for_resume``). An event
-  is only deletable when it falls outside the ``keep_recent`` window AND is not
-  a semantically pending proposal (one without a ``review_verdict`` targeting
-  its ``msg_id``). The pending-proposal anti-join is the sole resume-safety
-  mechanism; the pruner never needs to know about agent cursors.
+* **Resume safety** — ``replay_for_resume`` rebuilds the undecided proposals
+  from the event log, so an event is deletable only once it falls outside the
+  ``keep_recent`` window AND is not a proposal still awaiting a
+  ``review_verdict`` on its ``msg_id``.
 * **In-flight safety** — ``tasks`` pruning never touches ``queued`` / ``running``
   / ``failed`` rows; only truly-done (``succeeded`` / ``cancelled``) rows beyond
   a keep-recent count are removed.

@@ -686,12 +686,24 @@ class IntentRouter:
             with suppress(asyncio.CancelledError):
                 await task
 
+    def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
+        """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.
+
+        Args:
+            kind: The request kind, recorded as the failing action.
+            request_msg_id: The request message id, standing in for a task id.
+            result: The failure envelope carrying ``error_class`` and ``error``.
+        """
+        self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
+        self.shared_state.save(self.session_dir)
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler.
 
         Applies the execution-order gate, records the request on the bus, and
         dispatches to the registered handler or auto-rejects with a RESPONSE so
-        the requester never hangs.
+        the requester never hangs. Every failure is also appended to
+        ``last_action_failures``.
 
         Args:
             source (str): The agent issuing the request.
@@ -739,10 +751,7 @@ class IntentRouter:
                         priority=1,
                     )
                 )
-                self.shared_state.record_action_failure(
-                    action=kind, task_id=request_msg.msg_id, result=_fail_result
-                )
-                self.shared_state.save(self.session_dir)
+                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             handler = get_handler(kind)
             if handler is None:
@@ -768,10 +777,7 @@ class IntentRouter:
                         priority=1,
                     )
                 )
-                self.shared_state.record_action_failure(
-                    action=kind, task_id=request_msg.msg_id, result=_fail_result
-                )
-                self.shared_state.save(self.session_dir)
+                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
@@ -904,10 +910,7 @@ class IntentRouter:
                 )
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
-                self.shared_state.record_action_failure(
-                    action=kind, task_id=request_msg.msg_id, result=dict(result)
-                )
-                self.shared_state.save(self.session_dir)
+                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
             # Cache trace_analyze output (successful runs only).
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
@@ -955,10 +958,7 @@ class IntentRouter:
                     priority=1,
                 )
             )
-            self.shared_state.record_action_failure(
-                action=kind, task_id=request_msg.msg_id, result=_fail_result
-            )
-            self.shared_state.save(self.session_dir)
+            self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         """Route a RESPONSE intent back to the original requester.

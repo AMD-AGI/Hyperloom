@@ -74,9 +74,9 @@ class MaintenanceCollaborator:
 
         On a fixed tick cadence: actively reap TTL-expired serving + GPU leases
         and prune the events/tasks DB so a multi-day single-session run never
-        leaks capacity or grows the DB unbounded. Best-effort — every step is independently guarded so one
-        failure never aborts the run loop. Returns a summary dict when it ran,
-        else ``None``.
+        leaks capacity or grows the DB unbounded. Best-effort — every step is
+        independently guarded so one failure never aborts the run loop. Returns
+        a summary dict when it ran, else ``None``.
 
         Args:
             tick: The current coordinator tick; maintenance only runs when it
