@@ -148,7 +148,7 @@ listed below.
 | `repeated_policy_denied` (≥ 3) | medium | `alert(medium)` | `event` |
 | `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(...)`; HIGH tier also emits `prune_branch(family)` | `event` |
 | `idempotency_replay` | medium | `alert(medium)` | `event` |
-| `recover_unsuccessful` | high | `alert(high)` + `delegate(report)` | `event` |
+| `recover_unsuccessful` | high | `alert(high)` | `event` |
 | `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | `local_health` |
 | `local_server_unreachable`, no server process and no benchmark client of this session | — | suppressed (an idle stretch, not an outage) | `local_health` |
 | `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | `local_health` |
@@ -159,9 +159,9 @@ listed below.
 | `fd_pressure` (≥ warn_pct / ≥ crit_pct) | medium / high | `alert(medium)` / `alert(high)` | `local_health` |
 | `ray_head_dead` | high | `alert(high)` | `local_health` |
 | `gpu_memory_leaked` | high | `alert(high)` + `delegate(recover, force_gpu_cleanup=True)` | `gpu_leak` |
-| `deadline_warning` | medium / high | `alert(...)`; HIGH tier also emits `delegate(report)` | `budget` |
-| `deadline_imminent` | high | `alert(high)` + `delegate(report)` | `budget` |
-| `deadline_hard_cutoff` | high | `alert(high)` + `delegate(report)` | `budget` |
+| `deadline_warning` | medium / high | `alert(...)` | `budget` |
+| `deadline_imminent` | high | `alert(high)` | `budget` |
+| `deadline_hard_cutoff` | high | `alert(high)` | `budget` |
 | `budget_burn_no_gain` | medium | `alert(medium)` | `budget` |
 | `budget_strategy_drift` | medium | `alert(medium)` | `budget` |
 | `phase_budget_nearly_exhausted` | medium | `alert(medium)` | `phase_budget` |
@@ -202,7 +202,7 @@ alert's `detail.suggestion` field and the ladder never auto-emits
 `escalate_strategy_change` — the intent stays PolicyGate-allowed for
 explicit drives, but Orchestration owns the phase-advance decision.
 `delegate` is constrained to the `ROBUSTNESS_DELEGATE_ACTIONS`
-allowlist (`accuracy_gate` / `recover` / `report` / `server_lifecycle`).
+allowlist (`recover` only); all other policing intents ride alerts.
 
 Cooldown: identical `(symptom_name, subject)` keys are silenced for
 `config.cooldown_ticks` ticks (default 5) to avoid inbox flooding.
