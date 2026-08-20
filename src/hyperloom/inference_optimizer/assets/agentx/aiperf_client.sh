@@ -251,7 +251,14 @@ FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
 CANON_ENTRIES=393
 CANON_DURATION=3600
 # The corpus this model family canonically replays, before any operator pin.
-CANON_DS="$(_default_loader "$MODEL")"
+# The family whitelist below is a derivation, not a registry -- a model upstream
+# runs on the full corpus but whose slug does not match will fall back to the
+# 256k set, and the log line at the corpus block tells the operator to pin the
+# right one. Flagging that pin as a deviation would make the correct run
+# permanently non-submittable, so AGENTX_CANONICAL_DATASET lets the operator
+# declare which corpus IS canonical for this model. It is deliberately a second,
+# explicit knob: pinning alone still counts as a deviation.
+CANON_DS="${AGENTX_CANONICAL_DATASET:-$(_default_loader "$MODEL")}"
 NONCANON=()
 # A pinned corpus is a different workload, and the scenario cannot object: its
 # allowlist admits every dated weka variant, so replaying the 061526 set (which
@@ -270,6 +277,10 @@ if [ "$DURATION" -lt "$CANON_DURATION" ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}"
   # is harmless (nothing to suppress) and keeps the two paths uniform.
   SMOKE_ARGS+=(--unsafe-override)
 fi
+# Always exported, empty included: the switch forwards every AGENTX_* key from
+# the orchestrator's environment, so an inherited value from a previous run or a
+# wrapper would otherwise survive into a canonical run and invalidate it.
+export AGENTX_NONCANONICAL_REASONS=""
 if [ ${#NONCANON[@]} -gt 0 ]; then
   _reasons="$(IFS=,; echo "${NONCANON[*]}")"
   export AGENTX_NONCANONICAL_REASONS="$_reasons"
