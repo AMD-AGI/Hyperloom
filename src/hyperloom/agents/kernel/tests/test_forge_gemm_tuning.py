@@ -37,7 +37,6 @@ def _payload() -> dict:
         "tuner": "fmoe_ck",
         "untuned_csv": "/tmp/in.csv",
         "shapes_json": "/tmp/shapes.json",
-        "shapes_manifest": "/tmp/trace_shape_manifest.json",
         "tunableop_input": "/tmp/tunable.txt",
         "kernel_signature_log": "/tmp/server.log",
         "gpu_ids": "0,1",
@@ -58,18 +57,10 @@ def test_build_cmd_maps_all_options():
     assert cmd[cmd.index("--quant-type") + 1] == "auto"
     assert cmd[cmd.index("--mp") + 1] == "8"
     assert cmd[cmd.index("--tuner") + 1] == "fmoe_ck"
-    assert cmd[cmd.index("--shapes-manifest") + 1] == "/tmp/trace_shape_manifest.json"
     assert cmd[cmd.index("--tokens") + 1] == "64,128"
     assert "--skip-gpu-check" in cmd
     assert "--verbose" in cmd
     assert "--thorough" in cmd
-
-
-def test_build_cmd_omits_shapes_manifest_when_absent():
-    payload = _payload()
-    payload.pop("shapes_manifest")
-
-    assert "--shapes-manifest" not in forge_gemm_tuning._build_cmd(payload)
 
 
 def test_build_cmd_forwards_isl_when_known():

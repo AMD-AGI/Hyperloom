@@ -2089,66 +2089,6 @@ def _profile_shapes_are_fresh(state: Any) -> bool:
     return bool(state.profile_trace_matches_workload())
 
 
-_FORGE_SHAPE_MANIFEST_KIND = "trace_shape_manifest"
-
-
-def _is_trace_shape_manifest(path: Path) -> bool:
-    """Return whether ``path`` is a Hyperloom TraceShapeManifest JSON file."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return isinstance(data, dict) and data.get("manifest_kind") == _FORGE_SHAPE_MANIFEST_KIND
-
-
-def _resolve_forge_shapes_manifest(
-    state,
-    session_dir: Path,
-    *,
-    require_fresh_profile: bool = False,
-) -> str:
-    """Find a TraceShapeManifest JSON from the latest trace analysis, if any.
-
-    The manifest is produced by bypass trace analysis when
-    ``HYPERLOOM_TRACE_SHAPE_MANIFEST`` is enabled. Forge treats it as the
-    highest-priority dense shape source (weighted, variant-discriminating).
-    Missing or invalid artifacts are ignored so forge falls back to demand,
-    shapes JSON, untuned CSV, or config derivation.
-    """
-    if require_fresh_profile and not _profile_shapes_are_fresh(state):
-        log.info(
-            "Forge GEMM shapes manifest: latest profile does not match the "
-            "active workload/config; ignoring manifest artifact"
-        )
-        return ""
-    last_trace = getattr(state, "last_trace_analyze", None) or {}
-    if not isinstance(last_trace, dict):
-        return ""
-
-    candidates: list[str] = []
-    manifest_block = last_trace.get("trace_shape_manifest")
-    if isinstance(manifest_block, dict):
-        raw = str(manifest_block.get("path") or "").strip()
-        if raw:
-            candidates.append(raw)
-    artifact_paths = last_trace.get("artifact_paths")
-    if isinstance(artifact_paths, dict):
-        raw = str(artifact_paths.get("trace_shape_manifest") or "").strip()
-        if raw:
-            candidates.append(raw)
-    candidates_path_str = last_trace.get("candidates_path") or ""
-    if candidates_path_str:
-        cand_file = Path(candidates_path_str)
-        if cand_file.is_file():
-            candidates.append(str(cand_file.parent / "trace_shape_manifest.json"))
-
-    for candidate in candidates:
-        p = Path(candidate)
-        if p.is_file() and _is_trace_shape_manifest(p):
-            return str(p)
-    return ""
-
-
 def _resolve_forge_shapes(
     state,
     session_dir: Path,
@@ -3810,11 +3750,6 @@ async def _run_forge_gemm_tuning(
     # evidence that its static CSV came from the active benchmark. vLLM instead
     # requires native TunableOp rows or a workload-matched block-FP8 profile.
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
-    shapes_manifest = str(payload.get("shapes_manifest") or "").strip()
-    if shapes_manifest and not _path_is_existing_file(shapes_manifest):
-        shapes_manifest = ""
-    if not shapes_manifest:
-        shapes_manifest = _resolve_forge_shapes_manifest(state, session_dir)
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
     if untuned_csv and not _path_is_existing_file(untuned_csv):
         # Guard against inline content / stale paths.
@@ -3969,7 +3904,6 @@ async def _run_forge_gemm_tuning(
         "tokens": tokens,
         "untuned_csv": untuned_csv,
         "moe_untuned_csv": moe_untuned_csv,
-        "shapes_manifest": shapes_manifest,
         "shapes_json": shapes_json,
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
