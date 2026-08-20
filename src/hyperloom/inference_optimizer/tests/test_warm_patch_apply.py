@@ -120,9 +120,16 @@ def test_required_recipe_patch_fails_when_active_framework_root_is_missing(
     output_dir,
     monkeypatch,
 ):
+    from hyperloom.orchestrator.framework.paths import WarmReplayRootResolution
+
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.resolve_session_framework_root",
-        lambda: "",
+        "hyperloom.orchestrator.actions.executors.baseline.resolve_warm_replay_framework_root",
+        lambda **kwargs: WarmReplayRootResolution(
+            "",
+            "",
+            "framework_patch_root_not_in_allowlist",
+            ("/sgl-workspace/sglang/",),
+        ),
     )
     params = {
         "required_patch_timeline": True,

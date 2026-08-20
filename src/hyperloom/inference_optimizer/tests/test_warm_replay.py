@@ -538,10 +538,11 @@ async def test_current_recipe_patch_skips_without_active_framework_root(
 
     assert task is None
     assert prepared == 0
-    assert coord.shared_state.warm_replay_outcome == {
-        "status": "skipped",
-        "reason": "active_framework_root_missing",
-    }
+    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
+    assert coord.shared_state.warm_replay_outcome["reason"] == (
+        "framework_patch_root_not_in_allowlist"
+    )
+    assert coord.shared_state.warm_replay_outcome["framework_patch_root_allowlist"]
 
 
 @pytest.mark.parametrize(
@@ -1229,7 +1230,10 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     assert targets == [str(existing), str(added)]
 
 
-def test_kernel_targets_do_not_scan_other_framework_roots(tmp_path, monkeypatch):
+def test_kernel_target_falls_back_when_framework_env_does_not_match(
+    tmp_path,
+    monkeypatch,
+):
     coord = _make_coord(tmp_path)
     active_root = tmp_path / "active"
     stale_root = tmp_path / "stale"
@@ -1250,13 +1254,15 @@ def test_kernel_targets_do_not_scan_other_framework_roots(tmp_path, monkeypatch)
         lambda: str(active_root),
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
+        "hyperloom.orchestrator.framework.paths._warm_replay_kernel_patch_roots",
         lambda: (str(stale_root),),
     )
 
     entry = {"patch_path": str(patch)}
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
-    assert entry["resolution_error"] == f"existing target is missing: {active_root / 'src/kernel.py'}"
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [
+        str(stale_target)
+    ]
+    assert "resolution_error" not in entry
 
 
 def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monkeypatch):
@@ -1276,7 +1282,8 @@ def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monke
 
     entry = {"patch_path": str(patch)}
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
-    assert entry["resolution_error"] == "Session active framework root is unset"
+    assert entry["resolution_reason"] == "kernel_patch_root_not_in_allowlist"
+    assert "allowlist=" in entry["resolution_error"]
 
 
 def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):

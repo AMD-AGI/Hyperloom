@@ -33,7 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import resolve_session_framework_root
+from ...framework.paths import resolve_warm_replay_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
@@ -1340,9 +1340,20 @@ def _verify_three_way_clean(
 
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
     """Return the active framework root for Explore/Framework Recipe patches."""
-    if not params.get("patches"):
+    patches = params.get("patches") or []
+    if not patches:
         return ""
-    return resolve_session_framework_root()
+    patch_paths = []
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        for key in ("patch_ref", "patch_path", "patch_file"):
+            raw = str(patch.get(key) or "").strip()
+            if raw:
+                patch_paths.append(Path(raw))
+                break
+    resolution = resolve_warm_replay_framework_root(patch_paths=patch_paths or None)
+    return str(resolution.root or "").rstrip("/")
 
 
 def _apply_warm_patches(

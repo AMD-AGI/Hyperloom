@@ -771,3 +771,118 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     assert Path(second["backup_path"]).is_dir()
 
 
+class TestWarmReplayPatchRootResolution:
+    def test_framework_env_root_takes_precedence(self, monkeypatch, tmp_path):
+        env_root = tmp_path / "env-sglang"
+        env_root.mkdir()
+        monkeypatch.setenv("FRAMEWORK", "SGLANG")
+        monkeypatch.setenv("SGLANG_REPO_PATH", str(env_root))
+        resolution = fp.resolve_warm_replay_framework_root(patch_paths=[])
+        assert resolution.root == f"{env_root}/"
+        assert resolution.source == "env"
+        assert resolution.reason == ""
+
+    def test_framework_allowlist_matches_sglang_patch(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("FRAMEWORK", raising=False)
+        monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        root = tmp_path / "sgl-workspace" / "sglang"
+        target = root / "python" / "sglang" / "srt" / "models" / "qwen3.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("original\n", encoding="utf-8")
+        patch = tmp_path / "framework.patch"
+        patch.write_text(
+            "diff --git a/python/sglang/srt/models/qwen3.py "
+            "b/python/sglang/srt/models/qwen3.py\n"
+            "--- a/python/sglang/srt/models/qwen3.py\n"
+            "+++ b/python/sglang/srt/models/qwen3.py\n"
+            "@@ -1 +1 @@\n-original\n+patched\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            fp,
+            "_warm_replay_framework_patch_roots",
+            lambda: (f"{root}/",),
+        )
+        resolution = fp.resolve_warm_replay_framework_root(patch_paths=[patch])
+        assert resolution.root == f"{root}/"
+        assert resolution.source == "allowlist"
+
+    def test_framework_static_roots_precede_dynamic_discovery(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        static_root = tmp_path / "static" / "sglang"
+        dynamic_root = tmp_path / "dynamic" / "sglang"
+        static_root.mkdir(parents=True)
+        dynamic_root.mkdir(parents=True)
+        monkeypatch.setattr(
+            fp,
+            "_WARM_REPLAY_FRAMEWORK_STATIC_ROOTS",
+            (f"{static_root}/",),
+        )
+        monkeypatch.setattr(
+            fp,
+            "_discover_installed_framework_roots",
+            lambda: (f"{dynamic_root}/",),
+        )
+
+        assert fp._warm_replay_framework_patch_roots() == (
+            f"{static_root}/",
+            f"{dynamic_root}/",
+        )
+
+    def test_mismatched_env_root_falls_back_to_allowlist(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        env_root = tmp_path / "env-sglang"
+        fallback_root = tmp_path / "fallback" / "sglang"
+        env_root.mkdir()
+        target = fallback_root / "python/sglang/srt/models/qwen3.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("original\n", encoding="utf-8")
+        patch = tmp_path / "framework.patch"
+        patch.write_text(
+            "diff --git a/python/sglang/srt/models/qwen3.py "
+            "b/python/sglang/srt/models/qwen3.py\n"
+            "--- a/python/sglang/srt/models/qwen3.py\n"
+            "+++ b/python/sglang/srt/models/qwen3.py\n"
+            "@@ -1 +1 @@\n-original\n+patched\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("FRAMEWORK", "SGLANG")
+        monkeypatch.setenv("SGLANG_REPO_PATH", str(env_root))
+        monkeypatch.setattr(
+            fp,
+            "_warm_replay_framework_patch_roots",
+            lambda: (f"{fallback_root}/",),
+        )
+
+        resolution = fp.resolve_warm_replay_framework_root(patch_paths=[patch])
+
+        assert resolution.root == f"{fallback_root}/"
+        assert resolution.source == "allowlist"
+
+    def test_kernel_allowlist_miss_is_reported(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("FRAMEWORK", raising=False)
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        patch = tmp_path / "kernel.patch"
+        patch.write_text(
+            "diff --git a/csrc/ops.cpp b/csrc/ops.cpp\n"
+            "--- a/csrc/ops.cpp\n"
+            "+++ b/csrc/ops.cpp\n"
+            "@@ -1 +1 @@\n-old\n+new\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            fp,
+            "_warm_replay_kernel_patch_roots",
+            lambda: (f"{tmp_path / 'missing-aiter'}/",),
+        )
+        resolution = fp.resolve_warm_replay_kernel_root(patch_paths=[patch])
+        assert resolution.root == ""
+        assert resolution.reason == "kernel_patch_root_not_in_allowlist"
+
