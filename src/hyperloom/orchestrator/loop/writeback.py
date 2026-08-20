@@ -4,6 +4,8 @@
 """Coordinator main loop and runtime protocol manager."""
 
 from __future__ import annotations
+
+import hashlib
 import os
 import time
 from dataclasses import dataclass, field
@@ -79,6 +81,27 @@ from .coordinator import (
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+
+def _geak_config_file_digests(envs: Mapping[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Hash file-backed GEAK config envs without requiring final_launch.sh."""
+    digests: dict[str, str] = {}
+    missing: list[str] = []
+    for key, raw_value in sorted(envs.items()):
+        if not str(key).startswith("AITER_CONFIG_"):
+            continue
+        value = str(raw_value or "").strip()
+        path = Path(value)
+        if not value or not path.is_file():
+            missing.append(f"{key}={value}")
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digests[str(key)] = digest.hexdigest()
+    return digests, missing
+
 
 # FRAMEWORK_AGENT KEEPs are stacked under the ``framework`` attribution family
 # label rather than under their task kind, because that label is what
@@ -882,20 +905,41 @@ class WritebackCollaborator:
                 task,
                 macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
             ):
-                geak_result = (
-                    dict(self.shared_state.geak_result)
-                    if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                    else {}
-                )
-                geak_result["revalidation_status"] = "failed"
-                geak_result["revalidation_error_class"] = str(result_payload.get("error_class") or "")
-                geak_result["revalidation_error"] = str(
-                    result_payload.get("error") or result_payload.get("reason") or ""
-                )[:500]
-                self.shared_state.geak_result = geak_result
-                self.shared_state.geak_pending = {}
-                self.shared_state.resume_pending_revalidation = False
-                any_changed = True
+                fallback: dict[str, Any] | None = None
+                error_class = str(result_payload.get("error_class") or "")
+                if stopped_by_the_run_class(error_class) is None:
+                    try:
+                        fallback = await self._validate_geak_via_geak_harness(
+                            reason=error_class or "geak_2b_task_failed"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - fallback is best-effort
+                        log.exception("geak 2b failure: GEAK-harness fallback failed")
+                        fallback = {"validated": False, "reason": repr(exc)}
+                fallback_validated = fallback is not None and bool(fallback.get("validated"))
+                if fallback_validated:
+                    any_changed = True
+                    # 2a already promoted the candidate and settled geak_pending.
+                    # Do not overwrite that verdict with the failed 2b status.
+                else:
+                    geak_result = (
+                        dict(self.shared_state.geak_result)
+                        if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                        else {}
+                    )
+                    geak_result["revalidation_status"] = (
+                        "fallback_failed" if fallback is not None else "failed"
+                    )
+                    geak_result["revalidation_error_class"] = error_class
+                    geak_result["revalidation_error"] = str(
+                        (fallback or {}).get("reason")
+                        or result_payload.get("error")
+                        or result_payload.get("reason")
+                        or ""
+                    )[:500]
+                    self.shared_state.geak_result = geak_result
+                    self.shared_state.geak_pending = {}
+                    self.shared_state.resume_pending_revalidation = False
+                    any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}
@@ -3532,6 +3576,120 @@ class WritebackCollaborator:
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=cb_tput,
                 )
+                expected_current_best_cfg_hash = str(
+                    (task.params or {}).get("expected_current_best_cfg_hash") or ""
+                )
+                if expected_current_best_cfg_hash:
+                    from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+
+                    current_best_cfg_hash = canonical_fingerprint(
+                        str(cb_now.get("extra_server_args") or ""),
+                        dict(cb_now.get("extra_envs") or {}),
+                    )
+                    if current_best_cfg_hash != expected_current_best_cfg_hash:
+                        log.warning(
+                            "geak 2b: current_best config changed while revalidation ran "
+                            "(expected=%s got=%s) -> 2a fallback",
+                            expected_current_best_cfg_hash,
+                            current_best_cfg_hash,
+                        )
+                        decision = "fallback"
+                # A GEAK 2b verdict is terminal only after the requested hot,
+                # repeated protocol completed. The generic decision helper sees
+                # a scalar by design, so enforce sample count, spread, protocol
+                # identity, and latency sanity before accepting its verdict.
+                if bool((task.params or {}).get("rebench_required")):
+                    winner = best_winner if isinstance(best_winner, dict) else {}
+                    required_samples = int((task.params or {}).get("stack_rebench_repeats") or 1)
+                    sample_count = int(winner.get("stack_rebench_sample_count") or 0)
+                    protocol_complete = bool(winner.get("revalidation_protocol_complete"))
+                    expected_protocol = (task.params or {}).get("revalidation_protocol") or {}
+                    got_protocol = winner.get("revalidation_protocol") or {}
+                    expected_workload_signature = str(
+                        (task.params or {}).get("expected_workload_signature") or ""
+                    )
+                    got_workload_signature = str(winner.get("workload_signature") or "")
+                    try:
+                        spread_pct = float(winner.get("stack_rebench_spread_pct"))
+                    except (TypeError, ValueError):
+                        spread_pct = float("inf")
+                    try:
+                        max_spread_pct = float((task.params or {}).get("stack_rebench_max_spread_pct") or 3.0)
+                    except (TypeError, ValueError):
+                        max_spread_pct = 3.0
+                    comparable = (
+                        protocol_complete
+                        and sample_count == required_samples
+                        and spread_pct <= max_spread_pct
+                        and got_protocol == expected_protocol
+                        and (
+                            not expected_workload_signature
+                            or got_workload_signature == expected_workload_signature
+                        )
+                    )
+                    if not comparable:
+                        log.warning(
+                            "geak 2b: incomplete/incompatible measurement protocol "
+                            "(samples=%d/%d spread=%s max=%s complete=%r "
+                            "protocol_match=%r workload_match=%r) "
+                            "-> 2a fallback",
+                            sample_count,
+                            required_samples,
+                            spread_pct,
+                            max_spread_pct,
+                            protocol_complete,
+                            got_protocol == expected_protocol,
+                            (
+                                not expected_workload_signature
+                                or got_workload_signature == expected_workload_signature
+                            ),
+                        )
+                        decision = "fallback"
+                    try:
+                        expected_ttft_ms = float((task.params or {}).get("expected_geak_ttft_ms") or 0.0)
+                        measured_ttft_ms = float(winner.get("stack_rebench_ttft_median_ms") or 0.0)
+                    except (TypeError, ValueError):
+                        expected_ttft_ms = 0.0
+                        measured_ttft_ms = 0.0
+                    if (
+                        decision in {"validated", "no_promote"}
+                        and expected_ttft_ms > 0
+                    ):
+                        if measured_ttft_ms <= 0:
+                            log.warning(
+                                "geak 2b: required median TTFT is missing while GEAK reference "
+                                "is %.3fms -> 2a fallback",
+                                expected_ttft_ms,
+                            )
+                            decision = "fallback"
+                        elif measured_ttft_ms > expected_ttft_ms * 3.0:
+                            log.warning(
+                                "geak 2b: median TTFT %.3fms exceeds 3x GEAK reference %.3fms "
+                                "-> 2a fallback",
+                                measured_ttft_ms,
+                                expected_ttft_ms,
+                            )
+                            decision = "fallback"
+                expected_config_file_digests = (task.params or {}).get("expected_config_file_digests") or {}
+                if expected_config_file_digests:
+                    winner_envs = (
+                        best_winner.get("extra_envs") or {}
+                        if isinstance(best_winner, dict)
+                        else {}
+                    )
+                    got_config_file_digests, missing_config_files = _geak_config_file_digests(winner_envs)
+                    if (
+                        got_config_file_digests != expected_config_file_digests
+                        or missing_config_files
+                    ):
+                        log.warning(
+                            "geak 2b: file-backed config identity changed "
+                            "(expected=%r got=%r missing=%r) -> 2a fallback",
+                            expected_config_file_digests,
+                            got_config_file_digests,
+                            missing_config_files,
+                        )
+                        decision = "fallback"
                 # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
                 # cannot see the overlay drop out between dispatch and launch —
                 # ``run_grid`` skips an overlay whose dir has gone away and logs
@@ -3639,6 +3797,16 @@ class WritebackCollaborator:
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
+                        measured_ttft_ms=to_float(
+                            best_winner.get("stack_rebench_ttft_median_ms")
+                            if isinstance(best_winner, dict)
+                            else None
+                        ),
+                        measured_tpot_ms=to_float(
+                            best_winner.get("stack_rebench_tpot_median_ms")
+                            if isinstance(best_winner, dict)
+                            else None
+                        ),
                         provenance="geak_orch_harness_validated",
                         # Only an overlay that was dispatched AND still matches
                         # its manifest proves a kernel was in the measurement.
@@ -3720,6 +3888,15 @@ class WritebackCollaborator:
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak no_promote: observation emit failed")
+                    # Tombstone this result.json the same way "no_material"
+                    # does: stamp the closed verdict on geak_result so a
+                    # later KERNEL entry's crash-recovery check (kernel.py's
+                    # ``already_adjudicated`` gate) can tell this candidate
+                    # was already adjudicated and must not be re-recovered /
+                    # re-enqueued (see AMD-AGI/Hyperloom#1240).
+                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
+                    ps_stamped["revalidation_status"] = "no_promote"
+                    self.shared_state.geak_result = ps_stamped
                     self.shared_state.geak_pending = {}
                     self.shared_state.resume_pending_revalidation = False
                 else:
@@ -5099,17 +5276,43 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
+        ps_bench_protocol = ps.get("bench_protocol")
+        if not isinstance(ps_bench_protocol, dict):
+            ps_bench_protocol = {}
+        ps_validated_regimes = ps.get("validated_regimes")
+        if not isinstance(ps_validated_regimes, list):
+            ps_validated_regimes = []
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
         # a result carrying an accepted, positive-delta kernel is revalidated
         # too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
         if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
-            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+            from ..actions.executors._canonical_fingerprint import (
+                canonical_fingerprint,
+                workload_signature,
+            )
 
             ps_flags = str(ps_cfg.get("flags") or "").strip()
             ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
             if _ps_extra_flags:
                 ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            for protocol_key, env_key in (
+                ("random_range_ratio", "RANDOM_RANGE_RATIO"),
+                ("num_prompts", "NUM_PROMPTS"),
+                ("num_warmups", "NUM_WARMUPS"),
+                ("seed", "SEED"),
+            ):
+                protocol_value = ps_bench_protocol.get(protocol_key)
+                if protocol_value is not None and str(protocol_value).strip():
+                    ps_envs[env_key] = str(protocol_value)
+            expected_config_file_digests, missing_config_files = _geak_config_file_digests(ps_envs)
+            if missing_config_files:
+                log.warning(
+                    "geak 2b: file-backed config is not host-visible (%s); "
+                    "leaving identity unverified because the path may be valid "
+                    "inside the benchmark container",
+                    ", ".join(missing_config_files),
+                )
             # An overlay that cannot load installs nothing: the server launches
             # as plain baseline and any delta measured against it belongs to the
             # flags alone. Resolve that BEFORE dispatch so the task never carries
@@ -5144,6 +5347,22 @@ class WritebackCollaborator:
                 # after the run: a dropped or altered overlay then reads as
                 # inconclusive instead of as a validated kernel win.
                 expected_overlay_digest = _geak_overlay_digest(ps_overlay)
+                current_best_snapshot = (
+                    self.shared_state.current_best
+                    if isinstance(self.shared_state.current_best, dict)
+                    else {}
+                )
+                expected_current_best_cfg_hash = canonical_fingerprint(
+                    str(current_best_snapshot.get("extra_server_args") or ""),
+                    dict(current_best_snapshot.get("extra_envs") or {}),
+                )
+                expected_workload_signature = workload_signature(
+                    conc=getattr(self.shared_state, "conc", None),
+                    isl=getattr(self.shared_state, "isl", None),
+                    osl=getattr(self.shared_state, "osl", None),
+                    precision=getattr(self.shared_state, "precision", None),
+                    tp=getattr(self.shared_state, "tp", None),
+                )
                 # Name what ran. Without this the decision row inherits the flag
                 # string as its whole identity and the kernel rides along unnamed.
                 ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
@@ -5154,6 +5373,10 @@ class WritebackCollaborator:
                     "expected_cfg_hash": expected_cfg_hash,
                     "expected_overlay": ps_overlay,
                     "expected_overlay_digest": expected_overlay_digest,
+                    "expected_config_file_digests": expected_config_file_digests,
+                    "unverified_config_file_refs": missing_config_files,
+                    "expected_current_best_cfg_hash": expected_current_best_cfg_hash,
+                    "expected_workload_signature": expected_workload_signature,
                     "grid": [
                         {
                             "name": "geak_revalidate",
@@ -5170,7 +5393,26 @@ class WritebackCollaborator:
                     # Revalidation reproduces the whole stack, so its gain is
                     # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-                    "enable_stack_rebench": False,
+                    # GEAK's accepted headline is a hot, repeated measurement.
+                    # The decision round is therefore only the second discarded
+                    # prewarm pass; three consecutive same-server confirmations
+                    # produce the median consumed by the commit gate. A missing
+                    # confirmation leaves output_throughput empty and routes to
+                    # 2a fallback instead of terminal no_promote.
+                    "enable_stack_rebench": True,
+                    "rebench_required": True,
+                    "stack_rebench_repeats": 3,
+                    "stack_rebench_max_spread_pct": 3.0,
+                    "revalidation_protocol": {
+                        "prewarm_rounds": 2,
+                        "measured_repeats": 3,
+                        "aggregation": "median",
+                        "run_eval_between_measurements": False,
+                        "bench_client": str(ps.get("bench_client") or ""),
+                        "bench_protocol": dict(ps_bench_protocol),
+                        "validated_regimes": list(ps_validated_regimes),
+                    },
+                    "expected_geak_ttft_ms": ps.get("ttft_ms"),
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path

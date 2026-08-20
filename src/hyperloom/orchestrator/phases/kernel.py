@@ -948,6 +948,7 @@ class KernelPhase(PhaseHandler):
 
             task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
             task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
+            existing = bool(isinstance(summary, dict) and summary.get("existing"))
             pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             if task_id and task_state in {"queued", "running"}:
                 pending["status"] = "awaiting_rebench"
@@ -956,13 +957,62 @@ class KernelPhase(PhaseHandler):
                 state.save(self.session_dir)
                 return True
 
+            if task_id and existing and task_state == "succeeded":
+                # create_or_return_existing handed back a row that already
+                # ran to completion under this idempotency key (the
+                # AMD-AGI/Hyperloom#1240 singleton-slot collision). That row
+                # was promoted by the normal task-completion pipeline the
+                # moment it settled, so geak_result already carries the
+                # true verdict -- this is NOT "never dispatched". Reconcile
+                # geak_pending FROM that verdict instead of overwriting it
+                # with rebench_unavailable: the reservation written above
+                # (before this enqueue) already put the slot into a stale
+                # "awaiting_rebench" state that nothing will ever clear.
+                prior_geak_result = (
+                    state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+                )
+                settled_status = str(prior_geak_result.get("revalidation_status") or "")
+                if settled_status in {"no_material", "no_promote"} or self._geak_win_already_recorded():
+                    log.info(
+                        "geak: revalidation enqueue collided with an already-adjudicated "
+                        "task (%s, state=succeeded); clearing the stale reservation instead "
+                        "of overwriting the recorded verdict",
+                        task_id,
+                    )
+                    state.geak_pending = {}
+                    state.save(self.session_dir)
+                    return True
+                # Genuinely indeterminate (e.g. the per-cycle retry budget
+                # was exhausted before a fresh idempotency key could be
+                # minted): surface it honestly instead of claiming the task
+                # was never dispatched.
+                pending["status"] = "rebench_unavailable"
+                if pending.get("revalidation_task_id") in placeholder_keys:
+                    pending.pop("revalidation_task_id", None)
+                pending["revalidation_error"] = (
+                    f"rebench task {task_id} already succeeded but its verdict could not be "
+                    "reconciled (retry budget likely exhausted this cycle)"
+                )[:500]
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                log.warning(
+                    "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
+                    pending["revalidation_error"],
+                )
+                return False
+
             pending["status"] = "rebench_unavailable"
             # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
             if pending.get("revalidation_task_id") in placeholder_keys:
                 pending.pop("revalidation_task_id", None)
-            pending["revalidation_error"] = str(
-                (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
-            )[:500]
+            # Distinguish "never got to run" (cancelled) from any other
+            # unexpected settle instead of one misleading message for both:
+            # "before dispatch" is only true for the cancelled case.
+            if task_state == "cancelled":
+                default_reason = f"rebench cancelled before completion ({task_id or 'unknown'})"
+            else:
+                default_reason = f"rebench task settled without a usable result (state={task_state or 'unknown'})"
+            pending["revalidation_error"] = str((summary or {}).get("reason") or default_reason)[:500]
             state.geak_pending = pending
             state.save(self.session_dir)
             log.warning(
@@ -976,16 +1026,24 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        # Tombstone: a result already dropped by 2b as no-material must not be
-        # re-recovered from the stale (still status=ok) result.json, else each
-        # KERNEL entry re-enqueues a wasted rebench in a loop.
+        # Tombstone: a result already adjudicated by 2b — either dropped as
+        # no-material, or measured and found not to beat current_best
+        # (no_promote) — must not be re-recovered from the stale (still
+        # status=ok) result.json, else each KERNEL entry re-enqueues a
+        # wasted rebench in a loop, and (before this gate covered
+        # "no_promote") could even resurrect a settled, already-succeeded
+        # rebench task and misreport it as "rebench_unavailable"
+        # (AMD-AGI/Hyperloom#1240).
         prev_geak = (
             self.shared_state.geak_result
             if isinstance(getattr(self.shared_state, "geak_result", None), dict)
             else {}
         )
-        dropped_no_material = str(prev_geak.get("revalidation_status") or "") == "no_material"
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not dropped_no_material:
+        already_adjudicated = str(prev_geak.get("revalidation_status") or "") in {
+            "no_material",
+            "no_promote",
+        }
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not already_adjudicated:
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -1373,6 +1431,8 @@ class KernelPhase(PhaseHandler):
         result: dict[str, Any],
         *,
         measured_tput: float,
+        measured_ttft_ms: float | None = None,
+        measured_tpot_ms: float | None = None,
         provenance: str = "geak_e2e_promote",
         overlay_loaded: bool | None = None,
     ) -> None:
@@ -1387,6 +1447,8 @@ class KernelPhase(PhaseHandler):
         Args:
             result: GEAK's ``result.json`` payload.
             measured_tput: The rebench-measured throughput (tok/s).
+            measured_ttft_ms: Orchestrator-rebench median TTFT when available.
+            measured_tpot_ms: Orchestrator-rebench median TPOT when available.
             provenance: Which validation path measured it.
             overlay_loaded: Whether the authored-kernel overlay was proven
                 loaded for the measurement. ``None`` means the caller could not
@@ -1461,8 +1523,12 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": dict(parsed_envs),
                 "final_overlay": result.get("final_overlay") or "",
                 "source_phase": "KERNEL_AGENT",
-                "ttft_mean_ms": result.get("ttft_ms"),
-                "tpot_mean_ms": result.get("tpot_ms"),
+                "ttft_mean_ms": (
+                    measured_ttft_ms if measured_ttft_ms is not None else result.get("ttft_ms")
+                ),
+                "tpot_mean_ms": (
+                    measured_tpot_ms if measured_tpot_ms is not None else result.get("tpot_ms")
+                ),
                 "workspace": result.get("eval_dir"),
             },
             entry_extra=self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded),
