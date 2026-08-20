@@ -123,9 +123,11 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-# Per-action delegate source allowlist; unlisted actions fall through to the general delegate rules.
+_ROBUSTNESS_DELEGATE_SOURCE: frozenset[str] = frozenset({"robustness"})
+
+# Derived from ROBUSTNESS_DELEGATE_ONLY_ACTIONS so the two tables cannot drift apart.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
-    "recover": frozenset({"robustness"}),
+    action: _ROBUSTNESS_DELEGATE_SOURCE for action in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 }
 
 
@@ -969,6 +971,14 @@ class PolicyGate:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         if check_source:
+            # Robustness is restricted to its own declared action set; all other roles
+            # use the per-action allowlist below.
+            if role.name in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST and action_name not in ROBUSTNESS_DELEGATE_ONLY_ACTIONS:
+                raise PolicyDenied(
+                    f"role={role.name!r} cannot delegate action={action_name!r}; "
+                    f"allowed: {sorted(ROBUSTNESS_DELEGATE_ONLY_ACTIONS)!r}",
+                    rule="role",
+                )
             allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
             if allowed_sources is not None and role.name not in allowed_sources:
                 raise PolicyDenied(
