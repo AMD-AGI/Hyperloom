@@ -133,7 +133,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "output_dir", "--output-dir", required=True)
     _add_opt(cmd, args, "discover_mode", "--discover")
     cmd.extend(["--agent-backend", agent_backend])
-    _add_opt(cmd, args, "llm_model", "--llm-model", required=True)
+    _add_opt(cmd, args, "llm_model", "--model", required=True)
     cmd.extend(["--agent-sandbox-mode", agent_sandbox_mode])
     _add_opt(cmd, args, "max_turns", "--max-turns")
     _add_opt(cmd, args, "gpu", "--gpu")

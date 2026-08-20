@@ -55,7 +55,7 @@ def _publish(workspace: Path, payload: dict) -> None:
 
 def _manifest(commit_hash: str, **overrides) -> dict:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "commit_hash": commit_hash,
         "correctness_passed": True,
         "baseline_wall_ms": 2.0,
@@ -113,7 +113,6 @@ def test_missing_manifest_yields_no_evidence(repo):
     "overrides",
     [
         pytest.param({"correctness_passed": False}, id="correctness_failed"),
-        pytest.param({"schema_version": 2}, id="unknown_schema"),
         pytest.param({"mean_case_speedup": 1.0}, id="no_mean_case_gain"),
         pytest.param({"mean_case_speedup": None}, id="missing_mean_case_speedup"),
         pytest.param({"baseline_wall_ms": 0.0}, id="unusable_baseline"),
@@ -215,7 +214,7 @@ def test_corrupt_manifest_is_ignored_rather_than_raising(repo):
     workspace, _base_commit = repo
     root = workspace / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "best_result.json").write_text('{"schema_version": 1, "comm')
+    (root / "best_result.json").write_text('{"schema_version": 2, "comm')
 
     assert forge_submit._read_forge_best_result(str(workspace)) is None
 
@@ -671,3 +670,22 @@ def test_nested_schema_one_best_result_is_never_consulted_for_an_applyback(repo)
         )
         is None
     )
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, None])
+def test_a_schema_bump_alone_does_not_discard_a_proven_best(repo, version):
+    """What actually broke: the producer went to 2, this stayed on 1, and every
+    published best was dropped for six days. The evidence is judged on its own
+    fields, so the version it is stamped with cannot decide the question."""
+    workspace, base_commit = repo
+    best_commit = _commit_improvement(workspace)
+    _publish(workspace, _manifest(best_commit, schema_version=version))
+
+    validated = forge_submit._validated_forge_best_result(
+        forge_submit._read_forge_best_result(str(workspace)),
+        workspace=str(workspace),
+        base_commit=base_commit,
+    )
+
+    assert validated is not None
+    assert validated["best_commit"] == best_commit

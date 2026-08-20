@@ -1224,6 +1224,19 @@ def materialize_config_with_envs(
         log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
+    # ── aiter tuned-config lookup logging ────────────────────────────────────
+    # aiter logs a line for every tuned-GEMM table lookup it MISSES
+    # unconditionally, but the corresponding HIT line only when this is set. Two
+    # things depend on having it on:
+    #   * GEMM tuning takes its shape list from the misses -- shapes derived from
+    #     config.json instead cover 0.4% of what the runtime actually asks for;
+    #   * apply verification counts hits to decide whether a tuned artifact was
+    #     ever read. Without hit lines, "0 hits" and "hit logging was off" are
+    #     indistinguishable, and treating the latter as the former would REVERT
+    #     every arm.
+    # A scan of 60 production server logs found the flag set in none of them, so
+    # this is not a hypothetical gap. setdefault keeps an operator override.
+    envs.setdefault("AITER_LOG_TUNED_CONFIG", "1")
     _sync_repo_aliases(
         bench,
         envs,
