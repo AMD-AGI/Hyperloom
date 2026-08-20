@@ -42,6 +42,25 @@ _AITER_SHAPE_HIT_RE = re.compile(
 )
 
 Shape = tuple[int, int, int]
+FmoeDispatchKey = tuple[str, ...]
+
+# aiter logs fused-MoE dispatch as
+# ``[fused_moe] using <stage> <tag> for (cu, token, model_dim, inter, expert, topk, ...)``.
+_AITER_FUSED_MOE_DISPATCH_RE = re.compile(
+    r"\[fused_moe\]\s+using\s+\S+\s+\S+\s+for\s+\((?P<tuple>[^)]*)\)"
+)
+
+# Minimum columns shared by dispatch tuples and ``tuned_fmoe.csv`` rows.
+FMOE_DISPATCH_MIN_FIELDS = (
+    "cu_num",
+    "token",
+    "model_dim",
+    "inter_dim",
+    "expert",
+    "topk",
+)
+# Quant signature columns that are stable in both log and CSV when present.
+FMOE_DISPATCH_STABLE_FIELDS = ("q_dtype_a", "q_dtype_w", "q_type")
 
 
 def aiter_padded_m_fine(m: int) -> int:
@@ -209,6 +228,165 @@ def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     missed = {(int(m), int(n), int(k)) for m, n, k, _table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
     hit = {(int(m), int(n), int(k)) for m, n, k, _padded in _AITER_SHAPE_HIT_RE.findall(log_text or "")}
     return missed, hit
+
+
+def _split_fmoe_tuple(raw: str) -> list[str]:
+    """Split a fused-MoE dispatch tuple, respecting single-quoted fields."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quote = False
+    for ch in raw:
+        if ch == "'":
+            in_quote = not in_quote
+            continue
+        if ch == "," and not in_quote:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _normalize_fmoe_field(name: str, value: str) -> str:
+    text = str(value or "").strip()
+    if name == "act_type" and "." in text:
+        # ``ActivationType.Swiglu`` in the log vs ``Silu`` in CSV: keep the suffix.
+        text = text.rsplit(".", 1)[-1]
+    if name == "dtype":
+        lowered = text.lower()
+        if lowered.startswith("torch.bfloat"):
+            return "bf16"
+        if lowered.startswith("torch.float16"):
+            return "fp16"
+    if name == "q_type" and text.startswith("QuantType."):
+        return text
+    return text
+
+
+def _fmoe_dispatch_record(parts: list[str]) -> dict[str, str] | None:
+    """Map a fused-MoE dispatch tuple to the CSV dispatch-schema columns."""
+    if len(parts) < 6:
+        return None
+    names = (
+        "cu_num",
+        "token",
+        "model_dim",
+        "inter_dim",
+        "expert",
+        "topk",
+        "act_type",
+        "dtype",
+        "q_dtype_a",
+        "q_dtype_w",
+        "q_type",
+        "use_g1u1",
+        "doweight_stage1",
+    )
+    record: dict[str, str] = {}
+    for idx, name in enumerate(names):
+        if idx >= len(parts):
+            break
+        record[name] = _normalize_fmoe_field(name, parts[idx])
+    if not all(record.get(field) for field in FMOE_DISPATCH_MIN_FIELDS):
+        return None
+    return record
+
+
+def fmoe_dispatch_lookup_key(record: dict[str, str]) -> FmoeDispatchKey:
+    """Return the lookup key a ``tuned_fmoe.csv`` row must match."""
+    fields = list(FMOE_DISPATCH_MIN_FIELDS)
+    for name in FMOE_DISPATCH_STABLE_FIELDS:
+        if record.get(name):
+            fields.append(name)
+    return tuple(record[field] for field in fields)
+
+
+def parse_aiter_fused_moe_dispatches(log_text: str) -> list[dict[str, str]]:
+    """Return every fused-MoE dispatch the server logged."""
+    seen: set[FmoeDispatchKey] = set()
+    out: list[dict[str, str]] = []
+    for match in _AITER_FUSED_MOE_DISPATCH_RE.finditer(log_text or ""):
+        record = _fmoe_dispatch_record(_split_fmoe_tuple(match.group("tuple")))
+        if record is None:
+            continue
+        key = fmoe_dispatch_lookup_key(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(record)
+    return out
+
+
+def tuned_fmoe_csv_keys(path: str | Path) -> set[FmoeDispatchKey]:
+    """Return dispatch lookup keys present in a ``tuned_fmoe.csv``."""
+    out: set[FmoeDispatchKey] = set()
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return out
+    if not lines:
+        return out
+    header = [col.strip() for col in lines[0].split(",")]
+    try:
+        indices = {name: header.index(name) for name in FMOE_DISPATCH_MIN_FIELDS}
+        stable = {
+            name: header.index(name)
+            for name in FMOE_DISPATCH_STABLE_FIELDS
+            if name in header
+        }
+    except ValueError:
+        return out
+    for line in lines[1:]:
+        cols = line.split(",")
+        if len(cols) <= max(indices.values()):
+            continue
+        record = {
+            name: _normalize_fmoe_field(name, cols[index])
+            for name, index in indices.items()
+        }
+        for name, index in stable.items():
+            if index < len(cols) and cols[index].strip():
+                record[name] = _normalize_fmoe_field(name, cols[index])
+        if all(record.get(field) for field in FMOE_DISPATCH_MIN_FIELDS):
+            out.add(fmoe_dispatch_lookup_key(record))
+    return out
+
+
+def fmoe_tuned_config_coverage(
+    tuned_keys: Iterable[FmoeDispatchKey],
+    requested_dispatches: Iterable[dict[str, str]],
+) -> dict[str, Any]:
+    """Report how many logged fused-MoE dispatches the CSV can serve."""
+    tuned = {tuple(key) for key in tuned_keys}
+    requested = list(requested_dispatches)
+    if not requested:
+        return {
+            "requested": 0,
+            "covered": 0,
+            "coverage_pct": None,
+            "tuned_rows": len(tuned),
+        }
+    covered: list[dict[str, str]] = []
+    uncovered: list[dict[str, str]] = []
+    for record in requested:
+        if fmoe_dispatch_lookup_key(record) in tuned:
+            covered.append(record)
+        else:
+            uncovered.append(record)
+    total = len(requested)
+    return {
+        "requested": total,
+        "covered": len(covered),
+        "coverage_pct": round(100.0 * len(covered) / total, 2),
+        "tuned_rows": len(tuned),
+        "uncovered_sample": [
+            {field: record.get(field) for field in FMOE_DISPATCH_MIN_FIELDS}
+            for record in uncovered[:10]
+        ],
+    }
 
 
 def parse_aiter_consulted_tables(log_text: str) -> set[str]:
