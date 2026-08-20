@@ -1294,8 +1294,10 @@ class TestForgeGemmHelperCoverage:
 
         result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        assert result["status"] == "failed"
+        # Skipped, not failed: forge never started, so it has no verdict.
+        assert result["status"] == "skipped"
         assert result["error_class"] == "model_path_unavailable"
+        assert result["skip_reason"]
         assert subprocess_called is False
 
     @pytest.mark.asyncio
@@ -1324,7 +1326,7 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
         assert missing_model_dir.is_absolute()
-        assert result["status"] == "failed"
+        assert result["status"] == "skipped"
         assert result["error_class"] == "model_path_unavailable"
         assert subprocess_called is False
 
