@@ -91,7 +91,6 @@ def write_final_remote_recipe(
             state,
             files_dir,
             sections=KnowledgeSections.from_env(),
-            scope=scope,
         )
         return resolved.write_if_better(
             canonical_id,

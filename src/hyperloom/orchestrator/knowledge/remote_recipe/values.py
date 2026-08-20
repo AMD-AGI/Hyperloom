@@ -1080,9 +1080,9 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any = None,
-    scope: RecipeScope | None = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
+    scope = RecipeScope.from_state(state)
     pending_sections = list(
         getattr(state, "kb_stage_outbox", []) or []
     )
@@ -1160,7 +1160,7 @@ def build_remote_knowledge(
             "fusion": {"items": []},
             "rewrite": {"items": []},
         }
-        if scope is not None and scope.kernel_optimizer == "geak"
+        if scope.kernel_optimizer == "geak"
         else {
             "gemm": build_kernel_gemm_value(state, files),
             "fusion": build_kernel_fusion_value(state, files),
@@ -1175,7 +1175,7 @@ def build_remote_knowledge(
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
-        if scope is None or scope.kernel_optimizer == "forge":
+        if scope.kernel_optimizer == "forge":
             _adopt_prior_kernel(state, sections, value, files)
     staged_sections = (
         merge_staged_sections(
@@ -1210,11 +1210,7 @@ def build_remote_knowledge(
             "pitfalls": _experience(state, "warm_start_pitfalls"),
             "provenance": {
                 "producer": "hyperloom-inference-optimizer",
-                **(
-                    {"kernel_optimizer": scope.kernel_optimizer}
-                    if scope is not None
-                    else {}
-                ),
+                "kernel_optimizer": scope.kernel_optimizer,
                 "phase": "CLOSE",
                 "session_id": str(
                     getattr(state, "recipe_kb_session_id", "")

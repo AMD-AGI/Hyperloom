@@ -37,6 +37,11 @@ def _state(stack: list[dict]) -> SimpleNamespace:
         session_id="s1",
         recipe_kb_session_id="s1",
         warm_replay_outcome={},
+        kernel_optimizer="native",
+        tp=8,
+        conc=64,
+        isl=1024,
+        osl=256,
     )
 
 

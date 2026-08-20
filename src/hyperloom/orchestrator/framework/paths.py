@@ -674,15 +674,12 @@ def _warm_replay_kernel_patch_roots() -> tuple[str, ...]:
 def _patch_source_diff(source: WarmReplayPatchSource) -> str:
     """Return the diff text used for target matching, or ``""`` when unavailable.
 
-    An entry may carry its diff inline instead of on disk, so an absent or
-    unreadable ``patch_*`` file is not by itself evidence against a root.
+    An entry may carry its diff inline instead of on disk, so a ``patch_*`` ref
+    that names no local file is not by itself evidence against a root.
     """
-    if source.path is not None and source.path.is_file():
-        try:
-            return source.path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return source.content
-    return source.content
+    if source.path is None or not source.path.is_file():
+        return source.content
+    return source.path.read_text(encoding="utf-8", errors="replace")
 
 
 def _root_contains_patch_targets(root: Path, diffs: Sequence[str]) -> bool:
