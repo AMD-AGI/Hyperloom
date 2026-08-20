@@ -808,10 +808,15 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "target_file": str(ent.get("target_file") or ""),
                     "extra_server_args": str(ent.get("extra_server_args") or ""),
                     "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
-                    "validated": True,
+                    # Writers that cannot attribute the measured gain to this
+                    # one kernel say so; everything else stays validated, as
+                    # every pre-existing writer's row was.
+                    "validated": bool(ent.get("validated", True)),
                     "last_status": str(ent.get("last_status") or ""),
                     "adopted_at": str(ent.get("updated_at") or ""),
                     "attempt_count": int(ent.get("attempt_count") or 0),
+                    "basis": str(ent.get("basis") or ""),
+                    "alignment_status": str(ent.get("alignment_status") or ""),
                 }
             )
     return out
