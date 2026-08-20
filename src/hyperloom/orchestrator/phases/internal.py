@@ -59,7 +59,7 @@ class InternalTasksPhase(PhaseHandler):
             "source": "coordinator_internal",
             "reason": str(reason),
             "seen_pr_ids": seen,
-            "readonly": True,
+            "mode": "research",
         }
         proven = list(self._warm_recipe_proven_items())
         search = getattr(self.shared_state, "explore_search", None) or {}
@@ -196,8 +196,6 @@ class InternalTasksPhase(PhaseHandler):
             "gap_layer": "static_recon",
             "source": "coordinator_internal",
             "reason": str(reason),
-            # Read-only research lane (no worktree, no GPU lease).
-            "readonly": True,
             "scope": "domain",
             "mode": "research",
             "lane": "cpu",
@@ -308,10 +306,10 @@ class InternalTasksPhase(PhaseHandler):
                 "exhausted ones).\n" + (digest or "(no digest)")
             ),
             "gap_layer": "research",
-            # Bounded by wall-clock budget, not turns.
+            # Depth bounded by wall-clock budget, not turns.
             "source": "coordinator_internal",
             "reason": "plateau_trajectory_review",
-            "readonly": True,
+            "mode": "research",
         }
         if digest:
             params["gap_evidence"] = {"trajectory_review": digest}

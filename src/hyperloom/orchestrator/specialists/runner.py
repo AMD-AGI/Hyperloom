@@ -1468,15 +1468,13 @@ class SpecialistRunner:
 
         Returns:
             A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
-            is ``None`` in in-process/readonly mode or on git failure.
+            is ``None`` in in-process mode or on git failure.
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        elif bool((ctx.task.params or {}).get("readonly")):
-            return None, None, ""
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
             preferred=_framework_checkout(str((ctx.task.params or {}).get("framework") or "")),

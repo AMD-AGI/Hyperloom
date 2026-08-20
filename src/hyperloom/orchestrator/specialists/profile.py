@@ -208,9 +208,9 @@ def resolve_specialist_profile(
 ) -> SpecialistProfile:
     """Resolve scope/mode/bench/lane from dispatch params, falling back to safe defaults.
 
-    ``params["readonly"]`` or ``domain.readonly=True`` forces ``mode=research``.
-    Absent ``scope`` is inferred from the domain/tag anchor; bare dispatches
-    resolve to ``freeform → research → cpu``.
+    When ``mode`` is not given explicitly in params, the domain's ``default_mode``
+    is used before the global default.  Absent ``scope`` is inferred from the
+    domain/tag anchor; bare dispatches resolve to ``freeform → research → cpu``.
     """
     p = params or {}
 
@@ -220,11 +220,11 @@ def resolve_specialist_profile(
 
     mode = str(p.get("mode") or "").strip().lower()
     if mode not in MODE_VALUES:
-        mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
-
-    domain_readonly = bool(getattr(domain, "readonly", False)) if domain is not None else False
-    if _coerce_bool(p.get("readonly"), False) or domain_readonly:
-        mode = MODE_RESEARCH
+        domain_default = str(getattr(domain, "default_mode", "") or "").strip().lower()
+        if domain_default in MODE_VALUES:
+            mode = domain_default
+        else:
+            mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
 
     bench = _coerce_bool(p.get("bench"), DEFAULT_BENCH)
     if mode != MODE_PATCH:
