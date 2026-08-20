@@ -9,10 +9,8 @@ Three tiers by severity:
 2. **diagnose** (medium) — ``alert(severity="medium")`` carrying evidence.
 3. **recommend** (high) — ``alert(severity="high")`` plus, for some symptoms, a
    symptom-specific remediation intent: ``delegate(recover)`` (gpu_memory_leaked),
-   ``delegate(report)`` (``deadline_*`` wind-down and ``recover_unsuccessful``
-   finalization), or ``prune_branch`` (stuck / no-lever families in
-   ``_PRUNE_SYMPTOMS``). Every other HIGH symptom is strategic: the alert alone,
-   and Orchestration decides.
+   or ``prune_branch`` (stuck / no-lever families in ``_PRUNE_SYMPTOMS``). Every
+   other HIGH symptom is strategic: the alert alone, and Orchestration decides.
 
 Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
 cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
@@ -291,25 +289,6 @@ class ActionLadder:
                         "evidence": evidence,
                     },
                     idempotency_key=(f"recover-gpu-leak-tick-{self._last_tick_index}"),
-                )
-            )
-            return intents
-        # Wall-clock wind-down: ``delegate(report)`` lands a deterministic
-        # report in the remaining budget before the deadline supervisor
-        # SIGTERMs work; ``recover_unsuccessful`` is the finalization path.
-        if sym.name in {
-            "deadline_warning",
-            "deadline_imminent",
-            "deadline_hard_cutoff",
-            "recover_unsuccessful",
-        }:
-            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            slug = sym.name.replace("_", "-")
-            intents.append(
-                build_delegate(
-                    action_name="report",
-                    params={"reason": sym.name, "evidence": evidence},
-                    idempotency_key=(f"report-{slug}-tick-{self._last_tick_index}"),
                 )
             )
             return intents
