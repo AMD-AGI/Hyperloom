@@ -93,6 +93,10 @@ KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 _FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
 _INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
+# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync
+# so the feasibility check reasons about the budget the eval will really ask for.
+_EVAL_DEFAULT_MAX_TOKENS = 4096
+
 
 def _vram_guarded_server_args(extra_args: str) -> str:
     """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
@@ -7159,12 +7163,30 @@ async def _run_integrate_rebaseline_with_lock_retry(
     return retry_result
 
 
+def _eval_generation_budget() -> int:
+    """Completion tokens the eval harness reserves per sample.
+
+    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS``
+    when it parses as a positive integer, else the shim's own default. ``0``
+    means the operator disabled the clamp, so no budget can be assumed.
+    """
+    raw = (os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
+    if not raw:
+        return _EVAL_DEFAULT_MAX_TOKENS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _EVAL_DEFAULT_MAX_TOKENS
+    return value if value >= 0 else _EVAL_DEFAULT_MAX_TOKENS
+
+
 def _grade_integrate_accuracy(
     bench_result: dict[str, Any],
     *,
     session_dir: Path,
     workspace: Path,
     strict: bool = False,
+    server_args: str = "",
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
@@ -7198,6 +7220,8 @@ def _grade_integrate_accuracy(
         accuracy_passed,
         parse_eval_results,
         require_kernel_accuracy_default,
+        resolve_served_context,
+        served_context_hosts_eval,
     )
 
     baseline_accuracy = 0.0
@@ -7240,6 +7264,28 @@ def _grade_integrate_accuracy(
             "accuracy gate produced no eval result and this artifact has no "
             "other end-to-end correctness evidence"
         )
+    # A verdict can be missing because the eval broke, or because the serving
+    # configuration cannot answer an eval request at all. Only the first says
+    # anything about the patch. The second reproduces on every retry, so
+    # charging it to the patch discards a kernel over a configuration choice.
+    infeasible = False
+    if accuracy_pass is None:
+        fits, why = served_context_hosts_eval(
+            served_max_model_len=resolve_served_context(
+                server_args=server_args,
+                env_max_model_len=os.environ.get("MAX_MODEL_LEN", 0),
+            ),
+            eval_max_tokens=_eval_generation_budget(),
+        )
+        if not fits:
+            infeasible = True
+            reason = why
+            log.warning(
+                "integrate_handler: the accuracy gate cannot run under this "
+                "serving configuration, so no kernel can clear it until the "
+                "configuration changes: %s",
+                why,
+            )
     log.info(
         "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f source=%s",
         accuracy_pass,
@@ -7254,6 +7300,7 @@ def _grade_integrate_accuracy(
         "accuracy_pass": accuracy_pass,
         "reason": reason,
         "degraded": degraded,
+        "infeasible": infeasible,
         "accuracy": new_accuracy,
         "baseline_accuracy": baseline_accuracy,
         "task": task,
@@ -7745,8 +7792,28 @@ async def integrate_handler(
             session_dir=session_dir,
             workspace=workspace,
             strict=applyback_pending,
+            server_args=extra_args,
         )
         if accuracy_gate["blocked"]:
+            if accuracy_gate.get("infeasible"):
+                # The gate cannot run under this configuration, so this round
+                # measured nothing about the patch. Report it as an integration
+                # fault: faults carry their own budget and never consume one of
+                # the three attempts a patch gets to prove itself.
+                from ..actions.executors._accuracy_gate import (
+                    EVAL_KIND_CONTEXT_TOO_SMALL,
+                )
+
+                revert_result = _maybe_revert_kernel_patch(apply_result)
+                return {
+                    "status": "failed",
+                    "error_class": EVAL_KIND_CONTEXT_TOO_SMALL,
+                    "error": accuracy_gate["reason"],
+                    "decision": "NEEDS_REVIEW",
+                    "gain_pct": gain_pct,
+                    "accuracy_gate": accuracy_gate,
+                    "revert_result": revert_result,
+                }
             # A measured regression is hard negative evidence -> REVERT. A
             # missing verdict is only an evidence gap -> NEEDS_REVIEW.
             decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"

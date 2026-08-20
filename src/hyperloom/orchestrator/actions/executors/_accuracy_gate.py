@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,18 @@ BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY = "baseline_eval_contract_fingerprint"
 
 # Distinct eval-failure kinds.
 EVAL_KIND_RUNTIME_FAILURE = "eval_runtime_failure"
+
+# The serving configuration cannot answer an eval request at all, so no verdict
+# can ever be produced under it. Distinct from every other eval failure because
+# it is a property of the configuration rather than of the run: retrying the
+# same round reproduces it exactly.
+EVAL_KIND_CONTEXT_TOO_SMALL = "eval_context_too_small"
+
+# Smallest prompt an eval task is assumed to send. Deliberately conservative: a
+# five-shot gsm8k prompt runs to roughly a thousand tokens, so a context that
+# cannot hold even 256 on top of the generation budget cannot hold any real
+# task. Being conservative keeps this a proof of infeasibility, never a guess.
+_MIN_EVAL_PROMPT_TOKENS = 256
 EVAL_KIND_ACCURACY_UNAVAILABLE = "accuracy_unavailable"
 EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 # The model never emitted EOS, so the eval was cut short and scored ~0.
@@ -338,6 +351,96 @@ def eval_contract_fingerprint(
         contract["model"] = str(model)
     payload = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def resolve_served_context(
+    *,
+    server_args: str | None,
+    env_max_model_len: Any = 0,
+) -> int:
+    """Resolve the context length the server was actually started with.
+
+    ``--max-model-len`` inside the server-args string wins over the
+    ``MAX_MODEL_LEN`` env: the env is a request, the CLI flag is what the
+    process honours, and the parameter search rewrites the flag while leaving
+    the env untouched.
+
+    Args:
+        server_args: The server-args string (e.g. ``EXTRA_VLLM_ARGS``).
+        env_max_model_len: The ``MAX_MODEL_LEN`` env value, used only when the
+            server args do not carry the flag.
+
+    Returns:
+        The served context in tokens, or ``0`` when neither source resolves.
+    """
+    raw = str(server_args or "")
+    if raw:
+        try:
+            toks = shlex.split(raw)
+        except ValueError:
+            toks = raw.split()
+        flag = "--max-model-len"
+        prefix = flag + "="
+        for i, tok in enumerate(toks):
+            value = None
+            if tok == flag and i + 1 < len(toks):
+                value = toks[i + 1]
+            elif tok.startswith(prefix):
+                value = tok[len(prefix):]
+            if value is not None:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    break
+                if parsed > 0:
+                    return parsed
+                break
+    try:
+        return max(0, int(env_max_model_len or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def served_context_hosts_eval(
+    *,
+    served_max_model_len: Any,
+    eval_max_tokens: Any,
+) -> tuple[bool, str]:
+    """Whether the served context can hold an eval prompt plus its completion.
+
+    Answers only the question it can answer from configuration alone: is the
+    context provably too small for ANY prompt once the generation budget is
+    reserved. An unknown context or an unbounded generation budget yields
+    ``True`` — the point is to identify configurations that cannot work, never
+    to guess at ones that might not.
+
+    Args:
+        served_max_model_len: Context the server was started with; ``0`` when
+            unknown.
+        eval_max_tokens: Completion tokens the harness requests per sample;
+            ``0`` or negative means unbounded.
+
+    Returns:
+        ``(fits, reason)``. ``reason`` is empty when it fits.
+    """
+    try:
+        ctx = int(served_max_model_len or 0)
+    except (TypeError, ValueError):
+        ctx = 0
+    try:
+        gen = int(eval_max_tokens or 0)
+    except (TypeError, ValueError):
+        gen = 0
+    if ctx <= 0 or gen <= 0:
+        return True, ""
+    room = ctx - gen
+    if room >= _MIN_EVAL_PROMPT_TOKENS:
+        return True, ""
+    return False, (
+        f"served --max-model-len {ctx} cannot host the eval: {gen} completion "
+        f"tokens leave {room} for the prompt, below the {_MIN_EVAL_PROMPT_TOKENS} "
+        "token minimum, so every request is rejected before it reaches the model"
+    )
 
 
 def accuracy_keep_block(
@@ -730,6 +833,7 @@ __all__ = [
     "EVAL_KIND_ACCURACY_BELOW_FLOOR",
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
     "EVAL_KIND_GENERATION_PATHOLOGY",
+    "EVAL_KIND_CONTEXT_TOO_SMALL",
     "EVAL_KIND_RUNTIME_FAILURE",
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
@@ -746,6 +850,8 @@ __all__ = [
     "read_eval_probe",
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
+    "resolve_served_context",
     "require_framework_accuracy_default",
     "require_kernel_accuracy_default",
+    "served_context_hosts_eval",
 ]

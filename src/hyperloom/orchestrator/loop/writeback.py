@@ -2668,6 +2668,10 @@ class WritebackCollaborator:
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+                    # Carry the promoting lane's accuracy verdict onto the stack
+                    # so CLOSE reads one place instead of reconstructing which
+                    # lane promoted the champion. ``None`` means "not gated".
+                    "accuracy": (bv.get("accuracy") if isinstance(bv, dict) else None),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),
