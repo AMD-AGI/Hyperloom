@@ -1286,6 +1286,41 @@ class KernelPhase(PhaseHandler):
                 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
             )
 
+    @staticmethod
+    def _geak_stack_entry_extra(
+        result: dict[str, Any], *, overlay_loaded: bool | None
+    ) -> dict[str, Any]:
+        """Build the ``geak_e2e`` stack entry, carrying only kernels proven to have run.
+
+        ``accepted_kernels`` / ``accepted_heads`` are GEAK's self-report. They are
+        evidence that a kernel *ran* only if the overlay carrying it was proven loaded
+        for this measurement, which is exactly the call
+        :meth:`_record_geak_adopted_kernels` already makes for the per-kernel ledger.
+
+        The stack entry is the other reader: ``_geak_contribution`` classifies the
+        dashboard row from these lanes alone. Copying the lanes unconditionally let the
+        two disagree — a rebench that stripped a dead overlay promoted on its config
+        gain, the ledger correctly said unattributable, and the dashboard still filed
+        the row under ``kernel`` because the entry named one. So the lanes travel only
+        with the proof, and the proof travels with them.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+            overlay_loaded: Whether the overlay was proven loaded. ``None`` means the
+                caller could not tell, which is not proof and so is not credited.
+
+        Returns:
+            dict[str, Any]: The ``entry_extra`` for :meth:`_lift_to_current_best`.
+        """
+        proven = overlay_loaded is True
+        return {
+            "accepted_kernels": (result.get("accepted_kernels") or []) if proven else [],
+            "accepted_heads": (result.get("accepted_heads") or []) if proven else [],
+            "report_path": result.get("report_path"),
+            "source": "geak_e2e",
+            "overlay_loaded": overlay_loaded,
+        }
+
     def _promote_geak_from_candidate(
         self,
         result: dict[str, Any],
@@ -1383,12 +1418,7 @@ class KernelPhase(PhaseHandler):
                 "tpot_mean_ms": result.get("tpot_ms"),
                 "workspace": result.get("eval_dir"),
             },
-            entry_extra={
-                "accepted_kernels": result.get("accepted_kernels") or [],
-                "accepted_heads": result.get("accepted_heads") or [],
-                "report_path": result.get("report_path"),
-                "source": "geak_e2e",
-            },
+            entry_extra=self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded),
         )
 
         base = float(self.shared_state.baseline_tput or 0.0)
@@ -1400,7 +1430,6 @@ class KernelPhase(PhaseHandler):
             overlay_loaded=overlay_loaded,
         )
         if base > 0:
-            self.shared_state.cumulative_gain = (measured - base) / base * 100.0
             self._update_cumulative_gain_validated(
                 measured,
                 source="geak_e2e_promote",
