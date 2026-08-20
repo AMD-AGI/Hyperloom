@@ -1029,9 +1029,10 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
         capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
-        "are discouraged when a real bottleneck is on the table. Quality is",
-        "scored over quantity: cap your final ``proposal_set`` at the",
-        "**top-6** ranked picks (see Section 8).",
+        "are discouraged when a real bottleneck is on the table — but stop once",
+        "rounds stop yielding new findings; the wall clock is not the only stop",
+        "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
+        "cap**. One real beats two padded; ``empty=true`` beats one padded.",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1447,9 +1448,8 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Return True when every prior KB/PR/research source is empty, so a
-    cold-start directive is injected instead of letting specialists return
-    an empty proposal_set.
+    """Return True when every prior KB/PR/research source is empty, so the
+    cold-start directive is injected in place of the KB block.
 
     Args:
         inp: The specialist prompt inputs.
@@ -1495,7 +1495,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             )
             return rows
         if cold:
-            # Cold-start directive: propose domain-focus defaults, not an empty set.
+            # Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
             rows.extend(
                 [
                     "**COLD-START MODE — no priors available.**",
@@ -1508,27 +1508,22 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     "- Warm-start recipe: ``(none)`` (Section 5).",
                     "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
                     "",
-                    "**Directive — DO NOT return an empty proposal_set.** "
-                    + "Treat the *Winning techniques* + *Pitfalls* in your "
-                    + "**domain focus** block (Section 1) as your fallback "
-                    + "prior. Pick the **1–2 most conservative, "
-                    + "well-attested defaults** from those bullets that are "
-                    + "compatible with the hardware (Section 2) and the "
-                    + "gap symptom (Section 3); flag each with "
-                    + "``provenance: domain_focus_default`` in the proposal "
-                    + "and say it is an unvalidated fallback prior in the "
-                    + "proposal's ``reason``. Do NOT add a ``confidence`` "
-                    + "field: self-reported confidence / gain fields are "
-                    + "stripped from your output before review. Use the "
-                    + "``residual_questions`` field to record what RecipeKB, "
-                    + "research, or ``mcp__pr_monitor__*`` query a future round should pursue.",
-                    "",
-                    "If the *Winning techniques* block is generic enough "
-                    + "that no proposal is safer than a coin-flip, you may "
-                    + "still emit ``empty=true`` — but you MUST cite which "
-                    + "bullets you considered and why each was rejected "
-                    + "(in ``summary``). A bare empty exit with no rationale "
-                    + "will be treated as a tool failure by the Coordinator.",
+                    "**Directive — a coin-flip proposal is worse than none.** "
+                    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
+                    + "Section 1 as your fallback prior and take the **1–2 "
+                    + "most conservative, well-attested defaults** that fit "
+                    + "the hardware (Section 2) and the gap symptom "
+                    + "(Section 3); flag each ``provenance: "
+                    + "domain_focus_default`` and call it an unvalidated "
+                    + "fallback in the proposal's ``reason``. If none clears "
+                    + "that bar, emit ``empty=true`` and cite in ``summary`` "
+                    + "which you considered and why each was rejected — a "
+                    + "bare empty exit with no rationale reads as a tool "
+                    + "failure. Do NOT add a ``confidence`` field: "
+                    + "self-reported confidence / gain fields are stripped "
+                    + "before review. Record in ``residual_questions`` what "
+                    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
+                    + "future round should pursue.",
                 ]
             )
         else:
@@ -2227,11 +2222,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "coupling across several proposals."
         ),
         (
-            "- ``proposal_set`` MUST contain AT MOST **6** entries. You are a "
-            "curator, not a brainstormer: rank candidates by expected gain x "
-            "your confidence, drop everything that contradicts ``kb_subgraph`` "
-            "/ ``pr_evidence`` already in your prompt, and only emit the "
-            "surviving top 6. Fewer is better than padding."
+            "- ``proposal_set``: **2 entries is the norm, 4 the hard cap.** You "
+            "are a curator, not a brainstormer: rank by expected gain x "
+            "confidence, drop anything contradicting ``kb_subgraph`` / "
+            "``pr_evidence``, and stop at 2. A 3rd or 4th must beat the median "
+            "of the first two. Padding is a failure, not thoroughness: each "
+            "weak entry costs a Critic reject and a slot on the serial "
+            "benchmark queue. One real proposal is a better round than two "
+            "padded ones, and ``empty=true`` is better than one."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "

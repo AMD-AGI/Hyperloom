@@ -337,9 +337,6 @@ def run_aiter_build(
     so the coordinator tick loop is never blocked).  All subprocess calls go
     through the injectable ``run`` shim for testability.
     """
-    import json
-    import shutil
-    import subprocess as _subprocess
     import time as _time
 
     from .build_utils import (
@@ -1058,7 +1055,6 @@ def _driver_main(argv: list[str] | None = None) -> int:
     """Driver subprocess entry: load plan.json, call run_aiter_build, write result.json."""
     import argparse
     import json
-    import sys as _sys
 
     parser = argparse.ArgumentParser(description="Off-loop targeted-build driver")
     parser.add_argument("--attempt-root", required=True, help="Attempt directory")
