@@ -34,11 +34,16 @@ from hyperloom.inference_optimizer.breakdown.collectors.geak import (
     _stamp_journey_kind,
 )
 from hyperloom.orchestrator.loop.coordinator_helpers import (
+    _geak_accepted_kernel_specs,
     geak_is_cand_tag,
     geak_spec_is_env,
     geak_spec_kind,
     geak_spec_name,
 )
+
+
+def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
+    return {"short_name": name, "e2e_delta_pct": delta, **extra}
 
 
 # --------------------------------------------------------------------------
@@ -171,8 +176,41 @@ def test_collapse_keeps_two_real_kernels_that_share_a_gain() -> None:
     assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
 
 
+def test_specs_keeps_two_distinct_kernels_that_share_op_kind_and_gain() -> None:
+    result = {
+        "accepted_kernels": [
+            _spec("kernel_a", 12.31, op_kind="prefill_attn"),
+            _spec("kernel_b", 12.31, op_kind="prefill_attn"),
+        ]
+    }
+    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == [
+        "kernel_a",
+        "kernel_b",
+    ]
+
+
+def test_collapse_skips_unrelated_measured_unmeasured_pair_at_same_gain() -> None:
+    rows = [
+        {
+            "kernel_id": "kernel_a",
+            "name": "kernel_a",
+            "gpu_pct": 10.0,
+            "e2e_gain_pct": 5.0,
+            "op_kind": "prefill_attn",
+        },
+        {
+            "kernel_id": "kernel_b",
+            "name": "kernel_b",
+            "gpu_pct": None,
+            "e2e_gain_pct": 5.0,
+            "op_kind": "prefill_attn",
+        },
+    ]
+    out = _collapse_journey_aliases(rows)
+    assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
+
+
 def test_collapse_keeps_two_unmeasured_rows_that_share_a_gain() -> None:
-    # The mirror case: all-unmeasured is not a twin group either.
     rows = [
         {"kernel_id": "kernel_a", "name": "kernel_a", "gpu_pct": None, "e2e_gain_pct": 2.0},
         {"kernel_id": "kernel_b", "name": "kernel_b", "gpu_pct": None, "e2e_gain_pct": 2.0},

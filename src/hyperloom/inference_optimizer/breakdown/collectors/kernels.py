@@ -801,6 +801,10 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             if ent.get("last_decision") != "KEEP":
                 continue
+            # GEAK rows without a proven overlay stay in the ledger for audit
+            # but must not surface as adopted lifecycle entries.
+            if ent.get("validated") is False:
+                continue
             out.append(
                 {
                     "kernel_id": str(ent.get("kernel_id") or ""),
