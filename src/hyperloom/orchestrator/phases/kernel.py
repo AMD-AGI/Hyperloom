@@ -1559,10 +1559,12 @@ class KernelPhase(PhaseHandler):
             spec = row["spec"]
             entry = dict(ledger.get(kid) or {})
             attempts = list(entry.get("attempts") or [])
+            attempt_decision = "KEEP" if attributable else "UNATTRIBUTED"
+            attempt_status = "ok" if attributable else "unvalidated"
             attempts.append(
                 {
-                    "decision": "KEEP",
-                    "status": "ok",
+                    "decision": attempt_decision,
+                    "status": attempt_status,
                     "new_tput": measured_tput,
                     "gain_pct": rebench_gain if attributable else None,
                     "decision_reason": provenance,
@@ -1590,8 +1592,8 @@ class KernelPhase(PhaseHandler):
                     "attempts": attempts,
                     "attempt_count": len(attempts),
                     "best_gain_pct": max(gains) if gains else None,
-                    "last_decision": "KEEP",
-                    "last_status": "ok",
+                    "last_decision": attempt_decision,
+                    "last_status": attempt_status,
                     "validated": attributable,
                     "overlay_loaded": bool(overlay_loaded),
                     "basis": basis,
