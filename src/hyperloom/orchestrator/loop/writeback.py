@@ -27,6 +27,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -2542,6 +2543,12 @@ class WritebackCollaborator:
         applied, keyed by ``(action, variant_name)`` or by ``fingerprint``, so a
         rerun of an already-stacked config cannot double-apply it.
 
+        Every args string read here passes through
+        :func:`strip_benchmark_harness_flags`, including the previous
+        ``current_best`` — it is re-merged onto the winner, so a harness flag
+        left there by a layer that never composed (baseline, warm replay) would
+        otherwise reappear in the published config.
+
         Args:
             task_kind: The action kind that produced the winner (stamped on the
                 stack entry / current_best).
@@ -2568,17 +2575,19 @@ class WritebackCollaborator:
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
-            base_args = str(previous.get("extra_server_args") or "").strip()
+            base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
         _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
         if not _overlay and isinstance(previous, dict):
             _overlay = str(previous.get("final_overlay") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
-            candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
+            candidate_args = strip_benchmark_harness_flags(
+                bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
+            )
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or "").strip()
+            full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
         controls_effective = bool(
             isinstance(bv, dict)
             and (
@@ -2673,7 +2682,7 @@ class WritebackCollaborator:
                         stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
                         stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
-                            str(bv.get("effective_extra_server_args") or "")
+                            strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                         )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
@@ -2756,7 +2765,7 @@ class WritebackCollaborator:
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
                 current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
-                    str(bv.get("effective_extra_server_args") or "")
+                    strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                 )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
