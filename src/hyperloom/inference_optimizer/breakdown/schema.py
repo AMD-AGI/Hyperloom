@@ -1446,12 +1446,28 @@ class KBFlusherStatus(TypedDict, total=False):
 
 
 class WarmReplayOutcome(TypedDict, total=False):
-    """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields."""
+    """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields.
+
+    ``eval_ran`` / ``replay_accuracy`` / ``baseline_accuracy`` are recorded on
+    every replay that reached a throughput measurement, not only on rejection:
+    a config that was checked and passed is a different record from one that
+    was never checked. ``eval_ran`` is what separates "the model scored 0.0"
+    from "no score exists", which are otherwise both a null accuracy.
+
+    A measurement that fails never stops the run. The replay is admitted and
+    ``eval_error`` carries why no score could be read, so an unjudged promotion
+    is visible after the fact rather than silently indistinguishable from a
+    judged one.
+    """
 
     status: str
     expected_gain_pct: float
     actual_gain_pct: float
     throughput_after: float
+    eval_ran: bool
+    eval_error: str | None
+    replay_accuracy: float | None
+    baseline_accuracy: float | None
     warm_recipe_tier: str
     warm_recipe_conf: float
     config_source: str

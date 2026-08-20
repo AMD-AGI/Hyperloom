@@ -599,6 +599,9 @@ class _ExploreStateMixin:
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
             "gain_pct": variant.get("gain_pct"),
+            # Carried through so the ledger records what the KEEP was judged on;
+            # ``None`` means the variant was never gated, not that it scored 0.
+            "accuracy": variant.get("accuracy"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
             "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
