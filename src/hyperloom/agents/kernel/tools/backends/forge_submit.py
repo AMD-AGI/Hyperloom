@@ -2292,10 +2292,14 @@ def _validated_forge_best_result(
     of what to keep. Re-verify the commit lineage and the speedup here anyway --
     the file is written by another process and may be stale from an earlier run
     against a different base.
+
+    ``schema_version`` is deliberately not gated on. Every field read below is
+    checked on its own -- the commit against the workspace history, the timings
+    for being positive numbers, the score for actually improving -- so pinning a
+    version bought nothing those checks do not, while a producer bump that
+    changed none of them silently rejected every published best for six days.
     """
     if not isinstance(payload, dict):
-        return None
-    if payload.get("schema_version") != 1:
         return None
     if payload.get("correctness_passed") is not True:
         return None
@@ -2843,7 +2847,6 @@ def _run_loop_via_cli(
     driver: str,
     workspace: str,
     snr_threshold: float,
-    max_iters: int,
     max_hours: float,
     branch: str,
     gpu_target: str,
@@ -2919,8 +2922,6 @@ def _run_loop_via_cli(
         workspace,
         "--snr-threshold",
         str(snr_threshold),
-        "--max-iters",
-        str(max_iters),
         "--max-hours",
         str(max_hours),
         "--git-branch",
@@ -3123,7 +3124,6 @@ def _run_rewrite_via_cli(
     snr_threshold: float,
     gpu_target: str,
     gpu_type: str,
-    max_iters: int,
     max_hours: float,
     branch: str,
     framework: str,
@@ -3223,8 +3223,6 @@ def _run_rewrite_via_cli(
         str(snr_threshold),
         "--gpu-target",
         gpu_target,
-        "--max-iters",
-        str(max_iters),
         "--max-hours",
         str(max_hours),
         "--deadline-unix",
@@ -3389,7 +3387,6 @@ def _run_rewrite_attempt(
     invocation_spec_file: str,
     snr_threshold: float,
     gpu_type: str,
-    max_iters: int,
     max_hours: float,
     deadline_unix: float,
     timeout_s: int,
@@ -3419,7 +3416,6 @@ def _run_rewrite_attempt(
         snr_threshold=snr_threshold,
         gpu_target=spec.gpu_target,
         gpu_type=gpu_type,
-        max_iters=max_iters,
         max_hours=max_hours,
         branch=spec.branch,
         framework=spec.framework,
@@ -4032,7 +4028,6 @@ def _run_vendor_playbook_loop_via_cli(
     driver: str,
     workspace: str,
     snr_threshold: float,
-    max_iters: int,
     max_hours: float,
     branch: str,
     gpu_target: str,
@@ -4088,8 +4083,6 @@ def _run_vendor_playbook_loop_via_cli(
         workspace,
         "--snr-threshold",
         str(snr_threshold),
-        "--max-iters",
-        str(max_iters),
         "--max-hours",
         str(max_hours),
         "--git-branch",
@@ -4297,7 +4290,6 @@ def _run_claimed_vendor_playbook(
     branch = _new_forge_branch(output_dir, str(kernel_anchor))
     gpu_target = _resolve_gpu_target(candidate)
     gpu_type = _resolve_gpu_type(candidate)
-    max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
     snr_threshold = float(playbook.get("snr_threshold", 30.0))
     if timeout_s < _FORGE_MIN_BUDGET_SEC:
         log.warning(
@@ -4315,7 +4307,6 @@ def _run_claimed_vendor_playbook(
         driver=str(driver),
         workspace=str(workspace),
         snr_threshold=snr_threshold,
-        max_iters=max_iters,
         max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
         branch=branch,
         gpu_target=gpu_target,
@@ -4771,21 +4762,6 @@ def submit(
         forge_log = output_dir / "forge_loop.log"
         experiments_dir = output_dir / "forge_experiments"
         experiments_dir.mkdir(parents=True, exist_ok=True)
-        max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
-        # Compiled/ASM fellows can only tweak host-side params of a precompiled
-        # kernel, so their KEEP rate is structurally low. Cap their iteration
-        # budget; triton-fellow keeps the full budget. Configurable via
-        # FORGE_COMPILED_MAX_ITERS (>= FORGE_MAX_ITERS to disable).
-        if fellow != "triton-fellow":
-            _compiled_cap = int(os.environ.get("FORGE_COMPILED_MAX_ITERS", "3"))
-            if _compiled_cap < max_iters:
-                log.info(
-                    "forge: capping compiled/ASM fellow %s iters %d -> %d (low-yield kernel, see F3)",
-                    fellow,
-                    max_iters,
-                    _compiled_cap,
-                )
-                max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
@@ -4822,7 +4798,6 @@ def submit(
                 invocation_spec_file=invocation_spec_file,
                 snr_threshold=snr_threshold,
                 gpu_type=gpu_type,
-                max_iters=max_iters,
                 max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
                 deadline_unix=max(time.time() + 1.0, started + timeout_s),
                 timeout_s=timeout_s,
@@ -4836,7 +4811,6 @@ def submit(
             driver=driver,
             workspace=workspace,
             snr_threshold=snr_threshold,
-            max_iters=max_iters,
             max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
             branch=branch,
             gpu_target=gpu_target,

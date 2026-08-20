@@ -77,7 +77,10 @@ def test_build_cmd_maps_core_options(tmp_path):
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--output-dir") + 1] == str(tmp_path)
     assert cmd[cmd.index("--agent-backend") + 1] == "claude"
-    assert cmd[cmd.index("--llm-model") + 1] == "claude-opus-4-6"
+    # The model flag is spelled the way forge-loop spells it; forge-fuse rejects
+    # the old --llm-model outright rather than ignoring it.
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6"
+    assert "--llm-model" not in cmd
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
     assert "--fuse-all-confirmed" in cmd

@@ -474,11 +474,15 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     two legs to whichever phase the session stopped in.
 
     Only a previous leg that stopped for a recorded reason, or crashed
-    repeatedly, re-anchors the wall-clock budget. After a clean stop
-    ``start_ts`` is deliberately kept, so ``--max-hours`` still counts from the
-    original session start and the earlier legs' wall-clock stays spent. The
-    phase clock moves on either branch: the two answer different questions, and
-    neither answer includes time nothing was running.
+    repeatedly, re-anchors the wall-clock budget. That also clears
+    ``deadline_unix`` so ``Coordinator.run`` can stamp a new one from the
+    reset ``start_ts``; keeping the spent stamp would make ``--force-resume``
+    after ``time_exhausted`` stop immediately. After a clean stop ``start_ts``
+    and the stamp are deliberately kept, so remaining wall-clock is the
+    persisted deadline, not this invocation's ``--max-hours``. Raising that
+    flag on this path does not extend the stamp. The phase clock moves on
+    either branch: the two answer different questions, and neither answer
+    includes time nothing was running.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
@@ -501,7 +505,58 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
         state.crash_count = 0
         # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
         state.start_ts = state.resumed_ts
+        # The stamp is the loop's budget. Leaving a spent one in place after
+        # resetting start_ts would make this leg look already exhausted.
+        state.deadline_unix = 0.0
+        state.teardown_timings_sec = {}
     return state.resumed_ts
+
+
+def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> list[str]:
+    """Operator-facing resume notes when the wall-clock stamp is kept.
+
+    Remaining time is :meth:`SharedState.remaining_minutes` (the stamp), not
+    this invocation's ``--max-hours``. Raising that flag here does not extend
+    the deadline.
+
+    Args:
+        state: Loaded session state after :func:`_begin_resume_leg`.
+        max_hours: This invocation's ``--max-hours``.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
+    elapsed_h = state.elapsed_minutes() / 60.0
+    remaining_min = state.remaining_minutes()
+    lines = [
+        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
+        f"the persisted deadline is kept",
+    ]
+    if remaining_min is None:
+        lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
+        return lines
+    remaining_h = remaining_min / 60.0
+    lines.append(
+        f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp"
+    )
+    cli_hours = float(max_hours or 0.0)
+    if remaining_min <= 0.0:
+        lines.append(
+            "  → WARNING: the stamped deadline is already spent; start a fresh "
+            "session, or the run stops almost immediately"
+        )
+        lines.append(
+            "  → raising --max-hours on a clean-stop resume does not extend the "
+            "stamp; a recorded stop_reason re-anchors the budget"
+        )
+    elif cli_hours > 0.0:
+        cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
+        if abs(cli_left_min - remaining_min) > 1.0:
+            lines.append(
+                f"  → this invocation's --max-hours {cli_hours:.2f} does not "
+                f"extend or shrink that stamp"
+            )
+    return lines
 
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
