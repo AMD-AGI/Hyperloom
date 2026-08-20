@@ -2066,11 +2066,60 @@ class TestForgeGemmRuntimeConfigMerge:
 
         await phase._validate_gemm_tuning_e2e(result)
 
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert result["e2e_results"]["faults"][0]["reason"] == "integrate_fault:bench_exception"
+        assert result["e2e_results"]["faults"][0]["fault_attempts"] == 2
         assert result["e2e_results"]["reverted"] == []
         assert result["e2e_results"]["kept"][0]["tuner"] == "dense_bf16"
         assert result["decision"] == "KEEP"
+
+    @pytest.mark.asyncio
+    async def test_integrate_fault_retries_once_before_verdict(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+        dense_candidate = tmp_path / "dense.csv"
+        dense_candidate.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {
+                    "status": "failed",
+                    "error_class": "bench_exception",
+                    "decision": "REVERT",
+                    "error": "re-baseline did not succeed",
+                }
+            return {"status": "ok", "decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            phase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _env_var, env_value: env_value,
+        )
+        result = {
+            "backend": "forge",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(dense_candidate),
+                },
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert len(calls) == 2
+        assert result["e2e_results"]["faults"] == []
+        assert result["e2e_results"]["kept"][0]["tuner"] == "dense_bf16"
+        assert result["decision"] == "KEEP"
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_run_leaves_its_tuners_unjudged(self, tmp_path, monkeypatch):
         """A clock that ran out is not a verdict on the tuners it interrupted."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
@@ -2248,7 +2297,13 @@ class TestForgeGemmRuntimeConfigMerge:
         async def _raise_integrate(*_args, **_kwargs):
             raise RuntimeError("integrate failed")
 
-        monkeypatch.setattr(krh_mod, "integrate_handler", _raise_integrate)
+        calls: list[str] = []
+
+        async def _counting_raise(*_args, **_kwargs):
+            calls.append("boom")
+            raise RuntimeError("integrate failed")
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _counting_raise)
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -2276,6 +2331,8 @@ class TestForgeGemmRuntimeConfigMerge:
         fault = result["e2e_results"]["faults"][0]
         assert fault["reason"] == "integrate_fault:handler_exception"
         assert fault["fault"] is True
+        assert fault["fault_attempts"] == 2
+        assert len(calls) == 2
         assert result["e2e_results"]["reverted"] == []
 
 
