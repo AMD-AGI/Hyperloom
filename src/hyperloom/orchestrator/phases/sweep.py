@@ -251,10 +251,7 @@ class SweepPhase(PhaseHandler):
             kind="sweep",
             params=params,
             idempotency_key=f"internal-sweep-{reason}{self._cycle_idem_suffix()}",
-            # A row created without a TTL is one ``reclaim_expired_running``
-            # skips for good: if this ever ends up ``running`` with nothing
-            # behind it, nothing reclaims it and every ``tasks.running()``
-            # reader holds a phase open for the rest of the session.
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
             lease_ttl_sec=self._registry_lanes_ttl("sweep")[1],
         )
         if was_existing:

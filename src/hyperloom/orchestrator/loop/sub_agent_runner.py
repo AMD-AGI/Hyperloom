@@ -3,10 +3,10 @@
 
 """SubAgentRunner
 
-Runs one already-queued ``tasks`` row: acquires its lanes, replays PolicyGate
-at dispatch, invokes the deterministic Python ``ActionRunner`` executor
-registered for ``task.kind`` in ``self.executor_registry``, and transitions the
-row to its terminal state.
+Runs one already-queued ``tasks`` row under the lease its caller won: replays
+PolicyGate at dispatch, invokes the deterministic Python ``ActionRunner``
+executor registered for ``task.kind`` in ``self.executor_registry``, and
+transitions the row to its terminal state.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class SubAgentResult:
 
 
 class SubAgentRunner:
-    """Routes ``delegate`` work to the matching ActionRunner + holds leases.
+    """Routes ``delegate`` work to the matching ActionRunner, and releases its lease.
 
     ``executor_registry`` maps ``task.kind`` → :data:`ExecutorFn` (tests
     register stubs; production registers shell-wrapping executors).
@@ -162,13 +162,10 @@ class SubAgentRunner:
     ) -> None:
         """Record a task's terminal state, tolerating a row already terminal.
 
-        The one place this runner leaves a task. A row can reach its terminal
-        state without us -- a TTL watchdog reclaims it, a policy denial
-        transitions it -- and losing that race says the outcome is already
-        recorded, not that
-        this call failed. The ``queued -> running`` claim deliberately does not
-        come through here: there the rejection is the double-spawn guard and
-        has to reach the caller.
+        The one place this runner leaves a task. A watchdog can reclaim the row
+        first, and losing that race means the outcome is already recorded. The
+        ``queued -> running`` claim does not come through here: its rejection is
+        the double-spawn guard and has to reach the caller.
 
         Args:
             task_id: The task to transition.
@@ -194,22 +191,17 @@ class SubAgentRunner:
         prebound_lease: Lease | None = None,
         extra_context: dict | None = None,
     ) -> SubAgentResult:
-        """Acquire required lanes, claim the row, execute, record the outcome.
+        """Claim the row, execute it, record the outcome.
 
-        The order is the contract: lanes are taken before the row is claimed,
-        and from the claim onwards every exit writes a terminal state. So a row
-        reads ``running`` only while a live coroutine owns it, which is what the
-        phase gates and the ``tasks.running()`` readers are actually asking.
-        Whoever acquired the lanes -- caller or runner -- gets them back from
-        the single finally, on every path including a rejected claim.
-
-        With ``prebound_lease`` the runner skips its own acquire but still
-        owns the release.
+        From the claim onwards every exit writes a terminal state, so a row
+        reads ``running`` only while a live coroutine owns it -- which is what
+        the phase gates and the ``tasks.running()`` readers assume. The lease is
+        released by a single finally on every path, a rejected claim included.
 
         Args:
             task: The task to execute.
-            prebound_lease: Optional already-acquired lease; when given, the
-                runner skips its own acquire but still releases it.
+            prebound_lease: The lease the caller won for this task's lanes;
+                released here. ``None`` only for a task that needs no lanes.
             extra_context: Optional extra values merged into the
                 :class:`RunnerContext`.
 
@@ -244,23 +236,15 @@ class SubAgentRunner:
                         error=str(denied),
                     )
 
-            # Lanes are the caller's to win: both dispatch paths take them
-            # non-blocking and leave the row queued when a lane is busy, which
-            # is the answer a contended lane deserves. A runner that acquired
-            # its own would need the blocking variant, and its raise would land
-            # after the claim below -- stranding the row in ``running``, holding
-            # a phase open against work that never started. Getting here without
-            # them means a caller skipped that step, and running the action
-            # anyway would be running it unserialised.
+            # Running an action whose lanes nobody holds would run it
+            # unserialised, so a missing lease is a caller bug, not a fallback.
             if lease is None and task.requires_lanes:
                 raise ValueError(
                     f"task {task.task_id} ({task.kind}) requires lanes "
                     f"{list(task.requires_lanes)} but was dispatched without a lease"
                 )
 
-            # The claim. A rejection here is the double-spawn guard and belongs
-            # to the caller, so it propagates -- the finally below still hands
-            # back the lanes.
+            # Rejection here is the double-spawn guard; it belongs to the caller.
             await self.tasks.transition(task.task_id, "running")
 
             if runner is None:
@@ -277,9 +261,8 @@ class SubAgentRunner:
                     error=f"no runner registered for kind={task.kind!r}",
                 )
 
-            # Everything past the claim writes a terminal state on the way out.
-            # Preparing the workspace is inside it because an ENOSPC there is a
-            # task that failed, not a task still running.
+            # Workspace prep is inside the terminal-writing block: an ENOSPC
+            # there is a task that failed, not a task still running.
             try:
                 workspace = self._pre_mkdir_workspace(task)
                 extra: dict = {}
@@ -334,7 +317,7 @@ class SubAgentRunner:
                 result=result_payload,
             )
         finally:
-            # Always release whoever acquired the lease — pre-bound or owned.
+            # The caller won the lease; releasing it is this runner's job.
             if lease is not None:
                 await self.locks.release(lease)
 
