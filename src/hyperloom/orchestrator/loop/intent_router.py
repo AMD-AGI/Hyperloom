@@ -718,6 +718,11 @@ class IntentRouter:
 
         if target_agent == "kernel_agent":
             if not bool(getattr(self.shared_state, "kernel_enabled", True)):
+                _fail_result = {
+                    "status": "failed",
+                    "error_class": "agent_disabled",
+                    "error": "kernel_agent is disabled for this session (--no-kernel)",
+                }
                 await self.bus.append_and_seq(
                     Message.new(
                         target_agent,
@@ -727,20 +732,26 @@ class IntentRouter:
                             "in_reply_to": request_msg.msg_id,
                             "kind": f"{kind}_done",
                             "status": "failed",
-                            "result": {
-                                "status": "failed",
-                                "error_class": "agent_disabled",
-                                "error": "kernel_agent is disabled for this session (--no-kernel)",
-                            },
+                            "result": _fail_result,
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
                         priority=1,
                     )
                 )
+                self.shared_state.record_action_failure(
+                    action=kind, task_id=request_msg.msg_id, result=_fail_result
+                )
+                self.shared_state.save(self.session_dir)
                 return
             handler = get_handler(kind)
             if handler is None:
+                _fail_result = {
+                    "status": "failed",
+                    "error_class": "unknown_kernel_kind",
+                    "error": f"no programmatic handler for kind={kind!r}",
+                    "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
+                }
                 await self.bus.append_and_seq(
                     Message.new(
                         target_agent,
@@ -750,18 +761,17 @@ class IntentRouter:
                             "in_reply_to": request_msg.msg_id,
                             "kind": f"{kind}_done",
                             "status": "failed",
-                            "result": {
-                                "status": "failed",
-                                "error_class": "unknown_kernel_kind",
-                                "error": f"no programmatic handler for kind={kind!r}",
-                                "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
-                            },
+                            "result": _fail_result,
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
                         priority=1,
                     )
                 )
+                self.shared_state.record_action_failure(
+                    action=kind, task_id=request_msg.msg_id, result=_fail_result
+                )
+                self.shared_state.save(self.session_dir)
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
@@ -893,6 +903,11 @@ class IntentRouter:
                     priority=1,
                 )
             )
+            if str(result.get("status", "")).lower() in ("failed", "error"):
+                self.shared_state.record_action_failure(
+                    action=kind, task_id=request_msg.msg_id, result=dict(result)
+                )
+                self.shared_state.save(self.session_dir)
             # Cache trace_analyze output (successful runs only).
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
@@ -919,6 +934,11 @@ class IntentRouter:
                     await self._record_integrate_keep(result)
                 self.shared_state.save(self.session_dir)
         else:
+            _fail_result = {
+                "status": "failed",
+                "error_class": "unknown_target_agent",
+                "error": f"no handler registered for target_agent={target_agent!r}",
+            }
             await self.bus.append_and_seq(
                 Message.new(
                     target_agent,
@@ -928,17 +948,17 @@ class IntentRouter:
                         "in_reply_to": request_msg.msg_id,
                         "kind": f"{kind}_done",
                         "status": "failed",
-                        "result": {
-                            "status": "failed",
-                            "error_class": "unknown_target_agent",
-                            "error": f"no handler registered for target_agent={target_agent!r}",
-                        },
+                        "result": _fail_result,
                         "source": "coordinator_auto_reject",
                     },
                     in_reply_to=request_msg.msg_id,
                     priority=1,
                 )
             )
+            self.shared_state.record_action_failure(
+                action=kind, task_id=request_msg.msg_id, result=_fail_result
+            )
+            self.shared_state.save(self.session_dir)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         """Route a RESPONSE intent back to the original requester.

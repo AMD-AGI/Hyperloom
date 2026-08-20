@@ -326,6 +326,28 @@ async def test_no_intent_turn_advances_cursor(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_failed_kernel_request_recorded_in_last_action_failures(session_dir):
+    """A kernel-request that fails must appear in last_action_failures so the model can read it."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "no_such_kind"},
+            ),
+        )
+        failures = c.shared_state.last_action_failures
+        assert failures, "last_action_failures must be non-empty after a failed request"
+        assert failures[-1]["error_class"] == "unknown_kernel_kind"
+
+        summary = c.shared_state.to_prompt_summary()
+        assert "unknown_kernel_kind" in summary, "failure must be rendered in the shared-state prompt block"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_backend_error_turn_does_not_advance_cursor(session_dir):
     """A turn that raises BackendError must leave the cursor unmoved."""
     from hyperloom.orchestrator.bus.message_bus import Message
