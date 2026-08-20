@@ -528,8 +528,8 @@ class SpecialistSubprocessConfig:
     permission_mode: str = "bypassPermissions"
     """claude-cli ``--permission-mode``.
 
-    This is a Claude runtime policy only. Worktrees and tool allowlists scope
-    task behavior but are not filesystem containment.
+    A Claude runtime policy only. Worktrees and the tool denylist scope task
+    behavior but are not filesystem containment.
     """
 
     framework_source_roots: tuple[str, ...] = ()

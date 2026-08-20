@@ -94,7 +94,20 @@ class CodexAgentBackend:
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """Run one agentic Codex turn and parse its structured intent envelope."""
+        """Run one agentic Codex turn and parse its structured intent envelope.
+
+        Args:
+            prompt: The composed turn prompt; sent as the user turn.
+            system_prompt: Sent as thread developer instructions alongside the
+                specialist output contract.
+            disallowed_tools: Unused. Codex containment is the sandbox preset;
+                the Claude tool names have no counterpart here.
+            max_turns: Unused. The SDK owns the agent loop within one turn.
+
+        Returns:
+            BackendTurnResult: The validated intents plus raw reply text and
+            model/usage metadata.
+        """
         try:
             resolved_sandbox = resolve_codex_sandbox_mode(
                 sandbox_mode=self.sandbox_mode,
