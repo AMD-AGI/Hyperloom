@@ -446,20 +446,33 @@ class _RenderMixin:
     def _untested_proposal_rows(self) -> list[dict[str, Any]]:
         """Executable proposals from this cycle that no explore round has benched.
 
+        Matched on the proposal's own content. The ledger is keyed on the
+        variant folded together with whatever removal controls the stack
+        carried at the time, so a KEEP that changes those controls mid-round
+        would otherwise make everything benched before it look untried.
+
         Returns:
             Rows ranked by gap severity then recency, each carrying the
             normalized proposal fields plus ``domain`` / ``severity``.
         """
+        from hyperloom.common.coerce import to_int
+
         from ...actions.executors._proposal_identity import (
             controls_of,
             effective_fingerprint,
             is_executable,
             normalize_proposal,
         )
-        from ..shared_state import stack_base_params
 
-        base = stack_base_params(self.current_best)
-        tested = set((self.explore_search or {}).get("tested") or {})
+        def content_fingerprint(fields: dict[str, Any]) -> str:
+            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+
+        cycle = to_int(self.macro_cycle, default=0)
+        benched = {
+            content_fingerprint(normalize_proposal(row))
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
         severity_of = {
             str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
             for g in (self.gaps or [])
@@ -470,27 +483,22 @@ class _RenderMixin:
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
-            if not isinstance(entry, dict) or int(entry.get("cycle") or 0) != int(self.macro_cycle or 0):
+            if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
-            for proposal in entry.get("proposal_set") or []:
+            task_id = str(entry.get("task_id") or "")[:8]
+            for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
                 row = normalize_proposal(proposal)
                 if not is_executable(row):
                     continue
-                fingerprint = effective_fingerprint(
-                    row["extra_args"],
-                    row["extra_envs"],
-                    controls=controls_of(row),
-                    base_remove_args=base.get("base_remove_args"),
-                    base_unset_envs=base.get("base_unset_envs"),
-                    base_args_mode=base.get("base_args_mode"),
-                )
-                if fingerprint in tested or fingerprint in seen:
+                fingerprint = content_fingerprint(row)
+                if fingerprint in benched or fingerprint in seen:
                     continue
                 seen.add(fingerprint)
+                row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
                 ranked.append((rank.get(severity, 0), order, row))
@@ -507,7 +515,7 @@ class _RenderMixin:
         Returns:
             A single ``•``-prefixed line.
         """
-        parts = [f"• {row['name'] or '(unnamed)'} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+        parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
         if row["atomic"]:
             parts.append("ATOMIC")
         if row["extra_args"]:

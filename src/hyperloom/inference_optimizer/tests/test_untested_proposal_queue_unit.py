@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.actions.executors._proposal_identity import (
     controls_of,
     effective_fingerprint,
@@ -49,6 +48,16 @@ def _state(rounds, *, cycle: int = 0, tested=None, gaps=None, current_best=None)
     return state
 
 
+def _ledger_row(proposal) -> dict:
+    """A tested row as the executor writes it: variant-own fields, server-args key."""
+    fields = normalize_proposal(proposal)
+    return {
+        "extra_server_args": fields["extra_args"],
+        "extra_envs": fields["extra_envs"],
+        **controls_of(fields),
+    }
+
+
 def _fingerprint(proposal, **base) -> str:
     fields = normalize_proposal(proposal)
     return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields), **base)
@@ -88,25 +97,41 @@ def test_a_round_missing_its_cycle_field_reads_as_zero():
     assert _state([entry], cycle=1).to_untested_proposals_summary() == ""
 
 
-def test_benched_fingerprints_are_dropped():
+def test_benched_proposals_are_dropped():
     proposal = {"name": "benched", "extra_args": "--a 1"}
-    tested = {_fingerprint(proposal): {"outcome": "REVERT"}}
+    tested = {"whatever-key": dict(_ledger_row(proposal), outcome="REVERT")}
     assert _state([_round([proposal])], tested=tested).to_untested_proposals_summary() == ""
 
 
-def test_the_tested_lookup_folds_in_the_stack_base_controls():
-    """A naive fingerprint misses the ledger whenever the stack removes a flag."""
+def test_a_keep_that_changes_the_stack_does_not_resurrect_benched_proposals():
+    """The ledger key is stack-relative; matching on it would miss after a KEEP."""
     proposal = {"name": "with-removal", "extra_args": "--a 1", "remove_args": ["--v"]}
-    current_best = {"remove_args": ["--b"], "unset_envs": ["BE"]}
-    effective = _fingerprint(proposal, base_remove_args=["--b"], base_unset_envs=["BE"])
-    naive = canonical_fingerprint("--a 1", {}, remove_args=["--v"])
-    assert effective != naive
+    round_start = _fingerprint(proposal)
+    after_keep = _fingerprint(proposal, base_remove_args=["--b"], base_args_mode="replace")
+    assert round_start != after_keep
 
-    hidden = _state([_round([proposal])], tested={effective: {}}, current_best=current_best)
-    assert hidden.to_untested_proposals_summary() == ""
+    state = _state(
+        [_round([proposal])],
+        tested={round_start: dict(_ledger_row(proposal), outcome="REVERT")},
+        current_best={"remove_args": ["--b"], "args_mode": "replace"},
+    )
+    assert state.to_untested_proposals_summary() == ""
 
-    still_shown = _state([_round([proposal])], tested={naive: {}}, current_best=current_best)
-    assert "with-removal" in still_shown.to_untested_proposals_summary()
+
+def test_a_nameless_proposal_gets_a_stable_name_the_grid_parser_accepts():
+    from hyperloom.orchestrator.actions.executors.explore import _grid_variants_from_payload
+
+    entry = _round([{"extra_args": "--z"}], domain="comm_specialist")
+    entry["task_id"] = "deadbeef99"
+    line = _state([entry]).to_untested_proposals_summary()
+    assert "comm-deadbeef-0" in line
+    assert _grid_variants_from_payload([{"name": "comm-deadbeef-0", "extra_args": "--z"}])
+
+
+def test_a_non_numeric_cycle_does_not_break_prompt_assembly():
+    entry = _round([{"name": "v", "extra_args": "--a"}])
+    entry["cycle"] = "bad"
+    assert "v" in _state([entry], cycle=0).to_untested_proposals_summary()
 
 
 def test_duplicate_fingerprints_collapse_across_rounds():
