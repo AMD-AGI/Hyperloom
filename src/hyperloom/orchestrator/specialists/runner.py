@@ -174,6 +174,30 @@ def _framework_checkout(framework: str) -> str:
     return ""
 
 
+def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
+    """Return the allowlisted git checkouts other than ``base``.
+
+    Grounding falls back to these when the worktree base does not hold a
+    patch's targets, which is the normal case for a specialist that patches a
+    framework other than the one its worktree was cut from.
+
+    Args:
+        roots: The configured framework source roots.
+        base: The checkout the specialist worktree branched off, if any.
+
+    Returns:
+        The remaining roots that are git checkouts, in allowlist order.
+    """
+    base_resolved = base.resolve() if base else None
+    out: list[Path] = []
+    for raw in roots:
+        root = Path(raw)
+        if not (root / ".git").exists() or root.resolve() == base_resolved:
+            continue
+        out.append(root)
+    return tuple(out)
+
+
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
@@ -619,14 +643,10 @@ class SpecialistRunner:
                 enablement_candidate_refs=tuple(
                     str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
                 ),
-                enablement_accepted_config=(
-                    {
-                        "extra_envs": dict(params.get("base_extra_envs") or {}),
-                        "extra_server_args": str(params.get("base_extra_args") or "").strip(),
-                    }
-                    if (params.get("base_extra_envs") or params.get("base_extra_args"))
-                    else {}
-                ),
+                enablement_accepted_config={
+                    "extra_envs": dict(params.get("base_extra_envs") or {}),
+                    "extra_server_args": str(params.get("base_extra_args") or "").strip(),
+                },
                 gpu_type=str(params.get("gpu_type") or ""),
                 allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),
@@ -1406,28 +1426,22 @@ class SpecialistRunner:
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
         # the rest against the clean base checkout, and scan for smuggled claims.
-        # Candidate roots let cross-repo patches (e.g. sglang diff written from
-        # an aiter worktree) be re-grounded against the correct tree instead of
-        # being silently dropped as missing_target.
+        # The worktree base names one framework tree, but a specialist may target
+        # another allowlisted one, so the rest are offered as candidate roots.
         base_checkout = prep.worktree_base or prep.worktree
-        _all_roots = tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else ()
-        _base_str = str(base_checkout.resolve()) if base_checkout else ""
-        _candidate_roots = tuple(
-            Path(r)
-            for r in _all_roots
-            if r.rstrip("/") != _base_str.rstrip("/") and Path(r).is_dir() and (Path(r) / ".git").exists()
+        candidate_roots = _sibling_checkouts(
+            tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
+            base_checkout,
         )
-        kept, dropped, grounding, patch_roots = _patch_safety.vet_patches(
+        kept, dropped, grounding = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
-            candidate_roots=_candidate_roots,
+            candidate_roots=candidate_roots,
         )
-        # When the specialist wrote patches but grounding dropped every one of
-        # them as missing_target, surface this explicitly.  Silently degrading to
-        # no_patches let 101821 waste three rounds before it switched to artifacts.
-        had_patches_before_safety = bool(deduped)
-        all_dropped_by_grounding = (
-            had_patches_before_safety
+        # Every patch dropped for a target no tree holds: a distinct outcome from
+        # "the specialist wrote none", and the next round has to be told which.
+        all_dropped_by_grounding = bool(
+            deduped
             and not kept
             and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
         )
@@ -1445,10 +1459,7 @@ class SpecialistRunner:
         )
         done_payload["patches_written"] = kept
         done_payload["patch_grounding"] = grounding
-        done_payload["patch_roots"] = patch_roots
         if all_dropped_by_grounding:
-            # Explicit signal so framework.py can emit a distinct status and
-            # feed the reason back into the next round's prompt.
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
         if not kept:
             done_payload["empty"] = not bool(done_payload.get("proposal_set"))

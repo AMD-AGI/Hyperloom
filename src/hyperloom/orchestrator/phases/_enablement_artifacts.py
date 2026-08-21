@@ -120,10 +120,9 @@ def write_setting_script(
     once the copy lands.  Patches are dropped entirely without a framework root,
     because ``git apply`` would have no target to run against.
 
-    Artifacts (whole-file installs) are copied to ``reports/enablement/artifacts/``
-    and generate ``install -D`` lines in the script.  Their pre-image backups
-    (``.bak`` files from ``artifact_backups/``) are also copied as ``.orig``
-    so a human doing a source-code PR has both before and after available.
+    Whole-file artifacts are copied to ``reports/enablement/artifacts/`` and
+    become ``install -D`` lines. Each one's pre-image is copied alongside as
+    ``.orig``, which is what an upstream PR has to be written against.
 
     Args:
         session_dir: The session root directory.
@@ -150,38 +149,17 @@ def write_setting_script(
             if _copy(src, patches_dest / name):
                 script_patches.append(f"patches/{name}")
 
-    # Collect kept artifacts into reports/enablement/artifacts/ and build the
-    # install lines for the replay script.  The pre-image .bak (from
-    # artifact_backups/) is also copied as .orig so a human PR author has the
-    # before/after without digging into runs/.
-    script_artifacts: list[dict] = []
-    kept_artifacts = list(enablement.kept_artifacts or [])
-    if kept_artifacts:
-        arts_dest = enablement_dir(Path(session_dir)) / "artifacts"
-        for idx, art in enumerate(kept_artifacts):
-            if not isinstance(art, dict):
-                continue
-            tgt_str = str(art.get("target") or "").strip()
-            src_str = str(art.get("source") or "").strip()
-            bak_str = str(art.get("backup") or "").strip()
-            if not tgt_str:
-                continue
-            tgt = Path(tgt_str)
-            # Determine the archive filename (use target basename, de-collide).
-            art_name = f"{idx:03d}_{tgt.name}"
-            art_dest = arts_dest / art_name
-            # Copy the installed (post-image) file.
-            src_copied = False
-            if src_str and Path(src_str).is_file():
-                src_copied = _copy(Path(src_str), art_dest)
-            elif tgt.is_file():
-                # Target still in place (cross-root survival); archive it.
-                src_copied = _copy(tgt, art_dest)
-            # Copy pre-image .bak as .orig for upstream PR use.
-            if bak_str and Path(bak_str).is_file():
-                _copy(Path(bak_str), arts_dest / (art_name + ".orig"))
-            if src_copied:
-                script_artifacts.append({"archive_path": f"artifacts/{art_name}", "target": tgt_str})
+    artifacts_dest = enablement_dir(Path(session_dir)) / "artifacts"
+    script_artifacts: list[dict[str, str]] = []
+    for idx, art in enumerate(enablement.kept_artifacts or [], start=1):
+        target = str(art.get("target") or "")
+        name = f"{idx:03d}_{Path(target).name}"
+        if not _copy(Path(str(art.get("source") or "")), artifacts_dest / name):
+            continue
+        # ``artifact_backups/`` is outside PACKAGE_GLOBS, so this is the only
+        # copy of the pre-image that reaches the archive.
+        _copy(Path(str(art.get("backup") or "")), artifacts_dest / f"{name}.orig")
+        script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
 
     accepted_cfg = dict(enablement.accepted_config or {})
     extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}

@@ -1098,8 +1098,8 @@ class FrameworkPhase(PhaseHandler):
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
-        # Whole-file artifacts kept by prior rounds, re-installed idempotently
-        # at the start of each round (analogous to patch stacking).
+        # Whole-file artifacts kept by prior rounds, re-installed before the
+        # boot the same way patches are re-applied.
         base_artifacts = list(state.enablement.kept_artifacts or [])
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
@@ -1119,8 +1119,8 @@ class FrameworkPhase(PhaseHandler):
             if base_patches:
                 progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
             if base_artifacts:
-                art_tgts = [a.get("target", "?") for a in base_artifacts[:4]]
-                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) installed: {art_tgts}")
+                art_targets = [a["target"] for a in base_artifacts[:4]]
+                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) installed: {art_targets}")
             if base_setup:
                 progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
             if acc_envs or acc_args:
@@ -1204,14 +1204,11 @@ class FrameworkPhase(PhaseHandler):
             "enablement_base_artifacts": base_artifacts,
             # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
-            # Accumulated env/arg config from prior advanced rounds.  The bench
-            # variant combines these with this round's proposal, so the KEEP leg
-            # runs with the full env stack and effective_config is complete.
-            # Previously `base_extra_envs` was never filled here, so the KEEP
-            # bench ran without prior advanced envs and framework.py:1757
-            # replaced accepted_config with an incomplete effective_config.
-            "base_extra_envs": dict((state.enablement.accepted_config or {}).get("extra_envs") or {}),
-            "base_extra_args": str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip(),
+            # Config accumulated by prior advanced rounds. The bench variant
+            # layers this round's proposal on top, so a KEEP is graded on the
+            # whole stack and its effective_config records the whole stack.
+            "base_extra_envs": acc_envs,
+            "base_extra_args": acc_args,
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "readonly": False,
@@ -1740,6 +1737,17 @@ class FrameworkPhase(PhaseHandler):
                     cur.append(sc)
             state.enablement.setup_commands = cur
 
+        def _stack_kept_artifacts() -> None:
+            """Append this round's installed artifacts to the durable stack."""
+            cur = list(state.enablement.kept_artifacts or [])
+            seen = {str(a.get("target")) for a in cur}
+            for art in res.get("artifacts_applied") or []:
+                target = str(art.get("target") or "")
+                if target and target not in seen:
+                    cur.append(dict(art))
+                    seen.add(target)
+            state.enablement.kept_artifacts = cur
+
         def _reset_baseline_failure_backstop() -> None:
             """Clear the baseline-failure counters on enablement forward progress.
 
@@ -1784,14 +1792,7 @@ class FrameworkPhase(PhaseHandler):
                 if sp and sp not in kept:
                     kept.append(sp)
             state.enablement.kept_patches = kept
-            # Stack kept artifacts (whole-file installs) analogously to patches.
-            kept_arts = list(state.enablement.kept_artifacts or [])
-            for art in res.get("artifacts_applied") or []:
-                if isinstance(art, dict) and art.get("target"):
-                    tgt = str(art["target"])
-                    if not any(a.get("target") == tgt for a in kept_arts):
-                        kept_arts.append(dict(art))
-            state.enablement.kept_artifacts = kept_arts
+            _stack_kept_artifacts()
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
@@ -1825,16 +1826,7 @@ class FrameworkPhase(PhaseHandler):
                 if sp and sp not in kept:
                     kept.append(sp)
             state.enablement.kept_patches = kept
-            # Stack advanced artifacts analogously — PR #1215 fixed the same
-            # silent-drop for patches; artifacts were missed and advanced still
-            # reverted them.  Now they are preserved and replayed next round.
-            kept_arts = list(state.enablement.kept_artifacts or [])
-            for art in res.get("artifacts_applied") or []:
-                if isinstance(art, dict) and art.get("target"):
-                    tgt = str(art["target"])
-                    if not any(a.get("target") == tgt for a in kept_arts):
-                        kept_arts.append(dict(art))
-            state.enablement.kept_artifacts = kept_arts
+            _stack_kept_artifacts()
             _stack_setup_commands()
             _stack_kept_runtime()
             # Accumulated so a later kept round replays every advance, not just patches.
@@ -1862,13 +1854,10 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
-            # Surface grounding drops explicitly so the next round knows to switch
-            # to artifacts_written instead of writing patches that can never apply.
-            dropped_by_grounding = res.get("patches_dropped_by_grounding")
-            if isinstance(dropped_by_grounding, list) and dropped_by_grounding:
-                state.enablement.last_grounding_drop_reason = [str(d) for d in dropped_by_grounding[:8]]
-            else:
-                state.enablement.last_grounding_drop_reason = []
+        # Set on every round so a drop reason cannot outlive the round it describes.
+        state.enablement.last_grounding_drop_reason = [
+            str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
+        ]
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
