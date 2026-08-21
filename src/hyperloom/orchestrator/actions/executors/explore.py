@@ -77,6 +77,7 @@ from ._grid_runner import (
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
+
 # DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
 # params['stack_stable_threshold_pct'].
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
@@ -541,9 +542,7 @@ def filter_operator_pinned_envs(
     dropped: list[tuple[str, str]] = []
     for gv in grid:
         clash = sorted(
-            key
-            for key in (str(k).strip().upper() for k in (getattr(gv, "extra_envs", None) or {}))
-            if key in pinned
+            key for key in (str(k).strip().upper() for k in (getattr(gv, "extra_envs", None) or {})) if key in pinned
         )
         # A replay reproduces a config another component already measured, so it
         # carries the pinned values verbatim by construction.
@@ -848,11 +847,7 @@ class ExploreExecutor:
             # timeout instead of KILLED_OVERTIME with its diagnostic ratio.
             # Raise the ceiling (not the kill ratio) so the ordering holds for
             # the long baselines AgentX produces.
-            _ceiling = (
-                AGENTX_EXPLORE_TIMEOUT_CEILING_SEC
-                if agentx_enabled()
-                else DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
-            )
+            _ceiling = AGENTX_EXPLORE_TIMEOUT_CEILING_SEC if agentx_enabled() else DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
             timeout_sec = _compute_explore_variant_timeout(
                 baseline_runtime_sec=baseline_runtime_sec,
                 kill_ratio=overtime_kill_ratio,
@@ -888,9 +883,7 @@ class ExploreExecutor:
         # round's budget.
         lever_payload = framework_lever_grid(extra.get("shared_state") or extra.get("state"))
         if lever_payload:
-            existing_names = {
-                str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)
-            }
+            existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
             fresh = [v for v in lever_payload if str(v.get("name") or "") not in existing_names]
             if fresh:
                 log.info(
@@ -1637,9 +1630,7 @@ class ExploreExecutor:
                             # when an overlay was loaded. Empty for a flags-only
                             # variant, so a downstream reader can tell a config
                             # gain from a gain that also had a kernel running.
-                            "accepted_kernels": list(
-                                getattr(gv, "accepted_kernels", []) or []
-                            ),
+                            "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
                             # The verdict this KEEP rests on. ``None`` means the
                             # variant was not gated (not high-risk, or no

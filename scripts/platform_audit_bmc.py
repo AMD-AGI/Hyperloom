@@ -60,9 +60,7 @@ SENTINEL_USER = "hlaudit"
 #: its latency-sensitive columns, which is the closest published analogue to an
 #: inference serving host. The guide covers 9004 (Genoa); the knobs and their
 #: semantics carry forward to 9005 (Turin).
-SOURCE = (
-    "AMD BIOS & Workload Tuning Guide for EPYC 9004 (pub. 58011 rev 1.0), ch. 5"
-)
+SOURCE = "AMD BIOS & Workload Tuning Guide for EPYC 9004 (pub. 58011 rev 1.0), ch. 5"
 
 #: BIOS knobs, matched by vendor attribute name. Names differ per OEM, so each
 #: is a synonym pattern rather than a per-vendor table.
@@ -297,10 +295,7 @@ class TempBmcAccount:
             self.note = "; ".join(self.mint_errors)
             return self
         if not confirmed:
-            self.mint_errors.append(
-                "set password: return code reported success but ipmitool printed "
-                "no confirmation"
-            )
+            self.mint_errors.append("set password: return code reported success but ipmitool printed no confirmation")
 
         # Every remaining step grants access, so each is checked. A silent
         # failure here surfaces as a 401 from Redfish, which reads as an
@@ -311,8 +306,7 @@ class TempBmcAccount:
             ("enable account", ["ipmitool", "user", "enable", str(slot)]),
             (
                 "grant channel access",
-                ["ipmitool", "channel", "setaccess", "1", str(slot),
-                 "callin=on", "ipmi=on", "link=on", "privilege=4"],
+                ["ipmitool", "channel", "setaccess", "1", str(slot), "callin=on", "ipmi=on", "link=on", "privilege=4"],
             ),
         ):
             ok, _, err = sudo_run(cmd)
@@ -340,8 +334,7 @@ class TempBmcAccount:
         revoked, last_err = False, ""
         for priv in ("15", "1"):
             revoked, _, last_err = sudo_run(
-                ["ipmitool", "channel", "setaccess", "1", s,
-                 "callin=off", "ipmi=off", "link=off", f"privilege={priv}"]
+                ["ipmitool", "channel", "setaccess", "1", s, "callin=off", "ipmi=off", "link=off", f"privilege={priv}"]
             )
             if revoked:
                 break
@@ -373,8 +366,7 @@ class TempBmcAccount:
                 f"reachable over the LAN channel. Revoke it by hand:\n"
                 f"***   sudo ipmitool channel setaccess 1 {self.slot} callin=off "
                 f"ipmi=off link=off privilege=15\n"
-                f"***   sudo ipmitool user disable {self.slot}\n"
-                + "".join(f"***   - {f}\n" for f in failures),
+                f"***   sudo ipmitool user disable {self.slot}\n" + "".join(f"***   - {f}\n" for f in failures),
                 file=sys.stderr,
             )
         return False
@@ -407,8 +399,9 @@ def tls_context(ca_cert: str | None, insecure: bool) -> ssl.SSLContext:
     return ssl.create_default_context(cafile=ca_cert) if ca_cert else ssl.create_default_context()
 
 
-def rf_get(host: str, path: str, user: str, password: str, ctx: ssl.SSLContext,
-           timeout: int = 30) -> tuple[dict | None, str]:
+def rf_get(
+    host: str, path: str, user: str, password: str, ctx: ssl.SSLContext, timeout: int = 30
+) -> tuple[dict | None, str]:
     """GET a Redfish resource, returning ``(document, error)``."""
     req = urllib.request.Request(f"https://{host}{path}")
     if user:
@@ -449,8 +442,7 @@ def probe_reachable(host: str, ctx: ssl.SSLContext) -> str:
     return err or "service root unreachable"
 
 
-def redfish_bios(host: str, user: str, password: str,
-                 ctx: ssl.SSLContext) -> tuple[dict, str, str]:
+def redfish_bios(host: str, user: str, password: str, ctx: ssl.SSLContext) -> tuple[dict, str, str]:
     """Fetch BIOS attributes, discovering the system path (varies by OEM)."""
     systems, err = rf_get(host, "/redfish/v1/Systems", user, password, ctx)
     if systems is None and err:
@@ -564,19 +556,26 @@ def main() -> int:
     # a privileged account by omission.
     mints_account = not args.bmc_user
     if mints_account and not args.allow_account_creation:
-        print("Auditing without --bmc-user mints a temporary ADMINISTRATOR account on "
-              "the BMC. Pass --bmc-user with an existing (ideally read-only) account, "
-              "or --allow-account-creation to accept that.", file=sys.stderr)
+        print(
+            "Auditing without --bmc-user mints a temporary ADMINISTRATOR account on "
+            "the BMC. Pass --bmc-user with an existing (ideally read-only) account, "
+            "or --allow-account-creation to accept that.",
+            file=sys.stderr,
+        )
         return EXIT_UNKNOWN
 
     # ipmitool is needed to mint an account, not only to discover the address,
     # so --bmc-host does not excuse it on the minting path.
     if (mints_account or not args.bmc_host) and not ipmitool_present():
-        print("ipmitool is not on PATH, so "
-              + ("the temporary account cannot be minted. Pass --bmc-user to audit "
-                 "with an existing account." if mints_account
-                 else "the BMC address cannot be discovered. Pass --bmc-host explicitly."),
-              file=sys.stderr)
+        print(
+            "ipmitool is not on PATH, so "
+            + (
+                "the temporary account cannot be minted. Pass --bmc-user to audit with an existing account."
+                if mints_account
+                else "the BMC address cannot be discovered. Pass --bmc-host explicitly."
+            ),
+            file=sys.stderr,
+        )
         return EXIT_UNKNOWN
 
     host = args.bmc_host or bmc_ip()
@@ -598,9 +597,7 @@ def main() -> int:
 
     try:
         if args.bmc_user:
-            password = os.environ.get("BMC_PASSWORD") or getpass.getpass(
-                f"Password for {args.bmc_user}@{host}: "
-            )
+            password = os.environ.get("BMC_PASSWORD") or getpass.getpass(f"Password for {args.bmc_user}@{host}: ")
             attrs, _, err = redfish_bios(host, args.bmc_user, password, ctx)
         else:
             if args.insecure:
@@ -643,11 +640,19 @@ def main() -> int:
         code = EXIT_UNKNOWN
 
     if args.json:
-        print(json.dumps(
-            {"host": host, "rows": rows, "error": err,
-             "credential_failures": credential_failures, "exit_code": code},
-            indent=2, sort_keys=True,
-        ))
+        print(
+            json.dumps(
+                {
+                    "host": host,
+                    "rows": rows,
+                    "error": err,
+                    "credential_failures": credential_failures,
+                    "exit_code": code,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     else:
         if err:
             print(f"BIOS attributes unavailable: {err}", file=sys.stderr)

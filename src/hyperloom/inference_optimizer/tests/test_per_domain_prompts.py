@@ -800,7 +800,7 @@ def test_pr_monitor_section_lists_all_granted_tools():
     _sys, usr_p = _build_serving_prompt(task_id="tool-drift", pr_monitor_available=True)
     prefix = "mcp__pr_monitor__"
     for tool_full in PR_MONITOR_TOOL_NAMES:
-        short = tool_full[len(prefix):]
+        short = tool_full[len(prefix) :]
         assert short in usr_p, (
             f"Granted PR Monitor tool '{short}' is not advertised in §6 PR MONITOR. "
             "Update _section_pr_feed in specialist_prompt_builder.py."

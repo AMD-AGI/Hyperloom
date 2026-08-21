@@ -175,9 +175,7 @@ def test_one_sided_edges_are_mirrored():
     the dependent with an empty ``depends_on``, and the dependent's bundle would
     then omit the enabler it needs.
     """
-    switches, _ = manifest.parse_manifest(
-        [_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")]
-    )
+    switches, _ = manifest.parse_manifest([_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")])
     by_name = {s["switch"]: s for s in switches}
     assert by_name["HL_CACHE"]["depends_on"] == ["HL_HOIST"]
     assert by_name["HL_HOIST"]["enables"] == ["HL_CACHE"]
@@ -195,9 +193,7 @@ def test_a_dependency_cycle_is_broken_and_reported():
 
 def test_a_switch_with_dependents_is_flagged_as_an_enabler():
     """The enabler flag is derived, so a specialist cannot forget to set it."""
-    switches, _ = manifest.parse_manifest(
-        [_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")]
-    )
+    switches, _ = manifest.parse_manifest([_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")])
     by_name = {s["switch"]: s for s in switches}
     assert by_name["HL_HOIST"]["enabler"] is True
     assert by_name["HL_CACHE"]["enabler"] is False
@@ -332,9 +328,7 @@ def test_leave_one_out_skips_a_removal_that_empties_the_stack():
     # Dropping the root enabler would take HL_CACHE and HL_DERIVED with it, but
     # HL_STANDALONE survives, so it is a real experiment and is kept.
     assert "fwlever_drop_hl_hoist" in names
-    chain_only, _ = manifest.parse_manifest(
-        [_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")]
-    )
+    chain_only, _ = manifest.parse_manifest([_entry("HL_HOIST", enables=["HL_CACHE"]), _entry("HL_CACHE")])
     assert "fwlever_drop_hl_hoist" not in [v["name"] for v in manifest.leave_one_out_variants(chain_only)]
 
 
@@ -1000,10 +994,8 @@ async def test_a_plain_patch_without_env_gates_still_needs_no_manifest(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_violation(
-    tmp_path, monkeypatch
-):
-    """"We could not measure it" and "the patch is not inert" are different findings.
+async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_violation(tmp_path, monkeypatch):
+    """ "We could not measure it" and "the patch is not inert" are different findings.
 
     On a live session a parity leg whose report was read too early came back with no
     throughput, and the verdict said the patch "is not actually inert" — for a patch
@@ -1041,10 +1033,7 @@ def test_both_parity_outcomes_are_writable_to_the_framework_kb():
     assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY in kb_writeback.ALLOWED_OUTCOMES
     assert kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE in kb_writeback.ALLOWED_OUTCOMES
     # The two must stay distinct: one is a property of the patch, the other of the run.
-    assert (
-        kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY
-        != kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE
-    )
+    assert kb_writeback.OUTCOME_REVERTED_SWITCH_OFF_PARITY != kb_writeback.OUTCOME_REVERTED_PARITY_INCONCLUSIVE
 
 
 @pytest.mark.asyncio
@@ -1092,9 +1081,7 @@ async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bundle(
-    tmp_path, monkeypatch
-):
+async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bundle(tmp_path, monkeypatch):
     """A quality regression condemns one switch, not the whole bundle.
 
     Measured on a live session: a four-switch patch cached the SP seqlen
@@ -1143,9 +1130,7 @@ async def test_a_correctness_failure_without_switches_still_reverts(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_a_bundle_that_is_not_inert_still_reverts_despite_the_bisect_path(
-    tmp_path, monkeypatch
-):
+async def test_a_bundle_that_is_not_inert_still_reverts_despite_the_bisect_path(tmp_path, monkeypatch):
     """Keeping code is only safe when 'off' is genuinely off.
 
     A bundle that fails both the quality gate and parity is not a bisect

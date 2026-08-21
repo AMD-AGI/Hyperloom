@@ -622,9 +622,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     fact = next(row for row in rows if row["step"] == "fact_finalize")
     assert fact["status"] == "failed"
-    assert fact["detail"] == (
-        "status=error reason=KBStoreError backend=kb-store"
-    )
+    assert fact["detail"] == ("status=error reason=KBStoreError backend=kb-store")
 
 
 @pytest.mark.asyncio
@@ -890,6 +888,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
 
     finalize_calls: list[str] = []
     save_calls: list[Path] = []
+
     def _finalize(*, source: str) -> dict:
         finalize_calls.append(source)
         return {"status": "written"}

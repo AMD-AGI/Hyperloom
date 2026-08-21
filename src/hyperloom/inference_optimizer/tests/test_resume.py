@@ -486,7 +486,6 @@ class TestN23ResumePerSession:
         assert exc.value.code == 2
 
 
-
 # _load_kernel_agent_env_fallback hard-fails on bad state
 
 

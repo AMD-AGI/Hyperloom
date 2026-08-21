@@ -95,9 +95,7 @@ def test_three_entries_under_per_entry_cap_exceed_the_cumulative_cap():
         # is exactly why per-entry accounting never fired.
         assert ps.phase_elapsed_seconds(state, now_unix=exit_at) == ENTRY_SEC
         assert ENTRY_SEC < KERNEL_CAP_SEC
-        assert ps.phase_cumulative_seconds(state, now_unix=exit_at) == pytest.approx(
-            ENTRY_SEC * (entry + 1)
-        )
+        assert ps.phase_cumulative_seconds(state, now_unix=exit_at) == pytest.approx(ENTRY_SEC * (entry + 1))
         _enter(state, ps.PHASE_SWEEP, exit_at)
         now = exit_at + GAP_SEC
 
@@ -123,9 +121,7 @@ def test_per_entry_elapsed_keeps_its_meaning():
     _enter(state, ps.PHASE_KERNEL_AGENT, now)
     live = now + 1800.0
     assert ps.phase_elapsed_seconds(state, now_unix=live) == 1800.0
-    assert ps.phase_cumulative_seconds(state, now_unix=live) == pytest.approx(
-        3 * ENTRY_SEC + 1800.0
-    )
+    assert ps.phase_cumulative_seconds(state, now_unix=live) == pytest.approx(3 * ENTRY_SEC + 1800.0)
 
 
 def test_phase_budget_remaining_charges_every_entry():

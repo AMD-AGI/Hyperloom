@@ -32,6 +32,7 @@ from hyperloom.orchestrator.framework.targeted_build import (
 # Shared mock helpers
 # ---------------------------------------------------------------------------
 
+
 def _completed(stdout="", stderr="", returncode=0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
@@ -88,12 +89,14 @@ def _make_git(*, aiter_tags="v0.1.0\nv0.0.9", git_sha="abc1234"):
         if "rev-parse" in cmd:
             return _completed(stdout=git_sha + "\n")
         return _completed()
+
     return _git
 
 
 # ---------------------------------------------------------------------------
 # AITER recipe helpers
 # ---------------------------------------------------------------------------
+
 
 def _aiter_action(**kw):
     base = dict(
@@ -122,6 +125,7 @@ def _patch_aiter_isolation(monkeypatch, tmp_path, *, make_so=True):
     fake = FakeIsolation(worktree, venv)
 
     import hyperloom.agents.framework.isolation as iso_mod
+
     monkeypatch.setattr(iso_mod, "_run_git", lambda *a, **kw: None)
     monkeypatch.setattr(iso_mod, "_run_subprocess", lambda *a, **kw: None)
     monkeypatch.setattr(iso_mod, "prepare_repo_cache", fake.prepare_repo_cache)
@@ -164,8 +168,7 @@ def _make_aiter_run(
                 return _completed(stdout=triton_ver + "\n" if triton_ver else "")
             return _completed(stdout=torch_ver + "\n")
         if "pip" in cmd and "install" in cmd:
-            return _completed(returncode=0 if pip_ok else 1,
-                              stderr="" if pip_ok else "error: compile failed")
+            return _completed(returncode=0 if pip_ok else 1, stderr="" if pip_ok else "error: compile failed")
         if "import aiter" in cmd:
             return _completed(returncode=0 if import_ok else 1)
         if "tag -l" in cmd:
@@ -183,10 +186,16 @@ def _make_aiter_run(
 # sgl-kernel / vLLM recipe helpers
 # ---------------------------------------------------------------------------
 
+
 def _sgl_action(**kw):
     base = dict(
-        gap_id="g", framework="sglang", component="sgl_kernel", capability="fp4",
-        ref="v0.4.0", repo_url="https://github.com/sgl-project/sglang", gpu_arch="gfx950",
+        gap_id="g",
+        framework="sglang",
+        component="sgl_kernel",
+        capability="fp4",
+        ref="v0.4.0",
+        repo_url="https://github.com/sgl-project/sglang",
+        gpu_arch="gfx950",
     )
     base.update(kw)
     return TargetedBuildAction(**base)
@@ -194,8 +203,13 @@ def _sgl_action(**kw):
 
 def _vllm_action(**kw):
     base = dict(
-        gap_id="g", framework="vllm", component="vllm_source", capability="deepseek_v4",
-        ref="v0.19.0", repo_url="https://github.com/ROCm/vllm", gpu_arch="gfx950",
+        gap_id="g",
+        framework="vllm",
+        component="vllm_source",
+        capability="deepseek_v4",
+        ref="v0.19.0",
+        repo_url="https://github.com/ROCm/vllm",
+        gpu_arch="gfx950",
     )
     base.update(kw)
     return TargetedBuildAction(**base)
@@ -203,6 +217,7 @@ def _vllm_action(**kw):
 
 def _patch_isolation(monkeypatch, worktree, venv):
     import hyperloom.agents.framework.isolation as iso_mod
+
     monkeypatch.setattr(iso_mod, "_run_git", lambda *a, **kw: None)
     monkeypatch.setattr(iso_mod, "_run_subprocess", lambda *a, **kw: None)
     fake = FakeIsolation(worktree, venv)
@@ -210,24 +225,31 @@ def _patch_isolation(monkeypatch, worktree, venv):
     monkeypatch.setattr(iso_mod, "prepare_candidate_workspace", fake.prepare_candidate_workspace)
 
 
-def _make_rocm_run(*, hip_ok=True, torch_ver="2.10.0+git8514f05",
-                   pip_ok=True, verify_ok=True, git_sha="abc1234",
-                   triton_ver="3.1.0"):
+def _make_rocm_run(
+    *, hip_ok=True, torch_ver="2.10.0+git8514f05", pip_ok=True, verify_ok=True, git_sha="abc1234", triton_ver="3.1.0"
+):
     """Generic injectable run for both sgl-kernel and vLLM recipes."""
 
     def _run(argv, capture_output=False, text=False, timeout=3600, env=None, cwd=None, **kw):
         cmd = " ".join(str(a) for a in argv)
         if "vllm.platforms" in cmd or "current_platform" in cmd:
-            return _completed(returncode=0 if verify_ok else 1,
-                              stdout="vllm_rocm_ok\n" if verify_ok else "",
-                              stderr="" if verify_ok else "ROCm platform check failed\n")
+            return _completed(
+                returncode=0 if verify_ok else 1,
+                stdout="vllm_rocm_ok\n" if verify_ok else "",
+                stderr="" if verify_ok else "ROCm platform check failed\n",
+            )
         if "is_rocm" in cmd:
-            return _completed(stdout=json.dumps({
-                "torch_version": torch_ver,
-                "hip_version": "7.2.53211",
-                "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.0",
-                "is_rocm": hip_ok,
-            }) + "\n")
+            return _completed(
+                stdout=json.dumps(
+                    {
+                        "torch_version": torch_ver,
+                        "hip_version": "7.2.53211",
+                        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.0",
+                        "is_rocm": hip_ok,
+                    }
+                )
+                + "\n"
+            )
         if "which hipcc" in cmd:
             return _completed(stdout="/opt/rocm/bin/hipcc\n")
         if "dirname" in cmd:
@@ -239,8 +261,7 @@ def _make_rocm_run(*, hip_ok=True, torch_ver="2.10.0+git8514f05",
                 return _completed(stdout=triton_ver + "\n" if triton_ver else "")
             return _completed(stdout=torch_ver + "\n")
         if "pip" in cmd and "install" in cmd:
-            return _completed(returncode=0 if pip_ok else 1,
-                              stderr="" if pip_ok else "error: compile failed\n")
+            return _completed(returncode=0 if pip_ok else 1, stderr="" if pip_ok else "error: compile failed\n")
         if "setup_rocm.py" in cmd:
             return _completed(returncode=0 if pip_ok else 1)
         if "rev-parse" in cmd:
@@ -258,13 +279,15 @@ def _make_rocm_run(*, hip_ok=True, torch_ver="2.10.0+git8514f05",
 # AITER: success
 # ---------------------------------------------------------------------------
 
+
 def test_run_aiter_build_success_pinned_ref(monkeypatch, tmp_path):
     _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
 
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
-        run=_make_aiter_run(), git=_make_git(),
+        run=_make_aiter_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
 
@@ -281,7 +304,8 @@ def test_run_aiter_build_success_runtime_paths_valid(monkeypatch, tmp_path):
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
-        run=_make_aiter_run(), git=_make_git(),
+        run=_make_aiter_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok
@@ -294,12 +318,14 @@ def test_run_aiter_build_success_runtime_paths_valid(monkeypatch, tmp_path):
 # AITER: failure branches
 # ---------------------------------------------------------------------------
 
+
 def test_run_aiter_build_compile_error(monkeypatch, tmp_path):
     _patch_aiter_isolation(monkeypatch, tmp_path, make_so=False)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
-        run=_make_aiter_run(pip_ok=False), git=_make_git(),
+        run=_make_aiter_run(pip_ok=False),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
@@ -311,7 +337,8 @@ def test_run_aiter_build_abi_mismatch(monkeypatch, tmp_path):
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
-        run=_make_aiter_run(hip_ok=False), git=_make_git(),
+        run=_make_aiter_run(hip_ok=False),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
@@ -330,7 +357,8 @@ def test_run_aiter_build_symbol_missing(monkeypatch, tmp_path):
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0", expected_symbols=("aiter.ops.fp4_moe",)),
         str(tmp_path / "attempt"),
-        run=_run_missing, git=_make_git(),
+        run=_run_missing,
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
@@ -340,6 +368,7 @@ def test_run_aiter_build_symbol_missing(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # AITER: tag autoselect
 # ---------------------------------------------------------------------------
+
 
 def test_run_aiter_build_autoselect_hit(monkeypatch, tmp_path):
     _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
@@ -382,7 +411,8 @@ def test_run_aiter_build_no_live_tree_mutation(monkeypatch, tmp_path):
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
-        run=_capturing_run, git=_make_git(),
+        run=_capturing_run,
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok, result.failure_summary
@@ -396,8 +426,7 @@ def test_run_aiter_build_no_live_tree_mutation(monkeypatch, tmp_path):
         if jit:
             assert os.path.expanduser("~") not in jit or "attempt" in jit
         attempt_root = str(tmp_path / "attempt")
-        for key, val in [("HOME", home), ("AITER_ROOT_DIR", aiter_root),
-                         ("INFERENCE_OPTIMIZER_AITER_JIT_DIR", jit)]:
+        for key, val in [("HOME", home), ("AITER_ROOT_DIR", aiter_root), ("INFERENCE_OPTIMIZER_AITER_JIT_DIR", jit)]:
             if val:
                 assert attempt_root in val
 
@@ -421,10 +450,10 @@ def test_run_aiter_build_reproducible_versions(monkeypatch, tmp_path):
 def test_run_aiter_build_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
     result = run_aiter_build(
-        _aiter_action(ref="v0.1.0", gpu_arch="gfx950",
-                      source_pr_url="https://github.com/ROCm/aiter/pull/77"),
+        _aiter_action(ref="v0.1.0", gpu_arch="gfx950", source_pr_url="https://github.com/ROCm/aiter/pull/77"),
         str(tmp_path / "attempt"),
-        run=_make_aiter_run(), git=_make_git(),
+        run=_make_aiter_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok
@@ -436,7 +465,8 @@ def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0", gpu_arch="gfx950"),
         str(tmp_path / "attempt"),
-        run=_make_aiter_run(), git=_make_git(),
+        run=_make_aiter_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok
@@ -446,6 +476,7 @@ def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # AITER: result.json round-trip + driver
 # ---------------------------------------------------------------------------
+
 
 def test_result_json_round_trip_through_poll_build(tmp_path):
     """Driver writes result.json; poll_build reads it as a rich BuildResult."""
@@ -499,6 +530,7 @@ def test_driver_main_writes_result_json(monkeypatch, tmp_path):
 
     def _fake_recipe(action, attempt_root, **kw):
         from hyperloom.orchestrator.framework.build_actions import BuildResult
+
         return BuildResult(ok=True, attempt_root=attempt_root, failure_class="ok")
 
     monkeypatch.setattr(tb, "run_aiter_build", _fake_recipe)
@@ -523,6 +555,7 @@ def test_driver_main_missing_plan_writes_error(tmp_path):
 # sgl-kernel
 # ---------------------------------------------------------------------------
 
+
 def test_sgl_kernel_build_success(monkeypatch, tmp_path):
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
@@ -533,8 +566,10 @@ def test_sgl_kernel_build_success(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_sgl_kernel_build(
-        _sgl_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), git=_make_git(),
+        _sgl_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
@@ -552,8 +587,10 @@ def test_sgl_kernel_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_sgl_kernel_build(
-        _sgl_action(gpu_arch=""), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        _sgl_action(gpu_arch=""),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "preflight_toolchain"
@@ -569,8 +606,10 @@ def test_sgl_kernel_build_compile_error(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_sgl_kernel_build(
-        _sgl_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(pip_ok=False), disk_preflight_fn=_noop_disk,
+        _sgl_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(pip_ok=False),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "compile_error"
@@ -585,8 +624,10 @@ def test_sgl_kernel_build_abi_mismatch(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_sgl_kernel_build(
-        _sgl_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(hip_ok=False), disk_preflight_fn=_noop_disk,
+        _sgl_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(hip_ok=False),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
@@ -604,8 +645,10 @@ def test_sgl_kernel_build_pyproject_toml_copied(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_sgl_kernel_build(
-        _sgl_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        _sgl_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok
     assert (wt / "python" / "pyproject.toml").exists()
@@ -629,7 +672,8 @@ def test_sgl_kernel_symbol_missing(monkeypatch, tmp_path):
     result = run_sgl_kernel_build(
         _sgl_action(expected_symbols=("sgl_kernel.fp4_gemm",)),
         str(tmp_path / "attempt"),
-        run=_run_missing, disk_preflight_fn=_noop_disk,
+        run=_run_missing,
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "symbol_missing"
@@ -646,8 +690,10 @@ def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_sgl_kernel_build(
-        _sgl_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), git=_make_git(),
+        _sgl_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
@@ -667,7 +713,8 @@ def test_sgl_kernel_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     result = run_sgl_kernel_build(
         _sgl_action(source_pr_url="https://github.com/sgl-project/sglang/pull/5"),
         str(tmp_path / "attempt"),
-        run=_make_rocm_run(), git=_make_git(),
+        run=_make_rocm_run(),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
@@ -677,6 +724,7 @@ def test_sgl_kernel_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # vLLM-from-source
 # ---------------------------------------------------------------------------
+
 
 def test_vllm_source_build_success(monkeypatch, tmp_path):
     wt = tmp_path / "worktree"
@@ -688,8 +736,10 @@ def test_vllm_source_build_success(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
     assert result.failure_class == "ok"
@@ -706,8 +756,10 @@ def test_vllm_source_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_vllm_source_build(
-        _vllm_action(gpu_arch=""), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        _vllm_action(gpu_arch=""),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "preflight_toolchain"
@@ -722,8 +774,10 @@ def test_vllm_source_build_abi_mismatch_refuses_silently(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(hip_ok=False), disk_preflight_fn=_noop_disk,
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(hip_ok=False),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
@@ -742,20 +796,27 @@ def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
     def _run_wrong_py(argv, **kw):
         cmd = " ".join(str(a) for a in argv)
         if "is_rocm" in cmd:
-            return _completed(stdout=json.dumps({
-                "torch_version": "2.10.0",
-                "hip_version": "7.2",
-                "python_version": "3.8.0",
-                "is_rocm": True,
-            }) + "\n")
+            return _completed(
+                stdout=json.dumps(
+                    {
+                        "torch_version": "2.10.0",
+                        "hip_version": "7.2",
+                        "python_version": "3.8.0",
+                        "is_rocm": True,
+                    }
+                )
+                + "\n"
+            )
         return _make_rocm_run()(argv, **kw)
 
     if sys.version_info[:2] == (3, 8):
         pytest.skip("host is 3.8, no mismatch to detect")
 
     result = run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"),
-        run=_run_wrong_py, disk_preflight_fn=_noop_disk,
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_run_wrong_py,
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
     assert result.runtime.runtime_python_exe
@@ -769,8 +830,10 @@ def test_vllm_source_compile_error(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(pip_ok=False), disk_preflight_fn=_noop_disk,
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(pip_ok=False),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "compile_error"
@@ -786,8 +849,10 @@ def test_vllm_source_rocm_verify_fails_boot_failed(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"),
-        run=_make_rocm_run(verify_ok=False), disk_preflight_fn=_noop_disk,
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(verify_ok=False),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "boot_failed"
@@ -811,7 +876,8 @@ def test_vllm_source_symbol_missing(monkeypatch, tmp_path):
     result = run_vllm_source_build(
         _vllm_action(expected_symbols=("vllm.model_executor.models.deepseek_v4",)),
         str(tmp_path / "attempt"),
-        run=_run_sym, disk_preflight_fn=_noop_disk,
+        run=_run_sym,
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "symbol_missing"
@@ -828,8 +894,10 @@ def test_vllm_source_runtime_fields(monkeypatch, tmp_path):
     _patch_isolation(monkeypatch, wt, venv)
 
     result = run_vllm_source_build(
-        _vllm_action(gpu_arch="gfx950"), str(tmp_path / "attempt"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        _vllm_action(gpu_arch="gfx950"),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok
     rt = result.runtime
@@ -856,8 +924,10 @@ def test_vllm_source_load_probe_failure_returns_boot_failed(monkeypatch, tmp_pat
         return _make_rocm_run()(argv, **kw)
 
     result = run_vllm_source_build(
-        _vllm_action(), str(tmp_path / "attempt"),
-        run=_run_probe_fail, disk_preflight_fn=_noop_disk,
+        _vllm_action(),
+        str(tmp_path / "attempt"),
+        run=_run_probe_fail,
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
     assert result.failure_class == "boot_failed"
@@ -876,7 +946,8 @@ def test_vllm_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     result = run_vllm_source_build(
         _vllm_action(source_pr_url="https://github.com/ROCm/vllm/pull/42"),
         str(tmp_path / "attempt"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
     assert result.installed_versions.get("source_pr_url") == "https://github.com/ROCm/vllm/pull/42"
@@ -894,7 +965,8 @@ def test_recipe_no_source_pr_url_when_empty(monkeypatch, tmp_path):
     result = run_vllm_source_build(
         _vllm_action(),
         str(tmp_path / "attempt2"),
-        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+        run=_make_rocm_run(),
+        disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
     assert "source_pr_url" not in result.installed_versions
@@ -903,6 +975,7 @@ def test_recipe_no_source_pr_url_when_empty(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Driver dispatch for sgl-kernel / vLLM
 # ---------------------------------------------------------------------------
+
 
 def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
     root = tmp_path / "attempt"
@@ -914,6 +987,7 @@ def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
 
     def _fake_sgl(action, attempt_root, **kw):
         from hyperloom.orchestrator.framework.build_actions import BuildResult
+
         return BuildResult(ok=True, attempt_root=attempt_root, failure_class="ok")
 
     monkeypatch.setattr(tb, "run_sgl_kernel_build", _fake_sgl)
@@ -934,6 +1008,7 @@ def test_driver_main_routes_vllm_source(monkeypatch, tmp_path):
 
     def _fake_vllm(action, attempt_root, **kw):
         from hyperloom.orchestrator.framework.build_actions import BuildResult
+
         return BuildResult(ok=True, attempt_root=attempt_root, failure_class="ok")
 
     monkeypatch.setattr(tb, "run_vllm_source_build", _fake_vllm)
@@ -954,16 +1029,23 @@ def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
     def _patched_driver(argv=None):
         import argparse
         from pathlib import Path as _Path
+
         parser = argparse.ArgumentParser()
         parser.add_argument("--attempt-root", required=True)
         args = parser.parse_args(argv)
         root2 = _Path(args.attempt_root)
-        (root2 / "result.json").write_text(json.dumps({
-            "ok": False, "attempt_root": str(root2),
-            "failure_class": "compile_error",
-            "failure_summary": "no recipe for component 'unknown'",
-            "error": "no recipe for component 'unknown'",
-        }), encoding="utf-8")
+        (root2 / "result.json").write_text(
+            json.dumps(
+                {
+                    "ok": False,
+                    "attempt_root": str(root2),
+                    "failure_class": "compile_error",
+                    "failure_summary": "no recipe for component 'unknown'",
+                    "error": "no recipe for component 'unknown'",
+                }
+            ),
+            encoding="utf-8",
+        )
         return 1
 
     monkeypatch.setattr(tb, "_driver_main", _patched_driver)
@@ -977,6 +1059,7 @@ def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Opt-in real ROCm compile (excluded from CI via -m 'not targeted_build_e2e')
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.targeted_build_e2e
 def test_aiter_build_e2e_real_rocm(tmp_path):

@@ -805,9 +805,7 @@ class PolicyGate:
             raise PolicyDenied("unknown agent 'orchestration'", rule="role")
         trusted_framework_targets: frozenset[str] = frozenset()
         if kind == _WARM_REPLAY_ACTION:
-            trusted_framework_targets = self._validate_warm_replay_targets(
-                params_dict
-            )
+            trusted_framework_targets = self._validate_warm_replay_targets(params_dict)
         self._validate_payload_paths(
             role,
             IntentType.DELEGATE,
@@ -1188,8 +1186,7 @@ class PolicyGate:
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
         if gated_kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
             raise PolicyDenied(
-                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane "
-                f"and not LLM-requestable ({role.name})",
+                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane and not LLM-requestable ({role.name})",
                 rule="phase_incompatible",
                 hint=(
                     "run_fusion / run_collective are dispatched by the "
@@ -1565,10 +1562,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
                 rule="enablement_round_in_flight",
-                hint=(
-                    "Wait for the enablement specialist to finish and rearm "
-                    "before re-running baseline."
-                ),
+                hint=("Wait for the enablement specialist to finish and rearm before re-running baseline."),
             )
         # Checked after the authoring round, which is a reason to wait whatever
         # the anchor says: a specialist rewriting the framework underneath a
@@ -1848,9 +1842,7 @@ class PolicyGate:
                 rule="specialist_gpu_request_invalid",
             )
         ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0 and not (
-            uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0
-        ):
+        if ceiling <= 0 and not (uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule="specialist_gpu_pool_disabled",
@@ -2159,9 +2151,7 @@ class PolicyGate:
         if self.session_dir is None:
             return None
         try:
-            return self.session_dir.resolve().joinpath(
-                *_REMOTE_RECIPE_FILES_PARTS
-            )
+            return self.session_dir.resolve().joinpath(*_REMOTE_RECIPE_FILES_PARTS)
         except (OSError, RuntimeError):
             return None
 
@@ -2169,10 +2159,7 @@ class PolicyGate:
     def _patch_declared_targets(patch_path: Path) -> frozenset[str]:
         """Read safe relative targets from unified-diff headers."""
         try:
-            if (
-                not patch_path.is_file()
-                or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES
-            ):
+            if not patch_path.is_file() or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES:
                 return frozenset()
             text = patch_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -2197,11 +2184,7 @@ class PolicyGate:
         except ValueError:
             return frozenset()
         relative_posix = relative.as_posix()
-        return (
-            frozenset({relative_posix})
-            if relative_posix and relative_posix != "."
-            else frozenset()
-        )
+        return frozenset({relative_posix}) if relative_posix and relative_posix != "." else frozenset()
 
     def _validate_warm_replay_targets(
         self,
@@ -2237,8 +2220,7 @@ class PolicyGate:
             if not raw_targets:
                 continue
             if not isinstance(raw_targets, list) or not all(
-                isinstance(target, str) and target.strip()
-                for target in raw_targets
+                isinstance(target, str) and target.strip() for target in raw_targets
             ):
                 raise PolicyDenied(
                     f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets "
@@ -2249,14 +2231,12 @@ class PolicyGate:
             raw_patch = entry.get("patch_path")
             if not isinstance(raw_patch, str) or not raw_patch.strip():
                 raise PolicyDenied(
-                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} "
-                    "has no patch_path",
+                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
                     rule="warm_replay_patch_missing",
                 )
             if kb_root is None or not _resolved_within(raw_patch, str(kb_root)):
                 raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} is outside "
-                    f"the session KB download root={kb_root!s}",
+                    f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
                     rule="warm_replay_patch_outside_kb_download",
                 )
 
@@ -2281,14 +2261,11 @@ class PolicyGate:
                 active_root = resolve_session_framework_root()
                 if not active_root or not _resolved_within(raw_target, active_root):
                     raise PolicyDenied(
-                        f"replay_warm_recipe target_file={raw_target!r} is outside "
-                        "the Session active framework root",
+                        f"replay_warm_recipe target_file={raw_target!r} is outside the Session active framework root",
                         rule="warm_replay_target_outside_framework_roots",
                     )
                 target_candidates = self._framework_relative_candidates(raw_target)
-                if not declared_targets or declared_targets.isdisjoint(
-                    target_candidates
-                ):
+                if not declared_targets or declared_targets.isdisjoint(target_candidates):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} does not "
                         f"match patch targets={sorted(declared_targets)!r}",
@@ -2439,8 +2416,7 @@ class PolicyGate:
             scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
             if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
                 raise PolicyDenied(
-                    f"prune_branch scope={scope!r} not allowed "
-                    f"(allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                    f"prune_branch scope={scope!r} not allowed (allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
                     rule="prune_scope",
                     hint=(
                         f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "

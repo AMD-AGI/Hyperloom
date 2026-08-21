@@ -1,10 +1,5 @@
 # Pre-commit: single local front door for the CI static-analysis gates.
 #
-# Scope note: this wires the *check-only* hooks (no ``ruff-format``). The
-# repo-wide ``ruff format`` reflow (~170 files) is deferred to its own
-# mechanical PR; enable the ``ruff-format`` hook here once that lands so
-# formatting is enforced at authoring time.
-#
 # Install locally with::
 #
 #     pip install pre-commit && pre-commit install
@@ -13,16 +8,15 @@
 #
 #     pre-commit run --all-files
 #
-# Hooks default to changed files only, so the existing lint backlog does not
-# block commits while it is drained; new/changed lines are gated immediately.
 repos:
   # Ruff: same rule set as ``[tool.ruff]`` / ``[tool.ruff.lint]`` and the
-  # ``lint.yml`` CI job (E/F/W). Check only -- formatting is deferred (see note).
+  # ``lint.yml`` CI job (E/F/W). Format + check enforced at authoring time.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.20
     hooks:
       - id: ruff
         args: ["--force-exclude"]
+      - id: ruff-format
 
   # Bandit: reads ``[tool.bandit]`` (skips B101, excludes test trees). The
   # ``bandit[toml]`` extra is required to parse the config from pyproject.

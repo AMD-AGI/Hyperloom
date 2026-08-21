@@ -723,9 +723,7 @@ def test_maybe_build_shape_manifest_enabled_caps_and_writes(tmp_path, monkeypatc
     monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: {"status": "ok"})
     monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {"src": "stub"})
     monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [{"m": 1}], "warnings": []})
-    res = bta._maybe_build_shape_manifest(
-        _mk_args(), {"trace_file": "main.json"}, tmp_path, generated_at="2026-01-01"
-    )
+    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": "main.json"}, tmp_path, generated_at="2026-01-01")
     assert res["status"] == "ok"
     assert res["variant_count"] == 1  # 2 shards capped to 1
     assert res["row_count"] == 1
@@ -743,9 +741,7 @@ def test_maybe_build_shape_manifest_bad_max_caps_and_skips_bad_shard(tmp_path, m
     monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: next(_seq))
     monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {})
     monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [], "warnings": ["w"]})
-    res = bta._maybe_build_shape_manifest(
-        _mk_args(analysis_mode=None), {"trace_file": ""}, tmp_path, generated_at="t0"
-    )
+    res = bta._maybe_build_shape_manifest(_mk_args(analysis_mode=None), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res["status"] == "ok"
     assert res["variant_count"] == 1  # second (non-ok) shard skipped
     assert res["warnings"] == ["w"]
@@ -773,17 +769,21 @@ def test_maybe_build_shape_manifest_disabled_by_default(tmp_path, monkeypatch):
 
 def _prov_args(**kw):
     base = dict(
-        model_name="m", model_path="/p", framework="vllm", target_platform="mi355x",
-        precision="fp8", trace_input="t", capture_folder="", analysis_mode="decode",
+        model_name="m",
+        model_path="/p",
+        framework="vllm",
+        target_platform="mi355x",
+        precision="fp8",
+        trace_input="t",
+        capture_folder="",
+        analysis_mode="decode",
     )
     base.update(kw)
     return _argparse.Namespace(**base)
 
 
 def test_build_manifest_provenance_shared_path(monkeypatch):
-    monkeypatch.setattr(
-        bta, "_shared_build_provenance", lambda args, env, probe: {"_provenance_source": "shared"}
-    )
+    monkeypatch.setattr(bta, "_shared_build_provenance", lambda args, env, probe: {"_provenance_source": "shared"})
     assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "shared"
 
 
@@ -834,7 +834,14 @@ def _graph_under_recorded_events():
         {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 99, "External id": 200}},
         {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1000, "dur": 100, "args": {"correlation": 99}},
         {"cat": "kernel", "ph": "X", "name": "graph_fused_attn", "ts": 1100, "dur": 100, "args": {"correlation": 5}},
-        {"cat": "kernel", "ph": "X", "name": "graph_fused_mlp", "ts": 10_000_000, "dur": 100, "args": {"correlation": 5}},
+        {
+            "cat": "kernel",
+            "ph": "X",
+            "name": "graph_fused_mlp",
+            "ts": 10_000_000,
+            "dur": 100,
+            "args": {"correlation": 5},
+        },
     ]
     return events
 
@@ -933,7 +940,14 @@ def _graph_fully_recorded_idle_events():
         )
     for i, corr in enumerate((5, 6, 7, 8)):
         events.append(
-            {"cat": "kernel", "ph": "X", "name": f"graph_k{i}", "ts": 1000 + i * 3_000_000, "dur": 100, "args": {"correlation": corr}}
+            {
+                "cat": "kernel",
+                "ph": "X",
+                "name": f"graph_k{i}",
+                "ts": 1000 + i * 3_000_000,
+                "dur": 100,
+                "args": {"correlation": corr},
+            }
         )
     return events
 
@@ -1005,7 +1019,14 @@ def _graph_launch_stripped_events():
     instead of the raw trace would miss the artifact)."""
     return [
         {"cat": "kernel", "ph": "X", "name": "graph_fused_attn", "ts": 1100, "dur": 100, "args": {"correlation": 5}},
-        {"cat": "kernel", "ph": "X", "name": "graph_fused_mlp", "ts": 10_000_000, "dur": 100, "args": {"correlation": 5}},
+        {
+            "cat": "kernel",
+            "ph": "X",
+            "name": "graph_fused_mlp",
+            "ts": 10_000_000,
+            "dur": 100,
+            "args": {"correlation": 5},
+        },
     ]
 
 
@@ -1023,6 +1044,8 @@ def test_graph_launch_events_required_for_detection(tmp_path):
     chunk_cov = bta._reader.analyze_trace(str(chunk), top_k=0)["graph_coverage"]
     assert chunk_cov["graph_mode"] is False
     assert chunk_cov["graph_under_recorded"] is False
+
+
 # ---- trace-health: impossible durations + denoise-step inference ----------
 def _write_events(path: Path, events: list[dict]) -> Path:
     path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
@@ -1093,9 +1116,7 @@ def test_explicit_denoise_steps_wins_and_is_flagged(tmp_path, capsys):
     assert result.get("num_denoise_steps") == 9
     # The 1 inferred step disagrees with the requested 9, which must be flagged.
     assert "bypass_denoise_steps_mismatch" in _result_codes(result)
-    msg = next(
-        w["message"] for w in result["trace_health_warnings"] if w["code"] == "bypass_denoise_steps_mismatch"
-    )
+    msg = next(w["message"] for w in result["trace_health_warnings"] if w["code"] == "bypass_denoise_steps_mismatch")
     assert "requested count wins" in msg
 
 
@@ -1128,9 +1149,7 @@ def test_duration_warning_severity_is_graded(tmp_path, capsys):
     severe = [dict(base[0], name="corrupt", dur=900_000)] + base[1:]
     trace = _write_events(tmp_path / "severe.trace.json", severe)
     _rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
-    warn = next(
-        (w for w in result["trace_health_warnings"] if w["code"] == "bypass_impossible_kernel_durations"), None
-    )
+    warn = next((w for w in result["trace_health_warnings"] if w["code"] == "bypass_impossible_kernel_durations"), None)
     assert warn is not None and warn["severity"] == "warning"
     assert "unreliable" in warn["message"]
     assert "% of the" in warn["message"], "share of summed device time should be reported"

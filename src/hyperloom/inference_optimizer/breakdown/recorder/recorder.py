@@ -451,14 +451,10 @@ class Recorder:
             atomic_write_text(target, data, make_parents=True)
         except BaseException as exc:
             if traced:
-                self._trace(
-                    record, target, payload, operation, previous, existed, len(data), exc
-                )
+                self._trace(record, target, payload, operation, previous, existed, len(data), exc)
             raise
         if traced:
-            self._trace(
-                record, target, payload, operation, previous, existed, len(data), None
-            )
+            self._trace(record, target, payload, operation, previous, existed, len(data), None)
         return target
 
     def _trace(

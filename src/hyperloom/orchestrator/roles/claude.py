@@ -675,7 +675,9 @@ class ClaudeBackend:
         default_effort = "medium" if self.conversational else "low"
         diag["reasoning_effort"] = kwargs.get(
             "effort",
-            getattr(options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()),
+            getattr(
+                options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()
+            ),
         )
         diag["thinking"] = kwargs.get(
             "thinking",

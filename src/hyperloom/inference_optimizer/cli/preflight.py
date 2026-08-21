@@ -650,9 +650,7 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
         getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
     ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
     try:
-        outcome = framework_deps.ensure(
-            framework, python_exe=python_exe, pip_extra=tuple(pip_extra)
-        )
+        outcome = framework_deps.ensure(framework, python_exe=python_exe, pip_extra=tuple(pip_extra))
     except framework_deps.TorchClobberedError as exc:
         print(f"Preflight: FATAL {exc}", file=sys.stderr)
         sys.exit(2)
@@ -1756,7 +1754,7 @@ def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> b
             "'--concurrent-requests' flag from a Magpie benchmark script "
             f"(MAGPIE_PATH={magpie_path or '<unset>'}, "
             f"INFERENCEX_PATH={inferencex_path}). RUN_EVAL=true baselines will "
-            "abort with \"Unknown parameter: --concurrent-requests\"; eval "
+            'abort with "Unknown parameter: --concurrent-requests"; eval '
             "concurrency must flow via EVAL_CONCURRENT_REQUESTS/CONC instead."
         )
     return ok
@@ -1931,9 +1929,7 @@ def _preflight(
     # the restore baseline are taken after it loads. Only what the installer env
     # file injects on top is undone below.
     provider_mode = _provider_only_mode()
-    provider_snapshot = {
-        key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)
-    }
+    provider_snapshot = {key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)}
     _load_kernel_agent_env_fallback()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)

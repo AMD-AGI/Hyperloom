@@ -330,7 +330,5 @@ class ClaudeOneShotClient:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(
-                self.amessages(model=model, messages=messages, system=system, max_tokens=max_tokens)
-            )
+            return asyncio.run(self.amessages(model=model, messages=messages, system=system, max_tokens=max_tokens))
         raise RuntimeError("ClaudeOneShotClient.messages cannot run inside an active event loop")

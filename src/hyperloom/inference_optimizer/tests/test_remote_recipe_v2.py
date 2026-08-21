@@ -140,9 +140,7 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 "tput": 130.0,
             },
         ],
-        gemm_tuning_attempts=[
-            {"status": "failed", "decision": "REVERT", "error": "must not be persisted"}
-        ],
+        gemm_tuning_attempts=[{"status": "failed", "decision": "REVERT", "error": "must not be persisted"}],
         last_gemm_tuning={"status": "ok", "decision": "KEEP", "tuned_file": str(tuned)},
         last_fusion={
             "status": "ok",
@@ -174,10 +172,7 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files")
 
     assert bundle.knowledge["optimized_throughput"] == 130.0
-    assert (
-        bundle.knowledge["knowledge_schema_version"]
-        == CURRENT_KNOWLEDGE_SCHEMA_VERSION
-    )
+    assert bundle.knowledge["knowledge_schema_version"] == CURRENT_KNOWLEDGE_SCHEMA_VERSION
     assert bundle.knowledge["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
@@ -334,10 +329,7 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
                     "rewrite": {
                         "workspace": "/workspace/hyperloom/session",
                         "api_token": "secret",
-                        "note": (
-                            "failed at /home/operator/session/log.txt "
-                            "with TOKEN=secret"
-                        ),
+                        "note": ("failed at /home/operator/session/log.txt with TOKEN=secret"),
                     }
                 },
             }
@@ -358,9 +350,7 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
 
 def test_empty_phase_sections_do_not_copy_cumulative_current_best(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    state.optimization_stack = [
-        row for row in state.optimization_stack if row.get("source_phase") == "EXPLORE"
-    ]
+    state.optimization_stack = [row for row in state.optimization_stack if row.get("source_phase") == "EXPLORE"]
     bundle = build_remote_knowledge(state, tmp_path / "files-empty-framework")
     value = bundle.knowledge["value"]
     assert value["explore"]["extra_server_args"] == "--page-size 32"
@@ -393,9 +383,7 @@ def test_geak_results_are_excluded_from_remote_knowledge(tmp_path: Path) -> None
 
 def test_micro_keep_without_integrate_stack_is_not_written(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    state.optimization_stack = [
-        row for row in state.optimization_stack if row.get("action") != "integrate"
-    ]
+    state.optimization_stack = [row for row in state.optimization_stack if row.get("action") != "integrate"]
     bundle = build_remote_knowledge(state, tmp_path / "files-no-integrate")
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
@@ -430,9 +418,7 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
     prior_file.parent.mkdir(parents=True)
     prior_file.write_text("prior\n", encoding="utf-8")
     unreplayed_ref = "kernel/gemm/artifacts/unreplayed.csv"
-    (prior_root / "files" / unreplayed_ref).write_text(
-        "unreplayed\n", encoding="utf-8"
-    )
+    (prior_root / "files" / unreplayed_ref).write_text("unreplayed\n", encoding="utf-8")
     (prior_root / "recipe.json").write_text(
         json.dumps(
             {
@@ -456,11 +442,7 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
         encoding="utf-8",
     )
     state = _state(tmp_path)
-    state.optimization_stack = [
-        row
-        for row in state.optimization_stack
-        if row.get("source_phase") != "KERNEL_AGENT"
-    ]
+    state.optimization_stack = [row for row in state.optimization_stack if row.get("source_phase") != "KERNEL_AGENT"]
     state.last_gemm_tuning = {}
     state.last_fusion = {}
     state.last_fusion_integrate = {}
@@ -484,9 +466,7 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
         sections=sections,
     )
 
-    optimizations = bundle.knowledge["value"]["kernel"]["gemm"][
-        "optimizations"
-    ]
+    optimizations = bundle.knowledge["value"]["kernel"]["gemm"]["optimizations"]
     if adopted:
         assert optimizations == [{"id": "prior-gemm", "tuned_file": prior_ref}]
         assert {artifact.path for artifact in bundle.artifacts} == {prior_ref}
@@ -508,11 +488,7 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
             {
                 "value": {
                     "kernel": {
-                        "gemm": {
-                            "optimizations": [
-                                {"id": "prior-gemm", "tuned_file": prior_ref}
-                            ]
-                        },
+                        "gemm": {"optimizations": [{"id": "prior-gemm", "tuned_file": prior_ref}]},
                         "fusion": {"items": []},
                         "rewrite": {"items": []},
                     }
@@ -544,25 +520,19 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
         sections=sections,
     )
 
-    optimizations = bundle.knowledge["value"]["kernel"]["gemm"][
-        "optimizations"
-    ]
+    optimizations = bundle.knowledge["value"]["kernel"]["gemm"]["optimizations"]
     refs = [row["tuned_file"] for row in optimizations]
     assert prior_ref in refs
     assert len(refs) == 2
     assert len(set(refs)) == 2
-    assert set(refs).issubset(
-        {artifact.path for artifact in bundle.artifacts}
-    )
+    assert set(refs).issubset({artifact.path for artifact in bundle.artifacts})
 
 
 def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
     tmp_path: Path,
 ) -> None:
     state = _state(tmp_path)
-    state.optimization_stack = [
-        row for row in state.optimization_stack if row.get("action") != "integrate"
-    ]
+    state.optimization_stack = [row for row in state.optimization_stack if row.get("action") != "integrate"]
     state.kernel_integrate_attempts = {
         "rmsnorm": {
             "kernel_id": "rmsnorm",
@@ -590,9 +560,7 @@ def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> N
 
 def test_integrated_rewrite_missing_artifact_fails_closed(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    integrate = next(
-        row for row in state.optimization_stack if row.get("action") == "integrate"
-    )
+    integrate = next(row for row in state.optimization_stack if row.get("action") == "integrate")
     integrate["patch_path"] = str(tmp_path / "missing-rewrite.cu")
     state.kernel_opt_task_attempts["rmsnorm"]["last_artifact_path"] = ""
     with pytest.raises(RemoteRecipeValidationError, match="kernel/rewrite"):
@@ -601,9 +569,7 @@ def test_integrated_rewrite_missing_artifact_fails_closed(tmp_path: Path) -> Non
 
 def test_accepted_gemm_missing_tuned_file_fails_closed(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    gemm = next(
-        row for row in state.optimization_stack if row.get("action") == "gemm_tuning"
-    )
+    gemm = next(row for row in state.optimization_stack if row.get("action") == "gemm_tuning")
     gemm["tuned_file"] = str(tmp_path / "missing-tuned.csv")
     state.last_gemm_tuning["tuned_file"] = gemm["tuned_file"]
     with pytest.raises(RemoteRecipeValidationError, match="kernel/gemm"):
@@ -612,9 +578,7 @@ def test_accepted_gemm_missing_tuned_file_fails_closed(tmp_path: Path) -> None:
 
 def test_accepted_fusion_missing_patch_or_target_fails_closed(tmp_path: Path) -> None:
     state = _state(tmp_path)
-    fusion = next(
-        row for row in state.optimization_stack if row.get("action") == "fusion"
-    )
+    fusion = next(row for row in state.optimization_stack if row.get("action") == "fusion")
     fusion["patch_path"] = str(tmp_path / "missing-fusion.patch")
     state.last_fusion["patch"] = fusion["patch_path"]
     with pytest.raises(RemoteRecipeValidationError, match="kernel/fusion"):
@@ -630,9 +594,7 @@ def test_bundle_rejects_path_mismatch_and_prefix(tmp_path: Path) -> None:
     bad = KnowledgeBundle({"value": {}}, [Artifact("files/explore/a", source)])
     with pytest.raises(RemoteRecipeValidationError, match="files/ prefix"):
         bad.validate()
-    missing = KnowledgeBundle(
-        {"value": {"explore": {"patches": ["explore/missing.patch"]}}}
-    )
+    missing = KnowledgeBundle({"value": {"explore": {"patches": ["explore/missing.patch"]}}})
     with pytest.raises(RemoteRecipeValidationError, match="missing artifacts"):
         missing.validate()
 
@@ -912,11 +874,7 @@ def test_degraded_kb_skips_remote_close_writer(
     monkeypatch.setattr(
         remote_recipe.HyperloomRemoteKB,
         "from_env",
-        classmethod(
-            lambda cls: (_ for _ in ()).throw(
-                AssertionError("degraded CLOSE constructed HyperloomRemoteKB")
-            )
-        ),
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("degraded CLOSE constructed HyperloomRemoteKB"))),
     )
 
     outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
@@ -952,11 +910,7 @@ def test_local_close_ignores_ambient_kb_store(
     monkeypatch.setattr(
         remote_recipe.HyperloomRemoteKB,
         "from_env",
-        classmethod(
-            lambda cls: (_ for _ in ()).throw(
-                AssertionError("local CLOSE constructed HyperloomRemoteKB")
-            )
-        ),
+        classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("local CLOSE constructed HyperloomRemoteKB"))),
     )
     outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
@@ -1034,16 +988,11 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     )
 
     audit_rows = [
-        json.loads(line)
-        for line in recipe_snapshot_audit_jsonl(tmp_path)
-        .read_text(encoding="utf-8")
-        .splitlines()
+        json.loads(line) for line in recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8").splitlines()
     ]
     assert audit_rows[-1]["status"] == "written"
     assert audit_rows[-1]["generator"] == "close"
-    assert audit_rows[-1]["result"]["canonical_id"] == (
-        "inference:m:h:f:mt:a:v:p"
-    )
+    assert audit_rows[-1]["result"]["canonical_id"] == ("inference:m:h:f:mt:a:v:p")
 
 
 def test_remote_close_transport_failure_is_nonfatal(
@@ -1070,11 +1019,7 @@ def test_remote_close_transport_failure_is_nonfatal(
     monkeypatch.setattr(
         remote_recipe.HyperloomRemoteKB,
         "from_env",
-        classmethod(
-            lambda cls: (_ for _ in ()).throw(
-                OSError("transport down")
-            )
-        ),
+        classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
     )
     outcome = WritebackCollaborator(coordinator).finalize_recipe_and_journal()
     assert outcome == {
@@ -1088,9 +1033,7 @@ def test_remote_close_transport_failure_is_nonfatal(
         recipe_snapshot_audit_jsonl,
     )
 
-    row = json.loads(
-        recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8")
-    )
+    row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
     assert row["status"] == "error"
     assert row["error"]["type"] == "OSError"
 
@@ -1179,11 +1122,7 @@ class _FakeStore:
     def put_dir(self, canonical_id, session_id, files_dir):
         self.calls.append(("put_dir", canonical_id, session_id, Path(files_dir)))
         root = Path(files_dir)
-        self.uploaded_paths = {
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
+        self.uploaded_paths = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
         return {
             path.relative_to(root).as_posix(): f"kb://{path.relative_to(root).as_posix()}"
             for path in root.rglob("*")
@@ -1244,11 +1183,7 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     assert store.calls[2][-1] == "replace"
     assert store.calls[3][-2:] == ("optimized_throughput", 130.0)
     assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
-    assert all(
-        not str(call[1]).startswith("kernel:")
-        for call in store.calls
-        if len(call) > 1
-    )
+    assert all(not str(call[1]).startswith("kernel:") for call in store.calls if len(call) > 1)
     assert store.published_knowledge is not None
     assert "kernel" in store.published_knowledge["value"]
     assert result.status == "written"
@@ -1431,9 +1366,7 @@ def test_read_sequence_writes_flat_recipe_and_files_only(tmp_path: Path) -> None
     assert not (tmp_path / "bundle" / "manifest.json").exists()
     assert (tmp_path / "bundle" / "files").is_dir()
     assert not (tmp_path / "bundle" / "files" / "old.patch").exists()
-    assert (
-        tmp_path / "bundle" / "files" / "kernel" / "rewrite" / "verified.bin"
-    ).read_bytes() == _DOWNLOAD_BYTES
+    assert (tmp_path / "bundle" / "files" / "kernel" / "rewrite" / "verified.bin").read_bytes() == _DOWNLOAD_BYTES
     assert {path.name for path in destination.iterdir()} == {"recipe.json", "files"}
 
 
@@ -1499,9 +1432,7 @@ def test_kernel_reads_same_downloaded_inference_recipe_without_second_get(
     assert rewrite["kernel_name"] == "verified"
     assert rewrite["patch"] == "kernel/rewrite/verified.bin"
     assert kernel.prior_file("kernel/rewrite/verified.bin") is not None
-    assert [call[0] for call in store.calls].count(
-        "get_hyperloom_recipe_view"
-    ) == 1
+    assert [call[0] for call in store.calls].count("get_hyperloom_recipe_view") == 1
     assert not (tmp_path / "runtime" / "kernel_agent_kb").exists()
 
 
@@ -1555,9 +1486,7 @@ def test_view_manifest_mismatch_deactivates_without_download(
         )
 
     assert not destination.exists()
-    assert not any(
-        call[0] == "download_session" for call in store.calls
-    )
+    assert not any(call[0] == "download_session" for call in store.calls)
 
 
 def test_read_rejects_non_json_knowledge_and_deactivates_destination(
@@ -1578,9 +1507,7 @@ def test_read_rejects_non_json_knowledge_and_deactivates_destination(
         )
 
     assert not destination.exists()
-    assert [call[0] for call in store.calls] == [
-        "get_hyperloom_recipe_view"
-    ]
+    assert [call[0] for call in store.calls] == ["get_hyperloom_recipe_view"]
 
 
 def test_read_replaces_existing_files_symlink_without_following(tmp_path: Path) -> None:
@@ -1668,9 +1595,7 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
         [patch],
         stack_index=2,
     )
-    bundle = build_remote_knowledge(
-        _state(tmp_path), tmp_path / "files", sections=sections
-    )
+    bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files", sections=sections)
     published = {artifact.path for artifact in bundle.artifacts}
     assert refs[0] in published
     assert (tmp_path / "files" / refs[0]).is_file()
@@ -1830,12 +1755,7 @@ def test_read_rejects_listing_without_required_size(tmp_path: Path) -> None:
             "outside",
         ),
         (
-            {
-                "files": [
-                    {"path": f"f-{index}", "sha256": _DOWNLOAD_SHA256}
-                    for index in range(513)
-                ]
-            },
+            {"files": [{"path": f"f-{index}", "sha256": _DOWNLOAD_SHA256} for index in range(513)]},
             "file count",
         ),
         ({"files": [{"path": "a", "size": 1}]}, "sha256"),
@@ -2055,9 +1975,7 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
         _Remote(),
         tmp_path / "remote-recipe",
     )
-    row = adapter.get_authoritative_recipe(
-        canonical_id="inference:m:h:f:mt:a:v:p"
-    )
+    row = adapter.get_authoritative_recipe(canonical_id="inference:m:h:f:mt:a:v:p")
 
     assert "patch_timeline" not in row
     assert "best_config" not in row
@@ -2120,12 +2038,8 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
             source = "current" if replayable else "legacy_gbrain"
             timeline = [patch_ref] if identity == donor else []
             knowledge = _current_knowledge(timeline=timeline)
-            knowledge["validated_e2e_gain"] = (
-                7.0 if identity == donor else 0.0 if replayable else 41.0
-            )
-            knowledge["what_worked"] = [
-                {"description": f"history:{identity}"}
-            ]
+            knowledge["validated_e2e_gain"] = 7.0 if identity == donor else 0.0 if replayable else 41.0
+            knowledge["what_worked"] = [{"description": f"history:{identity}"}]
             knowledge["value"]["explore"] = {
                 "extra_server_args": "",
                 "extra_envs": {},
@@ -2144,9 +2058,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
                 "view": {
                     "source": source,
                     "replayable": replayable,
-                    "replay_disabled_reason": (
-                        None if replayable else "legacy_history_only"
-                    ),
+                    "replay_disabled_reason": (None if replayable else "legacy_history_only"),
                 },
             }
 
@@ -2203,14 +2115,10 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
 
     assert row["canonical_id"] == donor
     assert row["replayable"] is True
-    assert row["what_worked"][0] == {
-        "description": f"history:{donor}"
-    }
+    assert row["what_worked"][0] == {"description": f"history:{donor}"}
     assert row["validated_gain_pct"] == 7.0
     assert row["sessions"][0]["gain_pct"] == 7.0
-    assert row["exact_history"]["what_worked"][0] == {
-        "description": f"history:{exact}"
-    }
+    assert row["exact_history"]["what_worked"][0] == {"description": f"history:{exact}"}
     assert row["exact_history"]["sessions"][0]["gain_pct"] == 41.0
     assert row["exact_history"]["validated_gain_pct"] == 41.0
     assert tier == "same_arch_class"
@@ -2229,9 +2137,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     selected = json.loads((main / "recipe.json").read_text(encoding="utf-8"))
     assert selected["canonical_id"] == donor
     assert (main / "files" / patch_ref).read_text(encoding="utf-8") == "donor patch"
-    replay_kb = RecipeReplayKB(
-        KnowledgeSections(tmp_path / "draft", warm_start_dir=main)
-    )
+    replay_kb = RecipeReplayKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=main))
     assert replay_kb.read_patch_timeline() == [patch_ref]
     candidates = main.parent / f".{main.name}-candidates"
     assert not candidates.exists()
@@ -2252,10 +2158,13 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
         tmp_path / "unused",
     )
 
-    assert adapter.search(
-        label_match={"framework": "sglang"},
-        hardware_in=["mi300x", "mi325x"],
-    ) == []
+    assert (
+        adapter.search(
+            label_match={"framework": "sglang"},
+            hardware_in=["mi300x", "mi325x"],
+        )
+        == []
+    )
     assert remote.kwargs["hardware_in"] == ["mi300x", "mi325x"]
     assert remote.kwargs["match"] == {"framework_name": "sglang"}
 
@@ -2284,10 +2193,7 @@ def test_remote_adapter_stops_on_empty_page_with_next_offset(
 def test_remote_adapter_caps_metadata_scan_without_downloading(
     tmp_path: Path,
 ) -> None:
-    identities = [
-        f"inference:model-{index}:mi300x:sglang:qwen:qwenarch:1.0:bf16"
-        for index in range(6)
-    ]
+    identities = [f"inference:model-{index}:mi300x:sglang:qwen:qwenarch:1.0:bf16" for index in range(6)]
 
     class _Remote:
         def __init__(self) -> None:
@@ -2295,10 +2201,7 @@ def test_remote_adapter_caps_metadata_scan_without_downloading(
 
         def search_identities(self, **_kwargs):
             return {
-                "items": [
-                    {"canonical_id": identity, "dimensions": {}}
-                    for identity in identities
-                ],
+                "items": [{"canonical_id": identity, "dimensions": {}} for identity in identities],
                 "total": len(identities),
                 "next_offset": None,
             }
@@ -2344,9 +2247,7 @@ def test_remote_adapter_detects_kernel_only_replay_material(
     knowledge = _current_knowledge()
     knowledge["value"]["explore"] = {}
     knowledge["value"]["framework"] = {}
-    knowledge["value"]["kernel"]["rewrite"] = {
-        "items": [{"kernel_name": "fused"}]
-    }
+    knowledge["value"]["kernel"]["rewrite"] = {"items": [{"kernel_name": "fused"}]}
     (candidate / "recipe.json").write_text(
         json.dumps(knowledge),
         encoding="utf-8",
@@ -2359,9 +2260,7 @@ def test_remote_adapter_detects_kernel_only_replay_material(
         json.dumps(knowledge),
         encoding="utf-8",
     )
-    assert not RemoteWarmRecipeAdapter._candidate_has_replay_material(
-        candidate
-    )
+    assert not RemoteWarmRecipeAdapter._candidate_has_replay_material(candidate)
 
 
 def test_recipe_replay_sdk_returns_exact_global_timeline(tmp_path: Path) -> None:
@@ -2375,9 +2274,7 @@ def test_recipe_replay_sdk_returns_exact_global_timeline(tmp_path: Path) -> None
         json.dumps(_current_knowledge(timeline=timeline)),
         encoding="utf-8",
     )
-    kb = RecipeReplayKB(
-        KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
-    )
+    kb = RecipeReplayKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=warm))
 
     assert kb.read_patch_timeline() == timeline
 
@@ -2459,9 +2356,7 @@ def test_vendored_sdk_exposes_view_and_identity_search() -> None:
 def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
-    digest = hashlib.sha1(
-        f"blob {len(content)}\0".encode() + content
-    ).hexdigest()
+    digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
     assert digest == "a1511c2d6d891220400057619901006aca1242bc"
 
 

@@ -747,20 +747,12 @@ def _collect_optimized_kernels(
             )
     # Cross-reference the stable task ledger (covers ordinal reuse and rotated
     # on-disk verification), falling back to legacy per-ordinal state.
-    ko_attempts = (
-        state.get("kernel_opt_task_attempts")
-        or state.get("kernel_opt_attempts")
-        or {}
-    )
+    ko_attempts = state.get("kernel_opt_task_attempts") or state.get("kernel_opt_attempts") or {}
     if isinstance(ko_attempts, dict):
         for ledger_id, ent in ko_attempts.items():
             if not isinstance(ent, dict):
                 continue
-            kid = str(
-                ent.get("current_kernel_id")
-                or ent.get("kernel_id")
-                or ledger_id
-            )
+            kid = str(ent.get("current_kernel_id") or ent.get("kernel_id") or ledger_id)
             entry = by_kid.setdefault(
                 kid,
                 {
@@ -795,9 +787,7 @@ def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
         # KEEP attempt must not resurrect a kernel that was later rejected.
         return False
     attempts = ent.get("attempts") or []
-    has_keep = any(
-        isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts
-    )
+    has_keep = any(isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts)
     if ent.get("overlay_loaded") is True:
         return True
     return has_keep
@@ -1499,11 +1489,7 @@ def collect_collective(state: dict[str, Any]) -> dict[str, Any]:
     if not raw_attempts and not last_raw:
         return {}
 
-    attempts = [
-        _normalize_collective_record(item)
-        for item in raw_attempts
-        if isinstance(item, dict)
-    ]
+    attempts = [_normalize_collective_record(item) for item in raw_attempts if isinstance(item, dict)]
     envelope: dict[str, Any] = {
         "only_mode": bool(state.get("collective_only_mode")),
         "attempts": attempts,

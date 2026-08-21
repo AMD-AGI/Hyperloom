@@ -245,9 +245,7 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")
 
 
-def test_reset_claude_config_leaves_file_alone_for_oauth_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_reset_claude_config_leaves_file_alone_for_oauth_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """primaryApiKey is API-credits billing; with only a subscription token there
     is no key to write, so the installers' no-op behaviour applies here too.
 
@@ -1658,8 +1656,6 @@ def test_paths_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.asset_root() == tmp_path
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "does_not_exist"))
     assert paths.workspace_root() == tmp_path / "does_not_exist"
-
-
 
 
 # ---------------------------------------------------------------------------

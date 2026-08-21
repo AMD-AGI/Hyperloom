@@ -84,9 +84,7 @@ class TestEntrypointAndCheckout:
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 
         bench, envs = self._bench(), {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert bench["benchmark_script"] == str(scripts / "run_whatever.sh")
 
     def test_the_runner_suffixed_script_wins_over_a_sibling(self, tmp_path, monkeypatch):
@@ -99,9 +97,7 @@ class TestEntrypointAndCheckout:
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 
         bench, envs = self._bench(), {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert bench["benchmark_script"] == str(scripts / "custom_mi355x.sh")
 
     def test_an_ambiguous_directory_picks_nothing(self, tmp_path, monkeypatch):
@@ -115,9 +111,7 @@ class TestEntrypointAndCheckout:
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 
         bench, envs = self._bench(), {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert "benchmark_script" not in bench
 
     def test_an_explicit_script_is_never_overwritten(self, tmp_path, monkeypatch):
@@ -129,9 +123,7 @@ class TestEntrypointAndCheckout:
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 
         bench = {"framework": "custom", "benchmark_script": "/chosen/by/operator.sh"}
-        we.apply_scriptable_runtime_defaults(
-            bench, {}, gpu_type="mi355x", explicit_benchmark_script=True
-        )
+        we.apply_scriptable_runtime_defaults(bench, {}, gpu_type="mi355x", explicit_benchmark_script=True)
         assert bench["benchmark_script"] == "/chosen/by/operator.sh"
 
     def test_the_checkout_reaches_the_orchestrator_env(self, tmp_path, monkeypatch):
@@ -149,9 +141,7 @@ class TestEntrypointAndCheckout:
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
 
         bench, envs = self._bench(), {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert envs["CUSTOM_REPO_PATH"] == str(repo)
         assert envs["CUSTOM_DIR"] == str(repo)
         assert os.environ.get("CUSTOM_REPO_PATH") == str(repo)
@@ -170,13 +160,9 @@ class TestEntrypointAndCheckout:
         """
         from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
-        monkeypatch.setenv(
-            "INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50", "MYFW_CKPT": "/w/x.pt"}'
-        )
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50", "MYFW_CKPT": "/w/x.pt"}')
         bench, envs = self._bench(), {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert envs["MYFW_STEPS"] == "50"
         assert envs["MYFW_CKPT"] == "/w/x.pt"
 
@@ -186,9 +172,7 @@ class TestEntrypointAndCheckout:
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50"}')
         bench, envs = self._bench(), {"MYFW_STEPS": "4"}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert envs["MYFW_STEPS"] == "4"
 
     def test_an_unparseable_pin_does_not_take_the_run_down(self, monkeypatch):
@@ -196,9 +180,7 @@ class TestEntrypointAndCheckout:
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "{not json")
         bench, envs = self._bench(), {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert envs == {}
 
     def test_extra_env_pins_stay_out_of_other_frameworks(self, monkeypatch):
@@ -221,9 +203,7 @@ class TestEntrypointAndCheckout:
 
         bench = {"framework": "xdit"}
         envs: dict = {}
-        we.apply_scriptable_runtime_defaults(
-            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
-        )
+        we.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert "CUSTOM_REPO_PATH" not in envs
         assert "custom_mi355x.sh" not in str(bench.get("benchmark_script") or "")
 
@@ -300,9 +280,7 @@ class TestMeasurementContract:
         from hyperloom.orchestrator.actions.executors import explore as explore_mod
 
         lines = inspect.getsource(explore_mod).splitlines()
-        call_at = next(
-            i for i, line in enumerate(lines) if "filter_operator_pinned_envs(grid" in line
-        )
+        call_at = next(i for i, line in enumerate(lines) if "filter_operator_pinned_envs(grid" in line)
         preceding = next(line for line in reversed(lines[:call_at]) if line.strip())
         assert 'framework == "custom"' in preceding, (
             "the pinned-env guard must stay scoped to custom; applying it to a shipped "
@@ -361,9 +339,7 @@ class TestLaunchValidation:
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts.resolve())
 
     @pytest.mark.parametrize("backend", ["", "magpie", "MAGPIE", "  ", "bypasss", "none"])
-    def test_custom_refuses_a_backend_that_cannot_run_the_script(
-        self, monkeypatch, tmp_path, backend
-    ):
+    def test_custom_refuses_a_backend_that_cannot_run_the_script(self, monkeypatch, tmp_path, backend):
         """The default backend is Magpie, which cannot run an operator's script.
 
         Nothing downstream rejects the pairing, so an unset or wrong value used

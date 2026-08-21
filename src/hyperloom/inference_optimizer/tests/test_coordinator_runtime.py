@@ -823,9 +823,7 @@ async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(ses
         assert (await c.tasks.get(b.task_id)).state == "cancelled"
         assert "baseline" not in c.shared_state.pruned_families
         events = await c.bus.tail(topic="event")
-        assert any(
-            m.payload.get("kind") == "prune_branch" and m.payload.get("scope") == "queued" for m in events
-        )
+        assert any(m.payload.get("kind") == "prune_branch" and m.payload.get("scope") == "queued" for m in events)
     finally:
         await c.stop()
 
@@ -1244,9 +1242,7 @@ def _eval_failed_result() -> dict:
 
 
 @pytest.mark.asyncio
-async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_node(
-    session_dir, monkeypatch
-):
+async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_node(session_dir, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1441,9 +1437,7 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
         st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
         st.enablement.eval_contract_fingerprint = "measured-fp"
 
-        await c._handle_unpromotable_result(
-            _mk_task("baseline", "t-noeval"), _eval_unavailable_result()
-        )
+        await c._handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
 
         # The measured characterization survives...
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"

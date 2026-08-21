@@ -411,10 +411,7 @@ class FrameworkPhase(PhaseHandler):
             ``True`` if a framework-owned specialist/integrate_patch task is queued or running,
             or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
-        unprocessed_ids = {
-            self._framework_candidate_key(c)
-            for c in self._unprocessed_framework_agent_candidates()
-        }
+        unprocessed_ids = {self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()}
         # The local-exploration arm's synthetic candidate id never appears in a
         # PR batch, so it is "in flight" while it lacks a terminal progress row.
         processed_ids = self._framework_processed_candidate_keys()
@@ -424,7 +421,6 @@ class FrameworkPhase(PhaseHandler):
             if not cand_id or cand_id in unprocessed_ids:
                 return True
             return cand_id.startswith("local_explore:") and cand_id not in processed_ids
-
 
         try:
             queued = await self.tasks.queued()
@@ -853,9 +849,7 @@ class FrameworkPhase(PhaseHandler):
             # Cross-framework ports route to a dedicated rewrite domain; the
             # same-framework case follows the session's framework kind.
             "domain": (
-                "cross_framework_rewrite_specialist"
-                if is_cross_framework
-                else self._authoring_specialist_domain()
+                "cross_framework_rewrite_specialist" if is_cross_framework else self._authoring_specialist_domain()
             ),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
@@ -1764,9 +1758,7 @@ class FrameworkPhase(PhaseHandler):
                 state.enablement.validation_pending = True
                 # Increment generation so the new window gets a fresh idempotency
                 # key and cannot reuse a prior terminal TaskRegistry row.
-                state.enablement.revalidation_generation = (
-                    int(state.enablement.revalidation_generation or 0) + 1
-                )
+                state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
                 state.enablement.revalidation_task_id = ""
             else:
                 state.enablement.succeeded = True
@@ -2421,9 +2413,7 @@ class FrameworkPhase(PhaseHandler):
         """
         progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
         n = sum(
-            1
-            for p in progress
-            if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
+            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
         )
         return f"local_explore:{n}"
 
@@ -2515,20 +2505,22 @@ class FrameworkPhase(PhaseHandler):
         if rewrite_arm:
             notes = self._render_rewrite_evidence_for_prompt() or self._rewrite_evidence_absence_note()
         try:
-            state.upsert_gap({
-                "canonical_id": gap_cid,
-                "symptom": gap or "Author a throughput patch from live source + profiling evidence",
-                "layer": "framework",
-                "severity": "medium",
-                "domain_hint": domain,
-                "source": "coordinator_internal",
-            })
+            state.upsert_gap(
+                {
+                    "canonical_id": gap_cid,
+                    "symptom": gap or "Author a throughput patch from live source + profiling evidence",
+                    "layer": "framework",
+                    "severity": "medium",
+                    "domain_hint": domain,
+                    "source": "coordinator_internal",
+                }
+            )
         except Exception:  # noqa: BLE001
             log.debug("FRAMEWORK local-explore: upsert_gap failed", exc_info=True)
         prior_attempts: list[dict[str, Any]] = []
         try:
             memory = self._build_framework_working_memory()
-            for t in (memory.get("tried_and_why") or []):
+            for t in memory.get("tried_and_why") or []:
                 if isinstance(t, dict) and str(t.get("ref") or "").strip():
                     prior_attempts.append(t)
         except Exception:  # noqa: BLE001
@@ -3529,9 +3521,7 @@ class FrameworkPhase(PhaseHandler):
             # against every other task; the handler below turns this into a
             # warning plus a progress row.
             if not lanes:
-                raise RuntimeError(
-                    "framework_agent resolved to no lanes; the task would run without GPU exclusivity."
-                )
+                raise RuntimeError("framework_agent resolved to no lanes; the task would run without GPU exclusivity.")
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
                 params=params,
@@ -4165,8 +4155,10 @@ class FrameworkPhase(PhaseHandler):
             elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
                 component = "sgl_kernel"
             elif framework == "vllm" and (
-                "vllm/_c" in log_lower or "vllm.extension" in log_lower
-                or "_c.so" in log_lower or "vllm._c" in sym_lower
+                "vllm/_c" in log_lower
+                or "vllm.extension" in log_lower
+                or "_c.so" in log_lower
+                or "vllm._c" in sym_lower
             ):
                 component = "vllm_source"
             else:
@@ -4226,8 +4218,7 @@ class FrameworkPhase(PhaseHandler):
             task_id = await self.enqueue_targeted_build(action)
             if task_id:
                 log.info(
-                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s "
-                    "arch_stall=%s gpu_arch=%s task=%s",
+                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s gpu_arch=%s task=%s",
                     signature.kind,
                     component,
                     bool(arch_stall and not is_compiled_gap),
@@ -4320,8 +4311,7 @@ class FrameworkPhase(PhaseHandler):
                 source_pr_url = _pr
             if not _repo_matches_targeted_build_component(repo_url, component):
                 log.warning(
-                    "ENABLEMENT: specialist-requested build repo/component mismatch "
-                    "component=%s repo_url=%s",
+                    "ENABLEMENT: specialist-requested build repo/component mismatch component=%s repo_url=%s",
                     component,
                     repo_url,
                 )
@@ -4375,9 +4365,7 @@ class FrameworkPhase(PhaseHandler):
         try:
             all_tasks = []
             for st in ("succeeded", "failed"):
-                all_tasks.extend(
-                    t for t in await self.tasks.by_state(st) if t.kind == "targeted_build"
-                )
+                all_tasks.extend(t for t in await self.tasks.by_state(st) if t.kind == "targeted_build")
             if not all_tasks:
                 return
             # Pick the most recent terminal row (by updated_at).
@@ -4493,9 +4481,7 @@ class FrameworkPhase(PhaseHandler):
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             self._note_build_routed(task_id)
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            self._maybe_rearm_enablement(
-                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
-            )
+            self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
             return
 
         log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
@@ -4629,9 +4615,7 @@ class FrameworkPhase(PhaseHandler):
         }
         # Prefer the eval-origin probe config so the re-run keeps the original
         # workload/eval contract; fall back to the promoted baseline config.
-        cfg = str(state.enablement.probe_config_path or "") or str(
-            getattr(state, "baseline_config_path", "") or ""
-        )
+        cfg = str(state.enablement.probe_config_path or "") or str(getattr(state, "baseline_config_path", "") or "")
         if cfg:
             params["config_path"] = cfg
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
@@ -4904,18 +4888,12 @@ class FrameworkPhase(PhaseHandler):
         if not isinstance(progress, list):
             progress = []
             self.shared_state.framework_agent_phase_progress = progress
-        matching = [
-            row
-            for row in progress
-            if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id
-        ]
+        matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
         if any(str(row.get("provenance") or "") != "authored_empty" for row in matching):
             return
         if matching:
             progress[:] = [
-                row
-                for row in progress
-                if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
+                row for row in progress if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
             ]
         # Roll the batch max-gain stat the plateau judge reads.
         batches = getattr(self.shared_state, "framework_agent_batches", None) or []
@@ -4998,9 +4976,8 @@ class FrameworkPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — stale bus entries are ignored
                 continue
             integrate_params = getattr(integrate_task, "params", None) or {}
-            if (
-                str(integrate_params.get("specialist_task_id") or "") != specialist_task_id
-                or not bool(integrate_params.get("framework_agent_authoring"))
+            if str(integrate_params.get("specialist_task_id") or "") != specialist_task_id or not bool(
+                integrate_params.get("framework_agent_authoring")
             ):
                 continue
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}

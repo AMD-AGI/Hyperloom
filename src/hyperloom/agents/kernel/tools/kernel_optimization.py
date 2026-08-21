@@ -1571,7 +1571,10 @@ def build_prompt(
     # __global__ in a multi-kernel file.
     device_symbol_block = ""
     device_kernel_name = str(candidate.get("device_kernel_name", "") or "").strip()
-    if candidate.get("source_resolution_method") in ("op_to_source", "active_finder", "symbol_index") and device_kernel_name:
+    if (
+        candidate.get("source_resolution_method") in ("op_to_source", "active_finder", "symbol_index")
+        and device_kernel_name
+    ):
         device_symbol_block = (
             "\n>>> DEVICE KERNEL FOCUS <<<\n"
             f"This op (`{kernel_name}`) dispatches to the device kernel symbol:\n"
@@ -1993,11 +1996,7 @@ def invoke_backend(
                 timeout_s=timeout_s,
                 prefer_ray=prefer_ray,
                 kernel_repo=kernel_repo,
-                invocation_spec_file=(
-                    str(invocation_spec_path)
-                    if invocation_spec_path.is_file()
-                    else ""
-                ),
+                invocation_spec_file=(str(invocation_spec_path) if invocation_spec_path.is_file() else ""),
             )
             result["output_dir"] = str(out_dir)
             if invocation_spec_path.is_file():
@@ -2102,11 +2101,7 @@ def run_attempt(
             artifacts = result.get("artifacts")
             if isinstance(artifacts, list):
                 forge_patch = next(
-                    (
-                        str(path)
-                        for path in artifacts
-                        if str(path).endswith(("forge.patch", ".diff"))
-                    ),
+                    (str(path) for path in artifacts if str(path).endswith(("forge.patch", ".diff"))),
                     "",
                 )
                 if forge_patch:
@@ -2126,18 +2121,10 @@ def run_attempt(
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
-            invocation_spec_path = (
-                result.get("invocation_spec_path") or ""
-                if isinstance(result, dict)
-                else ""
-            )
+            invocation_spec_path = result.get("invocation_spec_path") or "" if isinstance(result, dict) else ""
             if invocation_spec_path:
                 backend_paths["invocation_spec"] = str(invocation_spec_path)
-            checkpoint_path = (
-                result.get("checkpoint_path") or ""
-                if isinstance(result, dict)
-                else ""
-            )
+            checkpoint_path = result.get("checkpoint_path") or "" if isinstance(result, dict) else ""
             if checkpoint_path:
                 backend_paths["forge_checkpoint"] = str(checkpoint_path)
             cli_workspace = (result.get("cli_workspace") or "") if isinstance(result, dict) else ""
@@ -2199,9 +2186,7 @@ def run_attempt(
                 "partial_report",
             )
             unrecoverable_timeout = bool(
-                isinstance(result, dict)
-                and result.get("timed_out")
-                and not result.get("salvaged")
+                isinstance(result, dict) and result.get("timed_out") and not result.get("salvaged")
             )
             auth_loop_hits = _count_auth_failures(full_stdout)
             if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
@@ -2244,43 +2229,17 @@ def run_attempt(
             if isinstance(result, dict) and isinstance(result.get("kb_experience"), dict)
             else {}
         ),
-        "pristine_baseline_ms": (
-            result.get("pristine_baseline_ms")
-            if isinstance(result, dict)
-            else None
-        ),
-        "search_start_ms": (
-            result.get("search_start_ms")
-            if isinstance(result, dict)
-            else None
-        ),
+        "pristine_baseline_ms": (result.get("pristine_baseline_ms") if isinstance(result, dict) else None),
+        "search_start_ms": (result.get("search_start_ms") if isinstance(result, dict) else None),
         "best_ms": result.get("best_ms") if isinstance(result, dict) else None,
-        "mean_case_speedup": (
-            result.get("mean_case_speedup")
-            if isinstance(result, dict)
-            else None
-        ),
+        "mean_case_speedup": (result.get("mean_case_speedup") if isinstance(result, dict) else None),
         "search_start_mean_case_speedup": (
-            result.get("search_start_mean_case_speedup")
-            if isinstance(result, dict)
-            else None
+            result.get("search_start_mean_case_speedup") if isinstance(result, dict) else None
         ),
-        "total_improved": (
-            bool(result.get("total_improved"))
-            if isinstance(result, dict)
-            else False
-        ),
-        "incremental_improved": (
-            bool(result.get("incremental_improved"))
-            if isinstance(result, dict)
-            else False
-        ),
+        "total_improved": (bool(result.get("total_improved")) if isinstance(result, dict) else False),
+        "incremental_improved": (bool(result.get("incremental_improved")) if isinstance(result, dict) else False),
         "improved": bool(result.get("improved")) if isinstance(result, dict) else False,
-        "improved_during_search": (
-            bool(result.get("improved_during_search"))
-            if isinstance(result, dict)
-            else False
-        ),
+        "improved_during_search": (bool(result.get("improved_during_search")) if isinstance(result, dict) else False),
         "elapsed_s": elapsed,
         "prompt_path": str(prompt_file),
         "optimized_path": str(optimized_path) if optimized_path.exists() else "",
@@ -2884,17 +2843,9 @@ def prepare_deploy_patch(
     except OSError:
         return ""
     if re.search(r"(?m)^diff --git ", patch_text):
-        blocks = [
-            block
-            for block in re.split(r"(?m)^(?=diff --git )", patch_text)
-            if block.strip()
-        ]
+        blocks = [block for block in re.split(r"(?m)^(?=diff --git )", patch_text) if block.strip()]
     else:
-        blocks = [
-            block
-            for block in re.split(r"(?m)^(?=--- )", patch_text)
-            if block.strip()
-        ]
+        blocks = [block for block in re.split(r"(?m)^(?=--- )", patch_text) if block.strip()]
     kept: list[str] = []
     for block in blocks:
         try:
@@ -2903,8 +2854,7 @@ def prepare_deploy_patch(
             return ""
         generated = any(
             "__pycache__" in Path(str(desc.get("path") or "")).parts
-            or Path(str(desc.get("path") or "")).suffix.lower()
-            in {".pyc", ".pyo"}
+            or Path(str(desc.get("path") or "")).suffix.lower() in {".pyc", ".pyo"}
             for desc in descriptors
         )
         if not generated:
@@ -2935,11 +2885,7 @@ def resolve_deploy_repo_root(
         checked = 0
         for desc in descriptors:
             rel = Path(str(desc.get("path") or ""))
-            if (
-                not rel.parts
-                or rel.is_absolute()
-                or ".." in rel.parts
-            ):
+            if not rel.parts or rel.is_absolute() or ".." in rel.parts:
                 return False
             if desc.get("is_new") and desc.get("op") == "write":
                 continue
@@ -3057,16 +3003,10 @@ def _framework_applyback_evidence(applyback: dict[str, Any]) -> dict[str, Any]:
         "artifact_kind": str(applyback.get("artifact_kind") or ""),
         "artifact_schema_version": applyback.get("artifact_schema_version"),
         "validation_scope": str(applyback.get("validation_scope") or ""),
-        "reference_correctness_passed": bool(
-            applyback.get("reference_correctness_passed")
-        ),
+        "reference_correctness_passed": bool(applyback.get("reference_correctness_passed")),
         "reference_snr_db": applyback.get("reference_snr_db"),
-        "integration_validation_required": bool(
-            applyback.get("integration_validation_required")
-        ),
-        "integration_validation_status": str(
-            applyback.get("integration_validation_status") or ""
-        ),
+        "integration_validation_required": bool(applyback.get("integration_validation_required")),
+        "integration_validation_status": str(applyback.get("integration_validation_status") or ""),
         "commit": str(applyback.get("best_commit") or ""),
         "commit_ref": str(applyback.get("commit_ref") or ""),
         "builder_symbol": str(applyback.get("builder_symbol") or ""),
@@ -3107,11 +3047,7 @@ def build_verification(
         if is_forge:
             try:
                 candidate_speedup = float(a.get("mean_case_speedup"))
-                if (
-                    a.get("total_improved") is True
-                    and math.isfinite(candidate_speedup)
-                    and candidate_speedup > 1.0
-                ):
+                if a.get("total_improved") is True and math.isfinite(candidate_speedup) and candidate_speedup > 1.0:
                     sp = candidate_speedup
             except (TypeError, ValueError):
                 sp = None
@@ -3181,8 +3117,7 @@ def build_verification(
             snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
             deploy_patch = prepare_deploy_patch(
                 winning_patch,
-                output_path=snap_out.parent
-                / f"{best.get('attempt_id', 'attempt')}_deploy.patch",
+                output_path=snap_out.parent / f"{best.get('attempt_id', 'attempt')}_deploy.patch",
             )
             # Prefer the retained forge workspace: it is the live tree the patch
             # was produced against, so it carries every file the diff touches.
@@ -3190,25 +3125,16 @@ def build_verification(
             # that has already been reaped. Both are probed with is_dir() so a
             # stale path falls through instead of yielding an empty snapshot.
             snapshot_worktree = None
-            canonical_files_root = str(
-                bp.get("forge_canonical_files_root") or ""
-            )
+            canonical_files_root = str(bp.get("forge_canonical_files_root") or "")
             forge_workspace = str(bp.get("forge_workspace") or "")
-            if (
-                canonical_files_root
-                and Path(canonical_files_root).is_dir()
-            ):
+            if canonical_files_root and Path(canonical_files_root).is_dir():
                 snapshot_worktree = Path(canonical_files_root)
             elif forge_workspace and Path(forge_workspace).is_dir():
                 snapshot_worktree = Path(forge_workspace)
             else:
                 for root_key in ("output_dir", "cli_workspace"):
                     output_root = str(bp.get(root_key) or "")
-                    files_root = (
-                        Path(output_root) / "optimized_versions" / "files"
-                        if output_root
-                        else None
-                    )
+                    files_root = Path(output_root) / "optimized_versions" / "files" if output_root else None
                     if files_root is not None and files_root.is_dir():
                         snapshot_worktree = files_root
                         break
@@ -3236,9 +3162,7 @@ def build_verification(
                     best_artifact_bundle = {
                         "type": "patch_snapshot",
                         "producer": "kernelforge",
-                        "producer_manifest": str(
-                            bp.get("forge_best_manifest") or ""
-                        ),
+                        "producer_manifest": str(bp.get("forge_best_manifest") or ""),
                         "snapshot_dir": deploy_snapshot_dir,
                         "patch_path": deploy_patch_path,
                         "repo_root": deploy_repo_root,
@@ -3249,8 +3173,7 @@ def build_verification(
             if not best_artifact_bundle:
                 artifact_valid = False
                 artifact_error = (
-                    "Forge produced a patch, but its complete snapshot or "
-                    "consumer repo root could not be resolved"
+                    "Forge produced a patch, but its complete snapshot or consumer repo root could not be resolved"
                 )
     applyback = dict((best or {}).get("flydsl_applyback") or {})
     correctness_signal = getattr(args, "correctness_passed", None)
@@ -3295,9 +3218,7 @@ def build_verification(
         "e2e_gain_pct": e2e_gain_pct,
         "accuracy_passed": accuracy_passed,
         "verification_status": "complete" if correctness_passed and e2e_gain_pct is not None else "deferred",
-        "integration_validation_status": str(
-            applyback.get("integration_validation_status") or ""
-        ),
+        "integration_validation_status": str(applyback.get("integration_validation_status") or ""),
         "framework_applyback": _framework_applyback_evidence(applyback),
         "best_attempt_id": best["attempt_id"] if best else "",
         "best_backend": best["backend"] if best else "",
@@ -3367,10 +3288,7 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         if verification.get("integration_validation_status") == "pending":
             return {
                 "decision": "KEEP",
-                "reasons": [
-                    "framework apply-back reference-verified; framework E2E/accuracy "
-                    "deferred to integrate"
-                ],
+                "reasons": ["framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"],
             }
         return {
             "decision": "KEEP",

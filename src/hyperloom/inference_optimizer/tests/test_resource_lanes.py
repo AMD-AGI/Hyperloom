@@ -215,30 +215,20 @@ async def test_ray_observation_admits_up_to_pending_limit(conn):
     not physical-capacity-based — so multiple specialists queue on ONE GPU."""
     # A single physical GPU: the legacy try_acquire caps at 1 concurrent...
     pool = SpecialistGpuPool(conn, gpu_ids=[0])
-    a = await pool.try_acquire_ray_observation(
-        holder_id="h-a", task_id="t-a", pending_limit=3, ttl_sec=60
-    )
-    b = await pool.try_acquire_ray_observation(
-        holder_id="h-b", task_id="t-b", pending_limit=3, ttl_sec=60
-    )
-    c = await pool.try_acquire_ray_observation(
-        holder_id="h-c", task_id="t-c", pending_limit=3, ttl_sec=60
-    )
+    a = await pool.try_acquire_ray_observation(holder_id="h-a", task_id="t-a", pending_limit=3, ttl_sec=60)
+    b = await pool.try_acquire_ray_observation(holder_id="h-b", task_id="t-b", pending_limit=3, ttl_sec=60)
+    c = await pool.try_acquire_ray_observation(holder_id="h-c", task_id="t-c", pending_limit=3, ttl_sec=60)
     # ...but the Ray observation ledger admits up to pending_limit (3) at once,
     # each on a distinct synthetic slot id above the real device id space.
     assert a is not None and b is not None and c is not None
     slots = sorted(list(a.gpu_ids) + list(b.gpu_ids) + list(c.gpu_ids))
     assert slots == [100000, 100001, 100002]
     # Over the limit -> backpressure (None; caller keeps the task queued).
-    d = await pool.try_acquire_ray_observation(
-        holder_id="h-d", task_id="t-d", pending_limit=3, ttl_sec=60
-    )
+    d = await pool.try_acquire_ray_observation(holder_id="h-d", task_id="t-d", pending_limit=3, ttl_sec=60)
     assert d is None
     # Releasing frees a slot for the next admission (reuses the low slot).
     await pool.release(a)
-    e = await pool.try_acquire_ray_observation(
-        holder_id="h-e", task_id="t-e", pending_limit=3, ttl_sec=60
-    )
+    e = await pool.try_acquire_ray_observation(holder_id="h-e", task_id="t-e", pending_limit=3, ttl_sec=60)
     assert e is not None and list(e.gpu_ids) == [100000]
     await pool.release(b)
     await pool.release(c)

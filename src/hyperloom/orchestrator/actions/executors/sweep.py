@@ -290,8 +290,7 @@ class SweepExecutor:
         # magnitude above these placeholders -- so nothing else prunes them.)
         if agentx_enabled() and len(isl_osl_configs) > 1:
             log.info(
-                "sweep: AgentX collapses %d ISL/OSL points to %s "
-                "(the agentic client does not read ISL/OSL)",
+                "sweep: AgentX collapses %d ISL/OSL points to %s (the agentic client does not read ISL/OSL)",
                 len(isl_osl_configs),
                 isl_osl_configs[0],
             )

@@ -689,8 +689,8 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         return None
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-    stub._record_framework_agent_authored_outcome = (
-        lambda *, task, result: recorded.append(str(result.result.get("status") or ""))
+    stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
+        str(result.result.get("status") or "")
     )
     stub._maybe_rearm_authored_lane = lambda *_args, **_kwargs: None
     stub._drain_apply_fail_retry_pending = _noop_async
@@ -1157,10 +1157,7 @@ def test_framework_agent_repo_url_origin_framework_known() -> None:
     assert (
         Coordinator._framework_agent_repo_url_origin_framework("https://github.com/sgl-project/sglang.git") == "sglang"
     )
-    assert (
-        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/xdit-project/xDiT.git")
-        == "xdit"
-    )
+    assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/xdit-project/xDiT.git") == "xdit"
 
 
 def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> None:

@@ -1623,9 +1623,7 @@ def compute_plateau_kernel(
 # emits it when conc_sweep was refused, and mapping that to
 # robustness_escalated turns a successful run into a CI failure.
 _SWEEP_DONE_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed"})
-_CONC_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset(
-    {"succeeded", "partial", "completed", "skipped", "failed"}
-)
+_CONC_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 
 def _sweep_has_recorded_closeout(state: Any) -> bool:
@@ -1921,11 +1919,7 @@ def kernel_work_pending(state: Any) -> bool:
     for ledger_id, attempt in attempts.items():
         if not isinstance(attempt, dict):
             continue
-        kernel_id = str(
-            attempt.get("current_kernel_id")
-            or attempt.get("kernel_id")
-            or ledger_id
-        )
+        kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
         source_file = str(attempt.get("last_source_file") or "")
         task_group_key = str(attempt.get("task_group_key") or "")
         integrated = False
@@ -1937,15 +1931,9 @@ def kernel_work_pending(state: Any) -> bool:
                 if str(integrated_entry.get("kernel_id") or "") != kernel_id:
                     continue
                 integrated_source = str(
-                    integrated_entry.get("target_file")
-                    or integrated_entry.get("source_file")
-                    or ""
+                    integrated_entry.get("target_file") or integrated_entry.get("source_file") or ""
                 )
-                integrated = (
-                    not source_file
-                    or not integrated_source
-                    or source_file == integrated_source
-                )
+                integrated = not source_file or not integrated_source or source_file == integrated_source
             if integrated:
                 break
         if integrated:
@@ -1955,9 +1943,7 @@ def kernel_work_pending(state: Any) -> bool:
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
         rejected_reason = str(attempt.get("rejected_reason") or "").strip()
-        integration_status = str(
-            attempt.get("integration_status") or ""
-        ).strip().lower()
+        integration_status = str(attempt.get("integration_status") or "").strip().lower()
         if integration_status in {"integrated", "rejected"}:
             continue
         if kernel_id in rejected and (not task_group_key or rejected_reason):

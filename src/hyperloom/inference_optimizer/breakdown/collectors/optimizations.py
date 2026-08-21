@@ -48,9 +48,7 @@ _ATTEMPT_KINDS = frozenset(
 )
 
 _KEEP_DECISIONS = frozenset({"KEEP", "KEPT", "KEPT_INERT", "ADOPT", "ADOPTED", "PROMOTED"})
-_REVERT_DECISIONS = frozenset(
-    {"REVERT", "REVERTED", "REJECTED", "FAILED", "ACCURACY_UNAVAILABLE_REJECT"}
-)
+_REVERT_DECISIONS = frozenset({"REVERT", "REVERTED", "REJECTED", "FAILED", "ACCURACY_UNAVAILABLE_REJECT"})
 
 # Measurement names, not the result fields they came from: the recorder maps
 # ``output_throughput`` and ``delta_pct`` onto ``throughput`` and ``gain``
@@ -80,10 +78,7 @@ def _parse_ts(value: Any) -> float | None:
 
 
 def _empty_summary() -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        source: {"keeps": 0, "total_gain_pct": 0.0}
-        for source in _SOURCES
-    }
+    summary: dict[str, Any] = {source: {"keeps": 0, "total_gain_pct": 0.0} for source in _SOURCES}
     summary["kernel_agent"]["by_backend"] = {
         "geak": {"keeps": 0, "total_gain_pct": 0.0},
         "forge": {"keeps": 0, "total_gain_pct": 0.0},
@@ -132,18 +127,10 @@ def _collect_backend_attempts(
                     "micro_speedup": _to_float(raw.get("micro_speedup")),
                     "compile_passed": raw.get("compile_passed"),
                     "correctness_passed": raw.get("correctness_passed"),
-                    "error_class": (
-                        str(raw.get("error_class")) if raw.get("error_class") else None
-                    ),
+                    "error_class": (str(raw.get("error_class")) if raw.get("error_class") else None),
                     "error": str(raw.get("error")) if raw.get("error") else None,
-                    "result_path": (
-                        str(raw.get("result_path")) if raw.get("result_path") else None
-                    ),
-                    "verification_path": (
-                        str(raw.get("verification_path"))
-                        if raw.get("verification_path")
-                        else None
-                    ),
+                    "result_path": (str(raw.get("result_path")) if raw.get("result_path") else None),
+                    "verification_path": (str(raw.get("verification_path")) if raw.get("verification_path") else None),
                 }
             )
 
@@ -384,10 +371,7 @@ def _recorded_attempt_row(
                 "occurrences_of_name": sum(
                     1
                     for mid, _ in occurrence_index.items()
-                    if str((measurement_by_id.get(mid) or {}).get("name") or "")
-                    .strip()
-                    .lower()
-                    == name
+                    if str((measurement_by_id.get(mid) or {}).get("name") or "").strip().lower() == name
                 ),
             }
         )
@@ -425,9 +409,7 @@ def _recorded_attempt_row(
         measurement_source = "adoption_pinned_stale"
 
     artifact_ids = list(operation.get("artifact_refs") or [])
-    artifact_ids += [
-        aid for aid in adoption.get("artifact_ids") or [] if aid not in artifact_ids
-    ]
+    artifact_ids += [aid for aid in adoption.get("artifact_ids") or [] if aid not in artifact_ids]
     artifacts: list[dict[str, str]] = []
     for artifact_id in artifact_ids:
         artifact = artifact_by_id.get(str(artifact_id))
@@ -468,9 +450,7 @@ def _recorded_attempt_row(
         "attempt_id": operation_id,
         "agent": _attempt_agent(operation, adoption),
         "agent_method": (
-            "recorded"
-            if str(operation.get("agent") or adoption.get("agent") or "").strip()
-            else "derived"
+            "recorded" if str(operation.get("agent") or adoption.get("agent") or "").strip() else "derived"
         ),
         "producer": str(operation.get("producer") or ""),
         "kind": _work_kind(operation),
@@ -480,9 +460,7 @@ def _recorded_attempt_row(
             "name": str(subject.get("name") or ""),
         },
         "kernel_id": (
-            str(subject.get("name") or "")
-            if "kernel" in str(subject.get("subject_type") or "").lower()
-            else None
+            str(subject.get("name") or "") if "kernel" in str(subject.get("subject_type") or "").lower() else None
         ),
         "backend": str(operation.get("strategy") or ""),
         "phase": str(operation.get("phase") or ""),
@@ -499,12 +477,7 @@ def _recorded_attempt_row(
         # status inferred from the operation around it are different claims,
         # and the value alone cannot tell them apart.
         "decision_source": decision_source,
-        "decision_reason": str(
-            adoption.get("reason")
-            or decision_row.get("reason")
-            or outputs.get("reason")
-            or ""
-        ),
+        "decision_reason": str(adoption.get("reason") or decision_row.get("reason") or outputs.get("reason") or ""),
         "keep_threshold_pct": keep_threshold_pct,
         # A bar recorded on the gate is the one that gate ruled against; one
         # recorded on the outputs is the executor's configuration, which need
@@ -514,15 +487,11 @@ def _recorded_attempt_row(
         # What the operation says happened to the workload, as distinct from
         # what the adoption stream credits. The two are written by one call and
         # dropped independently, so they can disagree.
-        "integrated": (
-            bool(outputs.get("integrated")) if outputs.get("integrated") is not None else None
-        ),
+        "integrated": (bool(outputs.get("integrated")) if outputs.get("integrated") is not None else None),
         # What stood behind the verdict: an accuracy gate that ruled, an
         # end-to-end re-measurement, or a KEEP nothing checked the accuracy of.
         "validation_basis": str(adoption.get("validation_basis") or ""),
-        "attribution_eligible": (
-            bool(adoption.get("attribution_eligible", True)) if adoption else None
-        ),
+        "attribution_eligible": (bool(adoption.get("attribution_eligible", True)) if adoption else None),
         "local_gain_pct": round(local_gain_pct, 6) if local_gain_pct is not None else None,
         "local_gain_source": local_gain_source,
         "throughput_before": throughput_before,
@@ -556,9 +525,7 @@ def _recorded_attempt_row(
         # from, and how many readings the operation has in total. Without this
         # a re-measured kernel looks the same as one measured once.
         "measurement_source": measurement_source,
-        "measurement_occurrences": sum(
-            1 for mid in recorded_ids if mid in measurement_by_id
-        ),
+        "measurement_occurrences": sum(1 for mid in recorded_ids if mid in measurement_by_id),
         "artifacts": artifacts,
     }
 
@@ -595,9 +562,7 @@ def _occurrence_index(
             continue
         name = str(measurement.get("name") or "").strip().lower()
         taken_at = _parse_ts(measurement.get("measured_at"))
-        ordered.setdefault(name, []).append(
-            (taken_at if taken_at is not None else float("inf"), str(measurement_id))
-        )
+        ordered.setdefault(name, []).append((taken_at if taken_at is not None else float("inf"), str(measurement_id)))
     index: dict[str, int] = {}
     for rows in ordered.values():
         # Ties fall back to the id so the numbering is at least deterministic
@@ -629,9 +594,7 @@ def _latest_measurement_per_name(
         if current is None or taken_at >= current[0]:
             newest[name] = (taken_at, str(measurement_id))
     chosen = {measurement_id for _, measurement_id in newest.values()}
-    return [
-        measurement_id for measurement_id in measurement_ids if measurement_id in chosen
-    ]
+    return [measurement_id for measurement_id in measurement_ids if measurement_id in chosen]
 
 
 def _recorded_baseline_throughput(
@@ -776,26 +739,10 @@ def _collect_gemm_tuning_runs(
     for operation in operations:
         if not isinstance(operation, dict) or operation.get("kind") != "gemm_tuning":
             continue
-        extensions = (
-            operation.get("extensions")
-            if isinstance(operation.get("extensions"), dict)
-            else {}
-        )
-        gemm_extension = (
-            extensions.get("gemm")
-            if isinstance(extensions.get("gemm"), dict)
-            else {}
-        )
-        result = (
-            dict(gemm_extension.get("result"))
-            if isinstance(gemm_extension.get("result"), dict)
-            else {}
-        )
-        outputs = (
-            operation.get("outputs")
-            if isinstance(operation.get("outputs"), dict)
-            else {}
-        )
+        extensions = operation.get("extensions") if isinstance(operation.get("extensions"), dict) else {}
+        gemm_extension = extensions.get("gemm") if isinstance(extensions.get("gemm"), dict) else {}
+        result = dict(gemm_extension.get("result")) if isinstance(gemm_extension.get("result"), dict) else {}
+        outputs = operation.get("outputs") if isinstance(operation.get("outputs"), dict) else {}
         adoption = adoption_by_operation.get(
             str(operation.get("operation_id") or ""),
             {},
@@ -821,8 +768,7 @@ def _collect_gemm_tuning_runs(
         result.setdefault(
             "adopted",
             adoption.get("validated") is True
-            and str(adoption.get("decision") or "").upper()
-            in {"KEEP", "ADOPT", "ADOPTED"},
+            and str(adoption.get("decision") or "").upper() in {"KEEP", "ADOPT", "ADOPTED"},
         )
         if result.get("gain_pct") is None:
             result["gain_pct"] = _to_float(adoption.get("gain_pct"))
@@ -859,9 +805,7 @@ def collect_recorded_optimizations(
         if isinstance(row, dict) and row.get("measurement_id")
     }
     artifact_by_id = {
-        str(row.get("artifact_id") or ""): row
-        for row in artifacts
-        if isinstance(row, dict) and row.get("artifact_id")
+        str(row.get("artifact_id") or ""): row for row in artifacts if isinstance(row, dict) and row.get("artifact_id")
     }
     adoption_by_operation: dict[str, dict[str, Any]] = {}
     for row in adoptions:
@@ -959,13 +903,7 @@ def collect_recorded_optimizations(
             f"{sorted(unclaimed_integrations)[:5]}"
         )
 
-    alias_conflicts = sorted(
-        {
-            conflict
-            for attempt in attempts
-            for conflict in attempt.get("alias_conflicts") or []
-        }
-    )
+    alias_conflicts = sorted({conflict for attempt in attempts for conflict in attempt.get("alias_conflicts") or []})
     if alias_conflicts:
         # Two names for one role, disagreeing. Whichever was read first won,
         # and the chain arithmetic carries that choice into every later step.
@@ -1004,11 +942,7 @@ def collect_recorded_optimizations(
         chain_continuous = True
         if baseline_tput and throughput_after:
             started_from = throughput_before or expected_before or baseline_tput
-            drift = (
-                (started_from - expected_before) / baseline_tput * 100.0
-                if expected_before
-                else 0.0
-            )
+            drift = (started_from - expected_before) / baseline_tput * 100.0 if expected_before else 0.0
             # Percentage points of the baseline this step added. Stated this
             # way the rows sum exactly, with no chaining subtleties to get
             # wrong, and any drift stays outside the sum.
@@ -1066,9 +1000,7 @@ def collect_recorded_optimizations(
                 "chain_continuous": chain_continuous,
                 # The executor's own figure, carried so the two are visibly
                 # different numbers rather than one ambiguous field.
-                "local_gain_pct": (
-                    round(local_gain, 6) if local_gain is not None else None
-                ),
+                "local_gain_pct": (round(local_gain, 6) if local_gain is not None else None),
                 "cumulative_gain_pct": round(cumulative, 6),
                 "throughput_after": throughput_after,
                 "validated": True,
@@ -1086,11 +1018,7 @@ def collect_recorded_optimizations(
             "validation.unattributed_gain_pct rather than credited to the step "
             "that follows it"
         )
-    discontinuous = [
-        str(entry["adopted_attempt_id"])
-        for entry in entries
-        if not entry.get("chain_continuous")
-    ]
+    discontinuous = [str(entry["adopted_attempt_id"]) for entry in entries if not entry.get("chain_continuous")]
     if discontinuous:
         warnings.append(
             f"optimizations: {len(discontinuous)} adopted step(s) recorded no "
@@ -1100,10 +1028,7 @@ def collect_recorded_optimizations(
 
     summary_by_agent = _summarize_by_agent(
         attempts,
-        {
-            str(entry["adopted_attempt_id"]): _to_float(entry.get("gain_pct")) or 0.0
-            for entry in entries
-        },
+        {str(entry["adopted_attempt_id"]): _to_float(entry.get("gain_pct")) or 0.0 for entry in entries},
     )
     backend_attempts = _collect_backend_attempts(
         session_id,
@@ -1144,18 +1069,12 @@ def collect_recorded_optimizations(
         )
 
     non_attributable = [
-        attempt
-        for attempt in attempts
-        if attempt.get("adopted") and attempt.get("attribution_eligible") is False
+        attempt for attempt in attempts if attempt.get("adopted") and attempt.get("attribution_eligible") is False
     ]
     # An adopted step that contributes nothing to the total is a hole in the
     # accounting, not a zero. Counting it keeps the sum honest about what it
     # could not see.
-    unmeasured = [
-        str(entry["adopted_attempt_id"])
-        for entry in entries
-        if entry.get("gain_method") == "missing"
-    ]
+    unmeasured = [str(entry["adopted_attempt_id"]) for entry in entries if entry.get("gain_method") == "missing"]
     if unmeasured:
         warnings.append(
             f"optimizations: {len(unmeasured)} adopted step(s) recorded neither "
@@ -1183,9 +1102,7 @@ def collect_recorded_optimizations(
     )
 
     session_validation = _recorded_session_validation(operations)
-    recorded_total = (
-        _to_float(session_validation.get("validated_gain_pct")) if session_validation else None
-    )
+    recorded_total = _to_float(session_validation.get("validated_gain_pct")) if session_validation else None
     if recorded_total is not None and abs(recorded_total - cumulative) > 0.01:
         # The one disagreement this section could never previously surface:
         # the ledger and the figure the run promoted are now two independent
@@ -1211,9 +1128,7 @@ def collect_recorded_optimizations(
         "summary_by_source": summary_by_source,
         "summary_by_kind": summary_by_kind,
         "validation": {
-            "method": (
-                "recorded_session_validation" if recorded_total is not None else "ledger_sum"
-            ),
+            "method": ("recorded_session_validation" if recorded_total is not None else "ledger_sum"),
             "validated_at_stack_len": (
                 int(_to_float(session_validation.get("validated_at_stack_len")) or 0)
                 if session_validation
@@ -1232,16 +1147,10 @@ def collect_recorded_optimizations(
             # nothing here can be checked.
             "ledger_total_gain_pct": round(cumulative, 6),
             "validation_basis": (
-                str(session_validation.get("measurement_basis") or "")
-                if session_validation
-                else "ledger_sum"
+                str(session_validation.get("measurement_basis") or "") if session_validation else "ledger_sum"
             ),
-            "validation_source": (
-                str(session_validation.get("source") or "") if session_validation else ""
-            ),
-            "reconciliation_gap_pct": (
-                round(recorded_total - cumulative, 6) if recorded_total is not None else None
-            ),
+            "validation_source": (str(session_validation.get("source") or "") if session_validation else ""),
+            "reconciliation_gap_pct": (round(recorded_total - cumulative, 6) if recorded_total is not None else None),
             "attributed_total_gain_pct": round(attributed, 6),
             "unattributed_gain_pct": round(unattributed, 6),
             "attribution_gap_pct": round(
@@ -1256,9 +1165,7 @@ def collect_recorded_optimizations(
             # Adopted steps whose finishing throughput was reconstructed from
             # the executor's own percentage rather than read from a
             # measurement.
-            "projected_keep_count": sum(
-                1 for entry in entries if entry.get("gain_method") == "local_gain_projected"
-            ),
+            "projected_keep_count": sum(1 for entry in entries if entry.get("gain_method") == "local_gain_projected"),
             # Adopted steps whose evidence trail no longer resolves.
             "stale_evidence_count": len(stale_evidence),
             # Changes the ledger says landed with nothing crediting them. Any
@@ -1268,11 +1175,7 @@ def collect_recorded_optimizations(
             # Adopted on the strength of a KEEP verdict alone, with no
             # accuracy gate having ruled on them.
             "unscored_keep_count": unscored_keeps,
-            "notes": [
-                "Projected from author-time recorder streams "
-                "(operations/adoptions/measurements/artifacts)."
-            ],
+            "notes": ["Projected from author-time recorder streams (operations/adoptions/measurements/artifacts)."],
         },
         "gemm_tuning_runs": _collect_gemm_tuning_runs(operations, adoptions),
     }
-

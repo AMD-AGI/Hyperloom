@@ -637,8 +637,7 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
 
     assert cp.returncode == 0
     assert bool(reported) is reports_liveness, (
-        f"a child that printed nothing was reported alive {len(reported)} times "
-        f"by {appended_line.strip()!r}"
+        f"a child that printed nothing was reported alive {len(reported)} times by {appended_line.strip()!r}"
     )
 
 

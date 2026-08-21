@@ -62,9 +62,7 @@ def test_build_nonzero_is_compile_error(tmp_path):
 
 
 def test_per_attempt_jit_dir_env_and_log(tmp_path):
-    action = _action(
-        [sys.executable, "-c", "import os; print(os.environ['INFERENCE_OPTIMIZER_AITER_JIT_DIR'])"]
-    )
+    action = _action([sys.executable, "-c", "import os; print(os.environ['INFERENCE_OPTIMIZER_AITER_JIT_DIR'])"])
     root = tmp_path / "a3"
     handle = spawn_build(action, attempt_root=str(root))
     _wait_terminal(handle)
