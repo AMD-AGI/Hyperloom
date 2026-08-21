@@ -13,6 +13,7 @@ import types
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 from hyperloom.orchestrator.loop.coordinator import (
@@ -289,6 +290,9 @@ def _enqueue_self(**state_kw):
         ["research_lane"],
         base_ttl_sec,
     )
+    # Real catalogue resolution, so a row enqueued without a TTL is visible here.
+    fake.action_registry = ACTION_CATALOGUE
+    fake._registry_lanes_ttl = types.MethodType(Coordinator._registry_lanes_ttl, fake)
     fake._maybe_record_enablement_human_review = types.MethodType(
         Coordinator._maybe_record_enablement_human_review, fake
     )
