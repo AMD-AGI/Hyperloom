@@ -465,6 +465,38 @@ class TestKeepGoingAsymmetry:
         assert results[0].error_class == "magpie_nonzero_invalid_measurement"
         assert results[0].returncode == 1
 
+    def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
+        """Pre-spawn miss: empty pipe + empty logs, diagnostic lives in report.errors."""
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _blank_rc2(cmd, *a, **k):
+            out_idx = cmd.index("--output-dir")
+            slot = Path(cmd[out_idx + 1])
+            ws = slot / "benchmark_sglang_20260101_000000"
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "benchmark_report.json").write_text(
+                json.dumps(
+                    {
+                        "success": False,
+                        "framework": "sglang",
+                        "errors": [
+                            "scriptable benchmark script not found for custom_mi355x.sh"
+                        ],
+                    }
+                )
+            )
+            return subprocess.CompletedProcess(cmd, 2, "", "")
+
+        results = self._run(_blank_rc2, base, tmp_path / "out")
+        assert len(results) == 1
+        assert results[0].error_class == "magpie_nonzero_invalid_measurement"
+        assert "custom_mi355x.sh" in (results[0].error or "")
+        marker_path = next((tmp_path / "out").glob("variant_*/abort_reason.json"))
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert "custom_mi355x.sh" in marker["error"]
+
 
 # ---------------------------------------------------------------------------
 # auto-warmup teardown timing

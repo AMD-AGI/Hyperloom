@@ -142,6 +142,30 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
+def test_seed_shared_state_records_custom_workload_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FRAMEWORK", "custom")
+    monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "/scripts")
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", "/fw")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "")
+    )
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+
+    state = cb._seed_shared_state(tmp_path, _args(framework="custom"), session_id="s-custom")
+    assert state.bypass_scripts_dir == "/scripts"
+    assert state.framework_repo_path == "/fw"
+    assert state.benchmark_backend == "bypass"
+
+
 def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
     tmp_path: Path,
     monkeypatch,
