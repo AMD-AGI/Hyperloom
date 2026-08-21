@@ -37,8 +37,8 @@ carries an extra hard gate in PolicyGate
 bar comes from the action class — see
 [review_coordinator_inbox.md](review_coordinator_inbox.md).
 
-Critic does not block Robustness emergency actions such as `kill_task`
-or `prune_branch`. Review those only after the fact as advice.
+Critic does not block Robustness emergency actions such as `prune_branch`
+or `delegate(recover)`. Review those only after the fact as advice.
 
 ## Review Steps
 

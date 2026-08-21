@@ -1825,9 +1825,9 @@ def compute_kernel_progress_fingerprint(
                 "collective_attempt_id",
                 "status",
                 "decision",
-                "integration_status",
+                "patch_cleanup_status",
                 "integration_decision",
-                "integration_recovery_action",
+                "patch_cleanup_action",
                 "integration_revert_status",
                 "integration_finalize_status",
             )
@@ -1850,7 +1850,9 @@ def collective_integration_pending(state: Any) -> bool:
         raise ValueError("collective E2E flags must be boolean")
     if kept != requires_e2e:
         raise ValueError("collective E2E flags are inconsistent")
-    return kept and str(last.get("integration_status") or "") != "complete"
+    # Fall back to legacy field name for --resume compat.
+    cleanup = str(last.get("patch_cleanup_status") or last.get("integration_status") or "")
+    return kept and cleanup != "complete"
 
 
 def kernel_work_pending(state: Any) -> bool:

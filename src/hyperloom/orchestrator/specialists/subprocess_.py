@@ -528,8 +528,8 @@ class SpecialistSubprocessConfig:
     permission_mode: str = "bypassPermissions"
     """claude-cli ``--permission-mode``.
 
-    This is a Claude runtime policy only. Worktrees and tool allowlists scope
-    task behavior but are not filesystem containment.
+    A Claude runtime policy only. Worktrees and the tool denylist scope task
+    behavior but are not filesystem containment.
     """
 
     framework_source_roots: tuple[str, ...] = ()
@@ -818,7 +818,7 @@ class SpecialistSubprocessDispatcher:
         worktree_base: Path | None,
         system_prompt: str,
         user_prompt: str,
-        allowed_tools: tuple[str, ...],
+        disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset(),
         max_turns: int,
         gpu_ids: tuple[int, ...] = (),
         wall_budget_sec: float | None = None,
@@ -846,8 +846,9 @@ class SpecialistSubprocessDispatcher:
             system_prompt (str): System prompt assembled by
                 :func:`specialist_prompt_builder.build_specialist_prompts`.
             user_prompt (str): User prompt from the same builder.
-            allowed_tools (tuple[str, ...]): Per-task tool whitelist
-                (post-:meth:`SpecialistRunner._resolve_tools`).
+            disallowed_tools: Tool names to deny in the agent CLI subprocess.
+                Passed as ``--disallowedTools`` to the Claude CLI; has no
+                Codex equivalent (Codex containment uses ``--sandbox``).
             max_turns (int): Turn budget. This dispatcher never enforces it
                 mechanically — neither agent CLI is passed a turn-cap flag (the
                 cap reaches the specialist only as advisory prompt text baked
@@ -920,15 +921,15 @@ class SpecialistSubprocessDispatcher:
                 )
                 env.update(launch_env_additions)
             else:
-                # Preserve the established Claude transport unchanged.
-                combined = "<!-- system_prompt -->\n" + system_prompt + "\n<!-- user_prompt -->\n" + user_prompt
-                prompt_file.write_text(combined, encoding="utf-8")
+                prompt_file.write_text(user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
                 cmd = self._build_claude_cmd(
-                    prompt_file=prompt_file,
+                    system_prompt_file=prompt_file.parent / "system_prompt.md",
+                    system_prompt=system_prompt,
+                    user_prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
-                    allowed_tools=allowed_tools,
+                    disallowed_tools=frozenset(disallowed_tools),
                 )
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
@@ -988,7 +989,7 @@ class SpecialistSubprocessDispatcher:
                     cwd=str(worktree or workspace),
                     log_path=str(process_log),
                     env_mode="replace",
-                    stdin_path=(str(prompt_file) if backend == AGENT_BACKEND_CODEX else None),
+                    stdin_path=str(prompt_file),
                 )
             except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                 return SpecialistSubprocessResult(
@@ -1040,11 +1041,10 @@ class SpecialistSubprocessDispatcher:
             log_fh = process_log.open("w", encoding="utf-8")
             stdin_fh: Any = None
             try:
-                if backend == AGENT_BACKEND_CODEX:
-                    stdin_fh = prompt_file.open("rb")
+                stdin_fh = prompt_file.open("rb")
                 proc = subprocess.Popen(
                     cmd,
-                    stdin=stdin_fh if stdin_fh is not None else subprocess.DEVNULL,
+                    stdin=stdin_fh,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
                     env=env,
@@ -1175,50 +1175,6 @@ class SpecialistSubprocessDispatcher:
                 f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
             )
         return pinned
-
-    def _build_agent_cmd(
-        self,
-        *,
-        prompt_file: Path,
-        workspace: Path,
-        worktree: Path | None,
-        allowed_tools: tuple[str, ...],
-        backend: str = "",
-        system_prompt: str = "",
-    ) -> list[str]:
-        """Assemble the argv for whichever agent CLI drives this specialist.
-
-        Args:
-            prompt_file (Path): User prompt for Codex; combined prompt for Claude.
-            workspace (Path): Task workspace surfaced as a writable dir.
-            worktree (Path | None): Write-isolated worktree, when present.
-            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
-            backend (str): Backend to build for; resolved from the config /
-                credential shape when empty.
-            system_prompt (str): Higher-priority Codex developer instructions.
-                Claude already reads its combined prompt file.
-
-        Returns:
-            list[str]: The full command argv to spawn.
-
-        Raises:
-            SpecialistAgentUnavailableError: If the selected CLI has no runtime
-                or cannot be pointed at the deployment's gateway.
-        """
-        selected = backend or self._agent_backend()
-        if selected == AGENT_BACKEND_CODEX:
-            return self._build_codex_cmd(
-                prompt_file=prompt_file,
-                workspace=workspace,
-                worktree=worktree,
-                system_prompt=system_prompt,
-            )
-        return self._build_claude_cmd(
-            prompt_file=prompt_file,
-            workspace=workspace,
-            worktree=worktree,
-            allowed_tools=allowed_tools,
-        )
 
     def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
         """Return the dirs an agent CLI may write, in precedence order.
@@ -1363,30 +1319,43 @@ class SpecialistSubprocessDispatcher:
     def _build_claude_cmd(
         self,
         *,
-        prompt_file: Path,
+        system_prompt_file: Path,
+        system_prompt: str,
+        user_prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
-        allowed_tools: tuple[str, ...],
+        disallowed_tools: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
-        The Anthropic-side half of :meth:`_build_agent_cmd`. Builds the flag list
-        (output format, permission mode, system prompt file, tool whitelist, mcp
-        config, ``--add-dir`` entries, operator escape-hatch args).
-        ``emit_intent`` is dropped from the tool whitelist since the subprocess
-        has no in-process MCP server.
+        System and user prompts travel through separate channels: system via
+        ``--system-prompt-file``, user via stdin.
 
         Args:
-            prompt_file (Path): Combined system+user prompt file passed via
-                ``--system-prompt-file``.
+            system_prompt_file (Path): Destination for the written system prompt;
+                passed to ``--system-prompt-file``.
+            system_prompt (str): The system prompt text to write.
+            user_prompt_file (Path): Pre-written user prompt file fed to stdin.
             workspace (Path): Task workspace surfaced as an ``--add-dir``.
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.
-            allowed_tools (tuple[str, ...]): Per-task tool whitelist.
+            disallowed_tools: Tool names to remove from the available set.
 
         Returns:
             list[str]: The full command argv to spawn.
         """
+        fd = os.open(system_prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(system_prompt)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        system_prompt_file.chmod(0o600)
+
         cfg = self.config
         cmd: list[str] = [
             cfg.claude_executable,
@@ -1397,22 +1366,15 @@ class SpecialistSubprocessDispatcher:
             "--permission-mode",
             cfg.permission_mode,
             "--system-prompt-file",
-            str(prompt_file),
-            "-p",
-            "Execute the task in your system prompt. Work autonomously. "
-            + "Write specialist_done.json as your absolute last action.",
+            str(system_prompt_file),
         ]
         if cfg.model:
             cmd.extend(["--model", cfg.model])
-        # Drop ``emit_intent``: the subprocess exits via writing specialist_done.json.
-        tools_filtered = [t for t in allowed_tools if t != "emit_intent"]
-        if tools_filtered:
-            cmd.extend(["--allowedTools", ",".join(tools_filtered)])
-        # Declare leaf sub-agent types when the specialist may fan out via Task.
-        if "Task" in tools_filtered:
-            from .leaf import build_leaf_agents_json
+        if disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(sorted(disallowed_tools))])
+        from .leaf import build_leaf_agents_json
 
-            cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
+        cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
         for d in self._writable_dirs(workspace, worktree):

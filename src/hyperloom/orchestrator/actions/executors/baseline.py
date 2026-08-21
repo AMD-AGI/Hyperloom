@@ -690,10 +690,10 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     deviation from the baseline output).
 
     The kernel lane also drives this executor through synthetic tasks that
-    carry ``kind="baseline"`` literally (integrate re-baseline, the paired-A/B
-    pristine arm, stack validation). Those are throughput-only A/B probes
-    against an already-anchored baseline -- they never anchor one -- so they
-    opt out via ``params["quality_ref_exempt"]`` and are treated exactly like
+    carry ``kind="baseline"`` literally (integrate re-baseline, stack
+    validation). Those are throughput-only A/B probes against an
+    already-anchored baseline -- they never anchor one -- so they opt out via
+    ``params["quality_ref_exempt"]`` and are treated exactly like
     ``replay_warm_recipe``: compare, never establish.
 
     Args:
@@ -1818,57 +1818,27 @@ def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
 ) -> dict[str, Any]:
-    """Rollback kernel mutations and report whether every restore succeeded."""
-    if isinstance(snapshots, list) and snapshots:
-        errors: list[str] = []
-        for snapshot in reversed(snapshots):
-            target = Path(str(snapshot.get("target") or ""))
-            try:
-                if snapshot.get("existed"):
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(
-                        Path(str(snapshot.get("backup") or "")).read_bytes()
-                    )
-                    if snapshot.get("mode") is not None:
-                        target.chmod(int(snapshot["mode"]))
-                elif target.exists() or target.is_symlink():
-                    target.unlink()
-                if snapshot.get("existed"):
-                    expected = Path(
-                        str(snapshot.get("backup") or "")
-                    ).read_bytes()
-                    if not target.is_file() or target.read_bytes() != expected:
-                        raise OSError("kernel restore verification failed")
-                elif target.exists() or target.is_symlink():
-                    raise OSError("kernel target still exists after restore")
-            except OSError as exc:
-                errors.append(f"{target}:{type(exc).__name__}:{exc}")
-        return {"ok": not errors, "errors": errors}
+    """Rollback kernel mutations and report whether every restore succeeded.
+
+    Restoring the snapshots is not on its own enough: the applies also left
+    backup manifests, and on the multi-node path the patch is on every pod.
+    Both halves have to be undone, which is what the prelude rollback does.
+
+    Args:
+        results (Any): Apply results carrying the backup manifests to revert.
+        snapshots (Any): Pristine copies captured before the mutation.
+
+    Returns:
+        dict[str, Any]: ``ok`` and the accumulated ``errors``.
+    """
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
-    from ...kernel.request_handlers import _maybe_revert_kernel_patch
+    from ...phases.prelude import PreludePhase
 
-    errors: list[str] = []
-    for result in reversed(results):
-        if not isinstance(result, dict):
-            continue
-        try:
-            reverted = _maybe_revert_kernel_patch(result)
-            if reverted.get("status") != "ok":
-                raise RuntimeError(
-                    str(
-                        reverted.get("error")
-                        or reverted.get("reason")
-                        or f"kernel revert status={reverted.get('status')}"
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "baseline_executor: combined warm-kernel rollback failed",
-                exc_info=True,
-            )
-            errors.append(f"{type(exc).__name__}:{exc}")
-    return {"ok": not errors, "errors": errors}
+    return PreludePhase._revert_warm_kernel_patches(
+        [r for r in results if isinstance(r, dict)],
+        list(snapshots) if isinstance(snapshots, list) else None,
+    )
 
 
 class BaselineExecutor:

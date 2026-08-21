@@ -246,11 +246,7 @@ def _stale_lease_symptoms(
                 },
                 subject={"task_id": task_id},
                 source="local",
-                suggestion=(
-                    f"kill_task(scope='task', task_id={task_id!r}) to "
-                    f"release the lease; the lane will free up for the "
-                    f"next pending proposal"
-                ),
+                suggestion="no action needed; the dispatcher reaps dead lease holders every tick",
             )
         )
     return out

@@ -869,7 +869,6 @@ class FrameworkPhase(PhaseHandler):
             "framework_batch_id": batch_id,
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
-            "readonly": False,
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
@@ -896,16 +895,6 @@ class FrameworkPhase(PhaseHandler):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            allowed_tools=[
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
@@ -1177,7 +1166,6 @@ class FrameworkPhase(PhaseHandler):
             "enablement_setup_commands": base_setup,
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
-            "readonly": False,
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
@@ -1539,16 +1527,6 @@ class FrameworkPhase(PhaseHandler):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            allowed_tools=[
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
@@ -2083,7 +2061,6 @@ class FrameworkPhase(PhaseHandler):
             "framework": framework_name,
             "task_kind": "explore_apply_retry",
             "source": "coordinator_internal",
-            "readonly": False,
             "notes": notes,
             "apply_retry_attempt": attempt,
             "prior_patches": retry_feedback[0].get("patch") if retry_feedback else "",
@@ -2101,16 +2078,6 @@ class FrameworkPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                allowed_tools=[
-                    "Read",
-                    "Grep",
-                    "Glob",
-                    "Write",
-                    "Edit",
-                    "Bash",
-                    "WebSearch",
-                    "WebFetch",
-                ],
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
             )
@@ -2550,7 +2517,6 @@ class FrameworkPhase(PhaseHandler):
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            "readonly": False,
             **self._framework_gpu_params(),
         }
         try:
@@ -2562,16 +2528,6 @@ class FrameworkPhase(PhaseHandler):
             "kind": "specialist",
             "params": params,
             "requires_lanes": lanes,
-            "allowed_tools": [
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             "side_effects": ["writes_results", "writes_patches"],
             "lease_ttl_sec": ttl,
         }
@@ -4745,6 +4701,8 @@ class FrameworkPhase(PhaseHandler):
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
             generation=int(state.enablement.revalidation_generation or 0),
             label="revalidation",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("baseline")[1],
         )
         state.enablement.revalidation_generation = generation
         return task
@@ -5372,6 +5330,8 @@ class FrameworkPhase(PhaseHandler):
                 kind="explore",
                 params=params,
                 idempotency_key=f"framework-config-explore-round{int(round_no)}{self._cycle_idem_suffix()}",
+                # Without a TTL the row is invisible to ``reclaim_expired_running``.
+                lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
             )
         except Exception:  # noqa: BLE001 -- defensive; never wedge the pump
             log.exception("framework_config: failed to enqueue explore round")
@@ -5552,7 +5512,7 @@ class FrameworkPhase(PhaseHandler):
             # subphase (and the mn-explore bridge skips it to avoid double-consume).
             "framework_config_generation": True,
             "source": "coordinator_internal",
-            "readonly": True,
+            "mode": "research",
             "notes": notes,
             **self._framework_gpu_params(),
         }
@@ -5568,7 +5528,6 @@ class FrameworkPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                allowed_tools=["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
                 side_effects=["writes_results"],
                 lease_ttl_sec=ttl,
             )

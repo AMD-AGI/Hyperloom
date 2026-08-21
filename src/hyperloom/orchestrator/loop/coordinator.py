@@ -825,6 +825,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
 
+        # Per-agent (seq, msg_id) of the last message its prompt rendered.
+        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
@@ -904,7 +907,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_delegate": "router",
         "_handle_request": "router",
         "_handle_response": "router",
-        "_handle_kill_task": "router",
         "_handle_extend_lease": "router",
         "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
@@ -1153,11 +1155,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_proposal_task_map": "proposals",
         "_registry_lanes_ttl": "dispatcher",
         "_cycle_idem_suffix": "dispatcher",
-        "_cursor_advance_to_latest": "dispatcher",
+        "_advance_rendered_cursor": "conversation",
         "_dispatch_paused_for_phase_budget": "dispatcher",
         "_pump_dispatcher_once": "dispatcher",
         "_spawn_fitting_queued": "dispatcher",
-        "_run_dispatched_with_gpu_release": "dispatcher",
+        "run_task_registered": "dispatcher",
         "_specialist_wall_budget_sec": "dispatcher",
         "_specialist_progress_publisher": "dispatcher",
         "_resolve_serving_tp": "dispatcher",
@@ -1216,8 +1218,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_prune_runs_for_disk": "maintenance",
         "_maybe_checkpoint_orchestration": "maintenance",
         "enqueue_targeted_build": "build_lifecycle",
-        "_maybe_pump_targeted_build": "build_lifecycle",
-        "_maybe_reap_targeted_build": "build_lifecycle",
     }
 
     def __getattr__(self, name: str):
@@ -1786,13 +1786,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_framework_agent_phase_safely(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
-                    # Off-loop targeted-build pump + reaper (each guarded; never
-                    # blocks the tick — the build runs in its own process group).
-                    try:
-                        await self._maybe_reap_targeted_build(tick=tick_n)
-                        await self._maybe_pump_targeted_build(tick=tick_n)
-                    except Exception:  # noqa: BLE001
-                        log.exception("targeted-build tick raised")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._await_within_session_bound(
@@ -2001,6 +1994,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
+            await self._advance_rendered_cursor(agent_name)
             return
         except Exception as exc:  # noqa: BLE001
             # Catch-all so one agent's bad turn never stops the loop.
@@ -2054,6 +2048,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+        await self._advance_rendered_cursor(agent_name)
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

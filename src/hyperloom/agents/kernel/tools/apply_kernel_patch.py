@@ -352,6 +352,38 @@ def _path_hash(path: Path) -> str:
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
+_MAX_BACKUP_DIR_ATTEMPTS: int = 200
+
+
+def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
+    """Create a backup directory this apply alone owns.
+
+    Suffixes ``-2``, ``-3``, … when an earlier attempt already claimed the name,
+    which a constant or absent ``kernel_id`` would otherwise reuse.
+    ``mkdir(exist_ok=False)`` makes the claim atomic against a concurrent caller.
+
+    Args:
+        backup_root (Path): Directory the per-attempt backups live under.
+        kernel_id (str): Kernel identifier; falls back to the target's stem.
+        target (Path): File being replaced.
+
+    Returns:
+        Path: The newly created backup directory.
+
+    Raises:
+        RuntimeError: If every suffix is taken.
+    """
+    base = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    for suffix in range(1, _MAX_BACKUP_DIR_ATTEMPTS + 1):
+        candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"_claim_backup_dir: {base} still taken after {_MAX_BACKUP_DIR_ATTEMPTS} suffixes")
+
+
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
     """Copy a file into the backup tree and return the manifest entry.
 
@@ -671,14 +703,7 @@ def _within_root(path: Path, root: Path) -> bool:
         r = root.resolve()
     except (OSError, RuntimeError):
         return False
-    try:
-        return p == r or p.is_relative_to(r)
-    except AttributeError:  # pragma: no cover — Python <3.9
-        try:
-            p.relative_to(r)
-            return True
-        except ValueError:
-            return False
+    return p == r or p.is_relative_to(r)
 
 
 def apply_snapshot(
@@ -1510,11 +1535,9 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         ValueError: When the target is outside the known roots and
             ``allow_unknown_target`` is ``False``.
     """
-    target = str(target_file)
-    lower = target.lower()
-    roots = known_target_roots()
+    lower = str(target_file).lower()
     if not allow_unknown_target and not any(
-        str(root).lower() in lower for root in roots
+        _within_root(target_file, Path(root)) for root in known_target_roots()
     ):
         raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
 
@@ -2153,7 +2176,7 @@ def apply_kernel_patch(
     except ValueError as exc:
         return {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
 
-    backup_dir = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     manifest_path = backup_dir / "manifest.json"
     source_backup = _copy_to_backup(target, backup_dir, "source")
     artifacts: list[dict[str, str]] = []
@@ -2479,7 +2502,7 @@ def _apply_kernel_patch_snapshot(
                 f"deploy root for target: {target}"
             ),
         }
-    backup_dir = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
+    backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = backup_dir / "manifest.json"
 

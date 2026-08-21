@@ -32,8 +32,8 @@ def test_coerce_unix_variants() -> None:
 def test_collect_last_seen_branches() -> None:
     inbox = [
         _item("user", ts=999.0),  # untracked -> skip
-        _item("kernel_agent", ts=50.0),  # tracked -> set
-        _item("kernel_agent"),  # no ts -> skip
+        _item("critic", ts=50.0),  # tracked -> set
+        _item("critic"),  # no ts -> skip
     ]
     events = [
         {"agent": "critic"},  # no ts -> continue
@@ -41,7 +41,7 @@ def test_collect_last_seen_branches() -> None:
         {"agent": "user", "ts": 5.0},  # untracked
     ]
     last = _collect_last_seen(inbox, events)
-    assert last == {"kernel_agent": 50.0, "orchestration": 200.0}
+    assert last == {"critic": 50.0, "orchestration": 200.0}
 
 
 def test_evaluate_stall_emits_high() -> None:
@@ -210,3 +210,31 @@ def test_running_work_that_never_reported_is_no_evidence_either_way() -> None:
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0))
     assert [s.name for s in out] == ["agent_stall"]
     assert "in_flight_work_idle_seconds" not in out[0].evidence
+
+
+def test_kernel_agent_is_not_a_tracked_agent() -> None:
+    """It has no backend, no turn and no heartbeat, so silence means nothing.
+
+    Its only bus footprint is the completion receipt the Coordinator signs on
+    its behalf, which measures demand for kernel work rather than health.
+    """
+    inbox = [_item("kernel_agent", ts=1.0)]
+    assert _collect_last_seen(inbox, []) == {}
+
+
+def test_a_long_inline_kernel_step_does_not_accuse_orchestration() -> None:
+    """Kernel handlers are awaited inline, so the tick's own agent goes quiet.
+
+    A heartbeat raised around the handler is the only thing keeping that agent
+    visible; without it a two-hour forge run reads as a stalled orchestrator.
+    """
+    now = 10_000.0
+    cfg = StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0)
+    ctx = ReactorContext(inbox=[], now_unix=now)
+
+    beating = SourceData(coordinator_events=[{"agent": "orchestration", "ts": now - 150.0}])
+    assert evaluate_stall_signals(ctx, beating, config=cfg) == []
+
+    silent = SourceData(coordinator_events=[{"agent": "orchestration", "ts": now - 7200.0}])
+    accused = evaluate_stall_signals(ctx, silent, config=cfg)
+    assert [s.evidence["agent"] for s in accused] == ["orchestration"]

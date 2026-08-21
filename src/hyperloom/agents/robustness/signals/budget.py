@@ -7,11 +7,10 @@ Two complementary axes:
 
 * Percentage ladder, gated on no validated gain: ``budget_strategy_drift``
   (burn_pct >= 0.5), ``budget_burn_no_gain`` (>= 0.70), ``deadline_imminent``
-  (>= 0.85, emits ``delegate(report)``).
+  (>= 0.85, HIGH alert signalling Orchestration to wind down).
 * Absolute-time backstop, fires regardless of gain: ``deadline_warning``
   (remaining <= 30min, downgraded HIGH -> MEDIUM when a validated gain exists)
-  and ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH +
-  ``delegate(report)``).
+  and ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH).
 
 Both axes are suppressed for sub-``min_budget_minutes`` sessions and during the
 closing phase.
@@ -40,7 +39,6 @@ class BudgetConfig:
     # Budget used past this with no validated gain → cheaper actions take over from kernel_opt.
     strategy_drift_pct: float = 0.5
     warn_pct: float = 0.70
-    # Past this with no validated gain → HIGH escalate + delegate(report).
     imminent_pct: float = 0.85
     # Absolute-time backstop; 30 min matches the SKILL playbook "If <30 min remain, prefer report".
     deadline_warning_minutes: float = 30.0
@@ -135,7 +133,7 @@ def _imminent_symptom(
         cfg (BudgetConfig): Budget tunables.
 
     Returns:
-        Symptom: A HIGH-severity symptom recommending ``delegate(report)``.
+        Symptom: A HIGH-severity symptom signalling Orchestration to finalize.
     """
     return Symptom(
         name="deadline_imminent",
@@ -159,7 +157,7 @@ def _imminent_symptom(
         # Session-wide; empty subject collapses the dedup key across ticks.
         subject={},
         source="local",
-        suggestion=("delegate(report) to finalize at the last validated gain"),
+        suggestion=("propose report to finalize at the last validated gain"),
     )
 
 
@@ -286,7 +284,7 @@ def _deadline_warning_symptom(
         subject={},
         source="local",
         suggestion=(
-            "delegate(report) to finalize at the last validated gain"
+            "propose report to finalize at the last validated gain"
             if severity is SymptomSeverity.HIGH
             else "escalate_strategy_change: do not propose kernel_opt or new explore; validate_stack and report only"
         ),
@@ -327,7 +325,7 @@ def _hard_cutoff_symptom(
         },
         subject={},
         source="local",
-        suggestion=("delegate(report) immediately; any new task started now will be cut by the deadline supervisor"),
+        suggestion=("propose report immediately; any new task started now will be cut by the deadline supervisor"),
     )
 
 

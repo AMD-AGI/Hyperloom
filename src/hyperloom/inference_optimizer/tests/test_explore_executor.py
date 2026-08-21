@@ -2406,21 +2406,14 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch,
 ):
     """When the atom help-text probe is unavailable, ``apply_compatibility_filter`` drops no seed variant."""
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    monkeypatch.delenv("FRAMEWORK", raising=False)
-    # Force the help-text probe to return empty (simulates atom not importable).
-    from hyperloom.orchestrator.actions.executors import (
-        _grid_runner,
-    )
+    # The filter resolves this name in its own module, so patching the
+    # re-export on _grid_runner would leave the real ten-second probe running.
+    from hyperloom.orchestrator.actions.executors import _grid_variant_filter
 
-    monkeypatch.setattr(
-        _grid_runner,
-        "_probe_server_help_text",
-        lambda fw: "",
-    )
+    monkeypatch.setattr(_grid_variant_filter, "_probe_server_help_text", lambda fw: "")
 
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
-    kept, dropped = apply_compatibility_filter(grid)
+    kept, dropped = apply_compatibility_filter(grid, framework="atom", model_path="")
     assert kept == grid, f"compatibility filter dropped seed variants when help-text probe is empty; dropped={dropped}"
 
 

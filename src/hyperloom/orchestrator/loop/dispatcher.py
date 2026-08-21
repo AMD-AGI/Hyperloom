@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
@@ -115,6 +115,12 @@ _COOPERATIVE_CANCEL_GRACE_SEC: float = (
 _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
+#: Kinds the pump dispatches but does not join: it drains what it joins before
+#: returning, and an off-loop compile there would hold every reactor turn for
+#: its duration. Admission is unchanged — same budget, lane and lease gates.
+_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
+
+
 class _InflightAction(NamedTuple):
     """A running action's handle: what it is, its task, and how to ask it to stop."""
 
@@ -136,7 +142,7 @@ class DispatcherCollaborator:
         # whose handle lives in a frame can only be stopped by the frame that is
         # already blocked awaiting it, which is precisely the situation shutdown
         # and an exhausted wall-clock budget have to break. Entries remove
-        # themselves in :meth:`_run_dispatched_with_gpu_release`.
+        # themselves in :meth:`run_task_registered`.
         self._inflight_actions: dict[str, _InflightAction] = {}
 
     def __getattr__(self, name: str):
@@ -167,17 +173,6 @@ class DispatcherCollaborator:
         """
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         return f"-c{cycle}" if cycle > 0 else ""
-
-    async def _cursor_advance_to_latest(self, agent_name: str) -> None:
-        """Advance an agent's read cursor to the latest message addressed to it.
-
-        Args:
-            agent_name (str): The agent whose inbox cursor to advance.
-        """
-        latest = await self.bus.tail(n=1, to_agent=agent_name)
-        if latest:
-            top = latest[0]
-            await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
 
     def _dispatch_paused_for_phase_budget(self) -> bool:
         """True when the current phase's budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
@@ -388,9 +383,9 @@ class DispatcherCollaborator:
 
         Re-scans the queue whenever an in-flight task completes
         (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
-        the moment its lane frees. The pump still fully drains all currently
-        dispatchable work before returning. Each GPU lease is bound to its
-        task_id and released by the runner.
+        the moment its lane frees. Everything it joins is drained before it
+        returns; :data:`_NOT_JOINED_KINDS` is dispatched and left running. Each
+        GPU lease is bound to its task_id and released by the runner.
 
         Budget guard: once the phase's cyclic budget is spent
         (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
@@ -556,18 +551,20 @@ class DispatcherCollaborator:
     ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
         """Spawn every currently lane-fitting queued task not already in flight.
 
-        Returns the ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
-        (possibly empty). Pure dispatch — per-task completion bookkeeping is
-        handled by :meth:`_reap_dispatched_task`. Applies the capacity /
+        Pure dispatch — per-task completion bookkeeping is handled by
+        :meth:`_reap_dispatched_task`. Applies the capacity /
         GPU-specialist-lease gating; each lease is bound to its task_id.
 
         Args:
             exclude_ids: Task ids already dispatched this pump pass; skipped so
-                a task is never dispatched twice.
+                a task is never dispatched twice. A dispatched
+                :data:`_NOT_JOINED_KINDS` task is added here, since it is the
+                only record of it this pass carries back.
 
         Returns:
-            The ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
-            (possibly empty).
+            The ``(task, asyncio_task, gpu_lease)`` tuples the caller must join.
+            A :data:`_NOT_JOINED_KINDS` task is spawned and registered for
+            cancellation but deliberately absent from this list.
         """
         queued = await self.tasks.queued()
         if not queued:
@@ -598,9 +595,9 @@ class DispatcherCollaborator:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
                 continue
-            if task.kind == "targeted_build":
-                # Off-loop builds run in their own process group and are pumped/
-                # reaped by BuildLifecycleCollaborator; never drain them here.
+            join_in_pump = task.kind not in _NOT_JOINED_KINDS
+            if not join_in_pump and task.task_id in self._inflight_actions:
+                # Still running from an earlier pump that returned without it.
                 continue
             if await self._cancel_queued_task_over_budget(task):
                 continue
@@ -814,7 +811,7 @@ class DispatcherCollaborator:
                 pass
             cancel_scope = CancelScope()
             atask = asyncio.create_task(
-                self._run_dispatched_with_gpu_release(
+                self.run_task_registered(
                     task,
                     prebound_lease=lease,
                     extra_context=extra_context,
@@ -824,52 +821,94 @@ class DispatcherCollaborator:
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
-            spawned.append((task, atask, gpu_lease))
+            if join_in_pump:
+                spawned.append((task, atask, gpu_lease))
+            else:
+                # Nothing retrieves this handle's exception, so report it here.
+                atask.add_done_callback(self._report_unjoined_failure(task))
+                exclude_ids.add(task.task_id)
         return spawned
 
-    async def _run_dispatched_with_gpu_release(
+    @staticmethod
+    def _report_unjoined_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
+        """Build the done-callback for a handle no caller awaits."""
+
+        def _report(atask: "asyncio.Task[Any]") -> None:
+            # A cancelled task has no exception to read, and cancelling is how
+            # shutdown reaches it, so it is not a failure worth reporting.
+            if atask.cancelled():
+                return
+            exc = atask.exception()
+            if exc is not None:
+                log.error(
+                    "dispatcher: %s (%s) raised: %r",
+                    task.task_id,
+                    task.kind,
+                    exc,
+                    exc_info=exc,
+                )
+
+        return _report
+
+    async def run_task_registered(
         self,
         task: Task,
         *,
-        prebound_lease: Any,
-        extra_context: dict[str, Any],
-        gpu_lease: Any,
+        prebound_lease: Any = None,
+        extra_context: dict[str, Any] | None = None,
+        gpu_lease: Any = None,
         gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
-    ) -> "SubAgentResult":
-        """Run a dispatched task, releasing its GPU lease in a structured finally.
+    ) -> "SubAgentResult | None":
+        """Run one task under the wall-clock defences, and hand back what it held.
 
-        Binding the GPU-lease release to the asyncio task's own lifecycle
-        guarantees the cards are freed on completion, error, or cancellation
-        even if the pump coroutine is cancelled or the reap never runs.
-        ``release`` is idempotent, so the release in
-        :meth:`_reap_dispatched_task` remains harmless. When a Ray
-        ``GpuSpecialistLease`` was acquired it is closed here too so
-        the ``num_gpus`` lease is released on every exit path. The same finally
-        retires this task's ``_inflight_actions`` handle, so the set cannot
-        outlive the work it points at.
+        The only way an action runs. Registering the handle is what lets
+        :meth:`cancel_inflight_actions` reach the work at shutdown or on a spent
+        budget, and binding the teardown to this coroutine frees the lanes and
+        cards on every exit, including one the reap never sees.
 
         Args:
-            task: The dispatched task.
-            prebound_lease: The already-acquired resource-lane lease (or None).
-            extra_context: Per-task context (wall budget, gpu ids, …).
-            gpu_lease: The SQLite GPU-specialist accounting lease to release, or
-                None.
-            gpu_specialist_lease: The Ray ``GpuSpecialistLease`` to close
-                (release the ``num_gpus`` actor lease), or None on the local
-                path.
-            cancel_scope: The action's cancel channel, published here rather
-                than at the call site because a task copies its context when it
-                is created and never sees a value set afterwards.
+            task: The task row to run.
+            prebound_lease: Lanes the caller already holds; when ``None`` and
+                the task needs lanes they are taken here, non-blocking.
+            extra_context: Per-task extras (wall budget, gpu ids, …).
+            gpu_lease: SQLite GPU-specialist accounting lease to release, if any.
+            gpu_specialist_lease: Ray ``GpuSpecialistLease`` to close, if any.
+            cancel_scope: The caller's cancel channel. The pump passes one
+                because it registers its handle before this coroutine starts;
+                other callers leave it ``None`` and are registered here.
 
         Returns:
-            SubAgentResult: The result from ``sub.run_task``.
+            The runner's result, or ``None`` when the task's lanes were busy, in
+            which case the row is untouched and still queued.
         """
+        lease = prebound_lease
+        if lease is None and task.requires_lanes:
+            lease = await self.locks.try_acquire_many(
+                list(task.requires_lanes),
+                holder_id=task.task_id,
+                task_id=task.task_id,
+                action=task.kind,
+                ttl_sec=task.lease_ttl_sec or 60,
+            )
+            if lease is None:
+                log.info(
+                    "dispatcher: %s (%s) not started; lanes %s are busy",
+                    task.task_id,
+                    task.kind,
+                    list(task.requires_lanes),
+                )
+                return None
+        if cancel_scope is None:
+            cancel_scope = CancelScope()
+            handle = asyncio.current_task()
+            if handle is not None:
+                self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
         try:
             with use_cancel_scope(cancel_scope):
                 return await self.sub.run_task(
                     task,
-                    prebound_lease=prebound_lease,
+                    prebound_lease=lease,
                     extra_context=extra_context,
                 )
         finally:
@@ -1431,6 +1470,8 @@ class DispatcherCollaborator:
     def _time_budget_denial_for_action(
         self,
         action_name: str,
+        *,
+        fallback_cost_minutes: float | None = None,
     ) -> PolicyDenied | None:
         """Refuse an action whose expected cost cannot fit the remaining session budget.
 
@@ -1447,6 +1488,9 @@ class DispatcherCollaborator:
 
         Args:
             action_name: The proposed/delegated/inline action name.
+            fallback_cost_minutes: What to price the action at when the
+                catalogue does not carry it. Without it, a kind deliberately
+                kept out of the catalogue is admitted at any remaining budget.
 
         Returns:
             A :class:`PolicyDenied` when the budget cannot fit the action, else
@@ -1460,11 +1504,14 @@ class DispatcherCollaborator:
         reg = getattr(self, "action_registry", None)
         meta = reg.get(action) if reg is not None else None
         if meta is None:
-            return None
-        expected_min = expected_action_cost_minutes(
-            meta,
-            measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
-        )
+            if fallback_cost_minutes is None:
+                return None
+            expected_min = float(fallback_cost_minutes)
+        else:
+            expected_min = expected_action_cost_minutes(
+                meta,
+                measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
+            )
         usable_sec = self.shared_state.session_budget_usable_sec()
         if action_fits_time_budget(
             usable_sec=usable_sec,
@@ -1518,7 +1565,13 @@ class DispatcherCollaborator:
         Returns:
             ``True`` when the task was cancelled and must be skipped this pass.
         """
-        denied = self._time_budget_denial_for_action(task.kind)
+        # An uncatalogued kind is priced by the lease its enqueue sized, the
+        # only cost estimate it has.
+        ttl_sec = int(getattr(task, "lease_ttl_sec", 0) or 0)
+        denied = self._time_budget_denial_for_action(
+            task.kind,
+            fallback_cost_minutes=(ttl_sec / 60.0) if ttl_sec > 0 else None,
+        )
         if denied is None:
             return False
         try:
@@ -1863,21 +1916,10 @@ class DispatcherCollaborator:
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"
             )
-        # Publish a handle for as long as the action runs. This path abandons its
-        # future once the caller's inline wait elapses -- the action keeps going
-        # by design, so without a handle nothing could stop it, including a
-        # teardown that is about to close the database underneath it. The handle
-        # is this coroutine's own task: cancelling it drops the audit publication
-        # below, which the runner's terminal transition already accounts for.
-        inline_handle = asyncio.current_task()
-        cancel_scope = CancelScope()
-        if inline_handle is not None:
-            self._inflight_actions[task.task_id] = _InflightAction(task.kind, inline_handle, cancel_scope)
-        try:
-            with use_cancel_scope(cancel_scope):
-                result = await self.sub.run_task(task)
-        finally:
-            self._inflight_actions.pop(task.task_id, None)
+        # This path abandons its future once the caller's inline wait elapses, so
+        # the handle registered below is the only thing that can still stop the
+        # action. Inline actions are lane-less by whitelist, so the run happens.
+        result = await self.run_task_registered(task)
         result_payload = {
             "task_id": task.task_id,
             "kind": task.kind,

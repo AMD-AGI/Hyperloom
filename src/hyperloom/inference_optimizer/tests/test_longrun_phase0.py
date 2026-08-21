@@ -20,7 +20,6 @@ import pytest
 from hyperloom.orchestrator.bus import db_maintenance as dbm
 from hyperloom.orchestrator.state import shared_state as ss_mod
 from hyperloom.orchestrator.state.shared_state import SharedState, _cap_tested_ledger
-from hyperloom.orchestrator.bus.cursor_store import CursorStore
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -99,62 +98,31 @@ def test_tested_ledger_cap_applied_on_merge():
 
 # DB retention (events + tasks), resume-safe
 @pytest.mark.asyncio
-async def test_prune_events_respects_min_cursor_and_recent_window(conn):
+async def test_prune_events_respects_recent_window(conn):
     bus = MessageBus(conn)
-    cursors = CursorStore(conn)
     for i in range(100):
         await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
-    # No cursor yet => nothing is safe to prune.
-    assert await dbm.prune_events(conn, cursors, keep_recent=0) == 0
-
-    # Advance the min cursor to seq=60; keep_recent=10 protects the tail.
-    await cursors.advance("orchestration", seq=60, msg_id="x")
-    deleted = await dbm.prune_events(conn, cursors, keep_recent=10)
-    # delete_below = min(60, 90) = 60 => seq 1..60 removed.
-    assert deleted == 60
+    # keep_recent=10: only the last 10 are retained.
+    deleted = await dbm.prune_events(conn, keep_recent=10)
+    assert deleted == 90
     remaining = await conn.fetchall("SELECT seq FROM events ORDER BY seq")
-    assert [r["seq"] for r in remaining] == list(range(61, 101))
-
-
-@pytest.mark.asyncio
-async def test_prune_events_never_crosses_resume_anchor(conn):
-    """An event above any agent cursor must survive (still needs replay)."""
-    bus = MessageBus(conn)
-    cursors = CursorStore(conn)
-    for i in range(50):
-        await bus.append_and_seq(Message.new("orchestration", "kernel_agent", "request", {"i": i}))
-    # Two agents; the laggard cursor (kernel=20) is the safe watermark.
-    await cursors.advance("orchestration", seq=50, msg_id="a")
-    await cursors.advance("kernel_agent", seq=20, msg_id="b")
-    await dbm.prune_events(conn, cursors, keep_recent=0)
-    rows = await conn.fetchall("SELECT MIN(seq) AS m FROM events")
-    # Nothing at/below the laggard's unprocessed frontier is removed.
-    assert int(rows[0]["m"]) == 21
-    replay = await bus.replay_for("kernel_agent", after_seq=20)
-    assert len(replay) == 30
+    assert [r["seq"] for r in remaining] == list(range(91, 101))
 
 
 # pruning must not delete a still-pending proposal
 @pytest.mark.asyncio
 async def test_prune_events_protects_pending_proposal(conn):
-    """A processed-but-undecided proposal survives pruning; once a verdict
-    targets it, it becomes prunable."""
+    """A pending proposal survives pruning; once a verdict targets it, it becomes prunable."""
     bus = MessageBus(conn)
-    cursors = CursorStore(conn)
-    # A proposal with no verdict yet.
     prop = Message.new("orchestration", "*", "proposal", {"action_name": "x"})
     await bus.append_and_seq(prop)
-    # Filler so the proposal is well below the recent window.
     for i in range(50):
         await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
-    await cursors.advance("orchestration", seq=100, msg_id="z")
 
-    # Pending proposal must survive even though it's processed + old.
-    await dbm.prune_events(conn, cursors, keep_recent=0)
+    await dbm.prune_events(conn, keep_recent=0)
     rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
     assert [r["msg_id"] for r in rows] == [prop.msg_id]
 
-    # Now a verdict decides it → it becomes prunable.
     await bus.append_and_seq(
         Message.new(
             "critic",
@@ -163,8 +131,7 @@ async def test_prune_events_protects_pending_proposal(conn):
             {"target_proposal_msg_id": prop.msg_id, "verdict": "approve"},
         )
     )
-    await cursors.advance("orchestration", seq=200, msg_id="z2")
-    await dbm.prune_events(conn, cursors, keep_recent=0)
+    await dbm.prune_events(conn, keep_recent=0)
     rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
     assert rows == []
 
@@ -236,11 +203,9 @@ async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
 @pytest.mark.asyncio
 async def test_run_db_retention_aggregates(conn):
     bus = MessageBus(conn)
-    cursors = CursorStore(conn)
     for i in range(40):
         await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
-    await cursors.advance("orchestration", seq=40, msg_id="z")
-    res = await dbm.run_db_retention(conn, cursors, events_keep_recent=5)
+    res = await dbm.run_db_retention(conn, events_keep_recent=5)
     assert res.events_deleted > 0
     assert res.total == res.events_deleted + res.tasks_deleted
 
@@ -363,7 +328,6 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
         for i in range(30):
             await c.bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
-        await c.cursors.advance("orchestration", seq=30, msg_id="m")
 
         # Off-cadence ticks are a no-op.
         assert await c._maybe_run_maintenance_tick(tick=7) is None

@@ -518,7 +518,7 @@ class ConversationCollaborator:
                         "will likely be cut by the deadline."
                     )
 
-        # Time budget for Robustness — fires deadline_imminent → delegate(report) wind-down.
+        # Time budget for Robustness — drives the deadline_imminent alert.
         if agent_name == "robustness" and self._run_deadline is not None and self._run_started_monotonic is not None:
             remaining_min = max(
                 0.0,
@@ -743,11 +743,10 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        # Full unread batch: events arriving in one tick must not be dropped.
         rendered = list(msgs)
-        # Durable at-least-once-until-decided delivery of proposals to the
-        # Critic: the inbox tail is lossy, so re-present every still-undecided
-        # proposal from the durable ``pending_proposals`` registry.
+        if msgs:
+            top = msgs[-1]
+            self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
         if agent_name == "critic":
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
@@ -762,17 +761,30 @@ class ConversationCollaborator:
 
         return "\n".join(sections)
 
+    async def _advance_rendered_cursor(self, agent_name: str) -> None:
+        """Advance an agent's read cursor to the last message its prompt rendered.
+
+        Args:
+            agent_name: The agent whose cursor to advance; a no-op when its
+                last composed prompt carried no new messages.
+        """
+        entry = self._coord._rendered_cursor.get(agent_name)
+        if entry is None:
+            return
+        seq, msg_id = entry
+        await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
+
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present.
 
-        The rendered tail can drop proposals that scrolled past the capped
-        window. Source the review set from the durable ``pending_proposals``
-        registry and merge any missing proposal messages into the rendered
-        window (deduped by ``msg_id``, re-sorted by ``seq`` so "newest last"
-        holds).
+        A rendered proposal whose verdict has not yet arrived will not appear in
+        the next inbox because the cursor has legitimately moved past it. Source
+        the review set from the durable ``pending_proposals`` registry and merge
+        any missing proposal messages into the rendered window (deduped by
+        ``msg_id``, re-sorted by ``seq`` so "newest last" holds).
 
         Args:
-            rendered: The tail-capped messages already selected for the inbox.
+            rendered: The messages selected for the inbox.
 
         Returns:
             The rendered list augmented with any undecided proposal messages

@@ -179,11 +179,12 @@ is controlled by `SGLANG_ROCM_EXTRA` (default `rocm720`) and
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
 workload skill's `install.sh`.
 
-Specialist subprocesses inherit only a minimal non-secret environment by
-default. If a deployment still relies on parent-process LLM key variables,
-custom Anthropic headers, or AWS Bedrock env vars for the `claude` CLI, set
-`HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1` explicitly, or configure credentials
-in the CLI's own settings before launching Hyperloom.
+Specialist subprocesses inherit a minimal environment including LLM provider
+credentials (`ANTHROPIC_API_KEY`, `LLM_GATEWAY_KEY`, AWS Bedrock vars, etc.)
+by default so the agent CLI can authenticate. Unrelated secrets such as GitHub
+and KB tokens are never forwarded. To suppress credential forwarding when the
+`claude` CLI is authenticated through its own config, set
+`HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0`.
 
 `.env` in the current workspace is the single source of truth; no extra script
 needs sourcing. Setup only needs to run again when changing the LLM provider,

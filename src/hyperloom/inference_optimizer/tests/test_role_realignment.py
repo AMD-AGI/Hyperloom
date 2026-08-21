@@ -51,7 +51,7 @@ def test_orchestration_prompt_includes_phase_contract(registry):
     assert "policy_denied" in text.lower()
 
 
-def test_orchestration_prompt_explains_kill_task_resource_lifetime(registry):
+def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=default_enabled_actions(no_kernel=False),
@@ -62,8 +62,7 @@ def test_orchestration_prompt_explains_kill_task_resource_lifetime(registry):
         rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
     )
 
-    # Detailed kill_task semantics moved to specialist_rescue.md reference doc.
-    assert "kill_task" in text
+    assert "kill_task" not in text
     assert "read_reference('specialist_rescue')" in text
 
 
