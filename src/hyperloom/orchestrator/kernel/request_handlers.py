@@ -2887,6 +2887,25 @@ _FMOE_UNTUNED_CSV_HEADER = (
     "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
 )
 
+#: forge wordings that still hand back a deployable env. ``partial_failure``
+#: means one tuner crashed while another delivered; ``partial_output`` means a
+#: tuner wrote fewer rows than it was given shapes for, and the rows it did
+#: write are usable. Bridging only ``candidate`` left both with no ``decision``
+#: at all, so a deployable artifact was never E2E-measured and the run read in
+#: the breakdown exactly like one that found nothing.
+_FORGE_DELIVERING_MICRO_DECISIONS = ("candidate", "partial_failure", "partial_output")
+
+#: forge wordings that carry nothing deployable. Each is a distinct outcome --
+#: a crash, a tuner that wrote zero rows, a partial run whose surviving tuners
+#: produced no env -- and none of them is the same event as an honest
+#: ``no_improvement``, which is why they reach the envelope as an error_class.
+_FORGE_BARREN_MICRO_DECISIONS = (
+    "failed",
+    "empty_output",
+    "partial_failure",
+    "partial_output",
+)
+
 
 def _write_fmoe_untuned_csv_from_log(
     server_log: str,
@@ -3973,10 +3992,26 @@ async def _run_forge_gemm_tuning(
         if reason:
             result["skip_reason"] = reason
 
-    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
-    # recommended_env becomes decision="KEEP" + extra_envs.
+    # A tuner that named its failure must be legible at the top level. The jsonl
+    # audit row already lifts this, but the breakdown and the optimization stack
+    # read the envelope, so a run where every tuner crashed reached them as
+    # ``status="failed"`` with two empty strings and no reason at all. Lifted
+    # before the bridge below so a specific class outranks the generic wording.
+    if not result.get("error_class"):
+        for _t in result.get("tuners_run") or []:
+            if isinstance(_t, dict) and _t.get("error_class"):
+                result["error_class"] = str(_t["error_class"])
+                break
+    if not result.get("error"):
+        for _t in result.get("tuners_run") or []:
+            if isinstance(_t, dict) and _t.get("error"):
+                result["error"] = str(_t["error"])
+                break
+
+    # Bridge forge schema → coordinator schema: a micro_decision that delivered a
+    # ``recommended_env`` becomes decision="KEEP" + extra_envs.
     micro = str(result.get("micro_decision") or "").strip().lower()
-    if micro == "candidate" and result.get("recommended_env"):
+    if micro in _FORGE_DELIVERING_MICRO_DECISIONS and result.get("recommended_env"):
         result.setdefault("decision", "KEEP")
         # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
         # source-layer snapshot): copy it into the serving aiter config dir,
@@ -4005,10 +4040,17 @@ async def _run_forge_gemm_tuning(
         # Micro-only result: E2E validation still needed.
         result.setdefault("requires_e2e_validation", True)
     elif micro in ("no_improvement", "skipped"):
+        # Ran, reached a verdict, found nothing. Deliberately left unadorned:
+        # the wordings below are only legible because this one is not.
         result.setdefault("decision", "REVERT")
-    elif micro == "failed":
+    elif micro in _FORGE_BARREN_MICRO_DECISIONS:
         result.setdefault("decision", "REVERT")
-        result.setdefault("status", "failed")
+        if micro == "failed":
+            result.setdefault("status", "failed")
+        # Without this the breakdown reads a crashed tuner, a run that wrote
+        # nothing, and a run that honestly found nothing as the same event --
+        # and forge coined these wordings precisely to separate them.
+        result.setdefault("error_class", f"forge_{micro}")
 
     return result
 

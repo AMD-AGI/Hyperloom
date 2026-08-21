@@ -1362,6 +1362,187 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] == "failed"
         assert result["backend"] == "forge"
 
+    # ---- forge wording -> coordinator decision ------------------------------
+    #
+    # forge reports seven micro_decision wordings; the bridge handled four. The
+    # three it missed left ``decision`` unset and ``status`` at "ok", which in the
+    # breakdown is indistinguishable from a genuine no_improvement -- the very
+    # distinction those wordings exist to draw.
+
+    @pytest.mark.asyncio
+    async def test_a_partial_run_that_delivered_an_env_is_still_a_candidate(
+        self, tmp_path, monkeypatch
+    ):
+        """``partial_failure`` with an env means some tuner delivered.
+
+        Gating the bridge on the word ``candidate`` alone dropped it on the floor:
+        no decision, no E2E validation, and a deployable artifact never measured.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
+        )
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps(
+                {
+                    "status": "ok",
+                    "micro_decision": "partial_failure",
+                    "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+                }
+            )
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "KEEP"
+        assert result["requires_e2e_validation"] is True
+        assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"}
+
+    @pytest.mark.asyncio
+    async def test_partial_output_with_an_env_is_a_candidate(self, tmp_path, monkeypatch):
+        """Fewer rows than shapes asked for, but the rows written are deployable."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
+        )
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps(
+                {
+                    "status": "ok",
+                    "micro_decision": "partial_output",
+                    "recommended_env": {"AITER_CONFIG_GEMM_BF16": "/ws/bf16.csv"},
+                }
+            )
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "KEEP"
+        assert result["requires_e2e_validation"] is True
+
+    @pytest.mark.asyncio
+    async def test_an_empty_run_is_reverted_and_says_so(self, tmp_path, monkeypatch):
+        """``empty_output`` must not read as a run that found nothing.
+
+        Writing zero rows and running to a genuine no-improvement verdict are
+        different outcomes; forge added the wording to keep them apart, so the
+        envelope has to carry it where the breakdown looks.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "empty_output"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert result["error_class"], "an empty run must name itself"
+        assert "empty" in result["error_class"]
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_no_improvement_stays_unadorned(self, tmp_path, monkeypatch):
+        """The distinction only works if the ordinary case stays ordinary."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert not result.get("error_class")
+
+    @pytest.mark.asyncio
+    async def test_a_tuner_error_class_reaches_the_envelope(self, tmp_path, monkeypatch):
+        """A crash named by a tuner must be visible at the top level.
+
+        The jsonl audit row already lifted it; the breakdown and the stack read
+        the envelope, so a run where every tuner crashed arrived there as
+        ``status="failed"`` with two empty strings and no reason at all.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps(
+                {
+                    "status": "failed",
+                    "micro_decision": "failed",
+                    "tuners_run": [
+                        {
+                            "tuner": "fmoe_ck",
+                            "status": "failed",
+                            "error_class": "codegen_unsupported_dtype",
+                            "error": "Unsupported data type combination",
+                        }
+                    ],
+                }
+            )
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["error_class"] == "codegen_unsupported_dtype"
+        assert "Unsupported data type" in str(result.get("error") or "")
+
+    @pytest.mark.asyncio
+    async def test_an_absent_micro_decision_is_left_alone(self, tmp_path, monkeypatch):
+        """No wording at all is not a verdict; the bridge must not invent one."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert "decision" not in result
+
     # ---- MoE runtime key: log -> CSV -> payload -> forge argv ---------------
     #
     # The reason this whole lane exists is that MoE tuning keyed on the config
