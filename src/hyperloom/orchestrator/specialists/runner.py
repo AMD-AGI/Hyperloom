@@ -619,6 +619,14 @@ class SpecialistRunner:
                 enablement_candidate_refs=tuple(
                     str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
                 ),
+                enablement_accepted_config=(
+                    {
+                        "extra_envs": dict(params.get("base_extra_envs") or {}),
+                        "extra_server_args": str(params.get("base_extra_args") or "").strip(),
+                    }
+                    if (params.get("base_extra_envs") or params.get("base_extra_args"))
+                    else {}
+                ),
                 gpu_type=str(params.get("gpu_type") or ""),
                 allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),
