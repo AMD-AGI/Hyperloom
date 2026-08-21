@@ -1715,6 +1715,34 @@ class TestForgeGemmHelperCoverage:
         assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
         assert values["q_type"] == "QuantType.per_1x32"
 
+    def test_the_token_column_comes_from_the_workload(self, tmp_path):
+        """``tokens`` arrives as forge's comma-separated string, not a list.
+
+        The handler builds it with ``_normalize_tokens``, which always returns a
+        string, while this signature said ``list[int]`` and the body iterated it.
+        A real multi-token workload therefore hit ``int(',')`` and a single-token
+        one silently wrote the digits as separate tokens -- rows the runtime can
+        never look up. Every existing case passed a list, so the tests agreed
+        with the annotation and not with the caller.
+        """
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        for tokens, expected in (
+            ("1,32,64", ["1", "32", "64"]),
+            ("64", ["64"]),
+            ([1, 32, 64], ["1", "32", "64"]),
+            ("", ["1"]),
+            ("  16 , 16 ,bad,-8, 0 ", ["16"]),
+        ):
+            csv_path, _report = krh._write_fmoe_untuned_csv_from_log(
+                str(log), tokens, tmp_path / f"ws_{str(tokens)[:12].strip()}"
+            )
+            assert csv_path, f"no CSV for tokens={tokens!r}"
+            rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
+            got = [r.split(",")[0] for r in rows[1:]]
+            assert got == expected, f"tokens={tokens!r} -> {got}"
+
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
         """Deriving the CSV is useless if the option never reaches forge."""
