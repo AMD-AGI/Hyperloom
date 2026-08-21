@@ -682,14 +682,6 @@ def _patch_source_diff(source: WarmReplayPatchSource) -> str:
     return source.path.read_text(encoding="utf-8", errors="replace")
 
 
-def _root_contains_patch_targets(root: Path, diffs: Sequence[str]) -> bool:
-    from hyperloom.orchestrator.specialists.patch_safety import patch_targets_missing
-
-    if not root.is_dir():
-        return False
-    return not any(patch_targets_missing(diff, root) for diff in diffs)
-
-
 def _warm_replay_patch_sources(
     patch_paths: Sequence[Path] | None,
     patch_entries: Iterable[Any] | None,
@@ -709,46 +701,38 @@ def _resolve_warm_replay_patch_root(
     allowlist: tuple[str, ...],
     missing_patch_reason: str,
     missing_allowlist_reason: str,
+    use_session_root: bool,
 ) -> WarmReplayRootResolution:
+    from hyperloom.orchestrator.specialists.patch_safety import (
+        resolve_patch_apply_root,
+    )
+
     diffs = [
         diff
         for diff in (_patch_source_diff(source) for source in patch_sources)
         if diff.strip()
     ]
-    env_root = resolve_session_framework_root()
-    if env_root and _root_contains_patch_targets(Path(env_root.rstrip("/")), diffs):
+    env_root = resolve_session_framework_root() if use_session_root else ""
+    resolution = resolve_patch_apply_root(
+        diffs,
+        explicit_root=Path(env_root.rstrip("/")) if env_root else None,
+        candidate_roots=tuple(Path(candidate.rstrip("/")) for candidate in allowlist),
+    )
+    if resolution.root is not None:
         return WarmReplayRootResolution(
-            root=_normalize_root(env_root),
-            source="env",
+            root=_normalize_root(str(resolution.root)),
+            source="env" if env_root else "allowlist",
             reason="",
-            allowlist=(),
+            allowlist=() if env_root else allowlist,
         )
-
-    # With no readable diff there is nothing to match a root against, so
-    # scanning the allowlist would pick an arbitrary tree. Only the env root,
-    # which the session declared, stays trustworthy here.
-    if not diffs:
-        return WarmReplayRootResolution(
-            root="",
-            source="",
-            reason=missing_patch_reason,
-            allowlist=allowlist,
-        )
-
-    for candidate in allowlist:
-        root = Path(candidate.rstrip("/"))
-        if _root_contains_patch_targets(root, diffs):
-            return WarmReplayRootResolution(
-                root=_normalize_root(str(root)),
-                source="allowlist",
-                reason="",
-                allowlist=allowlist,
-            )
-
+    reason = {
+        "patch_content_missing": missing_patch_reason,
+        "no_matching_root": missing_allowlist_reason,
+    }.get(resolution.reason, resolution.reason)
     return WarmReplayRootResolution(
         root="",
         source="",
-        reason=missing_allowlist_reason,
+        reason=reason,
         allowlist=allowlist,
     )
 
@@ -764,6 +748,7 @@ def resolve_warm_replay_framework_root(
         allowlist=_warm_replay_framework_patch_roots(),
         missing_patch_reason="active_framework_root_missing",
         missing_allowlist_reason="framework_patch_root_not_in_allowlist",
+        use_session_root=True,
     )
 
 
@@ -778,6 +763,7 @@ def resolve_warm_replay_kernel_root(
         allowlist=_warm_replay_kernel_patch_roots(),
         missing_patch_reason="active_kernel_patch_root_missing",
         missing_allowlist_reason="kernel_patch_root_not_in_allowlist",
+        use_session_root=True,
     )
 
 

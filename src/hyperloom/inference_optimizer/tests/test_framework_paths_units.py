@@ -833,7 +833,7 @@ class TestWarmReplayPatchRootResolution:
             f"{dynamic_root}/",
         )
 
-    def test_mismatched_env_root_falls_back_to_allowlist(
+    def test_mismatched_explicit_root_is_rejected(
         self,
         monkeypatch,
         tmp_path,
@@ -863,8 +863,9 @@ class TestWarmReplayPatchRootResolution:
 
         resolution = fp.resolve_warm_replay_framework_root(patch_paths=[patch])
 
-        assert resolution.root == f"{fallback_root}/"
-        assert resolution.source == "allowlist"
+        assert resolution.root == ""
+        assert resolution.source == ""
+        assert resolution.reason == "explicit_root_target_mismatch"
 
     def test_inline_patch_content_matches_allowlist_root(self, monkeypatch, tmp_path):
         """A legacy entry carrying only an inline diff still resolves a root."""

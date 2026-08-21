@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -99,6 +100,15 @@ class ParsedPatchTargets:
     @property
     def all(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys((*self.existing, *self.created)))
+
+
+@dataclass(frozen=True)
+class PatchRootResolution:
+    """One unambiguous checkout selected from Patch pre-image targets."""
+
+    root: Path | None
+    reason: str = ""
+    matches: tuple[Path, ...] = ()
 
 
 def _safe_patch_path(raw: str) -> str:
@@ -213,10 +223,15 @@ def patch_targets_missing(
     Returns:
         The raw pre-image token paths absent from ``root`` at every level.
     """
+    pairs = patch_file_targets(patch_text)
+    existing = [old for old, _new in pairs if old != _DEV_NULL]
+    if not pairs:
+        try:
+            existing = list(parse_patch_targets(patch_text).existing)
+        except ValueError:
+            return ["<invalid>"]
     missing: list[str] = []
-    for old, _new in patch_file_targets(patch_text):
-        if old == _DEV_NULL:
-            continue
+    for old in existing:
         found = False
         for lvl in strip_levels:
             try:
@@ -228,6 +243,69 @@ def patch_targets_missing(
         if not found:
             missing.append(old)
     return missing
+
+
+def resolve_patch_apply_root(
+    patch_texts: Sequence[str],
+    *,
+    explicit_root: Path | None,
+    candidate_roots: Sequence[Path] = (),
+) -> PatchRootResolution:
+    """Resolve one checkout under the shared Enablement/warm-replay rules.
+
+    An explicit root is authoritative and permits create-only diffs. Without
+    one, at least one pre-image must identify exactly one candidate root; zero
+    or multiple complete matches fail closed.
+    """
+    texts = tuple(str(text or "") for text in patch_texts if str(text or "").strip())
+    resolved_explicit: Path | None = None
+    if explicit_root is not None:
+        try:
+            resolved_explicit = Path(explicit_root).resolve()
+        except (OSError, RuntimeError):
+            return PatchRootResolution(None, "explicit_root_invalid")
+        if not resolved_explicit.is_dir():
+            return PatchRootResolution(None, "explicit_root_invalid")
+        if not texts:
+            return PatchRootResolution(resolved_explicit)
+
+    parsed: list[ParsedPatchTargets] = []
+    try:
+        parsed = [parse_patch_targets(text) for text in texts]
+    except ValueError:
+        return PatchRootResolution(None, "patch_targets_invalid")
+    if not parsed:
+        return PatchRootResolution(None, "patch_content_missing")
+
+    has_existing = any(targets.existing for targets in parsed)
+    if resolved_explicit is not None:
+        if any(patch_targets_missing(text, resolved_explicit) for text in texts):
+            return PatchRootResolution(None, "explicit_root_target_mismatch")
+        return PatchRootResolution(resolved_explicit)
+    if not has_existing:
+        return PatchRootResolution(None, "pure_create_requires_explicit_root")
+
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidate_roots:
+        try:
+            root = Path(candidate).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if root in seen or not root.is_dir():
+            continue
+        seen.add(root)
+        roots.append(root)
+    matches = tuple(
+        root
+        for root in roots
+        if not any(patch_targets_missing(text, root) for text in texts)
+    )
+    if not matches:
+        return PatchRootResolution(None, "no_matching_root")
+    if len(matches) > 1:
+        return PatchRootResolution(None, "ambiguous_root", matches)
+    return PatchRootResolution(matches[0], matches=matches)
 
 
 # Scope literal that triggers the cross-domain Critic rules. Duplicated from
@@ -484,6 +562,7 @@ def ground_patch_text(
     *,
     base_checkout: Path | None,
     candidate_roots: tuple[Path, ...] = (),
+    explicit_root: Path | None = None,
     git_timeout_sec: float = 30.0,
 ) -> PatchGroundingResult:
     """Validate + git-ground one patch.
@@ -501,6 +580,8 @@ def ground_patch_text(
             ``None`` to skip the ``git apply --check`` step.
         candidate_roots: Further checkouts to try when ``base_checkout`` does
             not hold the patch's targets.
+        explicit_root: Authoritative target checkout. Required for create-only
+            patches because no pre-image can identify a candidate.
         git_timeout_sec: Timeout for each ``git apply --check`` subprocess.
 
     Returns:
@@ -511,22 +592,25 @@ def ground_patch_text(
     escape = patch_escapes_tree(patch_text)
     if escape is not None:
         return PatchGroundingResult(GROUND_PATH_ESCAPE, f"path={escape!r}")
-    if base_checkout is None or not Path(base_checkout).is_dir():
+    candidates = tuple(
+        root
+        for root in ((base_checkout,) if base_checkout is not None else ())
+        + tuple(candidate_roots)
+        if Path(root).is_dir()
+    )
+    if explicit_root is None and not candidates:
         return PatchGroundingResult(GROUND_UNCHECKED, "no base checkout")
-
-    base = Path(base_checkout)
-    missing = patch_targets_missing(patch_text, base)
-    root = base
-    if missing:
-        for alt in candidate_roots:
-            if not patch_targets_missing(patch_text, alt):
-                root = alt
-                break
-        else:
-            return PatchGroundingResult(
-                GROUND_MISSING_TARGET,
-                "target file(s) not in any framework tree: " + ", ".join(missing[:5]),
-            )
+    resolution = resolve_patch_apply_root(
+        (patch_text,),
+        explicit_root=explicit_root,
+        candidate_roots=candidates,
+    )
+    if resolution.root is None:
+        detail = resolution.reason
+        if resolution.matches:
+            detail += ": " + ", ".join(str(root) for root in resolution.matches)
+        return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
+    root = resolution.root
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "apply", "--check", "-"],
@@ -653,8 +737,9 @@ def vet_patches(
     *,
     base_checkout: Path | None,
     candidate_roots: tuple[Path, ...] = (),
+    explicit_root: Path | None = None,
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str]]:
-    """Ground each patch file; drop clear garbage (non-diff / path escape).
+    """Ground one Patch set against the same resolved checkout.
 
     Stale-but-valid patches are kept (integrate_patch + Critic adjudicate)
     with a grounding note.
@@ -665,6 +750,7 @@ def vet_patches(
             ``None``.
         candidate_roots: Further checkouts to try for patches whose targets
             are absent from ``base_checkout``.
+        explicit_root: Authoritative target checkout, when declared.
 
     Returns:
         A ``(kept_paths, dropped_records, grounding_by_path)`` tuple.
@@ -672,13 +758,70 @@ def vet_patches(
     kept: list[str] = []
     dropped: list[dict[str, str]] = []
     grounding: dict[str, str] = {}
+    readable: list[tuple[str, str]] = []
     for path in patch_paths:
         try:
             text = Path(path).read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             dropped.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
             continue
-        res = ground_patch_text(text, base_checkout=base_checkout, candidate_roots=candidate_roots)
+        if not is_unified_diff(text):
+            dropped.append(
+                {
+                    "path": path,
+                    "verdict": GROUND_NOT_DIFF,
+                    "detail": "no unified-diff hunk header",
+                }
+            )
+            grounding[path] = GROUND_NOT_DIFF
+            continue
+        escape = patch_escapes_tree(text)
+        if escape is not None:
+            dropped.append(
+                {
+                    "path": path,
+                    "verdict": GROUND_PATH_ESCAPE,
+                    "detail": f"path={escape!r}",
+                }
+            )
+            grounding[path] = GROUND_PATH_ESCAPE
+            continue
+        readable.append((path, text))
+
+    if not readable:
+        return kept, dropped, grounding
+    candidates = tuple(
+        root
+        for root in ((base_checkout,) if base_checkout is not None else ())
+        + tuple(candidate_roots)
+        if Path(root).is_dir()
+    )
+    resolution = resolve_patch_apply_root(
+        [text for _path, text in readable],
+        explicit_root=explicit_root,
+        candidate_roots=candidates,
+    )
+    if resolution.root is None:
+        detail = resolution.reason
+        if resolution.matches:
+            detail += ": " + ", ".join(str(root) for root in resolution.matches)
+        for path, _text in readable:
+            grounding[path] = GROUND_MISSING_TARGET
+            dropped.append(
+                {
+                    "path": path,
+                    "verdict": GROUND_MISSING_TARGET,
+                    "detail": detail,
+                }
+            )
+        return kept, dropped, grounding
+
+    for path, text in readable:
+        res = ground_patch_text(
+            text,
+            base_checkout=None,
+            explicit_root=resolution.root,
+        )
         grounding[path] = res.verdict
         if res.is_garbage:
             dropped.append({"path": path, "verdict": res.verdict, "detail": res.detail})
@@ -701,6 +844,7 @@ __all__ = [
     "GROUND_STALE",
     "GROUND_UNCHECKED",
     "PatchGroundingResult",
+    "PatchRootResolution",
     "PatchSafetyReport",
     "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
@@ -714,6 +858,7 @@ __all__ = [
     "patch_file_targets",
     "patch_targets_missing",
     "quantitative_claim_rule_descriptor",
+    "resolve_patch_apply_root",
     "scan_numeric_claims",
     "strip_forbidden_proposal_fields",
     "vet_patches",

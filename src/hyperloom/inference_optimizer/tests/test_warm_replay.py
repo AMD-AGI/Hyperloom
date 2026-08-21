@@ -203,10 +203,19 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
         "framework/overlays/000001/00-framework.patch",
         "explore/overlays/000002/00-explore.patch",
     ]
-    for ref in refs:
+    targets = ["src/framework_fix.py", "src/explore_fix.py"]
+    for ref, target in zip(refs, targets, strict=True):
         patch = warm_dir / "files" / ref
         patch.parent.mkdir(parents=True, exist_ok=True)
-        patch.write_text(f"diff --git a/{ref} b/{ref}\n", encoding="utf-8")
+        patch.write_text(
+            f"diff --git a/{target} b/{target}\n"
+            f"--- a/{target}\n"
+            f"+++ b/{target}\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n",
+            encoding="utf-8",
+        )
     table_ref = "kernel/gemm/table.json"
     table = warm_dir / "files" / table_ref
     table.parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +264,10 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     monkeypatch.setenv("KB_WARM_START_DIR", str(warm_dir))
     framework_root = tmp_path / "framework"
     framework_root.mkdir()
+    for target in targets:
+        path = framework_root / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr(
         "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
         lambda: str(framework_root),
@@ -539,9 +552,7 @@ async def test_current_recipe_patch_skips_without_active_framework_root(
     assert task is None
     assert prepared == 0
     assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
-    assert coord.shared_state.warm_replay_outcome["reason"] == (
-        "framework_patch_root_not_in_allowlist"
-    )
+    assert coord.shared_state.warm_replay_outcome["reason"] == "patch_targets_invalid"
     assert coord.shared_state.warm_replay_outcome["framework_patch_root_allowlist"]
 
 
@@ -1230,7 +1241,7 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     assert targets == [str(existing), str(added)]
 
 
-def test_kernel_target_falls_back_when_framework_env_does_not_match(
+def test_kernel_target_rejects_stale_root_when_explicit_root_does_not_match(
     tmp_path,
     monkeypatch,
 ):
@@ -1259,10 +1270,8 @@ def test_kernel_target_falls_back_when_framework_env_does_not_match(
     )
 
     entry = {"patch_path": str(patch)}
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [
-        str(stale_target)
-    ]
-    assert "resolution_error" not in entry
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert entry["resolution_reason"] == "explicit_root_target_mismatch"
 
 
 def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monkeypatch):
@@ -1282,7 +1291,7 @@ def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monke
 
     entry = {"patch_path": str(patch)}
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
-    assert entry["resolution_reason"] == "kernel_patch_root_not_in_allowlist"
+    assert entry["resolution_reason"] == "pure_create_requires_explicit_root"
     assert "allowlist=" in entry["resolution_error"]
 
 

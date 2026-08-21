@@ -24,7 +24,11 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
-from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
+from ...specialists.patch_safety import (
+    patch_file_targets,
+    patch_targets_missing,
+    resolve_patch_apply_root,
+)
 from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
@@ -303,104 +307,85 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
-    """True when *every* supplied patch has all its modify/delete targets
-    present under ``root`` (at some ``-p`` strip level).
-
-    Returns False if any patch is unreadable or has a missing target here.
-    """
-    if not patch_paths:
-        return False
-    for patch in patch_paths:
-        try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False
-        if patch_targets_missing(text, root):
-            return False
-    return True
-
-
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
+    patch_texts: list[str] | None = None,
 ) -> Path | None:
-    """Pick the framework source root for patches.
-
-    Precedence: explicit param (must lie under a trusted installed source
-    scope) → first source root whose tree
-    actually contains the patch targets (target-aware: a ``vllm/...`` patch must
-    apply under the vllm root, not the first allowlist entry which is ``aiter``)
-    → the tree this session was pointed at → first existing git root → first
-    existing dir. None when nothing resolves.
-
-    The target-aware match is all-or-nothing across the patch set, so one path
-    that does not resolve sends the whole candidate to the next choice. That
-    used to be the head of the allowlist, which is ``aiter`` regardless of what
-    the session is optimising — patches naming the real tree's files then failed
-    to apply and the candidate was written off as ``rejected_apply_fail`` with no
-    hint that it had been aimed at an unrelated repository. Asking the session
-    which tree it is optimising keeps the failure honest: the patch is then
-    rejected by the tree it was written against, which is a fact about the patch.
-
-    Args:
-        explicit: Explicit framework-root override, or ``None`` to use the
-        source scope. Overrides outside the trusted scope are rejected.
-        patch_paths: Patch target paths used to pick the allowlist root whose
-            tree actually contains them.
-
-    Returns:
-        The resolved framework source root, or ``None`` when nothing resolves.
-    """
+    """Pick one unambiguous framework root under the shared Patch rules."""
+    roots = [Path(root) for root in resolve_source_file_allowlist()]
+    explicit_path: Path | None = None
     if explicit:
         try:
-            p = Path(explicit).resolve()
+            explicit_path = Path(explicit).resolve()
         except (OSError, RuntimeError):
             log.warning(
                 "integrate_patch: framework_source_root override %r could not be resolved",
                 explicit,
             )
             return None
-        if not p.is_dir():
+        if not explicit_path.is_dir():
             log.warning(
                 "integrate_patch: framework_source_root override %r does not exist",
                 explicit,
             )
             return None
-        for r in resolve_source_file_allowlist():
+        for root_value in roots:
             try:
-                root = Path(r).resolve()
+                root = root_value.resolve()
             except (OSError, RuntimeError):
                 continue
-            if _is_within(p, root):
-                return p
-        log.warning(
-            "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
-            explicit,
+            if _is_within(explicit_path, root):
+                break
+        else:
+            log.warning(
+                "integrate_patch: framework_source_root override %r rejected "
+                "(outside trusted source scope)",
+                explicit,
+            )
+            return None
+
+    texts = [str(text) for text in (patch_texts or []) if str(text).strip()]
+    for patch in patch_paths or []:
+        try:
+            texts.append(patch.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    has_patch_input = bool(patch_paths or patch_texts)
+    if has_patch_input:
+        session_root = resolve_session_framework_root()
+        candidates = [
+            *roots,
+            *((Path(session_root),) if session_root else ()),
+        ]
+        resolution = resolve_patch_apply_root(
+            texts,
+            explicit_root=explicit_path,
+            candidate_roots=candidates,
         )
-        return None
-    roots = [Path(r) for r in resolve_source_file_allowlist()]
-    # Target-aware: prefer the root that actually holds the patch's targets.
-    if patch_paths:
-        for p in roots:
-            if p.is_dir() and _root_contains_patch_targets(p, patch_paths):
-                return p
+        if resolution.root is None:
+            log.warning(
+                "integrate_patch: Patch root resolution rejected: %s%s",
+                resolution.reason,
+                (
+                    f" matches={[str(root) for root in resolution.matches]!r}"
+                    if resolution.matches
+                    else ""
+                ),
+            )
+        return resolution.root
+
+    if explicit_path is not None:
+        return explicit_path
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
-        if patch_paths:
-            log.warning(
-                "integrate_patch: no source root holds every patch target; "
-                "applying against the session's framework tree %s",
-                session_root,
-            )
         return Path(session_root)
-    for p in roots:
-        if p.is_dir() and (p / ".git").exists():
-            return p
-    # Last resort: a non-git dir.
-    for p in roots:
-        if p.is_dir():
-            return p
+    for root in roots:
+        if root.is_dir() and (root / ".git").exists():
+            return root
+    for root in roots:
+        if root.is_dir():
+            return root
     return None
 
 
@@ -2303,11 +2288,21 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                _error_class = "framework_source_root_rejected"
-                _error = (
-                    f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured trusted source scope"
+                explicit_path = Path(explicit_framework_root)
+                missing_records = (
+                    _preflight_missing_targets(explicit_path, patch_paths)
+                    if explicit_path.is_dir()
+                    else []
                 )
+                if missing_records:
+                    _error_class = "patch_target_missing"
+                    _error = missing_records
+                else:
+                    _error_class = "framework_source_root_rejected"
+                    _error = (
+                        f"framework_source_root {explicit_framework_root!r} is not "
+                        "under the configured trusted source scope"
+                    )
             else:
                 _error_class = "no_framework_agent_root"
                 _error = (
@@ -2327,6 +2322,12 @@ class IntegratePatchExecutor:
                 "retry_feedback": [],
                 "prior_patches": [str(p) for p in patch_paths],
             }
+            if _error_class == "patch_target_missing":
+                _early["advisory"] = (
+                    "patch target file(s) absent from framework_source_root "
+                    f"{explicit_framework_root}; author patches only against files "
+                    "that exist in the installed framework tree."
+                )
             if params.get("enablement"):
                 _early["enablement"] = True
             return _early
