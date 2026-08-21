@@ -209,7 +209,7 @@ def test_successful_grep_replaces_a_prior_rejection_method(monkeypatch):
     )
     item = {"name": "k", "source_file": "Not found", "duration_us": 1.0}
 
-    got = tl._finalize_candidates([item], allow_model_tiers=False)[0]
+    got = tl._finalize_candidates([item])[0]
 
     assert got["source_file"] == "/repo/pkg/kernel.py"
     assert got["source_resolution_method"] == "name_grep"
@@ -468,7 +468,6 @@ def test_trace_launcher_caller_does_not_override_grep_definition(
     got = tl._finalize_candidates(
         [_wiring_candidate()],
         trace_files=[_wiring_trace(tmp_path, f"{launcher}(42): launch")],
-        allow_model_tiers=False,
     )[0]
 
     assert got["source_file"] == definition
@@ -479,28 +478,26 @@ def test_trace_launcher_caller_does_not_override_grep_definition(
     assert "trace launcher differs from grep source" in got["source_resolution_reason"]
 
 
-def test_unconfirmed_trace_launcher_continues_to_model_fallback(
+def test_unconfirmed_trace_launcher_leaves_the_source_empty(
     monkeypatch,
     tmp_path,
 ):
-    """An unconfirmed launcher must leave source empty for the next tier."""
-    fallback_calls = []
+    """An unconfirmed launcher is evidence, never an attribution.
 
-    def _record_fallback(item):
-        """Record that finalization reached the model fallback tier."""
-        fallback_calls.append(item["name"])
-
+    Finalization stops here rather than guessing from the symbol; the
+    whole-table review that follows can weigh the blank against the launcher
+    frame and the rest of the table.
+    """
     launcher = "/repo/model/launcher.py"
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
-    monkeypatch.setattr(tl, "_apply_llm_source_fallback", _record_fallback)
 
     got = tl._finalize_candidates(
         [_wiring_candidate()],
         trace_files=[_wiring_trace(tmp_path, f"{launcher}(42): launch")],
     )[0]
 
-    assert fallback_calls == [got["name"]]
     assert got["source_file"] == ""
+    assert got["reusable_native_kernel"] is False
     assert got["trace_launcher_file"] == launcher
     assert got.get("source_resolution_method") != "trace_python_stack"
     assert "trace launcher unconfirmed by name grep" in got["source_resolution_reason"]
@@ -522,19 +519,14 @@ def test_wiring_without_trace_files_falls_back_quietly(tmp_path):
     assert "trace_resolver_error" not in str(got.get("source_resolution_reason", ""))
 
 
-def test_deterministic_finalization_never_calls_model_tiers(
-    monkeypatch,
-    tmp_path,
-):
-    """The deterministic route's no-LLM contract is enforced below the CLI."""
+def test_finalization_never_calls_a_model(monkeypatch, tmp_path):
+    """Source resolution is wholly deterministic; review is a later stage.
+
+    Nothing under ``_finalize_candidates`` may reach a provider, so the
+    deterministic route gets its no-LLM guarantee from the code rather than
+    from a flag it has to remember to pass.
+    """
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
-
-    def _model_called(*_args, **_kwargs):
-        """Fail if either model tier is reached."""
-        raise AssertionError("deterministic route called a model tier")
-
-    monkeypatch.setattr(tl, "_apply_llm_source_fallback", _model_called)
-    monkeypatch.setattr(tl, "_review_source_resolution", _model_called)
     artifact = tmp_path / "kernel_source_resolution.json"
     item = {
         "name": "zz_no_source_kernel",
@@ -542,13 +534,9 @@ def test_deterministic_finalization_never_calls_model_tiers(
         "duration_us": 100.0,
         "gpu_pct": 10.0,
     }
-    got = tl._finalize_candidates(
-        [item],
-        source_resolution_out=artifact,
-        allow_model_tiers=False,
-    )[0]
+    got = tl._finalize_candidates([item], source_resolution_out=artifact)[0]
     assert got["source_file"] == ""
-    assert "deterministic route" in got["source_resolution_reason"]
+    assert got["skip_reason"] == "source file not resolved"
     assert artifact.is_file()
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     assert "llm_audit" not in doc
