@@ -689,6 +689,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # main-flow rebench; kept OUT of current_best / optimization_stack / the
     # headline gain until validated. Cleared once promoted from a measured rebench.
     geak_pending: dict[str, Any] = field(default_factory=dict)
+    # What ``geak_pending`` held once the rebench settled it, plus the measured
+    # outcome. Every resolution path clears the pending record, so without this
+    # the self-reported figures and the basis they were taken on are gone by
+    # the time anything reads the session, leaving the gap between GEAK's claim
+    # and the measurement unexplainable.
+    geak_resolved: dict[str, Any] = field(default_factory=dict)
     # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
     stop_reason: str = ""

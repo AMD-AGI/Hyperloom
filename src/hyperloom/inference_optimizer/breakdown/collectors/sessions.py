@@ -1293,6 +1293,13 @@ def collect_final(
         # main-flow rebench; surfaced as an audit-only note and EXCLUDED from the
         # headline gain. Empty on native/validated sessions.
         "geak_pending": (dict(state.get("geak_pending") or {}) if isinstance(state.get("geak_pending"), dict) else {}),
+        # The same candidate after the rebench settled it: GEAK's self-reported
+        # figures and measurement basis kept beside the measured outcome, which
+        # is what makes the two numbers reconcilable. Empty until a rebench
+        # resolves the candidate, and on sessions GEAK never engaged.
+        "geak_resolved": (
+            dict(state.get("geak_resolved") or {}) if isinstance(state.get("geak_resolved"), dict) else {}
+        ),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation": stack_len > val_stack_len > 0,

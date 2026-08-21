@@ -55,6 +55,25 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 # pending revalidation while the enqueue is in flight.
 _GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
 
+# Keys copied verbatim out of GEAK's ``alignment_metrics``. The four speedups
+# are each a ratio against a baseline the reader cannot see, so the raw tok/s
+# travel with them: ``orchestrator_cold_baseline_tok_s`` is the same figure the
+# rebench measures against, which makes its distance from
+# ``geak_cold_baseline_tok_s`` the cross-harness term itself rather than an
+# inference about one.
+_GEAK_ALIGNMENT_KEYS: tuple[str, ...] = (
+    "hot_geak_speedup",
+    "cold_geak_speedup",
+    "hot_speedup",
+    "cold_speedup",
+    "geak_hot_baseline_tok_s",
+    "geak_hot_final_tok_s",
+    "geak_cold_baseline_tok_s",
+    "geak_cold_final_tok_s",
+    "orchestrator_hot_baseline_tok_s",
+    "orchestrator_cold_baseline_tok_s",
+)
+
 # Which table each aiter config env var is resolved under at serving time. Two
 # callers need it: the merge step, which has to find the runtime table to merge
 # our candidate into, and the apply check, which has to recognise our artifact
@@ -1285,7 +1304,6 @@ class KernelPhase(PhaseHandler):
         accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         base = float(self.shared_state.baseline_tput or 0.0)
         self_gain = ((new_tput - base) / base * 100.0) if base > 0 else None
-        am = result.get("alignment_metrics") or {}
         self.shared_state.geak_pending = {
             "status": "awaiting_rebench",
             # Audit-only self-reported numbers (not the headline until rebench).
@@ -1300,6 +1318,7 @@ class KernelPhase(PhaseHandler):
             # pending record, so a later promotion can name what it adopted
             # without re-reading result.json.
             "accepted_kernels": result.get("accepted_kernels") or [],
+            "accepted_heads": result.get("accepted_heads") or [],
             "geak_status": str(result.get("status") or ""),
             "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
             "final_overlay": result.get("final_overlay") or "",
@@ -1307,14 +1326,7 @@ class KernelPhase(PhaseHandler):
             "bench_script": result.get("bench_script"),
             "eval_dir": result.get("eval_dir"),
             # GEAK's own within-harness speedups, for the report's audit cross-check.
-            "alignment": {
-                "hot_geak_speedup": am.get("hot_geak_speedup"),
-                "cold_geak_speedup": am.get("cold_geak_speedup"),
-                "hot_speedup": am.get("hot_speedup"),
-                "cold_speedup": am.get("cold_speedup"),
-                "final_basis": am.get("final_basis") or result.get("final_throughput_basis"),
-                "geak_throughput_speedup": result.get("throughput_speedup"),
-            },
+            "alignment": self._geak_alignment_snapshot(result),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
         # Surface a large cross-harness measurement divergence as a warning only.
@@ -1332,6 +1344,108 @@ class KernelPhase(PhaseHandler):
                 float(mdiv),
                 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
             )
+
+    @staticmethod
+    def _geak_alignment_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+        """Copy GEAK's measurement basis out of ``result.json``.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+
+        Returns:
+            dict[str, Any]: The keys in :data:`_GEAK_ALIGNMENT_KEYS` plus the
+            basis GEAK promoted on and its own headline speedup. A value is
+            ``None`` where GEAK did not measure that regime, which is itself
+            the answer to why a cross-harness ratio is missing.
+        """
+        am = result.get("alignment_metrics")
+        if not isinstance(am, Mapping):
+            am = {}
+        snapshot: dict[str, Any] = {key: am.get(key) for key in _GEAK_ALIGNMENT_KEYS}
+        snapshot["final_basis"] = am.get("final_basis") or result.get("final_throughput_basis")
+        snapshot["geak_throughput_speedup"] = result.get("throughput_speedup")
+        return snapshot
+
+    def _record_geak_resolution(
+        self,
+        result: dict[str, Any],
+        *,
+        outcome: str,
+        measured_tput: float | None,
+        provenance: str,
+        reason: str = "",
+    ) -> None:
+        """Keep the candidate's own numbers past the point ``geak_pending`` is dropped.
+
+        ``geak_pending`` is the only place GEAK's self-reported figures and the
+        basis it measured them on survive, and every resolution path empties
+        it. What reached the breakdown afterwards was a measured gain beside a
+        self-reported one with nothing to account for the distance between
+        them. Writing both sides plus the basis here — at the same point the
+        pending record is cleared — is what makes that distance attributable
+        rather than merely visible.
+
+        The pending record is preferred over ``result`` for every figure it
+        holds. ``geak_result`` is overwritten in place by whatever GEAK ran
+        last, so by the time a rebench settles it can be an error stub with no
+        ``alignment_metrics`` left, while the pending record still carries the
+        snapshot taken when the candidate was accepted.
+
+        Args:
+            result: GEAK's ``result.json`` payload, used where the pending
+                record is missing or was never written.
+            outcome: ``promoted`` when the rebench wrote the headline,
+                otherwise why the candidate was let go.
+            measured_tput: The rebench measurement, when one was taken.
+            provenance: Which validation path produced the outcome.
+            reason: Free-text detail behind a non-promoted outcome.
+        """
+        pending = self.shared_state.geak_pending
+        pending = dict(pending) if isinstance(pending, Mapping) else {}
+        if not isinstance(result, Mapping):
+            result = {}
+        baseline = float(self.shared_state.baseline_tput or 0.0)
+        try:
+            self_tput = float(
+                pending.get("self_reported_tput") or result.get("final_throughput_tok_s") or 0.0
+            )
+        except (TypeError, ValueError):
+            self_tput = 0.0
+        self_gain = pending.get("self_reported_gain_pct")
+        if self_gain is None and baseline > 0 and self_tput > 0:
+            self_gain = (self_tput - baseline) / baseline * 100.0
+        measured_gain = None
+        if measured_tput and baseline > 0:
+            measured_gain = (measured_tput - baseline) / baseline * 100.0
+        alignment = pending.get("alignment")
+        if not isinstance(alignment, Mapping) or not alignment:
+            alignment = self._geak_alignment_snapshot(result)
+        self.shared_state.geak_resolved = {
+            "outcome": outcome,
+            "reason": reason,
+            "provenance": provenance,
+            # The denominator both gains are taken against, so neither has to
+            # be trusted on its label alone.
+            "baseline_tput": baseline or None,
+            "measured_tput": measured_tput,
+            "measured_gain_pct": measured_gain,
+            "self_reported_tput": self_tput or None,
+            "self_reported_gain_pct": self_gain,
+            "self_reported_speedup": (
+                pending.get("self_reported_speedup") or result.get("throughput_speedup")
+            ),
+            "self_reported_basis": (
+                pending.get("self_reported_basis") or result.get("final_throughput_basis")
+            ),
+            # GEAK's self-report, unconditionally: the stack entry carries these
+            # only when the overlay was proven loaded, which is the right bar
+            # for crediting a kernel but the wrong one for showing what GEAK
+            # claimed.
+            "accepted_heads": (pending.get("accepted_heads") or result.get("accepted_heads") or []),
+            "alignment": dict(alignment),
+            "eval_dir": pending.get("eval_dir") or result.get("eval_dir"),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
 
     @staticmethod
     def _geak_stack_entry_extra(
@@ -1447,6 +1561,13 @@ class KernelPhase(PhaseHandler):
                     "geak v4 final validation rejection recording failed",
                     exc_info=True,
                 )
+            self._record_geak_resolution(
+                result,
+                outcome="rejected",
+                measured_tput=measured,
+                provenance="geak_promote_rejected",
+                reason="rebench_did_not_beat_current_best",
+            )
             self.shared_state.geak_pending = {}
             self.shared_state.resume_pending_revalidation = False
             return
@@ -1481,6 +1602,12 @@ class KernelPhase(PhaseHandler):
                 measured,
                 source="geak_e2e_promote",
             )
+        self._record_geak_resolution(
+            result,
+            outcome="promoted",
+            measured_tput=measured,
+            provenance=provenance,
+        )
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
         try:
