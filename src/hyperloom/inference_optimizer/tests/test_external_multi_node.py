@@ -906,6 +906,20 @@ def test_resume_needs_a_cluster_that_still_serves(
         last_restart_ep=1,
         last_restart_pd_mode="aggregated",
         last_restart_extra_args="",
+        # The resume fast path matches on the whole topology record, so seeding
+        # the per-field keys alone is not a prior launch it will recognise.
+        # Spelled out rather than built from the helper: changing what the
+        # fingerprint covers changes which restarts may resume, and that should
+        # break this test rather than silently follow it.
+        last_restart_topology={
+            "framework": "sglang",
+            "model": "/models/test",
+            "tp": 8,
+            "ep": 1,
+            "nnodes": 2,
+            "pd_mode": "aggregated",
+            "extra_args": "",
+        },
     )
 
     submitted: list[str] = []
