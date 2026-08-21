@@ -452,10 +452,12 @@ def _is_split_chunk(path: Path, root: Path) -> bool:
 def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     """Return annotated ``*.trace.json.gz`` files under ``trace_dir``.
 
-    Excludes capture sidecars under ``capture_traces/`` (see
-    :func:`_is_capture_trace`) so a vLLM ``graph_capture_*.pt.trace.json.gz`` is
-    never promoted as the primary annotated trace, and steady-state chunks under
-    ``trace_split/`` for the same reason.
+    Excludes CUDA-graph capture sidecars (see :func:`_is_capture_trace`, which
+    matches them by shape rather than by one directory name) so a vLLM
+    ``graph_capture_*.pt.trace.json.gz`` or an unpatched SGLang's
+    ``graph_capture_profile/cuda_graph_capture-*`` is never promoted as the
+    primary annotated trace, and steady-state chunks under ``trace_split/`` for
+    the same reason.
 
     Ordered largest first. Consumers fall back to ``trace_files[0]`` when
     ``main_trace_path`` is absent, and at that point a 938-byte chunk and a
@@ -479,14 +481,15 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
 def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     """Return CUDA-graph capture sidecars under ``trace_dir`` (fallback only).
 
-    Anything under a ``capture_traces/`` directory, regardless of name — both
-    SGLang ``bs_*`` and vLLM ``graph_capture_*`` sidecars.
+    Whatever :func:`_is_capture_trace` classifies as a sidecar: SGLang ``bs_*``
+    under ``capture_traces/``, vLLM ``graph_capture_*``, and an unpatched
+    SGLang's ``graph_capture_profile/cuda_graph_capture-*``.
 
     Args:
         trace_dir: The directory to scan recursively.
 
     Returns:
-        Sorted capture sidecar paths found under ``capture_traces/``.
+        Sorted capture sidecar paths found under ``trace_dir``.
     """
     return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p, trace_dir))
 

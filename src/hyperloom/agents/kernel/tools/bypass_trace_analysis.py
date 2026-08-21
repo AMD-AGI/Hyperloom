@@ -49,7 +49,6 @@ try:
     from hyperloom.common.provenance import build_provenance as _shared_build_provenance
 except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
     _shared_build_provenance = None
-from _capture_shapes import CAPTURE_FRAGMENT_RE as _shared_capture_fragment_re  # noqa: E402
 from _idle_gate import (  # noqa: E402
     build_graph_under_recorded_warning,
     build_high_idle_warning,
@@ -204,15 +203,22 @@ _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
 #: ``graph_capture_rank_*`` files whose batch/mode live in execution_details.json.
-#: Unanchored because an unpatched SGLang prefixes the runner name, as in
-#: ``DecodeCudaGraphRunner_bs_104_rank0``; an anchored match fell through to the
-#: bare stem and lost the batch identity the manifest dedups on.
+#: Searched rather than matched from the start: an SGLang without the profiler
+#: patch prefixes the runner name, as in ``DecodeCudaGraphRunner_bs_104_rank0``,
+#: and an anchored read falls through to the bare stem -- which differs per rank,
+#: so the label dedup below stops collapsing the ranks of one batch.
 _VARIANT_RE = re.compile(r"(bs_\d+)", re.IGNORECASE)
-#: Which files count as capture shards worth indexing. Shared with the ranking
-#: and preflight classifiers rather than re-spelled here: the local copy this
-#: replaced was start-anchored, so an unpatched SGLang's
-#: ``cuda_graph_capture-*`` shard was skipped and its shapes never indexed.
-_CAPTURE_FILE_RE = _shared_capture_fragment_re
+#: Which files carry an indexable per-variant shape. Deliberately NOT the shared
+#: ``_capture_shapes`` classifier: that one answers "is this a sidecar rather
+#: than a workload trace", which is a wider question than this one. A
+#: whole-capture-per-rank file such as an unpatched SGLang's
+#: ``cuda_graph_capture-<runner>-TP-<n>`` is certainly a sidecar, but it holds
+#: every batch size at once and carries no variant identity, so admitting it
+#: mints one bogus variant per rank -- TP=8 would inflate ``variant_count`` by
+#: eight shape-identical entries and defeat the dedup a few lines down. Admit a
+#: ``bs_<batch>`` token anywhere (both SGLang layouts) or the vLLM prefix whose
+#: batch/mode arrive via execution_details.json.
+_CAPTURE_FILE_RE = re.compile(r"bs_\d+|\Agraph_capture", re.IGNORECASE)
 #: Optional cap on how many capture files to index (0 = all). Logged when hit.
 _MAX_CAPTURES_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES"
 
@@ -271,8 +277,6 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
             continue
         for cand in _reader._trace_candidates(root):
             name = cand.name
-            # ``search``: the shared pattern anchors only its ``bs_<digits>``
-            # alternative, so ``graph_capture`` still matches mid-name.
             if not _CAPTURE_FILE_RE.search(name):
                 continue
             key = str(cand.resolve())
@@ -282,7 +286,11 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
             pdir = cand.parent
             if pdir not in exec_cache:
                 exec_cache[pdir] = _load_execution_details(pdir)
-            if "graph_capture" in name.lower():
+            # vLLM only: its shards are named ``graph_capture_*`` and keep
+            # batch/mode in execution_details.json. An SGLang name that merely
+            # *contains* the token writes no such file, so routing it here would
+            # yield bs=None and fall back to the per-rank stem.
+            if name.lower().startswith("graph_capture"):
                 meta = exec_cache[pdir].get(name, {})
                 bs = meta.get("batch_size")
                 mode = meta.get("mode")
@@ -292,8 +300,8 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
                     label = f"bs_{bs}_{str(mode).lower()}" if mode else f"bs_{bs}"
                 else:
                     label = cand.stem
-            else:  # sglang bs_<batch>_rank<n>
-                m = _VARIANT_RE.match(name)
+            else:  # sglang bs_<batch>_rank<n>, with or without a runner prefix
+                m = _VARIANT_RE.search(name)
                 label = m.group(1).lower() if m else cand.stem
                 mode = None
             # TP>1 emits one capture shard per rank with the SAME variant label
