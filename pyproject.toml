@@ -44,6 +44,7 @@ web = [
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
+    "itanium-demangler>=1.0",
     "hyperloom-inference_optimizer[llm,web]",
 ]
 test = [

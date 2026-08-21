@@ -45,6 +45,15 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+try:
+    from itanium_demangler import parse as _itanium_parse
+except ImportError:
+    _itanium_parse = None
+    log.warning(
+        "itanium-demangler is not installed. Kernel classification may be degraded. "
+        "Install it with: pip install itanium-demangler"
+    )
+
 try:  # package import (TraceLens route / tests)
     from . import kernel_source_index, source_env
     from ._bypass_source_resolver import is_editable_source
@@ -100,17 +109,18 @@ class ResolveResult:
     elapsed_ms: float
     reason: str = ""
 
-    def as_legacy_tuple(self) -> tuple[str, str]:
-        """Legacy ``(source_file, method)`` shape for drop-in compatibility.
+    def as_legacy_tuple(self) -> tuple[str, str, str]:
+        """Legacy ``(source_file, method, reason)`` shape.
 
         A hit keeps its ``method`` (``"symbol_index"``); ``"non_patchable"`` is
         preserved even though its ``source_file`` is empty (so callers can tell
         "known not rewritable" from "not found"); every other empty-source
-        outcome collapses to ``"unresolved"``.
+        outcome collapses to ``"unresolved"``. ``reason`` carries the specific
+        non-patchable kind (e.g. ``"tensile_precompiled"``).
         """
         if self.source_file or self.method == "non_patchable":
-            return (self.source_file, self.method)
-        return ("", "unresolved")
+            return (self.source_file, self.method, self.reason)
+        return ("", "unresolved", "")
 
 
 # ----------------------------------------------------------------------------
@@ -177,8 +187,9 @@ def latency_report() -> dict[str, Any]:
 def _cxxfilt_base(mangled: str) -> str:
     """Demangle via ``c++filt`` when available (``""`` on failure).
 
-    Cached: demangling is pure and the same mangled symbols recur across
-    candidates, so we pay the subprocess spawn at most once per symbol.
+    Fallback for when ``itanium-demangler`` is not installed.  Cached: the same
+    mangled symbols recur across candidates, so subprocess spawn cost is paid at
+    most once per symbol.
     """
     if not shutil.which("c++filt"):
         return ""
@@ -189,19 +200,52 @@ def _cxxfilt_base(mangled: str) -> str:
             text=True,
             timeout=5,
         )
-        return proc.stdout.strip()
+        result = proc.stdout.strip()
+        # c++filt returns the input unchanged on failure — treat that as no result.
+        return result if result != mangled else ""
     except (OSError, subprocess.SubprocessError) as exc:
         log.debug("c++filt demangle failed for %r: %s", mangled, exc)
         return ""
 
 
+@functools.lru_cache(maxsize=8192)
+def _demangle(mangled: str) -> str:
+    """Demangle an Itanium-mangled symbol via ``itanium-demangler``.
+
+    Returns the demangled string on success, ``""`` on parse failure.  Unlike
+    ``c++filt``, this is pure-Python (no subprocess) and handles deeply-nested
+    CK template instantiations that exceed ``c++filt``'s recursion limits.
+
+    Falls back to ``_cxxfilt_base`` when ``itanium-demangler`` is not installed.
+    """
+    if _itanium_parse is None:
+        return _cxxfilt_base(mangled)
+    try:
+        node = _itanium_parse(mangled)
+        return str(node) if node is not None else ""
+    except Exception as exc:  # noqa: BLE001 — malformed symbols should not propagate.
+        log.debug("itanium demangle failed for %r: %s", mangled, exc)
+        return ""
+
+
 def _base_from_demangled(name: str) -> str:
-    """Extract the base kernel identifier from a demangled/plain symbol."""
-    # Keep only the head before params/templates, drop namespaces, then take the
-    # last token (drops any leading return type/qualifiers: "void ns::foo" -> "foo").
-    head = re.split(r"[(<]", name.strip(), maxsplit=1)[0].split("::")[-1]
-    tokens = head.split()
-    return tokens[-1] if tokens else ""
+    """Extract the base kernel identifier from a demangled/plain symbol.
+
+    Strips ``void`` return type, ``(anonymous namespace)::`` qualifiers,
+    template args ``<...>``, function args ``(...)``, and namespace prefixes.
+    """
+    n = (name or "").strip()
+    if not n:
+        return ""
+    if n.startswith("void "):
+        n = n[len("void "):].strip()
+    n = n.replace("(anonymous namespace)::", "")
+    n = re.sub(r"<.*$", "", n)
+    n = re.sub(r"\(.*$", "", n)
+    n = n.strip()
+    if "::" in n:
+        n = n.rsplit("::", 1)[-1]
+    return n
 
 
 def _base_from_mangled(mangled: str) -> str:
@@ -251,7 +295,7 @@ def base_symbol(device_kernel_name: str) -> str:
     if not raw:
         return ""
     if raw.startswith("_Z"):
-        demangled = _cxxfilt_base(raw)
+        demangled = _demangle(raw)
         if demangled and demangled != raw:
             return _base_from_demangled(demangled)
         return _base_from_mangled(raw)
@@ -261,24 +305,35 @@ def base_symbol(device_kernel_name: str) -> str:
 # ----------------------------------------------------------------------------
 # Non-patchable detection (symbol-derived, no external metadata)
 # ----------------------------------------------------------------------------
-def _non_patchable_kind(device_kernel_name: str) -> str:
-    """Return a non-patchable kind label from the symbol alone (``""`` if none).
+def _non_patchable_kind(device_kernel_name: str, *, op_name: str = "") -> str:
+    """Return a non-patchable kind label from the symbol/op name (``""`` if none).
 
-    CK (Composable Kernel) template instantiations have no single editable
-    ``__global__`` source, so they are detected from the symbol's namespace and
-    reported as ``"aiter_ck"`` (else ``""``). The match is boundary-anchored so
-    unrelated names ending in ``ck`` are not misclassified, and it falls back to
-    the mangled form when ``c++filt`` is unavailable so the verdict does not
-    depend on binutils being installed.
+    Detected categories:
+
+    * **Tensile** (``Cijk_*``): pre-compiled GPU assembly shipped as ``.co``
+      code objects in hipBLASLt/rocBLAS — no ``.cu`` source exists.
+    * **MIOpen** (``aten::miopen_*`` op name): assembly-generated convolution
+      kernels pre-compiled into MIOpen's kernel database. Identified by op name
+      rather than device kernel name patterns.
+    * **CK** (Composable Kernel, ``ck::`` / ``ck_tile::``): template
+      instantiations with no single editable ``__global__`` source.
     """
     raw = (device_kernel_name or "").strip()
     if not raw:
         return ""
+    # Tensile GEMM kernels: Cijk_<A_layout>_<B_layout>_<config...>
+    # These are pre-compiled assembly (.co), no .cu source exists.
+    if raw.startswith("Cijk_"):
+        return "tensile_precompiled"
+    # MIOpen convolution kernels: identified by op name rather than device
+    # kernel name patterns, which vary across MIOpen versions.
+    if "miopen" in (op_name or "").lower():
+        return "miopen_precompiled"
     if raw.startswith("_Z"):
-        demangled = _cxxfilt_base(raw)
+        demangled = _demangle(raw)
         if demangled:
             return "aiter_ck" if _CK_DEMANGLED_RE.search(demangled.lower()) else ""
-        # c++filt absent: classify from the mangled namespace prefix instead.
+        # Demangling failed: classify from the mangled namespace prefix instead.
         return "aiter_ck" if _CK_MANGLED_RE.search(raw) else ""
     return "aiter_ck" if _CK_DEMANGLED_RE.search(raw.lower()) else ""
 
@@ -348,7 +403,7 @@ def resolve(
 
     # Cheap gate first (symbol-derived): CK template instantiations have no
     # single editable source, so bail with a clear reason.
-    nonp_kind = _non_patchable_kind(device_kernel_name)
+    nonp_kind = _non_patchable_kind(device_kernel_name, op_name=op_name)
     if nonp_kind:
         return finish(
             ResolveResult(

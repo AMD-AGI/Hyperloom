@@ -454,8 +454,8 @@ def build_candidates(
         finder_patchable: bool | None = None
         finder_status = ""
         finder_reason = ""
-        if not source_file and kname:
-            source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
+        if not source_file and kname and source_method == "unresolved":
+            source_file, method, reason = resolve_source(op_name, framework=framework, device_kernel_name=kname)
             if source_file:
                 source_method = method
                 finder_patchable = True
@@ -468,12 +468,11 @@ def build_candidates(
                 source_method = method
                 finder_patchable = False
                 finder_status = "non_rewritable"
-                finder_reason = (
-                    "non-patchable kernel (symbol-detected: CK template / no single editable __global__ source)"
-                )
-        # Repo-scan is the last resort, and only for a genuine miss -- never when
-        # the finder already returned an authoritative non_patchable verdict.
-        if not source_file and kname and source_method != "non_patchable":
+                finder_reason = f"non-patchable kernel ({reason})" if reason else "non-patchable kernel"
+        # Repo-scan is the last resort, and only for a genuine miss -- never
+        # when the finder already returned an authoritative non_patchable
+        # verdict.
+        if not source_file and kname and source_method == "unresolved":
             source_file, method = resolve_by_kernel_name(kname)
             if source_file:
                 source_method = method
@@ -563,7 +562,15 @@ def build_candidates(
                 else (
                     ""
                     if source_file
-                    else (f"source: {finder_reason}" if finder_patchable is False else "source file not resolved")
+                    else (
+                        f"source: {finder_reason}"
+                        if finder_patchable is False
+                        else (
+                            "source: non-patchable kernel (trace kernel_file is not editable)"
+                            if source_method == "non_patchable"
+                            else "source file not resolved"
+                        )
+                    )
                 )
             ),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],

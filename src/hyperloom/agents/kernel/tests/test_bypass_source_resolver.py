@@ -45,8 +45,8 @@ def test_repo_triton_py_is_editable_but_generated_is_not():
 
 def test_resolve_source_without_symbol_is_unresolved():
     # The finder is symbol-driven: no device kernel name -> nothing to look up.
-    assert resolver.resolve_source("_C::silu_and_mul", framework="vllm") == ("", "unresolved")
-    assert resolver.resolve_source("", device_kernel_name="") == ("", "unresolved")
+    assert resolver.resolve_source("_C::silu_and_mul", framework="vllm") == ("", "unresolved", "")
+    assert resolver.resolve_source("", device_kernel_name="") == ("", "unresolved", "")
 
 
 def test_resolve_source_delegates_to_active_finder(monkeypatch):
@@ -54,20 +54,21 @@ def test_resolve_source_delegates_to_active_finder(monkeypatch):
 
     def fake_resolve_source(op_name, *, framework="", device_kernel_name=""):
         calls["args"] = (op_name, framework, device_kernel_name)
-        return "/opt/vllm/csrc/act.cu", "symbol_index"
+        return "/opt/vllm/csrc/act.cu", "symbol_index", ""
 
     monkeypatch.setattr(source_resolver, "resolve_source", fake_resolve_source)
-    src, method = resolver.resolve_source(
+    src, method, reason = resolver.resolve_source(
         "_C::silu_and_mul", framework="vllm", device_kernel_name="act_kernel"
     )
     assert src == "/opt/vllm/csrc/act.cu"
     assert method == "symbol_index"
+    assert reason == ""
     assert calls["args"] == ("_C::silu_and_mul", "vllm", "act_kernel")
 
 
 def test_resolve_source_finder_miss_is_unresolved(monkeypatch):
-    monkeypatch.setattr(source_resolver, "resolve_source", lambda *a, **k: ("", "unresolved"))
-    assert resolver.resolve_source("op::x", device_kernel_name="zzz") == ("", "unresolved")
+    monkeypatch.setattr(source_resolver, "resolve_source", lambda *a, **k: ("", "unresolved", ""))
+    assert resolver.resolve_source("op::x", device_kernel_name="zzz") == ("", "unresolved", "")
 
 
 def test_resolve_source_swallows_finder_errors(monkeypatch):
@@ -75,7 +76,7 @@ def test_resolve_source_swallows_finder_errors(monkeypatch):
         raise OSError("index build failed")
 
     monkeypatch.setattr(source_resolver, "resolve_source", boom)
-    assert resolver.resolve_source("op::x", device_kernel_name="k") == ("", "unresolved")
+    assert resolver.resolve_source("op::x", device_kernel_name="k") == ("", "unresolved", "")
 
 
 # --- Triton .py resolution (trace kernel_file + AST def-line pinning) ----------
@@ -127,7 +128,7 @@ def test_resolve_triton_py_launcher_form_parsed(repo_dir):
 
 def test_resolve_triton_py_rejects_generated():
     src, line, method = resolver.resolve_triton_py("/tmp/torchinductor_x/c.py")
-    assert (src, line, method) == ("", None, "unresolved")
+    assert (src, line, method) == ("", None, "non_patchable")
 
 
 def test_triton_def_line_single_unambiguous(repo_dir):

@@ -130,9 +130,9 @@ def test_ck_marker_is_namespace_boundary_not_substring():
 
 
 def test_ck_detection_falls_back_to_mangled_without_cxxfilt(monkeypatch):
-    # With c++filt unavailable, a mangled CK symbol must still be classified from
+    # With demangling unavailable, a mangled CK symbol must still be classified from
     # its length-prefixed namespace, so the verdict does not depend on binutils.
-    monkeypatch.setattr(source_resolver, "_cxxfilt_base", lambda _m: "")
+    monkeypatch.setattr(source_resolver, "_demangle", lambda _m: "")
     assert source_resolver._non_patchable_kind("_ZN2ck15kernel_moe_gemmIiEEvPf") == "aiter_ck"
     # A non-CK mangled symbol is not misclassified by the fallback.
     assert source_resolver._non_patchable_kind("_ZN4vllm11some_kernelIiEEvPf") == ""
@@ -146,7 +146,7 @@ def test_legacy_tuple_preserves_non_patchable(tmp_path):
     )
     # non_patchable carries an empty source_file but must NOT collapse to
     # "unresolved" -- callers distinguish "known not rewritable" from "not found".
-    assert res.as_legacy_tuple() == ("", "non_patchable")
+    assert res.as_legacy_tuple() == ("", "non_patchable", "aiter_ck")
 
 
 def test_header_declaration_not_selected_over_definition(tmp_path):
@@ -203,9 +203,10 @@ def test_legacy_tuple_shape(tmp_path):
     res = source_resolver.resolve(
         "op", framework="vllm", device_kernel_name="void vllm::my_test_kernel<float>()", index=index
     )
-    src, method = res.as_legacy_tuple()
+    src, method, reason = res.as_legacy_tuple()
     assert src.endswith("activation_kernels.cu")
     assert method == "symbol_index"
+    assert reason == ""
 
 
 # --- env fingerprint -------------------------------------------------------
