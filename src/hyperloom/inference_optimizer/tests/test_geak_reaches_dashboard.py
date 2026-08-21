@@ -192,3 +192,80 @@ def test_reverted_geak_kernel_is_not_credited(tmp_path: Path) -> None:
     )
     geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
     assert not geak.get("keeps")
+
+
+def _kernel_without_throughput_pair(kid: str, *, gain: float) -> dict:
+    """The shape every real campaign artifact has today.
+
+    All 36 KEEP blocks under ``/shared_nfs/hyperloom-claw`` publish
+    ``e2e_gain_pct`` and no ``base_tput``/``new_tput``. The fixture above adds the
+    pair, so it exercises the contract GEAK is moving to rather than the files on
+    disk — and the difference decides whether a number may be summed.
+    """
+    kernel = _kernel(kid, gain=gain, before=0.0, after=0.0)
+    kernel["e2e"].pop("base_tput", None)
+    kernel["e2e"].pop("new_tput", None)
+    return kernel
+
+
+def test_keep_without_a_throughput_pair_is_visible_but_not_summed(tmp_path: Path) -> None:
+    """Visible as a keep, absent from the total.
+
+    A local ``e2e_gain_pct`` is measured against whatever baseline the executor
+    held at the time. Projecting it as points of the session baseline is a unit
+    error: replaying the real journeys that way summed 36 local deltas into
+    +348.6 pp of a session that never moved that far. Withholding the gain must
+    not also withhold the keep, or the column reads zero again — which is the
+    bug the canonical-stream change was written to fix.
+    """
+    coord = _coord(tmp_path)
+    _record_baseline(tmp_path)
+    result = {
+        "kernel_journey_path": _journey(
+            tmp_path, [_kernel_without_throughput_pair("k_nopair", gain=29.994)]
+        )
+    }
+    coord._record_geak_kernel_journey(result)
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 1, geak
+    assert geak.get("non_attributable_keeps") == 1, geak
+    assert geak.get("total_gain_pct") == 0.0, geak
+
+
+def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Path) -> None:
+    """The tree must not assert a GEAK kernel ran beneath Forge.
+
+    Dropping ``legacy_only`` alone leaves the default route, which names the
+    parent operation ``kernel_agent_forge``. The per-kernel strategy is corrected
+    to ``geak`` afterwards, so the dashboard column fills either way — but a
+    reader walking parents to answer "which optimizer produced this kernel?"
+    gets Forge, and a replay after a process restart can mint further Forge route
+    operations for kernels Forge never dispatched.
+    """
+    coord = _coord(tmp_path)
+    _record_baseline(tmp_path)
+    result = {
+        "kernel_journey_path": _journey(
+            tmp_path, [_kernel("k_route", gain=5.0, before=1000.0, after=1050.0)]
+        )
+    }
+    coord._record_geak_kernel_journey(result)
+
+    warnings: list[str] = []
+    parts = assemble_parts(tmp_path, warnings=warnings)
+    operations = [r for r in parts.get("operations") or [] if isinstance(r, dict)]
+    names = {str(op.get("name") or "") for op in operations}
+    assert "k_route" in names, sorted(names)
+    assert "kernel_agent_forge" not in names, sorted(names)
+
+    kernel_ops = [op for op in operations if str(op.get("name") or "") == "k_route"]
+    assert kernel_ops, operations
+    parents = {str(op.get("parent_operation_id") or "") for op in kernel_ops}
+    geak_route_ids = {
+        str(op.get("operation_id") or "")
+        for op in operations
+        if str(op.get("name") or "") == "geak"
+    }
+    assert geak_route_ids, sorted(names)
+    assert parents <= geak_route_ids, (parents, geak_route_ids)
