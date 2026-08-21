@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .patch_lifecycle import cleanup_complete as patch_lifecycle_complete
+from .patch_lifecycle import lifecycle_complete as patch_lifecycle_complete
 
 
 #: Manifest states an interrupted apply can still be resumed from.

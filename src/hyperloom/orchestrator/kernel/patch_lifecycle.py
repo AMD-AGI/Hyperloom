@@ -22,15 +22,14 @@ CLEANUP_COMPLETE = "complete"
 CLEANUP_RECOVERY_REQUIRED = "recovery_required"
 
 
-def cleanup_complete(result: Any) -> bool:
-    """Return True when a KEEP finalize reached a terminal state (ok or partial)."""
-    return isinstance(result, dict) and result.get("status") in {"ok", "partial"}
+def lifecycle_complete(result: Any) -> bool:
+    """Return True when a finalize or revert left nothing owed.
 
-
-def revert_complete(result: Any) -> bool:
-    """Return True when a non-KEEP revert fully restored all patch sites.
-
-    Rejects ``"partial"`` — remote-pod revert failure means the patch is still live.
+    ``"partial"`` is not complete for either: a partial revert can leave the
+    patch live on a remote pod, and a partial finalize can leave backups on one
+    (both surface as a ``multinode_*`` issue in the tool's result). The
+    consequence differs per branch, which is :func:`cleanup_verdict`'s job, not
+    this predicate's.
     """
     return isinstance(result, dict) and result.get("status") in {"ok", "skipped"}
 
@@ -49,11 +48,11 @@ def cleanup_verdict(
     ``"ok"``; cleanup_status tracks the outstanding backup deletion.
     """
     if decision == "KEEP":
-        if cleanup_complete(finalize_result):
+        if lifecycle_complete(finalize_result):
             return "ok", CLEANUP_COMPLETE, ""
         return "ok", CLEANUP_RECOVERY_REQUIRED, "finalize"
 
-    if not revert_required or revert_complete(revert_result):
+    if not revert_required or lifecycle_complete(revert_result):
         return "ok", CLEANUP_COMPLETE, ""
 
     return "failed", CLEANUP_RECOVERY_REQUIRED, "revert"
