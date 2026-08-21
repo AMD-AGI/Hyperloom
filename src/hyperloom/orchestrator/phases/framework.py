@@ -1112,7 +1112,9 @@ class FrameworkPhase(PhaseHandler):
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
-        if base_patches or base_setup or base_artifacts:
+        acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
+        acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
+        if base_patches or base_setup or base_artifacts or acc_envs or acc_args:
             progress_bits = []
             if base_patches:
                 progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
@@ -1121,6 +1123,13 @@ class FrameworkPhase(PhaseHandler):
                 progress_bits.append(f"{len(base_artifacts)} prior artifact(s) installed: {art_tgts}")
             if base_setup:
                 progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
+            if acc_envs or acc_args:
+                cfg_bits = []
+                if acc_envs:
+                    cfg_bits.append(f"envs={acc_envs}")
+                if acc_args:
+                    cfg_bits.append(f"args={acc_args!r}")
+                progress_bits.append("accumulated config from prior advanced rounds: " + "; ".join(cfg_bits))
             notes = (
                 "STACKED ENABLEMENT (progress so far): the following already "
                 "cleared earlier boot crashes and WILL be re-applied/re-run as a "
@@ -1195,6 +1204,14 @@ class FrameworkPhase(PhaseHandler):
             "enablement_base_artifacts": base_artifacts,
             # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
+            # Accumulated env/arg config from prior advanced rounds.  The bench
+            # variant combines these with this round's proposal, so the KEEP leg
+            # runs with the full env stack and effective_config is complete.
+            # Previously `base_extra_envs` was never filled here, so the KEEP
+            # bench ran without prior advanced envs and framework.py:1757
+            # replaced accepted_config with an incomplete effective_config.
+            "base_extra_envs": dict((state.enablement.accepted_config or {}).get("extra_envs") or {}),
+            "base_extra_args": str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip(),
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "readonly": False,
