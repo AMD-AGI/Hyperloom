@@ -269,3 +269,113 @@ def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Pa
     }
     assert geak_route_ids, sorted(names)
     assert parents <= geak_route_ids, (parents, geak_route_ids)
+
+
+def _route_ops(session_dir: Path) -> tuple[set[str], set[str]]:
+    """(operation names, route subject names) written under ``session_dir``."""
+    warnings: list[str] = []
+    parts = assemble_parts(session_dir, warnings=warnings)
+    operations = [r for r in parts.get("operations") or [] if isinstance(r, dict)]
+    names = {str(op.get("name") or "") for op in operations}
+    subjects = {
+        str((op.get("subject") or {}).get("name") or "")
+        for op in operations
+        if str((op.get("subject") or {}).get("subject_type") or "") == "kernel_optimizer_route"
+    }
+    return names, subjects
+
+
+def test_reverting_a_geak_kernel_stays_on_the_geak_route(tmp_path: Path) -> None:
+    """Withdrawing a kernel must not re-file it under another optimizer.
+
+    HONEST SCOPE: this passes with and without the route argument on the revert
+    call, because `record_kernel_e2e` mints no route operation on that path —
+    checked both after a KEEP replay and standalone, as a restart would do. The
+    review reported the revert falling back to Forge; the call did, but the
+    fallback is inert today. The argument is still passed, because a call that
+    does not name its route is one change inside the recorder away from being
+    wrong, and this pins the outcome so that change cannot land quietly.
+
+    The load-bearing check for the route argument itself is
+    ``test_every_journey_replay_call_names_its_route``, which reads the source.
+    """
+    coord = _coord(tmp_path)
+    _record_baseline(tmp_path)
+    kernel = _kernel("k_revert_route", gain=5.0, before=1000.0, after=1050.0)
+    coord._record_geak_kernel_journey(
+        {"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])}
+    )
+    # `_reject_*` lives on KernelPhase and is not among the methods Coordinator
+    # delegates, so bind it directly rather than reaching through the facade.
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    KernelPhase._reject_geak_kernel_journey(
+        coord,
+        {"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])},
+        measured_tput=BASELINE_TPUT,
+        current_best_tput=BASELINE_TPUT * 1.2,
+        provenance="revalidation",
+    )
+
+    names, _ = _route_ops(tmp_path)
+    assert "kernel_agent_forge" not in names, sorted(names)
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert not geak.get("keeps"), geak
+
+
+def test_the_geak_route_subject_names_geak(tmp_path: Path) -> None:
+    """Operation and subject must name the same optimizer.
+
+    ``record_native_kernel_run_start`` derives the operation's name and strategy
+    from the route, but the subject payload kept a literal ``kernel_agent_forge``.
+    A GEAK replay then wrote ``operation.name=geak`` beside
+    ``subject.name=kernel_agent_forge`` — one record naming two optimizers, and
+    the subject is what identity lookups resolve against.
+    """
+    coord = _coord(tmp_path)
+    _record_baseline(tmp_path)
+    coord._record_geak_kernel_journey(
+        {
+            "kernel_journey_path": _journey(
+                tmp_path, [_kernel("k_subject", gain=5.0, before=1000.0, after=1050.0)]
+            )
+        }
+    )
+
+    names, subjects = _route_ops(tmp_path)
+    assert "geak" in names, sorted(names)
+    assert subjects == {"geak"}, subjects
+
+
+def test_every_journey_replay_call_names_its_route() -> None:
+    """Derived from the source, not from a list a seventh call site can miss.
+
+    Both route defects were the same shape: a recorder call that did not name its
+    route and silently took Forge. Six call sites carry ``route_strategy="geak"``
+    today; this fails if one is added without it, rather than waiting for a
+    reviewer to notice the provenance is wrong.
+    """
+    import re
+
+    source = Path(
+        __file__
+    ).resolve().parents[3] / "hyperloom" / "orchestrator" / "phases" / "kernel.py"
+    text = source.read_text(encoding="utf-8")
+    replay = text[text.index("def _record_geak_kernel_journey") :]
+    unrouted = []
+    for match in re.finditer(r"instrument\.record_kernel_(\w+)\(", replay):
+        depth, i = 0, match.end() - 1
+        while i < len(replay):
+            if replay[i] == "(":
+                depth += 1
+            elif replay[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        call = replay[match.start() : i + 1]
+        if 'route_strategy="geak"' not in call:
+            unrouted.append(
+                (match.group(1), replay[: match.start()].count("\n"))
+            )
+    assert not unrouted, f"recorder calls in the GEAK replay with no GEAK route: {unrouted}"
