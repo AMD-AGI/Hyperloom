@@ -451,16 +451,12 @@ def _trace_path_allowlist() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: a single-element tuple holding the multi-node profile
             trace root, normalized with a trailing ``/``. Boundary safety is
-            enforced by :func:`_resolved_within`, not by the trailing slash.
+            enforced by :func:`resolved_within`, not by the trailing slash.
     """
     from hyperloom.inference_optimizer.session.paths import mn_profile_trace_root
 
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
-
-
-_resolved_within = resolved_within
-_source_file_candidates = source_file_candidates
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
@@ -2034,7 +2030,7 @@ class PolicyGate:
             bool: True when ``value`` resolves to or under a configured editable
             source root, active site/dist-packages root, or ROCm source root.
         """
-        return any(_resolved_within(value, p) for p in resolve_source_file_allowlist())
+        return any(resolved_within(value, p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
@@ -2046,7 +2042,7 @@ class PolicyGate:
             bool: True when ``value`` resolves to or under any runtime-resolved
                 trace path root, else False.
         """
-        return any(_resolved_within(value, p) for p in _trace_path_allowlist())
+        return any(resolved_within(value, p) for p in _trace_path_allowlist())
 
     def _remote_recipe_files_root(self) -> Path | None:
         """Return the session-owned root containing downloaded KB artifacts."""
@@ -2147,7 +2143,7 @@ class PolicyGate:
                     "has no patch_path",
                     rule="warm_replay_patch_missing",
                 )
-            if kb_root is None or not _resolved_within(raw_patch, str(kb_root)):
+            if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
                 raise PolicyDenied(
                     f"replay_warm_recipe patch_path={raw_patch!r} is outside "
                     f"the session KB download root={kb_root!s}",
@@ -2173,7 +2169,7 @@ class PolicyGate:
                 )
             for raw_target in raw_targets:
                 active_root = resolve_session_framework_root()
-                if not active_root or not _resolved_within(raw_target, active_root):
+                if not active_root or not resolved_within(raw_target, active_root):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} is outside "
                         "the Session active framework root",
@@ -2261,7 +2257,7 @@ class PolicyGate:
             if key in SOURCE_LIKE_FIELDS:
                 if any(
                     self._path_in_source_allowlist(c) or self._path_under_session(c)
-                    for c in _source_file_candidates(node)
+                    for c in source_file_candidates(node)
                 ):
                     return
                 raise PolicyDenied(
