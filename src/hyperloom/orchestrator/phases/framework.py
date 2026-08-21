@@ -1108,6 +1108,7 @@ class FrameworkPhase(PhaseHandler):
         # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
+        grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
         if base_patches or base_setup:
             progress_bits = []
             if base_patches:
@@ -1126,6 +1127,17 @@ class FrameworkPhase(PhaseHandler):
                 f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
                 f"bridging approach / candidate than before."
             )
+        if grounding_drops:
+            drop_note = (
+                "PATCH GROUNDING FAILURE: the patches the prior round submitted "
+                "were dropped because their target file(s) do not exist in ANY "
+                "allowlisted framework source tree. Targets: "
+                + "; ".join(grounding_drops[:4])
+                + ". Use artifacts_written (whole-file install to an absolute "
+                "allowlisted path) instead of a unified diff, or verify the "
+                "target path with Glob/Read first."
+            )
+            notes = (drop_note + "\n\n" + notes).strip() if notes else drop_note
         gap_cid = f"gap.enablement.{signature.kind}"
         from hyperloom.agents.framework.enablement import CapabilityGap
 
@@ -1807,6 +1819,13 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
+            # Surface grounding drops explicitly so the next round knows to switch
+            # to artifacts_written instead of writing patches that can never apply.
+            dropped_by_grounding = res.get("patches_dropped_by_grounding")
+            if isinstance(dropped_by_grounding, list) and dropped_by_grounding:
+                state.enablement.last_grounding_drop_reason = [str(d) for d in dropped_by_grounding[:8]]
+            else:
+                state.enablement.last_grounding_drop_reason = []
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
