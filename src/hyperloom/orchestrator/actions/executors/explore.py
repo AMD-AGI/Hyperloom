@@ -32,7 +32,6 @@ import logging
 import os
 import time
 from pathlib import Path
-from statistics import median
 from typing import Any
 
 import yaml
@@ -798,25 +797,6 @@ class ExploreExecutor:
                 self.enable_stack_rebench,
             )
         )
-        rebench_required = bool(params.get("rebench_required", False))
-        try:
-            stack_rebench_repeats = max(1, min(5, int(params.get("stack_rebench_repeats", 1) or 1)))
-        except (TypeError, ValueError):
-            stack_rebench_repeats = 1
-        try:
-            stack_rebench_max_spread_pct = max(
-                0.0,
-                float(params.get("stack_rebench_max_spread_pct", 3.0) or 3.0),
-            )
-        except (TypeError, ValueError):
-            stack_rebench_max_spread_pct = 3.0
-        if rebench_required:
-            enable_stack_rebench = True
-        revalidation_protocol = (
-            dict(params.get("revalidation_protocol") or {})
-            if isinstance(params.get("revalidation_protocol"), dict)
-            else {}
-        )
 
         # per-variant overtime kill — anchored on baseline wall-clock.
         # Coordinator injects ``baseline_runtime_sec`` +
@@ -1114,9 +1094,7 @@ class ExploreExecutor:
         # the baseline gates its cold+hot double-run on, so the two sides measure
         # hot together or cold together: a session that opted out of the double
         # run has a COLD ``baseline_tput`` and must be graded cold.
-        use_warm_decision = lifecycle_eligible and (
-            rebench_required or bool(getattr(ss, "baseline_double_run", True))
-        )
+        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
@@ -1530,7 +1508,7 @@ class ExploreExecutor:
                     reason: str = ""
                     if r.status != "succeeded" or gain is None:
                         reason = (r.error or "")[-1200:] or "no_measurement"
-                    elif gain < keep_threshold_pct and not rebench_required:
+                    elif gain < keep_threshold_pct:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
                     else:
@@ -1672,33 +1650,23 @@ class ExploreExecutor:
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
                             "single_workspace": r.workspace,
-                            "workload_signature": ws_sig,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
                         }
-                        if rebench_required:
-                            keep_entry["revalidation_protocol"] = revalidation_protocol
                         in_batch_keeps.append(keep_entry)
 
                         stack_rebench_tput: float | None = None
                         stack_rebench_workspace: str | None = None
                         stack_rebench_warnings: list[str] = []
-                        stack_rebench_samples: list[float] = []
-                        stack_rebench_workspaces: list[str] = []
-                        stack_rebench_ttft_samples: list[float] = []
-                        stack_rebench_tpot_samples: list[float] = []
-                        stack_rebench_spread_pct: float | None = None
-                        stack_rebench_ttft_median_ms: float | None = None
-                        stack_rebench_tpot_median_ms: float | None = None
 
                         if enable_stack_rebench and running_base_tput > 0:
-                            # Same config as the decision round. GEAK
-                            # revalidation requests multiple consecutive
-                            # samples; the warmup + decision rounds act as the
-                            # two discarded prewarm passes, then these samples
-                            # are aggregated by median. Generic explore keeps
-                            # its historical single confirmation sample.
+                            # Round 2: same config as round 1. When eligible,
+                            # reuse round 1's hot server (cleanup=true tears it
+                            # down) so the measurement is warm and baseline-
+                            # comparable; otherwise a fresh cold boot. The
+                            # overtime-kill deadline applies as in the decision
+                            # round.
                             rebench_envs = dict(gv.extra_envs)
                             if use_warm_decision:
                                 # Throughput-stability check only; it shares the
@@ -1714,149 +1682,76 @@ class ExploreExecutor:
                                 unset_envs=list(run_unset_envs),
                                 args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                             )
-                            rebench_stopped = False
-                            rebench_error_class = ""
-                            if rebench_required and not lifecycle_eligible:
-                                rebench_error_class = "warm_rebench_lifecycle_unavailable"
-                                stack_rebench_warnings.append(rebench_error_class)
-                            for repeat_idx in (
-                                range(stack_rebench_repeats)
-                                if not rebench_error_class
-                                else ()
-                            ):
-                                final_repeat = repeat_idx == stack_rebench_repeats - 1
-                                repeat_lifecycle = (
-                                    {
-                                        "cleanup": final_repeat,
-                                        "pid_dir": str(slot),
-                                        "port": lifecycle_port,
-                                    }
-                                    if lifecycle_eligible
-                                    else None
-                                )
-                                rebench = await measure_stack_rebench(
-                                    config_path=config_path,
-                                    base_extra_args=stack_extra_args,
-                                    variant=rebench_variant,
-                                    # Floor sits on the anchor round 1 graded against,
-                                    # which advances with each in-batch KEEP.
-                                    base_tput=running_base_tput,
-                                    stable_threshold_pct=stack_stable_threshold_pct,
-                                    output_slot=slot / "stack_rebench" / f"repeat_{repeat_idx + 1:02d}",
-                                    variant_timeout_sec=timeout_sec,
-                                    model_path=resolved_model,
-                                    gpu_type=resolved_gpu,
-                                    benchmark_script=override_script,
-                                    result_dir=override_result_dir,
-                                    server_lifecycle=repeat_lifecycle,
-                                    base_args_mode=stack_base_args_mode,
-                                    preclean_before_run=not lifecycle_eligible,
-                                    soft_deadline_sec=decision_deadline_sec,
-                                    server_already_ready=lifecycle_eligible,
-                                    serving_lease=variant_lease,
-                                    session_deadline_sec=session_deadline_sec,
-                                    variant_expected_sec=decision_expected_sec,
-                                )
-                                stack_rebench_warnings.extend(rebench.warnings)
-                                if _stopped_by_the_run(
-                                    rebench,
-                                    variant=gv,
-                                    idx=idx,
-                                    round_label=f"stack rebench {repeat_idx + 1}/{stack_rebench_repeats}",
-                                ):
-                                    rebench_stopped = True
-                                    break
-                                if rebench.tput is None:
-                                    rebench_error_class = rebench.error_class or "stack_rebench_no_measurement"
-                                    break
-                                stack_rebench_samples.append(float(rebench.tput))
-                                if rebench.workspace:
-                                    stack_rebench_workspaces.append(str(rebench.workspace))
-                                if isinstance(rebench.ttft_median_ms, (int, float)):
-                                    stack_rebench_ttft_samples.append(float(rebench.ttft_median_ms))
-                                if isinstance(rebench.tpot_median_ms, (int, float)):
-                                    stack_rebench_tpot_samples.append(float(rebench.tpot_median_ms))
-
+                            round2_lifecycle = (
+                                {
+                                    "cleanup": True,
+                                    "pid_dir": str(slot),
+                                    "port": lifecycle_port,
+                                }
+                                if lifecycle_eligible
+                                else None
+                            )
+                            rebench = await measure_stack_rebench(
+                                config_path=config_path,
+                                base_extra_args=stack_extra_args,
+                                variant=rebench_variant,
+                                # Floor sits on the anchor round 1 graded against,
+                                # which advances with each in-batch KEEP.
+                                base_tput=running_base_tput,
+                                stable_threshold_pct=stack_stable_threshold_pct,
+                                output_slot=slot / "stack_rebench",
+                                variant_timeout_sec=timeout_sec,
+                                model_path=resolved_model,
+                                gpu_type=resolved_gpu,
+                                benchmark_script=override_script,
+                                result_dir=override_result_dir,
+                                server_lifecycle=round2_lifecycle,
+                                base_args_mode=stack_base_args_mode,
+                                preclean_before_run=not lifecycle_eligible,
+                                soft_deadline_sec=decision_deadline_sec,
+                                server_already_ready=lifecycle_eligible,
+                                serving_lease=variant_lease,
+                                session_deadline_sec=session_deadline_sec,
+                                variant_expected_sec=decision_expected_sec,
+                            )
                             # A confirmation the run stopped is not a failed
                             # confirmation: grading it would evict a variant as
                             # unstable on the strength of a round that never
                             # measured it. Undo the stack fold and drop the
                             # decision-round entry too, so a resume re-measures
                             # the variant and its confirmation together.
-                            if rebench_stopped:
+                            if _stopped_by_the_run(rebench, variant=gv, idx=idx, round_label="stack rebench"):
                                 in_batch_keeps.pop()
                                 round_tested.pop(fp, None)
                                 if gv.name:
                                     round_name_index.pop(gv.name, None)
                                 break
-                            if stack_rebench_samples:
-                                stack_rebench_tput = float(median(stack_rebench_samples))
-                                stack_rebench_workspace = (
-                                    stack_rebench_workspaces[-1] if stack_rebench_workspaces else None
-                                )
-                                stack_rebench_spread_pct = (
-                                    (max(stack_rebench_samples) - min(stack_rebench_samples))
-                                    / stack_rebench_tput
-                                    * 100.0
-                                    if stack_rebench_tput > 0
-                                    else None
-                                )
-                            if stack_rebench_ttft_samples:
-                                stack_rebench_ttft_median_ms = float(median(stack_rebench_ttft_samples))
-                            if stack_rebench_tpot_samples:
-                                stack_rebench_tpot_median_ms = float(median(stack_rebench_tpot_samples))
-                            stable_floor = running_base_tput * (1.0 + stack_stable_threshold_pct / 100.0)
-                            complete = len(stack_rebench_samples) == stack_rebench_repeats
-                            stable = (
-                                complete
-                                and stack_rebench_tput is not None
-                                and stack_rebench_tput >= stable_floor
-                                and (
-                                    stack_rebench_spread_pct is None
-                                    or stack_rebench_spread_pct <= stack_rebench_max_spread_pct
-                                )
-                            )
-                            # Rebench missed the stability/completeness contract:
-                            # evict as REVERT. For required GEAK revalidation the
-                            # empty output makes writeback choose 2a fallback,
-                            # never terminal no_promote.
-                            if not stable:
+                            stack_rebench_tput = rebench.tput
+                            stack_rebench_workspace = rebench.workspace
+                            stack_rebench_warnings = rebench.warnings
+                            stable_floor = rebench.stable_floor
+                            # Rebench missed the stability floor: evict as REVERT.
+                            if not rebench.stable:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
-                                    "(samples=%s median=%s spread=%s%% required=%d "
-                                    "stable_floor=%.2f error_class=%s)",
+                                    "(stack_rebench_tput=%s vs stable_floor=%.2f "
+                                    "with running_base_tput=%.2f * (1+%.2f%%))",
                                     gv.name,
-                                    stack_rebench_samples,
                                     stack_rebench_tput,
-                                    (
-                                        f"{stack_rebench_spread_pct:.3f}"
-                                        if stack_rebench_spread_pct is not None
-                                        else "n/a"
-                                    ),
-                                    stack_rebench_repeats,
                                     stable_floor,
-                                    rebench_error_class or "none",
+                                    running_base_tput,
+                                    stack_stable_threshold_pct,
                                 )
                                 round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
                                 round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
                                 round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
                                 round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
-                                round_tested[fp]["stack_rebench_samples"] = stack_rebench_samples
-                                round_tested[fp]["stack_rebench_sample_count"] = len(stack_rebench_samples)
-                                round_tested[fp]["stack_rebench_required_samples"] = stack_rebench_repeats
-                                round_tested[fp]["stack_rebench_spread_pct"] = stack_rebench_spread_pct
-                                round_tested[fp]["revalidation_protocol_complete"] = complete
                                 keep_unstable.append(
                                     {
                                         **keep_entry,
                                         "stack_rebench_tput": stack_rebench_tput,
                                         "stack_rebench_workspace": stack_rebench_workspace,
                                         "stack_rebench_warnings": stack_rebench_warnings,
-                                        "stack_rebench_samples": stack_rebench_samples,
-                                        "stack_rebench_sample_count": len(stack_rebench_samples),
-                                        "stack_rebench_required_samples": stack_rebench_repeats,
-                                        "stack_rebench_spread_pct": stack_rebench_spread_pct,
-                                        "revalidation_protocol_complete": complete,
                                     }
                                 )
                                 rejected_update.append(
@@ -1900,24 +1795,6 @@ class ExploreExecutor:
                                 round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
                                 round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
                                 round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
-                                round_tested[fp]["stack_rebench_samples"] = stack_rebench_samples
-                                round_tested[fp]["stack_rebench_sample_count"] = len(stack_rebench_samples)
-                                round_tested[fp]["stack_rebench_required_samples"] = stack_rebench_repeats
-                                round_tested[fp]["stack_rebench_spread_pct"] = stack_rebench_spread_pct
-                                round_tested[fp]["stack_rebench_ttft_median_ms"] = (
-                                    stack_rebench_ttft_median_ms
-                                )
-                                round_tested[fp]["stack_rebench_tpot_median_ms"] = (
-                                    stack_rebench_tpot_median_ms
-                                )
-                                round_tested[fp]["revalidation_protocol_complete"] = complete
-                                keep_entry["stack_rebench_samples"] = stack_rebench_samples
-                                keep_entry["stack_rebench_sample_count"] = len(stack_rebench_samples)
-                                keep_entry["stack_rebench_required_samples"] = stack_rebench_repeats
-                                keep_entry["stack_rebench_spread_pct"] = stack_rebench_spread_pct
-                                keep_entry["stack_rebench_ttft_median_ms"] = stack_rebench_ttft_median_ms
-                                keep_entry["stack_rebench_tpot_median_ms"] = stack_rebench_tpot_median_ms
-                                keep_entry["revalidation_protocol_complete"] = complete
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
                             # measurement, advance the running baseline naively.

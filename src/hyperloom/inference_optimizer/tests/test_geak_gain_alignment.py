@@ -374,7 +374,7 @@ def test_report_shows_validated_when_same_harness_confirmed() -> None:
 # ── 2b: validated is stamped ONLY from the same-harness (orchestrator) rebench ─
 
 
-def _revalidate_task(*, expected_hash: str, **extra_params: object) -> Task:
+def _revalidate_task(*, expected_hash: str) -> Task:
     return Task(
         task_id="reval-1",
         kind="explore",
@@ -383,7 +383,6 @@ def _revalidate_task(*, expected_hash: str, **extra_params: object) -> Task:
             "source": "resume_stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": expected_hash,
-            **extra_params,
         },
         idempotency_key="reval-1",
     )
@@ -454,101 +453,6 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_2b_incomplete_required_protocol_defers_to_geak_harness(tmp_path: Path) -> None:
-    """A scalar win cannot be terminal when the required sample series is incomplete."""
-    base, measured = 2844.209, 3270.0
-    coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.resume_pending_revalidation = True
-    coord.shared_state.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "reval-1",
-    }
-
-    called = {"n": 0}
-
-    async def _fallback(**_kwargs):
-        called["n"] += 1
-        return {"validated": False}
-
-    coord._validate_geak_via_geak_harness = _fallback  # type: ignore[assignment]
-    protocol = {"prewarm_rounds": 2, "measured_repeats": 3, "aggregation": "median"}
-    result = {
-        "output_throughput": measured,
-        "best_variant": {
-            "fingerprint": "abc",
-            "stack_rebench_sample_count": 1,
-            "stack_rebench_spread_pct": 0.0,
-            "revalidation_protocol_complete": False,
-            "revalidation_protocol": protocol,
-        },
-        "winners": [],
-    }
-    task = _revalidate_task(
-        expected_hash="abc",
-        rebench_required=True,
-        stack_rebench_repeats=3,
-        stack_rebench_max_spread_pct=3.0,
-        revalidation_protocol=protocol,
-    )
-    await coord._promote_to_shared_state("explore", result, task=task)
-
-    assert called["n"] == 1
-    assert coord.shared_state.geak_result["revalidation_status"] == "fallback_failed"
-
-
-@pytest.mark.parametrize("measured_ttft_ms", [None, 3296.0])
-@pytest.mark.asyncio
-async def test_2b_missing_or_cold_ttft_defers_to_geak_harness(
-    tmp_path: Path,
-    measured_ttft_ms: float | None,
-) -> None:
-    """The reproduced 2141/3296-ms cold artifact cannot become no_promote."""
-    base, current_best, measured = 651.991, 2674.160, 2141.0
-    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    coord.shared_state.resume_pending_revalidation = True
-    coord.shared_state.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "reval-1",
-    }
-    called = {"n": 0}
-
-    async def _fallback(**_kwargs):
-        called["n"] += 1
-        return {"validated": False}
-
-    coord._validate_geak_via_geak_harness = _fallback  # type: ignore[assignment]
-    protocol = {"prewarm_rounds": 2, "measured_repeats": 3, "aggregation": "median"}
-    best_variant = {
-        "fingerprint": "abc",
-        "stack_rebench_sample_count": 3,
-        "stack_rebench_spread_pct": 0.5,
-        "revalidation_protocol_complete": True,
-        "revalidation_protocol": protocol,
-        "stack_rebench_ttft_median_ms": measured_ttft_ms,
-    }
-    await coord._promote_to_shared_state(
-        "explore",
-        {
-            "output_throughput": measured,
-            "best_variant": best_variant,
-            "winners": [best_variant],
-        },
-        task=_revalidate_task(
-            expected_hash="abc",
-            rebench_required=True,
-            stack_rebench_repeats=3,
-            stack_rebench_max_spread_pct=3.0,
-            revalidation_protocol=protocol,
-            expected_geak_ttft_ms=175.832,
-        ),
-    )
-
-    assert called["n"] == 1
-    assert coord.shared_state.current_best["tput"] == pytest.approx(current_best)
-    assert coord.shared_state.geak_result["revalidation_status"] == "fallback_failed"
-
-
-@pytest.mark.asyncio
 async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) -> None:
     """A GEAK rebench that beats baseline but loses to current_best is measured, not a KEEP."""
     base, current_best, measured = 7380.7, 10067.9, 9623.0
@@ -562,31 +466,12 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
 
     coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
-    protocol = {"prewarm_rounds": 2, "measured_repeats": 3, "aggregation": "median"}
     result = {
         "output_throughput": measured,
-        "best_variant": {
-            "fingerprint": "abc",
-            "stack_rebench_sample_count": 3,
-            "stack_rebench_spread_pct": 0.4,
-            "stack_rebench_ttft_median_ms": 180.0,
-            "revalidation_protocol_complete": True,
-            "revalidation_protocol": protocol,
-        },
+        "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state(
-        "explore",
-        result,
-        task=_revalidate_task(
-            expected_hash="abc",
-            rebench_required=True,
-            stack_rebench_repeats=3,
-            stack_rebench_max_spread_pct=3.0,
-            revalidation_protocol=protocol,
-            expected_geak_ttft_ms=175.0,
-        ),
-    )
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     assert ss.current_best["tput"] == pytest.approx(current_best)
@@ -594,10 +479,6 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.resume_pending_revalidation is False
     assert not ss.geak_pending
-    # AMD-AGI/Hyperloom#1240 (item 4): no_promote must tombstone geak_result
-    # the same way no_material does, so a later KERNEL entry's crash-recovery
-    # check does not re-recover this result.json and re-enqueue a wasted
-    # (or worse, misreported) rebench for a candidate already adjudicated.
     assert ss.geak_result["revalidation_status"] == "no_promote"
 
 
@@ -654,8 +535,6 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     coord._promote_geak_from_candidate(
         result,
         measured_tput=measured,
-        measured_ttft_ms=181.0,
-        measured_tpot_ms=18.7,
     )
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -663,8 +542,6 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.current_best["tput"] == pytest.approx(measured)
     assert ss.current_best["extra_server_args"] == "--max-num-batched-tokens 24576"
     assert ss.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER") == "0"
-    assert ss.current_best["ttft_mean_ms"] == pytest.approx(181.0)
-    assert ss.current_best["tpot_mean_ms"] == pytest.approx(18.7)
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
     assert ss.resume_pending_revalidation is False
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
