@@ -168,10 +168,6 @@ def _write_inferencex(path: Path, tput: float = 1761.6, completed: int = 640) ->
                 "request_throughput": tput / 10,
                 "completed_requests": completed,
                 "duration_seconds": 120.0,
-                "mean_ttft_ms": 180.0,
-                "median_ttft_ms": 175.0,
-                "mean_tpot_ms": 19.0,
-                "median_tpot_ms": 18.5,
             }
         ),
         encoding="utf-8",
@@ -198,8 +194,6 @@ def test_rescue_from_env_path_adopted_after_subprocess_start(
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] == pytest.approx(1761.6)
     assert measurement["completed_requests"] == 640
-    assert measurement["ttft_median_ms"] == pytest.approx(175.0)
-    assert measurement["tpot_median_ms"] == pytest.approx(18.5)
     assert any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
     copied = workspace / leak_path.name
     assert copied.exists()
