@@ -70,12 +70,43 @@ class SubAgentResult:
         state (str): Terminal state — ``"succeeded"`` / ``"failed"``.
         result (dict): Executor result payload (empty on failure).
         error (str | None): Error string when the task failed, else None.
+        error_class (str): Machine-readable failure category. Not a closed
+            enum — each producer mints its own values, so a new prefix
+            family here is discoverable only via its consumers, not via a
+            central registry:
+
+            * ``"policy_{rule}"`` (e.g.
+              ``"policy_source_file_outside_trusted_scope"``): a
+              ``PolicyDenied`` dispatch rejection, keyed on
+              :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
+              Falls through any exact-match bucket below by design — a
+              policy denial isn't a runtime crash/oom/hang, so
+              :meth:`writeback._pitfall_severity_for` correctly excludes it
+              from ``SEVERITY_CRASH``. Still lands in the gap ledger as its
+              own ``(action, error_class)`` key
+              (:meth:`explore._extract_gaps_from_attempts`), which is enough
+              to group repeat denials without a dedicated bucket.
+            * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
+              exact-matched by :meth:`writeback._pitfall_severity_for` to
+              classify a failure as crash-severity for the KB.
+            * ``"no_executor"``: no runner registered for the task's
+              ``kind`` — set directly on this dataclass, same site as
+              ``policy_{rule}``, so this exit no longer collapses into
+              ``"unknown_error"`` either.
+            * The raised exception's ``__class__.__name__`` (e.g.
+              ``"TimeoutError"``): an executor raised instead of returning a
+              result. Same reasoning — a real class beats the generic
+              bucket, even though the exact name isn't enumerable up front.
+            * Anything else (including empty): executors set their own
+              ``error_class`` inside ``result``, or leave it unset, in which
+              case the gap ledger buckets it as ``"unknown_error"``.
     """
 
     task_id: str
     state: str  # "succeeded" / "failed"
     result: dict
     error: str | None = None
+    error_class: str = ""
 
 
 class SubAgentRunner:
@@ -224,7 +255,7 @@ class SubAgentRunner:
                         "cancelled",
                         evidence={
                             "reason": "policy_denied",
-                            "rule": getattr(denied, "rule", None),
+                            "rule": denied.rule,
                             "error": str(denied),
                         },
                         context="dispatch_policy_denied",
@@ -234,6 +265,7 @@ class SubAgentRunner:
                         state="failed",
                         result={},
                         error=str(denied),
+                        error_class=f"policy_{denied.rule or 'denied'}",
                     )
 
             # Running an action whose lanes nobody holds would run it
@@ -259,6 +291,7 @@ class SubAgentRunner:
                     state="failed",
                     result={},
                     error=f"no runner registered for kind={task.kind!r}",
+                    error_class="no_executor",
                 )
 
             # Workspace prep is inside the terminal-writing block: an ENOSPC
@@ -304,6 +337,7 @@ class SubAgentRunner:
                     state="failed",
                     result={},
                     error=repr(exc),
+                    error_class=exc.__class__.__name__,
                 )
             await self._write_terminal(
                 task.task_id,

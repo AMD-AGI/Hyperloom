@@ -944,11 +944,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # session start. The dataclass default is a placeholder for tests/direct
     # construction; the CLI/manifest default is whole-machine GPU detection.
     gpu_specialist_capacity: int = 0
-    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it once acted on.
+    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
     pending_escalate_hint: str = ""
-    # last cleared escalate hint (audit only) for the breakdown.
+    # last hint that actually drove a phase transition (audit only) for the breakdown.
     last_consumed_escalate_hint: str = ""
     last_consumed_escalate_hint_ts: str = ""
+    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown. Distinct from last_consumed_escalate_hint: that field means "this drove a transition", which a discarded hint never did.
+    last_discarded_escalate_hint: str = ""
+    last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
@@ -1882,7 +1885,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return text
 
     def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint (recording consumption in audit fields) so the next tick doesn't re-trigger; returns cleared hint.
+        """Pop the pending hint because it drove a phase transition; returns cleared hint.
+
+        Records the hint into ``last_consumed_escalate_hint`` — an audit field
+        that specifically means "this hint drove a transition". A hint that
+        was thrown away without acting on it is a different event and must go
+        through :meth:`discard_pending_escalate_hint` instead, or a discard
+        would misreport itself as a consumption in the breakdown.
 
         Returns:
             str: The consumed hint (``""`` when none was pending).
@@ -1893,6 +1902,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.pending_escalate_hint = ""
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = _now_iso()
+        return hint
+
+    def discard_pending_escalate_hint(self) -> str:
+        """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint.
+
+        Records the hint into ``last_discarded_escalate_hint`` rather than
+        ``last_consumed_escalate_hint`` — the hint never drove anything, so
+        recording it as consumed would tell the breakdown the opposite of
+        what happened.
+
+        Returns:
+            str: The discarded hint (``""`` when none was pending).
+        """
+        hint = (self.pending_escalate_hint or "").strip()
+        if not hint:
+            return ""
+        self.pending_escalate_hint = ""
+        self.last_discarded_escalate_hint = hint
+        self.last_discarded_escalate_hint_ts = _now_iso()
         return hint
 
     def enablement_close_guard_active(self) -> bool:
