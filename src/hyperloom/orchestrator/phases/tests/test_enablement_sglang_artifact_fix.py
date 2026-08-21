@@ -59,16 +59,59 @@ def test_patch_absent_from_every_root_is_dropped(tmp_path):
     assert res.is_garbage
 
 
-def test_candidate_roots_do_not_mask_a_stale_patch(tmp_path):
-    """A target the base root holds is graded there, not retried elsewhere."""
+def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     base = _checkout(tmp_path / "base", "f.py")
     other = _checkout(tmp_path / "other", "f.py")
     (base / "f.py").write_text("drifted\n", encoding="utf-8")
     _git("-C", str(base), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qam", "drift")
 
     res = _ps.ground_patch_text(_diff("f.py"), base_checkout=base, candidate_roots=(other,))
-    assert res.verdict == _ps.GROUND_STALE
-    assert not res.is_garbage
+    assert res.verdict == _ps.GROUND_MISSING_TARGET
+    assert res.detail.startswith("ambiguous_root:")
+    assert res.is_garbage
+
+
+def test_pure_create_requires_explicit_root(tmp_path):
+    root = _checkout(tmp_path / "root", "existing.py")
+    create = (
+        "diff --git a/new.py b/new.py\n"
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+new\n"
+    )
+
+    rejected = _ps.resolve_patch_apply_root(
+        (create,),
+        explicit_root=None,
+        candidate_roots=(root,),
+    )
+    accepted = _ps.resolve_patch_apply_root(
+        (create,),
+        explicit_root=root,
+        candidate_roots=(),
+    )
+
+    assert rejected.root is None
+    assert rejected.reason == "pure_create_requires_explicit_root"
+    assert accepted.root == root.resolve()
+
+
+def test_all_preimages_must_share_one_unique_root(tmp_path):
+    complete = _checkout(tmp_path / "complete", "first.py")
+    (complete / "second.py").write_text("one\n", encoding="utf-8")
+    _git("-C", str(complete), "add", ".")
+    _git("-C", str(complete), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "second")
+    partial = _checkout(tmp_path / "partial", "first.py")
+    patches = (_diff("first.py"), _diff("second.py"))
+
+    resolution = _ps.resolve_patch_apply_root(
+        patches,
+        explicit_root=None,
+        candidate_roots=(partial, complete),
+    )
+
+    assert resolution.root == complete.resolve()
 
 
 def test_vet_patches_rescues_a_cross_repo_patch(tmp_path):
@@ -81,6 +124,49 @@ def test_vet_patches_rescues_a_cross_repo_patch(tmp_path):
     assert kept == [str(patch)]
     assert dropped == []
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
+
+
+def test_vet_patches_resolves_the_complete_set_once(tmp_path):
+    complete = _checkout(tmp_path / "complete", "common.py")
+    (complete / "unique.py").write_text("one\n", encoding="utf-8")
+    _git("-C", str(complete), "add", ".")
+    _git("-C", str(complete), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "unique")
+    partial = _checkout(tmp_path / "partial", "common.py")
+    patches = []
+    for name in ("common.py", "unique.py"):
+        patch = tmp_path / f"{name}.patch"
+        patch.write_text(_diff(name), encoding="utf-8")
+        patches.append(str(patch))
+
+    kept, dropped, grounding = _ps.vet_patches(
+        patches,
+        base_checkout=partial,
+        candidate_roots=(complete,),
+    )
+
+    assert kept == patches
+    assert dropped == []
+    assert set(grounding.values()) == {_ps.GROUND_APPLIES}
+
+
+def test_vet_patches_rejects_a_set_split_across_roots(tmp_path):
+    first = _checkout(tmp_path / "first", "first.py")
+    second = _checkout(tmp_path / "second", "second.py")
+    patches = []
+    for name in ("first.py", "second.py"):
+        patch = tmp_path / f"{name}.patch"
+        patch.write_text(_diff(name), encoding="utf-8")
+        patches.append(str(patch))
+
+    kept, dropped, grounding = _ps.vet_patches(
+        patches,
+        base_checkout=first,
+        candidate_roots=(second,),
+    )
+
+    assert kept == []
+    assert len(dropped) == 2
+    assert set(grounding.values()) == {_ps.GROUND_MISSING_TARGET}
 
 
 def test_sibling_checkouts_excludes_the_base_and_non_repos(tmp_path):
