@@ -37,8 +37,7 @@ from .build_actions import BuildResult, FrameworkRuntime, TargetedBuildAction
 
 log = logging.getLogger(__name__)
 
-# How long to wait for a SIGKILLed process group to be reaped before giving up
-# on confirming it died.
+# Upper bound on confirming a SIGKILLed process group is gone.
 _REAP_TIMEOUT_SEC = 5.0
 
 # Default per-component build budgets (upper bounds), in seconds.
@@ -236,28 +235,24 @@ def classify_build_exit(handle: BuildHandle, rc: int) -> BuildResult:
 def ensure_build_dead(handle: BuildHandle) -> bool:
     """SIGKILL the build's process group unless it already exited.
 
-    SIGKILL without a SIGTERM grace on purpose: this runs on the abnormal exits
-    (budget spent, cancel, a raise between the spawn and the await), and a
-    half-finished build tree is discarded either way, so there is nothing a
-    graceful stop would preserve and nothing worth blocking the loop for.
+    No SIGTERM grace: a half-finished build tree is discarded either way, so
+    there is nothing a graceful stop would preserve.
 
     Args:
         handle: The build to make sure is not still running.
 
     Returns:
         bool: True when the process is known to be gone, so the caller may drop
-            the durable sentinel. False leaves the sentinel for a resume to
-            reclaim.
+            the durable sentinel. False leaves it for a resume to reclaim.
     """
     if handle.proc.poll() is not None:
         return True
     kill_build_pgroup(handle.pgid, sig=signal.SIGKILL)
     try:
         handle.proc.wait(timeout=_REAP_TIMEOUT_SEC)
-    except Exception:  # noqa: BLE001 — unreaped means "cannot confirm", not an error
+    except subprocess.TimeoutExpired:
         log.warning(
-            "targeted_build: pgid=%d did not reap after SIGKILL; leaving the "
-            "sentinel for resume recovery",
+            "targeted_build: pgid=%d unreaped after SIGKILL; keeping the sentinel",
             handle.pgid,
         )
         return False

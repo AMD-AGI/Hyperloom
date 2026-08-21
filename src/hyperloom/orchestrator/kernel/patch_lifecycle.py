@@ -25,11 +25,9 @@ CLEANUP_RECOVERY_REQUIRED = "recovery_required"
 def lifecycle_complete(result: Any) -> bool:
     """Return True when a finalize or revert left nothing owed.
 
-    ``"partial"`` is not complete for either: a partial revert can leave the
-    patch live on a remote pod, and a partial finalize can leave backups on one
-    (both surface as a ``multinode_*`` issue in the tool's result). The
-    consequence differs per branch, which is :func:`cleanup_verdict`'s job, not
-    this predicate's.
+    ``"partial"`` is owed work for either: a remote pod can be left with the
+    patch still live, or with its backups undeleted. What that costs differs per
+    branch, which is :func:`cleanup_verdict`'s call to make.
     """
     return isinstance(result, dict) and result.get("status") in {"ok", "skipped"}
 

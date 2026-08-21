@@ -1624,8 +1624,8 @@ async def test_integrate_handler_revert_partial_becomes_failed(
 ):
     """Non-KEEP + partial revert must set top-level status='failed'.
 
-    Previously revert_complete accepted "ok" or "partial", hiding multinode
-    revert failures where the patch remained live on a remote pod.
+    A partial revert hides a multinode failure where the patch stayed live on a
+    remote pod, so it is not a completed lifecycle.
     """
     import hyperloom.orchestrator.kernel.request_handlers as krh
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
