@@ -563,8 +563,13 @@ def test_snapshot_revert_rejects_head_mismatch(
     assert result["errors"][0].startswith("head_mismatch:")
 
 
-def test_required_patch_applies_via_nogit_when_repo_has_no_head(tmp_path, output_dir):
-    _require_patch_cli()
+def test_required_timeline_refuses_a_repo_with_no_head(tmp_path, output_dir):
+    """prelude promotes this tree against a pre_sha it cannot get here.
+
+    Applying via nogit made the run look prepared and then fail downstream with
+    validated_recipe_checkout_incomplete, leaving a half-patched tree behind.
+    Refusing up front is the outcome the caller can act on.
+    """
     repo = tmp_path / "unborn"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -581,12 +586,13 @@ def test_required_patch_applies_via_nogit_when_repo_has_no_head(tmp_path, output
         output_dir,
     )
 
-    assert result["status"] == "prepared"
-    assert "patched = True" in target.read_text()
+    assert result["status"] == "failed"
+    assert result["failure"] == "missing_git_head"
+    assert "original = True" in target.read_text(), "must not leave a patched tree"
 
 
-def test_nogit_applies_to_non_git_install_tree(tmp_path, output_dir):
-    _require_patch_cli()
+def test_required_timeline_refuses_a_non_git_install_tree(tmp_path, output_dir):
+    """Same contract for an install tree that was never a repo."""
     install_root = tmp_path / "dist-packages"
     target = install_root / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)
@@ -594,14 +600,28 @@ def test_nogit_applies_to_non_git_install_tree(tmp_path, output_dir):
 
     result = _apply_warm_patches(
         {
-            "patches": [
-                {
-                    "patch_file": "vllm/fp8.py",
-                    "patch_content": VALID_PATCH,
-                }
-            ],
+            "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
             "required_patch_timeline": True,
         },
+        str(install_root),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure"] == "missing_git_head"
+    assert "original = True" in target.read_text()
+
+
+def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
+    """Nothing downstream of a legacy patch needs a sha, so nogit stays."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+
+    result = _apply_warm_patches(
+        {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]},
         str(install_root),
         output_dir,
     )

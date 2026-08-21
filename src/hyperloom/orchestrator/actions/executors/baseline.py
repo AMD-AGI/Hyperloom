@@ -1446,6 +1446,23 @@ def _apply_warm_patches(
     target_path = Path(target_repo)
     git_tree = _is_git_tree(target_path)
     pre_sha = _git_head_sha(target_repo) if git_tree else ""
+    # prelude promotes a required timeline's tree only against a pre_sha and a
+    # git snapshot manifest. nogit produces neither, so serving this path from it
+    # turned a successful replay into validated_recipe_checkout_incomplete --
+    # worse than the fast failure it replaced. Refuse up front, as before; nogit
+    # serves the legacy list, where nothing downstream needs a sha.
+    if required_timeline and not pre_sha:
+        return {
+            "required": True,
+            "status": "failed",
+            "patches": [],
+            "applied": [],
+            "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+            "failure": "missing_git_head",
+            "pre_sha": "",
+            "target_repo": target_repo,
+            "rolled_back": False,
+        }
     use_nogit = not git_tree or not pre_sha
     nogit_backups: list[dict[str, Any]] = []
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
@@ -3478,8 +3495,13 @@ class BaselineExecutor:
                     )
                 return result
             finally:
-                if applied_patches and (
-                    _pre_patch_sha or params.get("_warm_patch_nogit_backups")
+                # A required timeline's tree is promoted by prelude after this
+                # returns, so it must stay patched; reverting here handed prelude
+                # a clean tree and silently lost the replay.
+                if (
+                    applied_patches
+                    and not isinstance(patch_application, dict)
+                    and (_pre_patch_sha or params.get("_warm_patch_nogit_backups"))
                 ):
                     _revert_warm_patch_state(
                         patch_target,
@@ -3789,9 +3811,12 @@ class BaselineExecutor:
                 port=port,
             )
             # Revert warm-replay patches to prevent state leakage into
-            # subsequent tasks that reuse the same InferenceX checkout.
+            # subsequent tasks that reuse the same InferenceX checkout. A
+            # required timeline is exempt: prelude promotes that tree after this
+            # returns and needs it still patched.
             if (
                 applied_patches
+                and not isinstance(patch_application, dict)
                 and (
                     _pre_patch_sha
                     or params.get("_warm_patch_nogit_backups")
