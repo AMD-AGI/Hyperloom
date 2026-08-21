@@ -132,7 +132,7 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord, build_life
 @pytest.fixture
 def executor(tmp_path):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
-    return TargetedBuildExecutor(session_dir=tmp_path)
+    return TargetedBuildExecutor()
 
 
 @pytest.mark.asyncio
@@ -165,7 +165,7 @@ async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, t
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
     action = _action([sys.executable, "-c", "import time; time.sleep(600)"], build_budget_sec=1)
     task, _ = await _enqueue_and_run(
-        build_lifecycle, TargetedBuildExecutor(session_dir=tmp_path),
+        build_lifecycle, TargetedBuildExecutor(),
         action=action, session_dir=tmp_path,
     )
     assert task.state == "failed"
@@ -295,7 +295,7 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, build_l
     from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
     action = _real_action()
-    executor = TargetedBuildExecutor(session_dir=tmp_path)
+    executor = TargetedBuildExecutor()
     tid = await build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_lifecycle.tasks.get(tid)
     await build_lifecycle.tasks.transition(tid, "running")
@@ -334,7 +334,7 @@ async def test_explicit_build_command_passed_verbatim(build_coord, build_lifecyc
     from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 
     action = _fake_action()
-    executor = TargetedBuildExecutor(session_dir=tmp_path)
+    executor = TargetedBuildExecutor()
     tid = await build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_lifecycle.tasks.get(tid)
     await build_lifecycle.tasks.transition(tid, "running")
@@ -416,7 +416,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_
     action = _action(["/nonexistent_compiler_xyz_P1_12"])
     tid = await build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_lifecycle.tasks.get(tid)
-    executor = TargetedBuildExecutor(session_dir=tmp_path)
+    executor = TargetedBuildExecutor()
     runner = SubAgentRunner(
         locks=build_coord.locks,
         tasks=build_coord.tasks,

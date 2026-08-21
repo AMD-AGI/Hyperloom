@@ -38,33 +38,6 @@ if TYPE_CHECKING:
 class TargetedBuildExecutor:
     """Executor for ``targeted_build`` task rows."""
 
-    def __init__(self, session_dir: Path | None = None) -> None:
-        self._session_dir = Path(session_dir) if session_dir is not None else None
-
-    def _resolve_session_dir(self, ctx: "RunnerContext") -> Path:
-        """Return the session dir this build writes under.
-
-        The constructor value is what production wires. When it is absent the
-        runner's own ``ctx.extra["session_dir"]`` stands in, so registration
-        never has to be conditional on having one at wiring time -- a
-        Coordinator-internal kind with no executor fails silently at dispatch.
-
-        Args:
-            ctx: The runner context for this task.
-
-        Returns:
-            The session directory.
-
-        Raises:
-            RuntimeError: When neither source carries one.
-        """
-        if self._session_dir is not None:
-            return self._session_dir
-        raw = str(ctx.extra.get("session_dir") or "").strip()
-        if not raw:
-            raise RuntimeError("targeted_build: no session dir to resolve the attempt root under")
-        return Path(raw)
-
     @staticmethod
     def _attempt_root(session_dir: Path, task_id: str) -> str:
         return str(session_dir / "enablement" / "builds" / task_id)
@@ -77,7 +50,7 @@ class TargetedBuildExecutor:
         """
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
-        session_dir = self._resolve_session_dir(ctx)
+        session_dir = Path(ctx.extra["session_dir"])
         attempt_root = self._attempt_root(session_dir, task.task_id)
         budget_sec = float(_resolve_budget_sec(action))
         shared_state = ctx.extra.get("shared_state")

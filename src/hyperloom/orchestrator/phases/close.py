@@ -713,12 +713,9 @@ class ClosePhase(PhaseHandler):
 
         A fresh report used to be awaited with no timeout, so a wedged writer
         held the process open after the session budget was already gone. The
-        bound is the step's typical cost, not the closing reserve.
-
-        The run goes through ``run_task_registered``, so the step is reachable
-        from ``cancel_inflight_actions`` at shutdown, and the cancellation the
-        bound raises lands on the runner's ``CancelledError`` path, which writes
-        the row terminal and returns its lanes before this returns.
+        bound is the step's typical cost, not the closing reserve. Cancelling it
+        lands on the runner's ``CancelledError`` path, which writes the row
+        terminal before this returns.
 
         Args:
             task: The queued (or otherwise runnable) close-step task.
@@ -745,9 +742,7 @@ class ClosePhase(PhaseHandler):
                 bound_sec,
             )
             return _TASK_STATE_RUNNING
-        # Closing steps take no lanes, so ``None`` — the lanes-busy answer — is
-        # unreachable here; treat it as the non-terminal state either way.
-        return result.state if result is not None else _TASK_STATE_RUNNING
+        return result.state
 
     async def _record_close_step(
         self,

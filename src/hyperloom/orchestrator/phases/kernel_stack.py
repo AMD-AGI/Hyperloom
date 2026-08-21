@@ -515,9 +515,9 @@ class KernelStackPhase(PhaseHandler):
                         bench_result,
                         session_dir=self.session_dir,
                         workspace=workspace,
-                        # The same args the bench server above was started with,
-                        # so a missing verdict can be told apart from a serving
-                        # context too small to answer an eval request at all.
+                        # The args the bench server ran under, so a serving
+                        # context too small to host an eval is not read as a
+                        # broken eval.
                         server_args=str(
                             (self.shared_state.current_best or {}).get("extra_server_args") or ""
                         ),

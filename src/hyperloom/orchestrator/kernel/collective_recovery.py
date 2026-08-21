@@ -266,9 +266,7 @@ async def recover_apply_state(
     if resumable_finalize:
         if manifest_status in _FINALIZED_MANIFEST_STATES:
             # Terminal manifest: finalize already ran and cannot run again, so
-            # the cleanup it owed is closed even when it only removed part of
-            # the backups. ``settled`` says that to the KEEP branch, which would
-            # otherwise re-enter finalize on a finalized manifest.
+            # the cleanup it owed is closed even on a partial sweep.
             finalize_result = {
                 "status": "ok" if manifest_status == "finalized" else "partial",
                 "reason": "manifest already finalized",
@@ -370,6 +368,7 @@ __all__ = [
     "IntegrationInputs",
     "RecoveredApply",
     "load_apply_checkpoint",
+    "patch_finalize_settled",
     "patch_lifecycle_complete",
     "recover_apply_state",
     "validate_integration_inputs",

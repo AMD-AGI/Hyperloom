@@ -44,8 +44,7 @@ def _fake_self(**state_overrides):
         _MN_AUTO_EXPLORE_GRID_CAP=Coordinator._MN_AUTO_EXPLORE_GRID_CAP,
         shared_state=state,
         tasks=_FakeTasks(),
-        # The enqueue takes the action catalogue's TTL so the row is visible to
-        # ``reclaim_expired_running``; the dispatcher owns the real lookup.
+        # Stands in for the dispatcher's action-catalogue TTL lookup.
         _registry_lanes_ttl=lambda kind: ([], 1800),
     )
 

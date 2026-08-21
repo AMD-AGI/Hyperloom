@@ -178,10 +178,8 @@ async def _spec_stub(ctx):  # noqa: ANN001, ANN202 - test stub
 
 
 def _fully_wired_registry() -> dict[str, object]:
-    # A session dir is what production always passes; the executors gated on it
-    # (targeted_build) are exactly the ones these two guards exist to check.
     coord = _fake_coordinator()
-    _register_executors(coord, specialist_executor=_spec_stub, session_dir=Path("."))
+    _register_executors(coord, specialist_executor=_spec_stub, session_dir=None)
     return coord.sub.executor_registry
 
 
@@ -211,11 +209,9 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     A registration whose name is not in the action catalogue can never be
     enqueued, so it is dead weight that also makes the real gap harder to see.
 
-    The Coordinator dispatches its internal-only kinds by name rather than
-    through the catalogue, so one of them may deliberately have no entry
-    (``targeted_build`` stays out to keep itself off ``_RUNS_ACTIONS``). That
-    exemption is derived from ``INTERNAL_ONLY_ACTION_NAMES`` rather than spelled
-    out here, so a rename still has to pass through the curated set.
+    An internal-only kind may deliberately have no entry -- ``targeted_build``
+    stays out to keep itself off ``_RUNS_ACTIONS`` -- so the exemption is
+    derived from ``INTERNAL_ONLY_ACTION_NAMES`` instead of spelled out here.
     """
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         ACTION_CATALOGUE,
