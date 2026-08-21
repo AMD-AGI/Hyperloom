@@ -57,6 +57,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "global_timeout", "--global-timeout")
     _add_opt(cmd, args, "tuner", "--tuner")
     _add_opt(cmd, args, "untuned_csv", "--untuned-csv")
+    _add_opt(cmd, args, "moe_untuned_csv", "--moe-untuned-csv")
     _add_opt(cmd, args, "shapes_json", "--shapes-json")
     _add_opt(cmd, args, "tunableop_input", "--tunableop-input")
     _add_opt(cmd, args, "kernel_signature_log", "--kernel-signature-log")

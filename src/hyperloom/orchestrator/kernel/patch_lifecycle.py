@@ -32,6 +32,23 @@ def lifecycle_complete(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") in {"ok", "skipped"}
 
 
+def finalize_settled(result: Any) -> bool:
+    """Return True when finalize will not run again for this apply.
+
+    Distinct from :func:`lifecycle_complete`, which grades what a cleanup still
+    owes. A finalize that reached a terminal manifest state is *settled* even
+    when it only removed part of the backups: the manifest cannot be finalized
+    again, so re-entering finalize repeats work that is done and leaves the
+    apply checkpoint on disk forever. Revert has no equivalent — a partial
+    revert may still leave the patch live on a remote pod, which is exactly why
+    :func:`lifecycle_complete` refuses to call it complete.
+
+    Callers mark such a result with ``settled=True``; anything
+    :func:`lifecycle_complete` already accepts is settled too.
+    """
+    return isinstance(result, dict) and (lifecycle_complete(result) or bool(result.get("settled")))
+
+
 def cleanup_verdict(
     *,
     decision: str,

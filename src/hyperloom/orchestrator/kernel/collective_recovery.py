@@ -19,7 +19,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .patch_lifecycle import lifecycle_complete as patch_lifecycle_complete
+from .patch_lifecycle import (
+    finalize_settled as patch_finalize_settled,
+    lifecycle_complete as patch_lifecycle_complete,
+)
 
 
 #: Manifest states an interrupted apply can still be resumed from.
@@ -262,16 +265,21 @@ async def recover_apply_state(
     )
     if resumable_finalize:
         if manifest_status in _FINALIZED_MANIFEST_STATES:
+            # Terminal manifest: finalize already ran and cannot run again, so
+            # the cleanup it owed is closed even when it only removed part of
+            # the backups. ``settled`` says that to the KEEP branch, which would
+            # otherwise re-enter finalize on a finalized manifest.
             finalize_result = {
                 "status": "ok" if manifest_status == "finalized" else "partial",
                 "reason": "manifest already finalized",
+                "settled": True,
             }
         else:
             finalize_result = await asyncio.to_thread(
                 _maybe_finalize_kernel_patch,
                 recovered,
             )
-        finalize_complete = patch_lifecycle_complete(finalize_result)
+        finalize_complete = patch_finalize_settled(finalize_result)
         return RecoveredApply(
             None,
             {

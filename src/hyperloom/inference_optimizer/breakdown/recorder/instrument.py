@@ -1279,6 +1279,33 @@ def _kernel_selection_operation_id(
     return _stable_id("op", "kernel_optimizer_selection", context_key, discriminator)
 
 
+# Canonical kernel routes: the route operation every kernel record hangs under, and the strategy
+# stamped on the kernel operation itself. Two entries today, and the pair is derived rather than
+# written at each call site because the forge identity used to be a literal in nine places — a tenth
+# reader was one edit away from silently parenting somebody else's kernels under Forge.
+#
+# A GEAK kernel replayed from its kernel_journey must NOT hang under the Forge route: the tree would
+# then assert it ran beneath a route that never dispatched it, and a reader walking parents to answer
+# "which optimizer produced this?" gets the wrong answer. The `geak` route operation already exists
+# (see the GEAK dispatch writer below); this makes the replay reachable to it.
+CANONICAL_KERNEL_ROUTES: dict[str, tuple[str, str]] = {
+    # route_strategy -> (route operation name, strategy stamped on the kernel operation)
+    "kernel_agent_forge": ("kernel_agent_forge", "forge"),
+    "geak": ("geak", "geak"),
+}
+
+
+def _canonical_route(route_strategy: str | None) -> tuple[str, str]:
+    """(route operation name, kernel strategy) for a canonical route.
+
+    Unknown values fall back to the forge pair, which is what every caller got before routes were
+    named, so an unrecognised string cannot silently drop a kernel off the streams.
+    """
+    return CANONICAL_KERNEL_ROUTES.get(
+        str(route_strategy or ""), CANONICAL_KERNEL_ROUTES["kernel_agent_forge"]
+    )
+
+
 def _kernel_route_operation_id(
     session_dir: Path | str,
     strategy: str,
@@ -1526,19 +1553,21 @@ def record_native_kernel_run_start(
     payload: Mapping[str, Any] | None = None,
     macro_cycle: int | None = None,
     route_operation_id: str = "",
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Upsert the selected native Kernel Agent plus Forge route as running."""
+    route_name, _ = _canonical_route(route_strategy)
     if not session_dir:
         trace_skip(reason="no session_dir", section="kernel_journey")
         return
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
         _kernel_route_context_key(session_dir),
         {},
-    ).get("route:kernel_agent_forge", "")
+    ).get(f"route:{route_name}", "")
     route_id = route_operation_id or _kernel_route_operation_id(
         session_dir,
-        "kernel_agent_forge",
+        route_name,
         macro_cycle=macro_cycle,
         run_discriminator=""
         if current_route_id
@@ -1549,24 +1578,27 @@ def record_native_kernel_run_start(
         operation_id=route_id,
         producer=producer,
         kind="kernel_optimizer_run",
-        name="kernel_agent_forge",
+        name=route_name,
         phase="KERNEL_AGENT",
         scope="run",
         strategy_group="kernel_optimizer",
-        strategy="kernel_agent_forge",
-        executor_class="deterministic",
+        strategy=route_name,
+        executor_class="llm_tool" if route_name == "geak" else "deterministic",
         status="running",
         started_at=_now_iso_safe(),
         inputs=dict(payload or {}),
         subject={
             "subject_id": _kernel_route_subject_id(
                 session_dir,
-                "kernel_agent_forge",
+                route_name,
                 route_operation_id=route_id,
             ),
             "subject_type": "kernel_optimizer_route",
             "role": "selected",
-            "name": "kernel_agent_forge",
+            # From route_name, like the operation above it. Left literal, a GEAK replay produced
+            # operation.name=geak next to subject.name=kernel_agent_forge — one record naming two
+            # different optimizers, and the subject is what identity lookups resolve against.
+            "name": route_name,
         },
     )
 
@@ -1577,9 +1609,11 @@ def record_native_kernel_run_result(
     result: Mapping[str, Any],
     macro_cycle: int | None = None,
     route_operation_id: str = "",
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Finalize the native Kernel Agent plus Forge route from its result."""
+    route_name, _ = _canonical_route(route_strategy)
     if not session_dir:
         trace_skip(reason="no session_dir", section="kernel_journey")
         return
@@ -1587,10 +1621,10 @@ def record_native_kernel_run_result(
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
         _kernel_route_context_key(session_dir),
         {},
-    ).get("route:kernel_agent_forge", "")
+    ).get(f"route:{route_name}", "")
     route_id = route_operation_id or _kernel_route_operation_id(
         session_dir,
-        "kernel_agent_forge",
+        route_name,
         macro_cycle=macro_cycle,
         run_discriminator=""
         if current_route_id
@@ -1610,12 +1644,12 @@ def record_native_kernel_run_result(
         operation_id=route_id,
         producer=producer,
         kind="kernel_optimizer_run",
-        name="kernel_agent_forge",
+        name=route_name,
         phase="KERNEL_AGENT",
         scope="run",
         strategy_group="kernel_optimizer",
-        strategy="kernel_agent_forge",
-        executor_class="deterministic",
+        strategy=route_name,
+        executor_class="llm_tool" if route_name == "geak" else "deterministic",
         status=result_status,
         ended_at=_now_iso_safe(),
         outputs={
@@ -2791,9 +2825,11 @@ def record_kernel_discovery(
             record_native_kernel_run_start(
                 session_dir,
                 payload={"discovery_source": source, "tool": tool or source},
+                route_strategy=route,
                 producer=producer,
             )
-            route_id = _kernel_route_operation_id(session_dir, "kernel_agent_forge")
+            route_name, _ = _canonical_route(route)
+            route_id = _kernel_route_operation_id(session_dir, route_name)
             record_operation(
                 session_dir,
                 operation_id=route_id,
@@ -2941,7 +2977,9 @@ def record_kernel_dispatch(
                 producer=producer,
             )
             return
-        record_native_kernel_run_start(session_dir, producer=producer)
+        record_native_kernel_run_start(
+            session_dir, route_strategy=route_strategy, producer=producer
+        )
         subject_id = _kernel_subject_id(session_dir, str(kernel_id))
         operation_id = _kernel_operation_id(session_dir, str(kernel_id))
         subject = {
@@ -2961,12 +2999,12 @@ def record_kernel_dispatch(
             phase="KERNEL_AGENT",
             scope="kernel",
             strategy_group="kernel_backend",
-            strategy="forge",
+            strategy=_canonical_route(route_strategy)[1],
             executor_class="llm_tool",
             status="running" if dispatched else "skipped",
             started_at=_now_iso_safe(),
-            parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-            root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+            root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
             subject=subject,
             inputs={
                 "backends": [str(value) for value in (backends or [])],
@@ -3044,7 +3082,9 @@ def record_kernel_backend_result(
                     producer=producer,
                 )
         elif kid and not legacy_only:
-            record_native_kernel_run_start(session_dir, producer=producer)
+            record_native_kernel_run_start(
+            session_dir, route_strategy=route_strategy, producer=producer
+        )
             subject_id = _kernel_subject_id(session_dir, kid)
             subject = {
                 "subject_id": subject_id,
@@ -3225,8 +3265,8 @@ def record_kernel_backend_result(
                 executor_class="llm_tool",
                 status=operation_status,
                 ended_at=_now_iso_safe() if operation_status != "running" else "",
-                parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-                root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+                root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
                 subject=subject,
                 attempts=canonical_attempts,
                 gates=canonical_gates,
@@ -3298,8 +3338,8 @@ def record_kernel_backend_result(
                 executor_class="llm_tool",
                 status="failed",
                 ended_at=_now_iso_safe(),
-                parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-                root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+                root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
                 attempts=[
                     {
                         "attempt_id": _stable_id("attempt", operation_id, "predispatch"),
@@ -3539,12 +3579,25 @@ def record_kernel_e2e(
         adoption_refs: list[str] = []
         if final_validated or decision_value in {"REVERT", "REJECTED"}:
             adoption_id = _stable_id("adoption", operation_id, "integrate")
+            # ATTRIBUTABLE ONLY WITH A THROUGHPUT PAIR. `e2e_gain_pct` is a percentage the executor
+            # measured against whatever baseline it happened to hold at the time. The collector
+            # turns an adoption into points of the ONE session baseline by walking the throughput
+            # chain; with no pair to anchor it, it can only sum the local percentages, and
+            # percentages taken against different denominators do not add. Replaying real GEAK
+            # journeys showed the cost of pretending otherwise: 36 keeps whose local deltas summed
+            # to +348.6 pp of a session that did not move that far.
+            # The adoption is still written, so the keep stays visible and countable; only its
+            # contribution to any total is withheld.
+            before_tput = to_float(evidence.get("base_tput"))
+            after_tput = to_float(evidence.get("new_tput"))
+            has_pair = bool(before_tput and after_tput and before_tput > 0 and after_tput > 0)
             _record_adoption_transition(
                 session_dir,
                 adoption_id=adoption_id,
                 producer=producer,
                 operation_id=operation_id,
                 adopted=final_validated,
+                attribution_eligible=has_pair,
                 reason=decision_reason
                 or ("integrate_e2e_passed" if final_validated else "integrate_e2e_failed"),
                 subject=subject,
@@ -3555,15 +3608,18 @@ def record_kernel_e2e(
                 # Frozen inline, not just referenced: measurement ids are stable
                 # per kernel, so a later attempt on the same kernel overwrites
                 # the very numbers this adoption was decided on.
-                throughput_before=to_float(evidence.get("base_tput")),
-                throughput_after=to_float(evidence.get("new_tput")),
+                throughput_before=before_tput,
+                throughput_after=after_tput,
                 configuration={
                     "patch_path": patch_path,
                     "target_file": target_file,
                     "extra_server_args": str(extra_server_args or ""),
                 },
                 validation_basis="e2e_validation",
-                metadata={"validation_tier": validation_tier or "integrate_e2e"},
+                metadata={
+                    "validation_tier": validation_tier or "integrate_e2e",
+                    **({} if has_pair else {"non_attributable_reason": "no_throughput_pair"}),
+                },
             )
             adoption_refs.append(adoption_id)
         record_operation(
@@ -3577,8 +3633,8 @@ def record_kernel_e2e(
             executor_class="llm_tool",
             status="succeeded" if final_validated else "reverted" if decision_value in {"REVERT", "REJECTED"} else "needs_review",
             ended_at=_now_iso_safe(),
-            parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-            root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+            root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
             subject=subject,
             gates=[gate],
             outputs={

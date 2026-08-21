@@ -3252,6 +3252,63 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
     assert "warnings=[" in rendered
 
 
+def test_format_last_trace_analyze_renders_low_compute_warning_numbers(session_dir):
+    """The compact line must carry the numbers the Coordinator routes on.
+
+    ``low_gpu_compute_pct`` exists to send a run to comm/params instead of
+    kernel rewriting, and telling a comm-bound window from a host-bound one
+    needs ``exposed_comm_pct``. A per-field ``if`` chain that only knew
+    ``idle_pct`` rendered this warning as a bare code with every number gone.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json.gz"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "low_gpu_compute_pct",
+                    "severity": "warning",
+                    "compute_pct": 3.99,
+                    "threshold_pct": 10.0,
+                    "exposed_comm_pct": 95.99,
+                    "source": "/tmp/x/analysis.md",
+                    "message": "low compute",
+                }
+            ],
+        },
+    )
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
+    assert "low_gpu_compute_pct(" in rendered
+    assert "compute=3.99%" in rendered
+    assert "exposed_comm=95.99%" in rendered
+    assert "threshold=10.0%" in rendered
+
+
+def test_format_last_trace_analyze_renders_both_gate_warnings(session_dir):
+    """Both gates can fire on one window; neither may erase the other's numbers."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json.gz"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {"code": "high_gpu_idle_pct", "severity": "warning", "idle_pct": 95.0, "threshold_pct": 80.0},
+                {"code": "low_gpu_compute_pct", "severity": "warning", "compute_pct": 3.0, "threshold_pct": 10.0},
+            ],
+        },
+    )
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
+    assert "high_gpu_idle_pct(idle=95.0%,threshold=80.0%)" in rendered
+    assert "low_gpu_compute_pct(compute=3.0%,threshold=10.0%)" in rendered
+
+
 def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
     """Tool-failure warning carries ``returncode``; the prompt must surface ``rc=N`` to distinguish a crash from a benign skip."""
     from hyperloom.orchestrator.state.shared_state import SharedState

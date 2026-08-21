@@ -915,7 +915,13 @@ class TestCollectiveIntegratePromotion:
     async def test_revert_recovery_does_not_repeat_e2e(
         self, tmp_path, monkeypatch
     ):
-        """An explicit recovery verdict must revert without remeasurement."""
+        """An explicit recovery verdict must revert without remeasurement.
+
+        The revert here comes back ``partial``, which under the converged
+        lifecycle contract is owed work, not done work: a partial revert can
+        leave the patch live on a remote pod, so the row keeps
+        ``recovery_required`` and names ``revert`` as the action still owed.
+        """
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -985,7 +991,11 @@ class TestCollectiveIntegratePromotion:
 
         assert (
             coord.shared_state.last_collective["patch_cleanup_status"]
-            == "complete"
+            == "recovery_required"
+        )
+        assert (
+            coord.shared_state.last_collective["patch_cleanup_action"]
+            == "revert"
         )
         assert (
             coord.shared_state.last_collective[
@@ -993,7 +1003,9 @@ class TestCollectiveIntegratePromotion:
             ]
             == "REVERT"
         )
-        assert not checkpoint.exists()
+        # The checkpoint is what a later pass reverts from, so an incomplete
+        # revert has to keep it; only a complete cleanup may drop it.
+        assert checkpoint.exists()
 
     @pytest.mark.asyncio
     async def test_run_forge_collective_records_handler_failure(
@@ -2013,6 +2025,112 @@ class TestForgeGemmRuntimeConfigMerge:
         )
 
     @pytest.mark.asyncio
+    async def test_integrate_bench_fault_not_recorded_as_zero_gain_revert(
+        self, tmp_path, monkeypatch
+    ):
+        """A server that never booted is an integrate fault, not a 0% REVERT."""
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+        fmoe_candidate = tmp_path / "fmoe.csv"
+        dense_candidate = tmp_path / "dense.csv"
+        fmoe_candidate.write_text("token,model_dim\n1,2\n", encoding="utf-8")
+        dense_candidate.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            calls.append(payload)
+            if payload["kernel_id"] == "gemm_tune_fmoe_ck":
+                return {
+                    "status": "failed",
+                    "error_class": "bench_exception",
+                    "decision": "REVERT",
+                    "error": "re-baseline did not succeed",
+                }
+            return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setattr(
+            phase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _env_var, env_value: env_value,
+        )
+
+        result = {
+            "backend": "forge",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "fmoe_ck",
+                    "improved_shapes": 2,
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": str(fmoe_candidate),
+                },
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(dense_candidate),
+                },
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert len(calls) == 3
+        assert result["e2e_results"]["faults"][0]["reason"] == "integrate_fault:bench_exception"
+        assert result["e2e_results"]["faults"][0]["fault_attempts"] == 2
+        assert result["e2e_results"]["reverted"] == []
+        assert result["e2e_results"]["kept"][0]["tuner"] == "dense_bf16"
+        assert result["decision"] == "KEEP"
+
+    @pytest.mark.asyncio
+    async def test_integrate_fault_retries_once_before_verdict(self, tmp_path, monkeypatch):
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        phase = KernelPhase(coord)
+        dense_candidate = tmp_path / "dense.csv"
+        dense_candidate.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        calls: list[dict] = []
+
+        async def _fake_integrate(payload, *, session_dir):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {
+                    "status": "failed",
+                    "error_class": "bench_exception",
+                    "decision": "REVERT",
+                    "error": "re-baseline did not succeed",
+                }
+            return {"status": "ok", "decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
+        monkeypatch.setattr(
+            phase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _env_var, env_value: env_value,
+        )
+        result = {
+            "backend": "forge",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(dense_candidate),
+                },
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert len(calls) == 2
+        assert result["e2e_results"]["faults"] == []
+        assert result["e2e_results"]["kept"][0]["tuner"] == "dense_bf16"
+        assert result["decision"] == "KEEP"
+
+    @pytest.mark.asyncio
     async def test_a_stopped_run_leaves_its_tuners_unjudged(self, tmp_path, monkeypatch):
         """A clock that ran out is not a verdict on the tuners it interrupted."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
@@ -2182,7 +2300,7 @@ class TestForgeGemmRuntimeConfigMerge:
         assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
-    async def test_records_integrate_exception_as_revert(self, tmp_path, monkeypatch):
+    async def test_records_integrate_exception_as_fault(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
         dense_candidate = tmp_path / "dense.csv"
@@ -2191,7 +2309,13 @@ class TestForgeGemmRuntimeConfigMerge:
         async def _raise_integrate(*_args, **_kwargs):
             raise RuntimeError("integrate failed")
 
-        monkeypatch.setattr(krh_mod, "integrate_handler", _raise_integrate)
+        calls: list[str] = []
+
+        async def _counting_raise(*_args, **_kwargs):
+            calls.append("boom")
+            raise RuntimeError("integrate failed")
+
+        monkeypatch.setattr(krh_mod, "integrate_handler", _counting_raise)
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -2213,9 +2337,15 @@ class TestForgeGemmRuntimeConfigMerge:
 
         await phase._validate_gemm_tuning_e2e(result)
 
-        assert result["decision"] == "REVERT"
-        assert result["micro_decision"] == "candidate_no_e2e_gain"
-        assert "integrate failed" in result["e2e_results"]["reverted"][0]["reason"]
+        assert result["status"] == "failed"
+        assert result["micro_decision"] == "integrate_fault"
+        assert result["e2e_gain_pct"] is None
+        fault = result["e2e_results"]["faults"][0]
+        assert fault["reason"] == "integrate_fault:handler_exception"
+        assert fault["fault"] is True
+        assert fault["fault_attempts"] == 2
+        assert len(calls) == 2
+        assert result["e2e_results"]["reverted"] == []
 
 
 class TestBf16DenseFallback:
@@ -2661,6 +2791,148 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.last_gemm_tuning["decision"] == "REVERT"
 
     @pytest.mark.asyncio
+    async def test_forge_e2e_keep_names_the_artifact_the_stack_recorded(
+        self, tmp_path, monkeypatch
+    ):
+        """The history row and the stack entry must name the same artifact.
+
+        The breakdown decides ``adopted`` by matching those two strings. Forge
+        reports per-tuner envs and never set ``tuned_file``, so the history row
+        carried "" and no KEEP could ever match -- measured across 419 real
+        attempts, none was reported adopted.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        await coord._handle_gemm_tuning_result(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.5,
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": "/dense.json"},
+                "extra_envs": {"AITER_DENSE": "/dense.json"},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": "/dense.json",
+                    }
+                ],
+            }
+        )
+
+        stack = coord.shared_state.optimization_stack
+        assert stack, "a KEEP must land on the stack"
+        assert stack[-1]["action"] == "gemm_tuning"
+        attempts = coord.shared_state.gemm_tuning_attempts
+        assert attempts[0]["decision"] == "KEEP"
+        assert attempts[0]["tuned_file"], "history row must name the artifact"
+        assert attempts[0]["tuned_file"] == stack[-1]["tuned_file"]
+
+    @pytest.mark.asyncio
+    async def test_a_second_round_claims_its_own_artifact(self, tmp_path, monkeypatch):
+        """Re-tuning the same tuner must not inherit the earlier round's path.
+
+        ``_lift_to_current_best`` skips the stack append when
+        ``(action, variant_name)`` already matches, and a GEMM variant is named
+        ``<backend>_<tuner>`` -- so after a second macro cycle re-tunes the same
+        tuner, the newest stack entry still describes round one. Taking the
+        artifact from there would make the second attempt claim the first one's
+        file, and with it the first one's gain.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        # Keep the candidate env value verbatim so each round's path is distinct
+        # and the assertion is about provenance, not about merging.
+        monkeypatch.setattr(
+            KernelPhase,
+            "_merge_gemm_candidate_with_runtime",
+            lambda _self, _env_var, env_value: env_value,
+        )
+
+        def _result(env_value: str) -> dict:
+            return {
+                "status": "ok",
+                "decision": "KEEP",
+                "best_speedup": 1.5,
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": env_value},
+                "extra_envs": {"AITER_DENSE": env_value},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": env_value,
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}]),
+        )
+        await coord._handle_gemm_tuning_result(_result("/round1.json"))
+
+        first_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        assert first_file, "round one must name its artifact"
+        stack_len = len(coord.shared_state.optimization_stack)
+
+        monkeypatch.setattr(
+            krh_mod,
+            "integrate_handler",
+            _make_integrate([{"decision": "KEEP", "new_tput": 160.0, "gain_pct": 23.1}]),
+        )
+        await coord._handle_gemm_tuning_result(_result("/round2.json"))
+
+        # Same (action, variant_name): the append is skipped by design.
+        assert len(coord.shared_state.optimization_stack) == stack_len
+        second_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        assert second_file and second_file != first_file
+
+    @pytest.mark.asyncio
+    async def test_forge_e2e_revert_does_not_claim_an_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        """A REVERT has nothing on the stack, so it must not name one."""
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        fake = _make_integrate([{"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        await coord._handle_gemm_tuning_result(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "backend": "forge",
+                "engine": "forge",
+                "requires_e2e_validation": True,
+                "recommended_env": {"AITER_DENSE": "/dense.json"},
+                "extra_envs": {"AITER_DENSE": "/dense.json"},
+                "tuners_run": [
+                    {
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "tuner": "dense_gemm",
+                        "env_var": "AITER_DENSE",
+                        "env_value": "/dense.json",
+                    }
+                ],
+            }
+        )
+
+        assert coord.shared_state.optimization_stack == []
+        assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
+
+    @pytest.mark.asyncio
     async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(self, tmp_path, monkeypatch):
         # a8w8 tuner reported no_improvement but the CK block-scale switch is
         # eligible → route to the E2E validator, not inline promote.
@@ -3103,7 +3375,7 @@ class TestValidateForgeGemmTuningE2E:
         assert result["requires_e2e_validation"] is False
 
     @pytest.mark.asyncio
-    async def test_integrate_exception_reverts_tuner(self, tmp_path, monkeypatch):
+    async def test_integrate_exception_records_fault_not_revert(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
 
         async def _boom(payload, *, session_dir):
@@ -3128,10 +3400,13 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_gemm_tuning_e2e(result)
 
-        assert result["decision"] == "REVERT"
-        reverted = result["e2e_results"]["reverted"]
-        assert len(reverted) == 1
-        assert reverted[0]["reason"].startswith("RuntimeError")
+        assert result["status"] == "failed"
+        assert result["micro_decision"] == "integrate_fault"
+        assert result["e2e_gain_pct"] is None
+        faults = result["e2e_results"]["faults"]
+        assert len(faults) == 1
+        assert faults[0]["reason"] == "integrate_fault:handler_exception"
+        assert result["e2e_results"]["reverted"] == []
 
     @pytest.mark.asyncio
     async def test_timeout_fallback_when_explore_helper_raises(self, tmp_path, monkeypatch):
