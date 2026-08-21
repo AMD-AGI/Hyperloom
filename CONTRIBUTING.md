@@ -39,6 +39,10 @@ If **any** changed file falls **outside** these patterns (for example `.py`, `py
 
 These GitHub jobs are optional from a default merge-policy perspective; skipping them on doc-only PRs saves runner time. You should still run **local** `pytest`, **ruff**, and **mypy** when your edits are not purely cosmetic (for example, Markdown that embeds commands, code blocks, or configuration snippets).
 
+## Coding style
+
+See **[docs/contributing/style-guide.md](docs/contributing/style-guide.md)** for Python, shell, YAML, testing, and REUSE conventions.
+
 ## Development setup
 - Python 3.10+.
 - Create and activate a virtual environment.
