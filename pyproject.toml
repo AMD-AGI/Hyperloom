@@ -380,3 +380,9 @@ ignore = ["E501", "E741"]
 "src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
+
+# Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
+# scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.
+[tool.ruff.format]
+exclude = ["**/*.md", "**/*.rst"]
+
