@@ -1267,12 +1267,12 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework_agent / "
-                    "conc_sweep are driven by the Coordinator (PRELUDE "
-                    "bootstrap, +10% watermark refresh, warm-recipe replay, "
-                    "FRAMEWORK pump, SWEEP-entry CONC ladder) and never appear "
-                    "in any phase's LLM-proposable set. Propose ``specialist`` "
-                    "or ``explore`` instead (or ``sweep`` for a full workload grid)."
+                    f"{' / '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are driven "
+                    "by the Coordinator — PRELUDE bootstrap, +10% watermark refresh, "
+                    "warm-recipe replay, FRAMEWORK pump, SWEEP-entry CONC ladder and "
+                    "off-loop component builds — and never appear in any phase's "
+                    "LLM-proposable set. Propose ``specialist`` or ``explore`` "
+                    "instead (or ``sweep`` for a full workload grid)."
                 ),
             )
         state = self.shared_state
