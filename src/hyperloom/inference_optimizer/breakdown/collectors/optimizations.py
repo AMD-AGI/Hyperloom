@@ -85,9 +85,9 @@ def _empty_summary() -> dict[str, Any]:
         for source in _SOURCES
     }
     summary["kernel_agent"]["by_backend"] = {
-        "geak": {"keeps": 0, "total_gain_pct": 0.0},
-        "forge": {"keeps": 0, "total_gain_pct": 0.0},
-        "unattributed": {"keeps": 0, "total_gain_pct": 0.0},
+        "geak": {"keeps": 0, "total_gain_pct": 0.0, "non_attributable_keeps": 0},
+        "forge": {"keeps": 0, "total_gain_pct": 0.0, "non_attributable_keeps": 0},
+        "unattributed": {"keeps": 0, "total_gain_pct": 0.0, "non_attributable_keeps": 0},
     }
     return summary
 
@@ -1148,6 +1148,26 @@ def collect_recorded_optimizations(
         for attempt in attempts
         if attempt.get("adopted") and attempt.get("attribution_eligible") is False
     ]
+    # `entries` is the GAIN ledger and deliberately holds only attributable keeps, so a backend whose
+    # keeps are all non-attributable reads as zero keeps — indistinguishable from an optimizer that
+    # produced nothing. That is the same conflation the canonical-stream fix set out to remove, one
+    # layer further in. Count the keep from the attempts, keep the gain coming from the entries.
+    for attempt in non_attributable:
+        if str(attempt.get("agent") or "") != "kernel_agent":
+            continue
+        by_backend = summary_by_source.setdefault(
+            "kernel_agent", {"keeps": 0, "total_gain_pct": 0.0}
+        ).setdefault("by_backend", {})
+        backend = str(attempt.get("backend") or "unattributed")
+        if backend not in by_backend:
+            backend = "unattributed"
+        backend_bucket = by_backend.setdefault(
+            backend, {"keeps": 0, "total_gain_pct": 0.0, "non_attributable_keeps": 0}
+        )
+        backend_bucket["keeps"] += 1
+        backend_bucket["non_attributable_keeps"] = (
+            int(backend_bucket.get("non_attributable_keeps", 0)) + 1
+        )
     # An adopted step that contributes nothing to the total is a hole in the
     # accounting, not a zero. Counting it keeps the sum honest about what it
     # could not see.
