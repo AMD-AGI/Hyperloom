@@ -18,6 +18,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     parse_aiter_consulted_tables,
     parse_aiter_fused_moe_dispatches,
     parse_aiter_shape_lookups,
+    resolve_fmoe_candidate_csv,
     tuned_config_coverage,
     tuned_csv_shapes,
     tuned_fmoe_csv_keys,
@@ -231,6 +232,35 @@ class TestFmoeDispatchParsing:
         (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
         report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), [record])
         assert report["covered"] == 0
+
+    def test_resolve_merged_candidate_fmoe_csv(self, tmp_path):
+        bare = tmp_path / "candidate_fmoe.csv"
+        bare.write_text("gfx\n", encoding="utf-8")
+        merged = tmp_path / "merged_candidate_fmoe.csv"
+        merged.write_text("gfx\n", encoding="utf-8")
+        assert resolve_fmoe_candidate_csv(merged) == bare
+
+    def test_resolve_merged_tuned_fmoe_csv(self, tmp_path):
+        bare = tmp_path / "tuned_fmoe.csv"
+        bare.write_text("gfx\n", encoding="utf-8")
+        merged = tmp_path / "merged_tuned_fmoe.csv"
+        merged.write_text("gfx\n", encoding="utf-8")
+        assert resolve_fmoe_candidate_csv(merged) == bare
+
+    def test_q_dtype_aliases_normalize_to_log_form(self, tmp_path):
+        path = tmp_path / "candidate_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "fp4,fp4,QuantType.per_1x128,1,0,1,10.0,"
+            "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n",
+            encoding="utf-8",
+        )
+        rows = tuned_fmoe_csv_rows(path)
+        assert rows[0]["q_dtype_a"] == "torch.float4_e2m1fn_x2"
+        assert rows[0]["q_dtype_w"] == "torch.float4_e2m1fn_x2"
 
 
 class TestTunedCsvCoverage:

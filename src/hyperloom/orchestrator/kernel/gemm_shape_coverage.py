@@ -270,6 +270,14 @@ def _normalize_fmoe_field(name: str, value: str) -> str:
             return "bf16"
         if lowered.startswith("torch.float16"):
             return "fp16"
+    if name in ("q_dtype_a", "q_dtype_w"):
+        lowered = text.lower()
+        if "float4" in lowered or "fp4" in lowered or "e2m1" in lowered:
+            return "torch.float4_e2m1fn_x2"
+        if "float8" in lowered or "fp8" in lowered or "e4m3" in lowered:
+            if "fnuz" in lowered:
+                return "torch.float8_e4m3fnuz"
+            return "torch.float8_e4m3fn"
     if name in ("use_g1u1", "doweight_stage1"):
         lowered = text.lower()
         if lowered in ("true", "1"):
@@ -381,17 +389,51 @@ def parse_aiter_fused_moe_dispatches(log_text: str) -> list[dict[str, str]]:
 def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
     """Resolve the bare candidate CSV used for runtime attribution.
 
-    E2E envs often point at ``merged_candidate_fmoe.csv``. Attribution must use
-    the sibling ``candidate_fmoe.csv`` when it exists; the merged superset must
+    E2E envs often point at ``merged_<name>.csv`` (for example
+    ``merged_candidate_fmoe.csv`` or ``merged_tuned_fmoe.csv``). Attribution
+    must use the sibling bare file when it exists; the merged superset must
     not impersonate a candidate row the tuner never produced.
     """
     resolved = Path(path)
     if not resolved.is_file():
         return None
-    if resolved.name == "merged_candidate_fmoe.csv":
-        bare = resolved.parent / "candidate_fmoe.csv"
+    if resolved.name.startswith("merged_"):
+        bare = resolved.parent / resolved.name[len("merged_") :]
         return bare if bare.is_file() else None
     return resolved
+
+
+FMOE_INTEGRATE_RUN = "integrate-gemm_tune_fmoe_ck"
+
+
+def log_has_fused_moe_activity(log_text: str) -> bool:
+    """Return True when server.log shows fused-MoE activity we might parse."""
+    text = log_text or ""
+    return "[aiter] [fused_moe]" in text or "Mxfp4 MoE backend" in text
+
+
+def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
+    """Mirror dense apply verification: dispatch attribution needs the flag."""
+    raw = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
+    return raw not in ("", "0", "false", "no", "off")
+
+
+def read_latest_integrate_server_log(
+    session_dir: Path,
+    integrate_name: str = FMOE_INTEGRATE_RUN,
+) -> tuple[Path, str] | None:
+    """Return the newest ``server.log`` under an integrate run, if readable."""
+    run_dir = session_dir / "runs" / "integrate" / integrate_name
+    logs = sorted(
+        run_dir.rglob("server.log"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+    )
+    if not logs:
+        return None
+    try:
+        return logs[-1], logs[-1].read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
