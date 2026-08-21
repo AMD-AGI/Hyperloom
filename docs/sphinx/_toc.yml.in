@@ -37,8 +37,6 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
-  - file: conceptual/kernel-execution-path.md
-    title: Kernel optimization execution path
 
 - caption: How to
   entries:
@@ -47,12 +45,12 @@ subtrees:
   - file: how-to/optimize-custom-workload.md
     title: Optimize your own workload
   - file: how-to/quantization-quark.md
-    title: Quantization with AMD Quark
-  - file: how-to/multi-node/hyperloom-remote-demo.md
-    title: Multi-node inference optimization demo
+    title: Enable quantization with AMD Quark
 
 - caption: Reference
   entries:
+  - file: reference/kernel-execution-path.md
+    title: Kernel optimization execution path
   - file: reference/api-reference.rst
     title: API reference
   - file: reference/environment-variables.md
@@ -69,6 +67,8 @@ subtrees:
     title: Knowledge base integration
   - file: reference/operator-scripts.md
     title: Operator scripts
+  - file: reference/multi-node.md
+    title: Multi-node inference optimization
   - file: reference/troubleshooting.md
     title: Troubleshooting
 
