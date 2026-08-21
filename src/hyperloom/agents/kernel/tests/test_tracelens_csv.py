@@ -2468,6 +2468,55 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
     assert traces[0] == real
 
 
+@pytest.mark.parametrize(
+    "relpath, expected",
+    [
+        # Hyperloom-patched SGLang.
+        ("capture_traces/bs_2_rank0.json.gz", True),
+        ("capture_traces/bs_64_rank7.json.gz", True),
+        # Unpatched SGLang: neither the directory nor the filename matches the
+        # patched shape, and the ``cuda_`` prefix defeats a start-anchored test.
+        ("graph_capture_profile/cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz", True),
+        # vLLM.
+        ("graph_capture_rank0.json.gz", True),
+        # Workload traces must survive all of the above.
+        ("1786734684.9990146-TP-0.trace.json.gz", False),
+        ("rank_0.trace.json.gz", False),
+        ("merged-annotated.trace.json.gz", False),
+    ],
+)
+def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpath, expected):
+    """The classifier keys on shape, so a new layout does not slip through.
+
+    Each entry is a layout a production profile actually wrote. An exact-name
+    whitelist passed the first two and missed the SGLang-without-patch one.
+    """
+    path = tmp_path / relpath
+    assert tla._is_capture_fragment(path, tmp_path) is expected
+
+
+def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
+    """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace.
+
+    ``graph_capture_profile/`` matched no known capture shape, so its files
+    shared the default bucket with the workload traces, where the tie-break is
+    descending size. The capture is the larger file, so it led discovery, the
+    probe stopped on it, and the splitter cut a bs=1/conc=1 graph-capture window
+    that carried zero GPU events. The whole kernel phase was lost to it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    real = _rank_trace(trace_dir / "1786734684.9990146-TP-0.trace.json.gz", kernels=8)
+    big_capture = _capture_sidecar(
+        trace_dir / "graph_capture_profile" / "cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz",
+        kernels=2,
+    )
+    assert big_capture.stat().st_size > real.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert traces[0] == real
+
+
 def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     """The promotion must hold on the route xDiT actually takes.
 

@@ -76,6 +76,10 @@ from _paths import workspace_root
 
 # Idle-gate threshold + high-idle warning: shared single source of truth so the
 # TraceLens and bypass routes gate on identical semantics.
+# Capture-vs-workload trace classification, shared with the bypass route so a
+# sidecar is recognised identically whichever backend reads the profile.
+from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+
 from _idle_gate import (
     build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
@@ -1058,38 +1062,13 @@ _PHASE_FRAGMENT_RE = re.compile(
 )
 
 
-#: Directory both frameworks write CUDA-graph capture sidecars into.
-_CAPTURE_DIR_NAME = "capture_traces"
-
-#: Sidecar filename shapes: SGLang ``bs_<batch>[_rank<n>]``, vLLM
-#: ``graph_capture_*``. The batch number is required rather than a bare ``bs_``
-#: prefix because this classifier now *rejects* an input instead of only sorting
-#: it, and a real trace that merely starts with those three characters must not
-#: be thrown out. One definition, because both callers need the same answer:
-#: discovery demotes sidecars below a real capture, and the preflight refuses an
-#: input made of nothing else.
-_CAPTURE_FRAGMENT_RE = re.compile(r"^(?:bs_\d+|graph_capture)", re.IGNORECASE)
-
-
 def _is_capture_fragment(path: Path, root: Path | None = None) -> bool:
     """Whether a trace path is a CUDA-graph capture sidecar.
 
-    Capture sidecars are recorded while the graph is being *built*, so the
-    launches in them go into the graph instead of onto the device. What lands is
-    a host-side Python call tree with a handful of stray kernels, one file per
-    (batch size, rank), each holding a single ``ProfilerStep``. There is no
-    iteration loop in one, which is what the steady-state splitter exists to cut
-    up.
-
-    Two signals, because either alone has a blind spot: the directory name
-    catches a sidecar whose filename nobody has seen before, and the filename
-    catches a flat layout that never made the directory.
-
-    ``root`` bounds the directory test to the input being analysed, the same way
-    :func:`_is_derived_trace` does it. Paths arrive absolute, so testing every
-    component would condemn every candidate whenever some ancestor happened to
-    be named ``capture_traces``. Callers pass the input directory, or a file's
-    parent so a single-file input is judged on its name alone.
+    Thin alias over :func:`_capture_shapes.is_capture_fragment`, which both
+    trace-analysis routes share so the answer cannot drift between them. Both
+    callers here need that same answer: discovery demotes sidecars below a real
+    capture, and the preflight refuses an input made of nothing else.
 
     Args:
         path: The trace file path to classify.
@@ -1099,15 +1078,7 @@ def _is_capture_fragment(path: Path, root: Path | None = None) -> bool:
         True when ``path`` is a graph-capture sidecar rather than a workload
         trace.
     """
-    if _CAPTURE_FRAGMENT_RE.match(path.name) is not None:
-        return True
-    relative = path
-    if root is not None:
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            relative = path
-    return any(part.lower() == _CAPTURE_DIR_NAME for part in relative.parts)
+    return _shared_is_capture_fragment(path, root)
 
 
 def _capture_classification_root(trace_input: Path) -> Path:
