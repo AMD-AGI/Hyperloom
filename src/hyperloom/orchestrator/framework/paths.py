@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Framework source-root resolution for PolicyGate and flag discovery.
+"""Framework source-root resolution and path containment.
 
 Centralises probe order across container layouts (``/sgl-workspace/...``,
 ``/app/ATOM/atom``, ``/app/xDiT``, site/dist-packages) so PolicyGate, AST
 discovery, install.sh, and ``apply_kernel_patch`` all agree. First-class
 frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is in the
 allowlist as a shared kernel library.
+
+Owning the roots and the containment test together keeps every caller on one
+boundary rule: :func:`resolved_within` against a root from this module.
 """
 
 from __future__ import annotations
@@ -579,10 +582,9 @@ _TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
 def resolved_within(value: str, root: str) -> bool:
     """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
 
-    Replaces a raw ``str.startswith`` prefix test so that ``..`` traversal and
-    shared-prefix boundary tricks (e.g. ``/x/aiter`` vs ``/x/aiterX``) cannot
-    slip a path past an allowlist root. Legitimate real paths nested under a
-    root are accepted identically to the old prefix check.
+    Resolving both sides is what rejects ``..`` traversal, symlink escapes, a
+    root substring embedded in an unrelated directory, and shared-prefix
+    boundary tricks such as ``/x/aiter`` versus ``/x/aiterX``.
 
     Args:
         value (str): the candidate path string.
@@ -603,23 +605,17 @@ def resolved_within(value: str, root: str) -> bool:
 def source_file_candidates(value: str) -> tuple[str, ...]:
     """Return the path forms a ``source_file`` value may legitimately take.
 
-    Roofline evidence reaches the orchestration prompt as trace frames, and the
-    model cites them verbatim when it dispatches. Checking such a frame as
-    written resolves it against the process CWD — the Hyperloom checkout — which
-    is under no allowlist root, so every citation is denied and the task it
-    carries is cancelled before it runs.
-
-    Traversal is not widened by this: each candidate is still resolved and
-    bounded by :func:`resolved_within`, so ``../`` climbs out of the root and
-    fails as before.
+    Roofline evidence reaches the orchestration prompt as trace frames and the
+    model cites them verbatim, so a relative frame must be resolved against the
+    session's framework tree rather than the process CWD, or every citation is
+    denied. Each candidate is still bounded by :func:`resolved_within`.
 
     Args:
         value (str): The raw field value.
 
     Returns:
-        tuple[str, ...]: ``value`` first (so absolute paths behave exactly as
-            they did), then the de-annotated form, then that form resolved
-            against the tree this session is optimizing.
+        tuple[str, ...]: ``value`` first, then the de-annotated form, then that
+            form resolved against the tree this session is optimizing.
     """
     raw = str(value).strip()
     out: list[str] = [raw]
