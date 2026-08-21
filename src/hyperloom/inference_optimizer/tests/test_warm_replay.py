@@ -1286,6 +1286,41 @@ def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monke
     assert "allowlist=" in entry["resolution_error"]
 
 
+def test_restored_kernel_plan_reresolves_root_before_blocking(
+    tmp_path,
+    monkeypatch,
+):
+    from hyperloom.orchestrator.framework.paths import WarmReplayRootResolution
+
+    coord = _make_coord(tmp_path)
+    entry = {
+        "column": "fusion",
+        "patch_path": str(tmp_path / "fusion.patch"),
+        "resolution_reason": "active_kernel_patch_root_missing",
+    }
+    coord.shared_state.warm_kernel_kb_plan = [entry]
+    calls = []
+
+    def _resolve(*, patch_entries):
+        calls.append(patch_entries)
+        return WarmReplayRootResolution(
+            root=str(tmp_path / "restored-framework"),
+            source="session_framework_root",
+            reason="",
+            allowlist=(str(tmp_path / "restored-framework"),),
+        )
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_warm_replay_kernel_root",
+        _resolve,
+    )
+
+    assert coord.phase_prelude._warm_replay_kernel_root_block_reason(
+        coord.shared_state
+    ) is None
+    assert calls == [[entry]]
+
+
 def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):
     coord = _make_coord(tmp_path)
     existing = tmp_path / "framework/existing.py"
