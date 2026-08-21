@@ -6694,6 +6694,47 @@ def build_audit_summary(
     }
 
 
+def run_candidate_review_stage(
+    run_dir: Path,
+    *,
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    log_path: Path | str | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Run the review stage, converting any unexpected fault into a warning.
+
+    The stage is advisory by construction, and it sits at the end of an
+    analysis that a multi-hour benchmark paid for. An unforeseen fault in it
+    must cost the audit, not the run, so nothing escapes this boundary.
+    """
+    try:
+        return _run_candidate_review_stage(
+            run_dir,
+            candidates=candidates,
+            args=args,
+            log_path=log_path,
+            trace_health_warnings=trace_health_warnings,
+        )
+    except Exception as exc:  # noqa: BLE001 - never let the audit fail the run
+        log.warning("candidate review stage failed (%r); keeping the deterministic table", exc)
+        if trace_health_warnings is not None:
+            trace_health_warnings.append(
+                {
+                    "code": "candidate_review_failed",
+                    "severity": "error",
+                    "status": "internal_error",
+                    "detail": type(exc).__name__,
+                    "message": (
+                        "The candidate review stage raised "
+                        f"{type(exc).__name__}; kernel_candidates.json is the "
+                        "unreviewed deterministic result."
+                    ),
+                }
+            )
+        return {}
+
+
 def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
     """Recompute everything that follows from ``source_file`` after a revision.
 
@@ -6726,7 +6767,7 @@ def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | No
         )
 
 
-def run_candidate_review_stage(
+def _run_candidate_review_stage(
     run_dir: Path,
     *,
     candidates: list[dict[str, Any]],
