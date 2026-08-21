@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -16,7 +17,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from ._vendor.kb_store_client import KBStoreClient, KBStoreError
+from ._vendor.kb_store_client import (
+    KBStoreClient as _VendorKBStoreClient,
+    KBStoreError,
+)
 from .models import (
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -32,6 +36,26 @@ from .values import has_replay_material
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
 _STORE_LOCK_INIT = threading.Lock()
+log = logging.getLogger(__name__)
+
+
+class KBStoreClient(_VendorKBStoreClient):
+    """Vendored client with Hyperloom's scoped-read contract validation."""
+
+    @staticmethod
+    def _scope_query(scope: dict[str, Any] | None) -> str:
+        if scope is not None:
+            required = ("kernel_optimizer", "tp", "conc", "isl", "osl")
+            missing = [
+                key
+                for key in required
+                if key not in scope or scope[key] is None
+            ]
+            if missing:
+                raise KBStoreError(
+                    "scope is missing required field(s): " + ", ".join(missing)
+                )
+        return _VendorKBStoreClient._scope_query(scope)
 
 
 class RemoteRecipeConfigurationError(KBStoreError):
@@ -555,6 +579,13 @@ class RemoteRecipeClient:
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         bundle.validate()
         if not has_replay_material({"knowledge": bundle.knowledge}):
+            log.error(
+                "Remote Recipe KB rejected a session with no replay material: "
+                "cid=%s sid=%s optimized_throughput=%s",
+                canonical_id,
+                session_id,
+                optimized_throughput,
+            )
             return RemoteWriteResult(
                 "skipped",
                 "empty_replay_material",

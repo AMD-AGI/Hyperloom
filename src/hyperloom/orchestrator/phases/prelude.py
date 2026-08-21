@@ -878,8 +878,9 @@ class PreludePhase(PhaseHandler):
                 "active_kernel_patch_root_missing",
             }:
                 continue
-            # The recorded reason can predate an inline-diff or env change that
-            # makes the root resolvable, so re-resolve before blocking.
+            # A persisted plan may be restored on resume under a different
+            # environment, and inline patch material may also have changed
+            # since the reason was recorded. Re-resolve before blocking.
             resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
             if resolution.root:
                 continue
@@ -1696,16 +1697,6 @@ class PreludePhase(PhaseHandler):
                 )
                 state.save(self.session_dir)
                 return None
-            state.warm_replay_pending = {
-                **dict(getattr(state, "warm_replay_pending", {}) or {}),
-                "active_framework_patch_root": str(
-                    framework_resolution.root
-                ).rstrip("/"),
-                "framework_patch_root_source": str(
-                    framework_resolution.source or ""
-                ),
-            }
-
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
             state.warm_replay_outcome = {
                 "status": "skipped",

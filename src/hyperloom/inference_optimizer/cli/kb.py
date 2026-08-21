@@ -373,24 +373,38 @@ def _bootstrap_recipe_kb(
         "claw_session_id": manifest.get("claw_session_id") or "",
         "sandbox_user_id": manifest.get("sandbox_user_id") or "",
     }
-    if kb is None:
-        from hyperloom.orchestrator.knowledge.remote_recipe import (
-            HyperloomRemoteKB,
-            RecipeScope,
-            RemoteWarmRecipeAdapter,
-        )
-
-        warm_start_dir = session_dir / "runtime" / "remote_recipe"
-        t0_kb = RemoteWarmRecipeAdapter(
-            HyperloomRemoteKB.from_env(),
-            warm_start_dir,
-            RecipeScope.from_state(state),
-        )
-        _publish_section_dirs(session_dir, warm_start_dir)
-    else:
-        _attach_recipe_audit_hook(kb, session_dir)
-        t0_kb = kb
     try:
+        if kb is None:
+            from hyperloom.orchestrator.knowledge.remote_recipe import (
+                HyperloomRemoteKB,
+                RecipeScope,
+                RemoteRecipeValidationError,
+                RemoteWarmRecipeAdapter,
+            )
+
+            warm_start_dir = session_dir / "runtime" / "remote_recipe"
+            try:
+                recipe_scope = RecipeScope.from_state(state)
+            except RemoteRecipeValidationError as exc:
+                print(
+                    f"WARNING: Remote Recipe KB scope is invalid: {exc}\n"
+                    "Continuing without warm-start.",
+                    file=sys.stderr,
+                )
+                args.kb_degraded_reason = (
+                    getattr(args, "kb_degraded_reason", None)
+                    or "recipe_scope_invalid"
+                )
+                return kb
+            t0_kb = RemoteWarmRecipeAdapter(
+                HyperloomRemoteKB.from_env(),
+                warm_start_dir,
+                recipe_scope,
+            )
+            _publish_section_dirs(session_dir, warm_start_dir)
+        else:
+            _attach_recipe_audit_hook(kb, session_dir)
+            t0_kb = kb
         run_t0_anchor(
             t0_kb,
             state,
