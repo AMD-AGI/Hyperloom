@@ -1362,6 +1362,180 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] == "failed"
         assert result["backend"] == "forge"
 
+    # ---- MoE runtime key: log -> CSV -> payload -> forge argv ---------------
+    #
+    # The reason this whole lane exists is that MoE tuning keyed on the config
+    # produced tables no runtime lookup could reach, so the key has to come from
+    # the dispatch tuple the runtime logged. Both ends of that were covered --
+    # the CSV writer in test_gemm_bf16_aiter_routing, the tuner's preference for
+    # a caller-supplied CSV in KernelForge -- and the handoff between them was
+    # not: deleting the derivation, the payload field, or the argv option each
+    # left the suite green.
+
+    #: A real dispatch line, gfx field included. Fixtures that dropped the gfx
+    #: field once let a regex that could never match production pass its tests.
+    _REAL_MOE_DISPATCH = (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+        "('gfx950', 256, 256, 4096, 512, 256, 6, 'ActivationType.Silu', "
+        "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', "
+        "'QuantType.per_1x32', True, False)"
+    )
+
+    @staticmethod
+    def _moe_state(tmp_path):
+        model_dir = tmp_path / "moe-model"
+        model_dir.mkdir(exist_ok=True)
+        SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path=str(model_dir),
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+        ).save(tmp_path)
+        return model_dir
+
+    @staticmethod
+    def _sentinel() -> str:
+        return (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_moe_key_travels_from_the_log_into_the_forge_payload(
+        self, tmp_path, monkeypatch
+    ):
+        """The dispatch tuple the runtime logged must reach forge as a CSV.
+
+        Asserts the values came from the log rather than from the config: the
+        original defect was a config-derived key (inter_dim un-sharded, dtypes
+        guessed) that aiter would never look up.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        argv: dict[str, list[str]] = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            argv["cmd"] = list(cmd)
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "moe-key", "kernel_signature_log": str(log)}
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        csv_path = Path(written["moe_untuned_csv"])
+        assert csv_path.is_file(), "the payload must name a CSV that exists"
+
+        rows = csv_path.read_text(encoding="utf-8").strip().splitlines()
+        header = rows[0].split(",")
+        values = dict(zip(header, rows[1].split(",")))
+        # Straight off the log line, not inferred from the model config.
+        assert values["inter_dim"] == "512"
+        assert values["model_dim"] == "4096"
+        assert values["expert"] == "256"
+        assert values["topk"] == "6"
+        assert values["q_dtype_a"] == "torch.float8_e4m3fn"
+        assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
+        assert values["q_type"] == "QuantType.per_1x32"
+
+    @pytest.mark.asyncio
+    async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
+        """Deriving the CSV is useless if the option never reaches forge."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        argv: dict[str, list[str]] = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            argv["cmd"] = list(cmd)
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "moe-argv", "kernel_signature_log": str(log)}
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        # The handler hands the tool an input JSON; the tool builds forge's argv
+        # from it. Assert the field the tool reads is the CSV that was derived.
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["moe_untuned_csv"].endswith("untuned_fmoe_from_runtime.csv")
+        assert str(workspace) in written["moe_untuned_csv"]
+
+    @pytest.mark.asyncio
+    async def test_a_caller_supplied_moe_csv_wins(self, tmp_path, monkeypatch):
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+        supplied = tmp_path / "operator_moe.csv"
+        supplied.write_text(krh._FMOE_UNTUNED_CSV_HEADER + "\n", encoding="utf-8")
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {
+            "task_id": "moe-supplied",
+            "kernel_signature_log": str(log),
+            "moe_untuned_csv": str(supplied),
+        }
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["moe_untuned_csv"] == str(supplied)
+
+    @pytest.mark.asyncio
+    async def test_a_stale_moe_csv_path_falls_back_to_the_log(
+        self, tmp_path, monkeypatch
+    ):
+        """A path that no longer exists must not be forwarded to forge.
+
+        Guards against handing forge a dead path (or inline content) instead of
+        deriving the key the runtime actually asked for.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {
+            "task_id": "moe-stale",
+            "kernel_signature_log": str(log),
+            "moe_untuned_csv": str(tmp_path / "gone.csv"),
+        }
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["moe_untuned_csv"] != str(tmp_path / "gone.csv")
+        assert Path(written["moe_untuned_csv"]).is_file()
+
     @pytest.mark.asyncio
     async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(self, tmp_path, monkeypatch):
         """vLLM block-FP8 must tune the device-side traced shapes.
