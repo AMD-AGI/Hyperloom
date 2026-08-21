@@ -1022,6 +1022,39 @@ def _with_stash_restore(
     return out
 
 
+def _restore_secondary_stashes(
+    secondary_stash: dict[str, tuple[str, str]],
+    primary_root: Path | None,
+) -> None:
+    """Pop the stashes we pushed on any secondary roots during _stage_apply.
+
+    Called after apply failure or at the end of verdicts that complete without
+    going through ``_with_stash_restore``.  Best-effort: a failed restore is
+    logged but does not abort the result flow.
+
+    Args:
+        secondary_stash: Mapping from root-path string to
+            ``(stash_state, stash_ref)`` as returned by ``_git_stash_if_dirty``.
+        primary_root: The primary ``framework_root``; skipped here because its
+            stash is managed by ``_with_stash_restore`` / ``_revert_patches``.
+    """
+    primary_str = str(primary_root.resolve()) if primary_root else ""
+    for root_str, (stash_state, stash_ref) in secondary_stash.items():
+        try:
+            r_path = Path(root_str)
+            if str(r_path.resolve()) == primary_str:
+                continue
+            note = _restore_stash_logged(r_path, stash_state, stash_ref)
+            if note:
+                log.warning(
+                    "integrate_patch: failed to restore secondary stash for %s: %s",
+                    root_str,
+                    note,
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("integrate_patch: exception restoring secondary stash for %s", root_str, exc_info=True)
+
+
 def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     """Restore the working tree to HEAD and remove untracked candidate files.
 
@@ -2400,6 +2433,30 @@ class IntegratePatchExecutor:
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
 
+        # Per-patch root routing: grounding may have found that certain patches
+        # (e.g. sglang diffs written from an aiter worktree) live in a different
+        # allowlisted root.  Stash any secondary roots we will mutate so the
+        # session's user state is not corrupted.
+        _patch_roots: dict[str, str] = {}
+        if done_payload:
+            _pr = done_payload.get("patch_roots")
+            if isinstance(_pr, dict):
+                _patch_roots = {str(k): str(v) for k, v in _pr.items()}
+        _secondary_roots_stash: dict[str, tuple[str, str]] = {}  # root_str -> (stash_state, stash_note)
+        for _p in patch_paths:
+            _alt_root_str = _patch_roots.get(str(_p))
+            if (
+                _alt_root_str
+                and _alt_root_str != str(framework_root)
+                and _alt_root_str not in _secondary_roots_stash
+            ):
+                _alt_path = Path(_alt_root_str)
+                if _alt_path.is_dir():
+                    _s_state, _s_note = _git_stash_if_dirty(_alt_path)
+                    _secondary_roots_stash[_alt_root_str] = (_s_state, _s_note)
+        # Publish secondary stash map so _stage_gate can restore them.
+        ctx._ip_secondary_roots_stash = _secondary_roots_stash  # type: ignore[attr-defined]
+
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
@@ -2412,32 +2469,42 @@ class IntegratePatchExecutor:
         ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
         ctx._ip_applied = applied  # type: ignore[attr-defined]
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
+        ctx._ip_patch_roots = _patch_roots  # type: ignore[attr-defined]
         for patch in patch_paths:
-            if git_tree:
-                ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
+            # Route each patch to its grounding root (may differ from
+            # framework_root for cross-repo patches).
+            _alt_root_s = _patch_roots.get(str(patch))
+            _eff_root = Path(_alt_root_s) if _alt_root_s else framework_root
+            _eff_git_tree = _is_git_tree(_eff_root) if _eff_root is not None else False
+            if _eff_git_tree:
+                ok, err, fb = _git_apply_collect_feedback(_eff_root, patch, three_way=False)
                 if not ok:
-                    apply_errors.append({"patch": str(patch), "stderr": err})
+                    apply_errors.append({"patch": str(patch), "stderr": err, "root": str(_eff_root)})
                     if fb is not None:
                         apply_feedbacks.append(fb)
                     break
-            else:
+            elif _eff_root is not None:
                 nogit_backup_root = output_root / "patch_backups"
                 ok, err, backups, fb = _apply_patch_no_git(
-                    framework_root,
+                    _eff_root,
                     patch,
                     nogit_backup_root,
                     seq_offset=len(self._nogit_patch_backups),
                 )
                 self._nogit_patch_backups.extend(backups)
                 if not ok:
-                    apply_errors.append({"patch": str(patch), "stderr": err})
+                    apply_errors.append({"patch": str(patch), "stderr": err, "root": str(_eff_root)})
                     if fb is not None:
                         apply_feedbacks.append(fb)
                     break
+            else:
+                apply_errors.append({"patch": str(patch), "stderr": "no framework root", "root": ""})
+                break
             applied.append(patch)
 
         if apply_errors:
-            reverted = self._revert_patches(framework_root, applied)
+            reverted = self._revert_patches_multi(framework_root, applied, _patch_roots)
+            _restore_secondary_stashes(_secondary_roots_stash, framework_root)
             await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="rejected_apply_fail",
@@ -3875,13 +3942,56 @@ class IntegratePatchExecutor:
         """
         framework_root: Path | None = getattr(ctx, "_ip_framework_root", None)
         self._revert_artifacts(list(getattr(ctx, "_ip_applied_artifacts", None) or []))
-        self._revert_patches(framework_root, list(getattr(ctx, "_ip_applied", None) or []))
+        _patch_roots: dict[str, str] = getattr(ctx, "_ip_patch_roots", None) or {}
+        self._revert_patches_multi(
+            framework_root,
+            list(getattr(ctx, "_ip_applied", None) or []),
+            _patch_roots,
+        )
         if framework_root is not None:
             _restore_stash_logged(
                 framework_root,
                 str(getattr(ctx, "_ip_stash_state", "") or "clean"),
                 str(getattr(ctx, "_ip_stash_note", "") or ""),
             )
+        _restore_secondary_stashes(
+            dict(getattr(ctx, "_ip_secondary_roots_stash", None) or {}),
+            framework_root,
+        )
+
+    def _revert_patches_multi(
+        self,
+        framework_root: Path | None,
+        applied: list[Path],
+        patch_roots: dict[str, str],
+    ) -> list[Path]:
+        """Reverse-apply patches routed to their per-patch root.
+
+        Groups ``applied`` by the root each patch was applied to, then calls
+        :meth:`_revert_patches` for each group.
+
+        Args:
+            framework_root: The primary framework root (fallback for patches
+                without an entry in ``patch_roots``).
+            applied: The patches applied this run, in apply order.
+            patch_roots: Mapping from patch-path string to the root string used
+                during apply (as written by runner.py's grounding pass).
+
+        Returns:
+            The patches actually reverted across all roots.
+        """
+        if not applied:
+            return []
+        # Group patches by their effective root.
+        groups: dict[str, list[Path]] = {}
+        for p in applied:
+            root_str = patch_roots.get(str(p)) or str(framework_root or "")
+            groups.setdefault(root_str, []).append(p)
+        reverted: list[Path] = []
+        for root_str, patches_in_root in groups.items():
+            root = Path(root_str) if root_str else None
+            reverted.extend(self._revert_patches(root, patches_in_root))
+        return reverted
 
     def _revert_patches(
         self,

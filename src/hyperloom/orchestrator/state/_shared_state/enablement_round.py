@@ -74,6 +74,13 @@ class EnablementRound:
     last_build_failure: dict = field(default_factory=dict)
     build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
+    # Patches written by the last round that were grounding-dropped (all missing
+    # targets). Injected into the next round's prompt so the specialist knows
+    # to switch to artifacts instead of repeating a doomed patch.
+    last_grounding_drop_reason: list = field(default_factory=list)
+    # Installed whole-file artifacts that have been KEPT or ADVANCED; replayed
+    # at the start of each subsequent round (analogous to kept_patches).
+    kept_artifacts: list = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":
