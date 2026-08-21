@@ -2887,18 +2887,17 @@ _FMOE_UNTUNED_CSV_HEADER = (
     "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
 )
 
-#: forge wordings that still hand back a deployable env. ``partial_failure``
-#: means one tuner crashed while another delivered; ``partial_output`` means a
-#: tuner wrote fewer rows than it was given shapes for, and the rows it did
-#: write are usable. Bridging only ``candidate`` left both with no ``decision``
-#: at all, so a deployable artifact was never E2E-measured and the run read in
-#: the breakdown exactly like one that found nothing.
-_FORGE_DELIVERING_MICRO_DECISIONS = ("candidate", "partial_failure", "partial_output")
-
 #: forge wordings that carry nothing deployable. Each is a distinct outcome --
 #: a crash, a tuner that wrote zero rows, a partial run whose surviving tuners
 #: produced no env -- and none of them is the same event as an honest
 #: ``no_improvement``, which is why they reach the envelope as an error_class.
+#:
+#: forge reaches these only when it has nothing to deploy: ``build_report``
+#: checks ``has_candidate`` ahead of all three, so a run that produced a usable
+#: env reports ``candidate`` whatever else went wrong alongside it. Verified
+#: against the real ``build_report`` across seven scenarios, including "one tuner
+#: crashed while another delivered" -- which reports ``candidate``, not
+#: ``partial_failure``.
 _FORGE_BARREN_MICRO_DECISIONS = (
     "failed",
     "empty_output",
@@ -4051,10 +4050,10 @@ async def _run_forge_gemm_tuning(
                 result["error"] = str(_t["error"])
                 break
 
-    # Bridge forge schema → coordinator schema: a micro_decision that delivered a
-    # ``recommended_env`` becomes decision="KEEP" + extra_envs.
+    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
+    # recommended_env becomes decision="KEEP" + extra_envs.
     micro = str(result.get("micro_decision") or "").strip().lower()
-    if micro in _FORGE_DELIVERING_MICRO_DECISIONS and result.get("recommended_env"):
+    if micro == "candidate" and result.get("recommended_env"):
         result.setdefault("decision", "KEEP")
         # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
         # source-layer snapshot): copy it into the serving aiter config dir,

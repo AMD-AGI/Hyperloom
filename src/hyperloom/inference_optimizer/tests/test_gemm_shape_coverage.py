@@ -470,6 +470,41 @@ class TestE2EValidationFailsOpen:
         assert "RuntimeError: e2e exploded" in fault["error"]
 
     @pytest.mark.asyncio
+    async def test_the_unmeasured_envelope_is_neutralised(self, tmp_path):
+        """An arm that raised was never measured, so it must not read as a KEEP.
+
+        The forge bridge stamps ``decision="KEEP"``, ``requires_e2e_validation``
+        and the raw combined ``recommended_env`` on the micro result alone; the
+        normal exit of validation rewrites all three so Orchestration never sees
+        an unmeasured candidate and issues a bundled integrate against it.
+        Recording the fault while leaving that envelope in place is worse than
+        the exception itself.
+        """
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        async def _boom(_result):
+            raise RuntimeError("e2e exploded")
+
+        phase, _ = self._phase(tmp_path, _boom)
+        result: dict = {
+            "backend": "forge",
+            "decision": "KEEP",
+            "requires_e2e_validation": True,
+            "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+            "extra_envs": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+        }
+
+        await KernelPhase._handle_gemm_tuning_result(phase, result)
+
+        assert result["decision"] == "REVERT"
+        assert result["requires_e2e_validation"] is False
+        assert result["e2e_validated"] is False
+        assert not result["recommended_env"]
+        assert not result["extra_envs"]
+        # The reason still has to be legible, not just absent.
+        assert result["e2e_results"]["faults"][0]["error_class"] == "e2e_validation_exception"
+
+    @pytest.mark.asyncio
     async def test_existing_faults_are_preserved(self, tmp_path):
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
