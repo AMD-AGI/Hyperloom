@@ -894,6 +894,13 @@ class WritebackCollaborator:
                     result_payload.get("error") or result_payload.get("reason") or ""
                 )[:500]
                 self.shared_state.geak_result = geak_result
+                self.phase_kernel._record_geak_resolution(
+                    geak_result,
+                    outcome="dropped",
+                    measured_tput=None,
+                    provenance="geak_rebench_failed",
+                    reason=str(geak_result.get("revalidation_error") or ""),
+                )
                 self.shared_state.geak_pending = {}
                 self.shared_state.resume_pending_revalidation = False
                 any_changed = True
@@ -3703,6 +3710,13 @@ class WritebackCollaborator:
                         )
                     except Exception:  # noqa: BLE001 - journey reject is best-effort
                         log.exception("geak no_material: journey rejection failed")
+                    self.phase_kernel._record_geak_resolution(
+                        ps_stamped,
+                        outcome="no_material",
+                        measured_tput=float(measured),
+                        provenance="geak_no_material",
+                        reason="geak_no_material_product",
+                    )
                     self.shared_state.geak_pending = {}
                     self.shared_state.resume_pending_revalidation = False
                 elif decision == "no_promote":
@@ -3731,6 +3745,13 @@ class WritebackCollaborator:
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak no_promote: observation emit failed")
+                    self.phase_kernel._record_geak_resolution(
+                        self.shared_state.geak_result,
+                        outcome="rejected",
+                        measured_tput=float(measured),
+                        provenance="geak_no_promote",
+                        reason="rebench_did_not_beat_current_best",
+                    )
                     self.shared_state.geak_pending = {}
                     self.shared_state.resume_pending_revalidation = False
                 else:
@@ -3792,6 +3813,13 @@ class WritebackCollaborator:
                             or "GEAK harness fallback did not validate"
                         )[:500]
                         self.shared_state.geak_result = geak_result
+                        self.phase_kernel._record_geak_resolution(
+                            geak_result,
+                            outcome="dropped",
+                            measured_tput=None,
+                            provenance="geak_same_harness_geak",
+                            reason=str(geak_result.get("revalidation_error") or ""),
+                        )
                         self.shared_state.geak_pending = {}
                         self.shared_state.resume_pending_revalidation = False
                 changed = True

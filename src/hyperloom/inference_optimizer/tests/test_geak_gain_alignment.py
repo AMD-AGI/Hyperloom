@@ -547,6 +547,145 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert not ss.geak_pending
 
 
+# ── the candidate's own numbers survive the pending record being cleared ─────
+
+
+def _aligned_result(*, final: float) -> dict:
+    """An ``_ok_result`` carrying the raw tok/s behind each speedup."""
+    result = _ok_result(final=final)
+    result["alignment_metrics"] = {
+        "final_basis": "cold",
+        "cold_geak_speedup": 1.1088,
+        "cold_speedup": 1.0903,
+        "hot_geak_speedup": 1.1499,
+        "hot_speedup": None,
+        "geak_cold_baseline_tok_s": 3081.699,
+        "geak_cold_final_tok_s": 3417.0,
+        "orchestrator_cold_baseline_tok_s": 3065.102,
+        "orchestrator_hot_baseline_tok_s": None,
+    }
+    result["accepted_heads"] = [{"short_name": "attn_stage1", "e2e_delta_pct": 14.04}]
+    return result
+
+
+def test_promote_keeps_both_sides_of_the_comparison(tmp_path: Path) -> None:
+    """A promote leaves the measured gain beside the self-reported one it beat.
+
+    The measured number alone cannot be reconciled against GEAK's claim, and
+    the claim lived only on ``geak_pending``, which the promote clears.
+    """
+    base, measured = 2844.209, 3270.0
+    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
+    result = _aligned_result(final=3236.489)
+    coord.shared_state.geak_result = result
+    coord._record_geak_candidate(result)
+    coord._promote_geak_from_candidate(result, measured_tput=measured)
+
+    resolved = coord.shared_state.geak_resolved
+    assert resolved["outcome"] == "promoted"
+    assert resolved["measured_tput"] == pytest.approx(measured)
+    assert resolved["measured_gain_pct"] == pytest.approx((measured - base) / base * 100.0)
+    assert resolved["self_reported_tput"] == pytest.approx(3236.489)
+    assert resolved["self_reported_gain_pct"] == pytest.approx((3236.489 - base) / base * 100.0)
+    # The baseline both gains divide by, so neither rests on its label alone.
+    assert resolved["baseline_tput"] == pytest.approx(base)
+    assert resolved["accepted_heads"][0]["e2e_delta_pct"] == pytest.approx(14.04)
+
+
+def test_alignment_snapshot_carries_the_baselines_behind_each_speedup(tmp_path: Path) -> None:
+    """The raw tok/s travel with the ratios.
+
+    A speedup on its own cannot say whether the two harnesses disagreed or the
+    kernel did: ``orchestrator_cold_baseline_tok_s`` beside
+    ``geak_cold_baseline_tok_s`` is what separates the two.
+    """
+    coord = _coord(tmp_path, baseline=2844.209, best_tput=3042.941)
+    result = _aligned_result(final=3236.489)
+    coord._record_geak_candidate(result)
+    coord._promote_geak_from_candidate(result, measured_tput=3270.0)
+
+    alignment = coord.shared_state.geak_resolved["alignment"]
+    assert alignment["final_basis"] == "cold"
+    assert alignment["cold_geak_speedup"] == pytest.approx(1.1088)
+    assert alignment["cold_speedup"] == pytest.approx(1.0903)
+    assert alignment["geak_cold_baseline_tok_s"] == pytest.approx(3081.699)
+    assert alignment["orchestrator_cold_baseline_tok_s"] == pytest.approx(3065.102)
+    # A regime GEAK could not compare across stays None rather than absent, so
+    # the reader can tell "not measured" from "not carried".
+    assert alignment["hot_speedup"] is None
+    assert "orchestrator_hot_baseline_tok_s" in alignment
+
+
+def test_resolution_prefers_the_candidate_time_alignment(tmp_path: Path) -> None:
+    """``geak_result`` is overwritten in place by whatever GEAK ran last.
+
+    A later failed run leaves an error stub with no ``alignment_metrics``, so
+    reading the basis from it at resolve time would lose the very numbers the
+    comparison needs. The pending record snapshotted them when the candidate
+    was accepted.
+    """
+    coord = _coord(tmp_path, baseline=2844.209, best_tput=3042.941)
+    coord._record_geak_candidate(_aligned_result(final=3236.489))
+    stub = {"status": "error", "error_class": "runner_timeout", "error": "timed out"}
+    coord.shared_state.geak_result = stub
+
+    coord._record_geak_resolution(
+        stub,
+        outcome="promoted",
+        measured_tput=3270.0,
+        provenance="geak_orch_harness_validated",
+    )
+
+    alignment = coord.shared_state.geak_resolved["alignment"]
+    assert alignment["cold_geak_speedup"] == pytest.approx(1.1088)
+    assert alignment["orchestrator_cold_baseline_tok_s"] == pytest.approx(3065.102)
+
+
+def test_rejected_rebench_records_what_was_dropped_and_why(tmp_path: Path) -> None:
+    """A measured rebench that loses to current_best still explains itself."""
+    base, current_best, measured = 7380.7, 10067.9, 9623.0
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    result = _aligned_result(final=10500.0)
+    coord.shared_state.geak_result = result
+    coord._record_geak_candidate(result)
+    coord._promote_geak_from_candidate(result, measured_tput=measured)
+
+    resolved = coord.shared_state.geak_resolved
+    assert resolved["outcome"] == "rejected"
+    assert resolved["reason"] == "rebench_did_not_beat_current_best"
+    assert resolved["measured_tput"] == pytest.approx(measured)
+    assert resolved["self_reported_tput"] == pytest.approx(10500.0)
+    assert not coord.shared_state.geak_pending
+
+
+def test_final_section_carries_the_resolved_candidate(tmp_path: Path) -> None:
+    """The reconciliation reaches the breakdown, not just the state."""
+    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_final
+
+    coord = _coord(tmp_path, baseline=2844.209, best_tput=3042.941)
+    result = _aligned_result(final=3236.489)
+    coord.shared_state.geak_result = result
+    coord._record_geak_candidate(result)
+    coord._promote_geak_from_candidate(result, measured_tput=3270.0)
+
+    state = {
+        "current_best": coord.shared_state.current_best,
+        "geak_pending": coord.shared_state.geak_pending,
+        "geak_resolved": coord.shared_state.geak_resolved,
+    }
+    final = collect_final(tmp_path, state, [])
+    assert final["geak_pending"] == {}
+    assert final["geak_resolved"]["outcome"] == "promoted"
+    assert final["geak_resolved"]["alignment"]["cold_speedup"] == pytest.approx(1.0903)
+
+
+def test_final_section_stays_empty_when_geak_never_ran(tmp_path: Path) -> None:
+    """Sessions GEAK never touched gain an empty key, not a half-filled one."""
+    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_final
+
+    assert collect_final(tmp_path, {"current_best": {}}, [])["geak_resolved"] == {}
+
+
 def test_report_shows_pending_candidate_excluded_from_headline() -> None:
     """A pending GEAK candidate renders as an audit note + warning and is
     NOT presented as a validated headline gain."""
