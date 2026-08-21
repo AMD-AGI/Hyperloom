@@ -2414,3 +2414,33 @@ def test_pending_integration_does_not_rescue_a_below_threshold_speedup(tmp_path)
 
     assert proposal["decision"] == "NEEDS_REVIEW"
     assert any("below KEEP threshold" in reason for reason in proposal["reasons"])
+
+
+def test_build_prompt_out_of_root_source_file_not_embedded(tmp_path, monkeypatch):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SHOULD_NOT_APPEAR_IN_PROMPT", encoding="utf-8")
+
+    # Fake a planted-directory path that substring matching would accept.
+    planted = tmp_path / "sgl-workspace" / "aiter"
+    planted.mkdir(parents=True)
+    planted_file = planted / "kernel.py"
+    planted_file.write_text("PLANTED_CONTENT", encoding="utf-8")
+
+    prompt = ko.build_prompt(_candidate(), _args(source_file=str(planted_file)))
+
+    assert "PLANTED_CONTENT" not in prompt
+    assert "SHOULD_NOT_APPEAR_IN_PROMPT" not in prompt
+
+
+def test_build_prompt_in_root_source_file_embedded(tmp_path, monkeypatch):
+    src = tmp_path / "kernel.py"
+    src.write_text("def in_root_kernel(): pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
+        lambda: (str(tmp_path) + "/",),
+    )
+
+    prompt = ko.build_prompt(_candidate(), _args(source_file=str(src)))
+
+    assert "in_root_kernel" in prompt
