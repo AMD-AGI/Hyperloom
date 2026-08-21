@@ -2609,6 +2609,10 @@ class EnablementBreakdown(TypedDict, total=False):
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
         setting_script: Session-relative path to the generated
             ``enablement_setting.sh`` artifact, when it was produced.
+        kept_artifacts: Whole-file artifact records landed by enablement
+            (``target`` / ``rel_target`` / ``kind`` per entry), analogous to
+            ``kept_patches``.  Populated only when artifacts were kept or
+            advanced.
     """
 
     mode: str
@@ -2627,6 +2631,7 @@ class EnablementBreakdown(TypedDict, total=False):
     launch_log_excerpt: str
     trigger_evidence_excerpt: str
     kept_patches: list[str]
+    kept_artifacts: list[dict[str, Any]]
     framework_root: str
     kept_stack_action: EnablementStackActionSummary
     candidate_refs: list[str]

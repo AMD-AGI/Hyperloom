@@ -1631,6 +1631,17 @@ def collect_enablement(
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_kept_patches:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
+    kept_artifacts_raw = _eg(state, "kept_artifacts")
+    if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:
+        out["kept_artifacts"] = [
+            {
+                "target": str(a.get("target") or ""),
+                "rel_target": str(a.get("rel_target") or ""),
+                "kind": str(a.get("kind") or ""),
+            }
+            for a in kept_artifacts_raw
+            if isinstance(a, dict) and a.get("target")
+        ]
     framework_root = str(_eg(state, "framework_root", "") or "")
     if framework_root:
         out["framework_root"] = framework_root

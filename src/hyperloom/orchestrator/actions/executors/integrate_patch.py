@@ -2147,6 +2147,44 @@ class IntegratePatchExecutor:
                 )
                 patch_paths = prefix + list(patch_paths)
 
+        # Re-install artifacts kept by prior rounds (base_artifacts replay,
+        # analogous to base_patches for code patches).
+        base_artifact_records = params.get("enablement_base_artifacts")
+        if bool(params.get("enablement")) and isinstance(base_artifact_records, list) and base_artifact_records:
+            _base_art_errors: list[str] = []
+            for art in base_artifact_records:
+                if not isinstance(art, dict):
+                    continue
+                tgt_str = str(art.get("target") or "").strip()
+                src_str = str(art.get("source") or "").strip()
+                if not tgt_str:
+                    continue
+                tgt = Path(tgt_str)
+                # Re-install: if the source is available use it; otherwise the
+                # target may still be in place from a prior apply (cross-root
+                # survival means it was never cleaned).
+                src = Path(src_str) if src_str else None
+                if src is not None and src.is_file():
+                    try:
+                        tgt.parent.mkdir(parents=True, exist_ok=True)
+                        import shutil as _shutil
+                        _shutil.copy2(src, tgt)
+                        log.info("integrate_patch: re-installed base artifact %s", tgt)
+                    except OSError as _e:
+                        _base_art_errors.append(f"{tgt}: {_e}")
+                elif not tgt.exists():
+                    log.warning(
+                        "integrate_patch: base artifact target %s missing and source unavailable; "
+                        "it may have been cleaned — round may fail",
+                        tgt,
+                    )
+            if _base_art_errors:
+                log.warning(
+                    "integrate_patch: %d base artifact(s) could not be re-installed: %s",
+                    len(_base_art_errors),
+                    _base_art_errors[:4],
+                )
+
         config_changes = dict(params.get("config_changes") or {})
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
@@ -2854,7 +2892,11 @@ class IntegratePatchExecutor:
             if advanced:
                 stacked_patches = [str(p) for p in applied]
                 new_log = str(bench_result.get("error") or "")
-                artifacts_reverted = self._revert_artifacts(applied_artifacts)
+                # Do NOT revert artifacts on advanced — PR #1215 fixed the same
+                # bug for patches (stash-reverted before being credited as base);
+                # artifacts were missed.  They are now stacked in
+                # kept_artifacts by framework.py and replayed next round.
+                artifacts_reverted: list[str] = []
                 reverted = self._revert_patches(framework_root, applied)
                 await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,

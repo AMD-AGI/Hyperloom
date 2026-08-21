@@ -120,6 +120,11 @@ def write_setting_script(
     once the copy lands.  Patches are dropped entirely without a framework root,
     because ``git apply`` would have no target to run against.
 
+    Artifacts (whole-file installs) are copied to ``reports/enablement/artifacts/``
+    and generate ``install -D`` lines in the script.  Their pre-image backups
+    (``.bak`` files from ``artifact_backups/``) are also copied as ``.orig``
+    so a human doing a source-code PR has both before and after available.
+
     Args:
         session_dir: The session root directory.
         enablement: The current ``EnablementRound`` state object.
@@ -145,6 +150,39 @@ def write_setting_script(
             if _copy(src, patches_dest / name):
                 script_patches.append(f"patches/{name}")
 
+    # Collect kept artifacts into reports/enablement/artifacts/ and build the
+    # install lines for the replay script.  The pre-image .bak (from
+    # artifact_backups/) is also copied as .orig so a human PR author has the
+    # before/after without digging into runs/.
+    script_artifacts: list[dict] = []
+    kept_artifacts = list(enablement.kept_artifacts or [])
+    if kept_artifacts:
+        arts_dest = enablement_dir(Path(session_dir)) / "artifacts"
+        for idx, art in enumerate(kept_artifacts):
+            if not isinstance(art, dict):
+                continue
+            tgt_str = str(art.get("target") or "").strip()
+            src_str = str(art.get("source") or "").strip()
+            bak_str = str(art.get("backup") or "").strip()
+            if not tgt_str:
+                continue
+            tgt = Path(tgt_str)
+            # Determine the archive filename (use target basename, de-collide).
+            art_name = f"{idx:03d}_{tgt.name}"
+            art_dest = arts_dest / art_name
+            # Copy the installed (post-image) file.
+            src_copied = False
+            if src_str and Path(src_str).is_file():
+                src_copied = _copy(Path(src_str), art_dest)
+            elif tgt.is_file():
+                # Target still in place (cross-root survival); archive it.
+                src_copied = _copy(tgt, art_dest)
+            # Copy pre-image .bak as .orig for upstream PR use.
+            if bak_str and Path(bak_str).is_file():
+                _copy(Path(bak_str), arts_dest / (art_name + ".orig"))
+            if src_copied:
+                script_artifacts.append({"archive_path": f"artifacts/{art_name}", "target": tgt_str})
+
     accepted_cfg = dict(enablement.accepted_config or {})
     extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}
     extra_server_args = str(accepted_cfg.get("extra_server_args") or "").strip()
@@ -164,6 +202,7 @@ def write_setting_script(
         patches=script_patches or None,
         framework_root=framework_root if script_patches else None,
         runtime=runtime_path or None,
+        artifacts=script_artifacts or None,
     )
 
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"

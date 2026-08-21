@@ -1098,6 +1098,9 @@ class FrameworkPhase(PhaseHandler):
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
+        # Whole-file artifacts kept by prior rounds, re-installed idempotently
+        # at the start of each round (analogous to patch stacking).
+        base_artifacts = list(state.enablement.kept_artifacts or [])
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
         # command is ever auto-seeded here: an unpinned upgrade of the shared
@@ -1109,10 +1112,13 @@ class FrameworkPhase(PhaseHandler):
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
-        if base_patches or base_setup:
+        if base_patches or base_setup or base_artifacts:
             progress_bits = []
             if base_patches:
                 progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
+            if base_artifacts:
+                art_tgts = [a.get("target", "?") for a in base_artifacts[:4]]
+                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) installed: {art_tgts}")
             if base_setup:
                 progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
             notes = (
@@ -1185,6 +1191,8 @@ class FrameworkPhase(PhaseHandler):
             "enablement_source_context": source_context,
             # Progressing patches from prior rounds, stacked as a base.
             "enablement_base_patches": base_patches,
+            # Whole-file artifact records from prior rounds, re-installed before boot.
+            "enablement_base_artifacts": base_artifacts,
             # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
             "launch_probe": req.launch_probe,
@@ -1759,6 +1767,14 @@ class FrameworkPhase(PhaseHandler):
                 if sp and sp not in kept:
                     kept.append(sp)
             state.enablement.kept_patches = kept
+            # Stack kept artifacts (whole-file installs) analogously to patches.
+            kept_arts = list(state.enablement.kept_artifacts or [])
+            for art in res.get("artifacts_applied") or []:
+                if isinstance(art, dict) and art.get("target"):
+                    tgt = str(art["target"])
+                    if not any(a.get("target") == tgt for a in kept_arts):
+                        kept_arts.append(dict(art))
+            state.enablement.kept_artifacts = kept_arts
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
@@ -1792,6 +1808,16 @@ class FrameworkPhase(PhaseHandler):
                 if sp and sp not in kept:
                     kept.append(sp)
             state.enablement.kept_patches = kept
+            # Stack advanced artifacts analogously — PR #1215 fixed the same
+            # silent-drop for patches; artifacts were missed and advanced still
+            # reverted them.  Now they are preserved and replayed next round.
+            kept_arts = list(state.enablement.kept_artifacts or [])
+            for art in res.get("artifacts_applied") or []:
+                if isinstance(art, dict) and art.get("target"):
+                    tgt = str(art["target"])
+                    if not any(a.get("target") == tgt for a in kept_arts):
+                        kept_arts.append(dict(art))
+            state.enablement.kept_artifacts = kept_arts
             _stack_setup_commands()
             _stack_kept_runtime()
             # Accumulated so a later kept round replays every advance, not just patches.
