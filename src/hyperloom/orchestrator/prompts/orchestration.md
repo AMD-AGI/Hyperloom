@@ -267,8 +267,8 @@ while any KEEP is pending silently omits its contribution.
 
 **No actionable kernel lever → `skip_to_sweep`, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
-exist (e.g. dominant kernels are vendor RCCL/NCCL binaries or closed
-CK/hipBLASLt GEMMs), drain `pending_keep_kernels` then emit
+exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
+`pending_keep_kernels` then emit
 `escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
 tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
 reloop gives EXPLORE another round.
@@ -368,6 +368,11 @@ on the next tick.
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied by R1
   `phase_incompatible`.
+* **Never propose or commission a tuned GEMM/BLAS table** —
+  `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
+  and the CSV/JSON they resolve to, or online tuning during a benchmark
+  (`PYTORCH_TUNABLEOP_TUNING=1`). That is `run_gemm_tuning`'s job in
+  KERNEL_AGENT; boolean GEMM-backend switches are unaffected.
 
 <!-- phase: KERNEL_AGENT -->
 ### Kernel request kinds

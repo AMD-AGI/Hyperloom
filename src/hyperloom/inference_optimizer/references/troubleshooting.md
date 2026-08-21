@@ -103,3 +103,14 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not
   start fresh.
+- `dead_holder_reaped` (lease reclaimed because the holder pid vanished): the
+  optimizer process died without unwinding, which on a sandboxed runtime usually
+  means the pod itself went away mid-task. Read
+  `runtime/pod_history.jsonl` — one append-only line per optimizer-lock
+  acquisition (`acquired_at` / `hostname` / `pid`), so more than one line means
+  the session was rebuilt and each entry marks a takeover. Prefer it over
+  `manifest.json` (pins only the *first* owner) and over `runtime/optimizer.lock`
+  (holds only the *current* one); a multi-rebuild session reads as single-pod
+  from those two alone. Correlate the takeover timestamps with the task that
+  failed — a roofline reclaimed here typically leaves a partial `torch_trace/`
+  and no `analysis.md`.
