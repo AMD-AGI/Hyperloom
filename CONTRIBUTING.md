@@ -18,7 +18,7 @@ This repository treats **documentation-only** pushes and pull requests the same 
 |-----------------|------------------------|------------------------------|
 | **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
 | **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
-| **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; steps use `continue-on-error: true` until backlog is cleared) | Yes (same `paths-ignore` as tests / CodeQL) |
+| **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; hard gate) | Yes (same `paths-ignore` as tests / CodeQL) |
 | **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.robustness`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
 | **Mypy** | Local / optional tooling only here | N/A |
 

@@ -6,10 +6,9 @@ name: Lint
 # Static analysis on push and pull_request for all branches. Skips when every
 # changed file matches paths-ignore (same list as ``tests-coverage.yml``).
 #
-# Ruff reads ``[tool.ruff]`` / ``[tool.ruff.lint]`` in ``pyproject.toml``. Step
-# ``continue-on-error: true`` keeps results advisory until the finding backlog
-# is cleared; then set those flags to ``false`` so merge gates can require a
-# green Lint job.
+# Ruff reads ``[tool.ruff]`` / ``[tool.ruff.lint]`` in ``pyproject.toml``. Ruff
+# check and format are hard gates. Bandit and Pylint remain advisory until their
+# backlogs are cleared.
 #
 # Pylint: ``--errors-only`` limits output to fatal/error-severity messages
 # (not convention or refactor hints). tree-reform.MD P2.5: critic-agent,
@@ -67,21 +66,11 @@ jobs:
 
       - name: Ruff check
         id: ruff_check
-        continue-on-error: true
         run: ruff check .
 
       - name: Ruff format (check only)
         id: ruff_format
-        continue-on-error: true
         run: ruff format --check .
-
-      - name: Advisory notice when Ruff failed
-        if: >-
-          always() &&
-          (steps.ruff_check.outcome == 'failure' ||
-           steps.ruff_format.outcome == 'failure')
-        run: |
-          echo "::warning::Ruff reported issues (advisory: step uses continue-on-error). Flip to hard-fail in this workflow after backlog is zero."
 
   bandit:
     name: bandit (medium+, production code)
