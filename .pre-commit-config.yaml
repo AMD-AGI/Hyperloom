@@ -52,3 +52,14 @@ repos:
     rev: v1.7.12
     hooks:
       - id: actionlint
+
+  # Enable once the mypy backlog is manageable (config in pyproject.toml):
+  # - repo: local
+  #   hooks:
+  #     - id: mypy
+  #       name: mypy (src/hyperloom)
+  #       entry: mypy src/hyperloom
+  #       language: system
+  #       types: [python]
+  #       pass_filenames: false
+  #       require_serial: true

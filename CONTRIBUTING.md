@@ -20,7 +20,7 @@ This repository treats **documentation-only** pushes and pull requests the same 
 | **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
 | **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; hard gate) | Yes (same `paths-ignore` as tests / CodeQL) |
 | **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.robustness`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
-| **Mypy** | Local / optional tooling only here | N/A |
+| **Mypy** | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error`; config in `[tool.mypy]`) | Yes (same `paths-ignore`) |
 
 If you add standalone workflows for **pytest**, **ruff**, **pylint**, or similar, copy the **same** `paths-ignore` blocks as in `tests-coverage.yml` / `codeql.yml` so documentation-only PRs stay consistent and cheap.
 
@@ -70,8 +70,8 @@ Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow a
 - Ruff:  
   `ruff check .`
 - Type checks (mypy):  
-  `mypy src/hyperloom`
-  - Adjust paths if you change package locations.
+  `mypy src/hyperloom`  
+  Configuration lives in `[tool.mypy]` in `pyproject.toml`. CI runs mypy as an **advisory** job until the type-check backlog is reduced.
 - CI runs **Pylint** with **`--errors-only`** (fatal/error severity only, not style) on several first-party packages from [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error` today). Root **`[tool.pylint.main]`** in `pyproject.toml` holds minimal defaults (e.g. `jobs`); tighten or add message disables there as the backlog shrinks.
 
 ## Before opening a PR

@@ -138,3 +138,29 @@ jobs:
             hyperloom.agents.framework \
             hyperloom.agents.critic.runtime \
             hyperloom.agents.quantization
+
+  mypy:
+    name: mypy (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install mypy and editable package
+        run: |
+          pip install --upgrade pip
+          pip install "mypy>=1.0"
+          pip install -e ".[test]"
+
+      - name: Mypy
+        id: mypy
+        continue-on-error: true
+        run: mypy src/hyperloom
+
+      - name: Advisory notice when Mypy failed
+        if: always() && steps.mypy.outcome == 'failure'
+        run: |
+          echo "::warning::Mypy reported type errors (advisory: step uses continue-on-error). Fix new errors in touched modules; flip to hard-fail after backlog shrinks."
