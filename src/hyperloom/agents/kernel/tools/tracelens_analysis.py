@@ -2566,112 +2566,183 @@ def find_repo_root(source_file: str) -> str:
 _BENCHMARK_DIRS = ("op_tests", "tests", "benchmarks", "benchmark", "test", "perf")
 
 
+#: Curated harness lookups, keyed by marker substrings in a kernel's name or
+#: source path. Paths are *checkout-relative* on purpose: the same harness sits
+#: at ``/sgl-workspace/aiter/op_tests/...`` in a serving image and is absent from
+#: a wheel install, so a pinned absolute path is either right on one host or a
+#: fabrication on every other.
 _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     # --- Normalization ---
     (
-        ("rmsnorm_quant", "add_rmsnorm_quant", "rmsnorm", "add_rmsnorm"),
         (
-            "/sgl-workspace/aiter/op_tests/test_rmsnorm2dFusedAddQuant.py",
-            "/sgl-workspace/aiter/op_tests/test_rmsnorm2d.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_rmsnorm.py",
-            "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_rmsnorm.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/normalization/test_rmsnorm.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/normalization/test_fused_add_rmsnorm_pad.py",
+            "rmsnorm_quant",
+            "add_rmsnorm_quant",
+            "rmsnorm",
+            "add_rmsnorm",
+        ),
+        (
+            "aiter/op_tests/test_rmsnorm2dFusedAddQuant.py",
+            "aiter/op_tests/test_rmsnorm2d.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_rmsnorm.py",
+            "sglang/sgl-kernel/benchmark/bench_rmsnorm.py",
+            "aiter/op_tests/triton_tests/normalization/test_rmsnorm.py",
+            "aiter/op_tests/triton_tests/normalization/test_fused_add_rmsnorm_pad.py",
         ),
     ),
     # --- Activation ---
     (
-        ("activation", "act_and_mul", "silu"),
         (
-            "/sgl-workspace/aiter/op_tests/test_activation.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_ff_a16w16_fused.py",
-            "/sgl-workspace/sglang/sgl-kernel/tests/test_activation.py",
-            "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_activation.py",
-            "/sgl-workspace/sglang/python/sglang/jit_kernel/tests/test_activation.py",
-            "/sgl-workspace/sglang/python/sglang/jit_kernel/benchmark/bench_activation.py",
+            "activation",
+            "act_and_mul",
+            "silu",
+        ),
+        (
+            "aiter/op_tests/test_activation.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_ff_a16w16_fused.py",
+            "sglang/sgl-kernel/tests/test_activation.py",
+            "sglang/sgl-kernel/benchmark/bench_activation.py",
+            "sglang/python/sglang/jit_kernel/tests/test_activation.py",
+            "sglang/python/sglang/jit_kernel/benchmark/bench_activation.py",
         ),
     ),
     # --- Attention ---
     (
-        ("paged_attention", "fmha", "attention"),
         (
-            "/sgl-workspace/aiter/op_tests/test_pa.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_decode.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_prefill.py",
+            "paged_attention",
+            "fmha",
+            "attention",
+        ),
+        (
+            "aiter/op_tests/test_pa.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_pa_decode.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_pa_prefill.py",
         ),
     ),
     # --- MLA decode ---
     (
-        ("mla_decode", "pseudo_mla", "mla_persistent"),
         (
-            "/sgl-workspace/aiter/op_tests/test_mla.py",
-            "/sgl-workspace/aiter/op_tests/test_mla_persistent.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_mla_decode.py",
+            "mla_decode",
+            "pseudo_mla",
+            "mla_persistent",
+        ),
+        (
+            "aiter/op_tests/test_mla.py",
+            "aiter/op_tests/test_mla_persistent.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_mla_decode.py",
         ),
     ),
     # --- MoE CK two-stage ---
     (
-        ("ck_moe_stage", "moe_2stage", "moe_stage1", "moe_stage2"),
         (
-            "/sgl-workspace/aiter/op_tests/test_moe_2stage.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_moe.py",
+            "ck_moe_stage",
+            "moe_2stage",
+            "moe_stage1",
+            "moe_stage2",
+        ),
+        (
+            "aiter/op_tests/test_moe_2stage.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_moe.py",
         ),
     ),
     # --- MoE FP8 blockscale (ASM) ---
     (
-        ("fmoe_fp8_blockscale", "moe_blockscale"),
         (
-            "/sgl-workspace/aiter/op_tests/test_moe_blockscale.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/moe/test_moe_gemm_a8w8_blockscale.py",
+            "fmoe_fp8_blockscale",
+            "moe_blockscale",
+        ),
+        (
+            "aiter/op_tests/test_moe_blockscale.py",
+            "aiter/op_tests/triton_tests/moe/test_moe_gemm_a8w8_blockscale.py",
         ),
     ),
     # --- GEMM A8W8 blockscale ---
     (
-        ("gemm_a8w8_blockscale",),
         (
-            "/sgl-workspace/aiter/op_tests/test_gemm_a8w8_blockscale.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py",
+            "gemm_a8w8_blockscale",
+        ),
+        (
+            "aiter/op_tests/test_gemm_a8w8_blockscale.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py",
         ),
     ),
     # --- Quantization ---
     (
-        ("dynamic_per_token_scaled_quant", "per_token_quant"),
         (
-            "/sgl-workspace/aiter/op_tests/test_quant.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/quant/test_quant.py",
+            "dynamic_per_token_scaled_quant",
+            "per_token_quant",
+        ),
+        (
+            "aiter/op_tests/test_quant.py",
+            "aiter/op_tests/triton_tests/quant/test_quant.py",
         ),
     ),
     # --- Batch-invariant addmm (Triton) ---
     (
-        ("batch_invariant", "addmm"),
-        ("/sgl-workspace/sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",),
+        (
+            "batch_invariant",
+            "addmm",
+        ),
+        (
+            "sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",
+        ),
     ),
 )
 
 
-def _known_harness_files(name: str, source_file: str, *, require_exists: bool = True) -> list[Path]:
+@lru_cache(maxsize=1)
+def _harness_search_bases() -> tuple[str, ...]:
+    """Directories a checkout-relative harness path may be joined onto.
+
+    A hint reads ``aiter/op_tests/...``, so the base is whatever holds the
+    ``aiter`` checkout. Each resolved search root contributes both itself and
+    its parent, because a root is the package directory on a wheel install
+    (``.../dist-packages/aiter``) and the checkout itself in a serving image
+    (``/sgl-workspace/aiter``); one join is the right one and the other simply
+    does not exist.
+
+    Returns:
+        tuple[str, ...]: Existing base directories, de-duplicated.
+    """
+    bases: list[str] = []
+    seen: set[str] = set()
+    for root in KNOWN_SEARCH_ROOTS:
+        trimmed = root.rstrip("/")
+        for base in (os.path.dirname(trimmed), trimmed):
+            if base and base not in seen and os.path.isdir(base):
+                seen.add(base)
+                bases.append(base)
+    return tuple(bases)
+
+
+def _known_harness_files(name: str, source_file: str) -> list[Path]:
     """Return curated benchmark/test harnesses matching a kernel.
 
-    Looks up :data:`_KNOWN_HARNESS_HINTS` by marker substrings found in the
-    kernel name / source path. By default it returns only hinted harnesses that
-    exist on disk; callers without a repo root can request the curated hint list
-    itself so tests and downstream prompts remain stable in minimal containers
-    where ``/sgl-workspace`` is absent.
+    Resolves each checkout-relative hint against the bases that exist here and
+    keeps only files actually present. A list naming paths that cannot be
+    opened is worse than an empty one, because every reader downstream -- the
+    dispatch prompt included -- treats a non-empty list as a harness it can run.
 
     Args:
         name (str): Kernel symbol/name.
         source_file (str): Resolved source-file path (may be empty).
-        require_exists (bool): When True, only paths present on disk are
-            returned. When False, matching curated hints are returned as-is.
 
     Returns:
-        list[Path]: Curated harness files, possibly empty.
+        list[Path]: Existing curated harness files, possibly empty.
     """
     blob = f"{name} {source_file}".lower()
     out: list[Path] = []
-    for markers, paths in _KNOWN_HARNESS_HINTS:
-        if any(marker in blob for marker in markers):
-            out.extend(Path(p) for p in paths if (not require_exists or Path(p).exists()))
+    seen: set[str] = set()
+    bases = _harness_search_bases()
+    for markers, relatives in _KNOWN_HARNESS_HINTS:
+        if not any(marker in blob for marker in markers):
+            continue
+        for relative in relatives:
+            for base in bases:
+                candidate = os.path.join(base, relative)
+                if candidate not in seen and os.path.isfile(candidate):
+                    seen.add(candidate)
+                    out.append(Path(candidate))
+                    break
     return out
 
 
@@ -2705,10 +2776,9 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     Returns:
         Up to ten matching harness paths, with multi-GPU tests demoted.
     """
-    if not repo_root:
-        known = _known_harness_files(name, source_file, require_exists=False)
-        return [str(p) for p in known[:10]]
     known = _known_harness_files(name, source_file)
+    if not repo_root:
+        return [str(p) for p in known[:10]]
     keywords = _candidate_keywords(name)
     # Add the source stem (and no-underscore variant) for repos that name tests differently.
     if source_file:
@@ -6756,6 +6826,11 @@ def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | No
         item["vendor_dispatch_wrapper"] = True
     item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
     _stamp_candidate_metadata(item, op_cat_map)
+    # Stamping recomputes benchmark_files from the curated marker table, which
+    # is coarser than a session that went and looked. Its verified answer wins.
+    reviewed_harnesses = item.get("review_benchmark_files")
+    if isinstance(reviewed_harnesses, list):
+        item["benchmark_files"] = list(reviewed_harnesses)
     # A restrictive hint is honoured, a permissive one is not. The reviewer can
     # veto a kernel it knows is not worth a tuning session, but it cannot talk
     # the gate into dispatching something the deterministic rules rejected.

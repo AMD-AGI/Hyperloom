@@ -505,13 +505,37 @@ def test_unknown_source_root_is_not_reusable_native():
     assert tla.recommend_backends(candidate) == []
 
 
-def test_known_rmsnorm_harness_is_registered_without_repo_root():
+def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
+    """A curated harness is found from the kernel name alone, with no repo root.
+
+    The hint is checkout-relative, so it is resolved against the search roots
+    rather than a pinned ``/sgl-workspace`` path, and only a file that is really
+    there is reported: a harness list naming paths nobody can open reads
+    downstream as a runnable harness.
+    """
+    harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "aiter"),))
+    tla._harness_search_bases.cache_clear()
+
     files = tla.find_benchmark_files(
         "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv",
         "",
         "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
     )
-    assert any("rmsnorm" in path.lower() for path in files)
+    tla._harness_search_bases.cache_clear()
+
+    assert files == [str(harness)]
+
+
+def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
+    """A hint that resolves nowhere yields nothing, not an unopenable path."""
+    monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "aiter"),))
+    tla._harness_search_bases.cache_clear()
+    files = tla.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
+    tla._harness_search_bases.cache_clear()
+    assert files == []
 
 
 def test_125_finalize_adds_kernel_category_for_attention():
