@@ -88,10 +88,9 @@ class TargetedBuildExecutor:
             command=_driver_command(action, attempt_root),
         )
 
-        # From here every exit runs the teardown, including a cancel from
-        # ``cancel_inflight_actions`` and a failure to persist the sentinel:
-        # the build is detached, so returning without killing it leaves a
-        # compile running against a lane this coroutine is about to release.
+        # The build outlives this coroutine unless killed, and the lane is
+        # released as it unwinds, so every exit from here must reach the
+        # teardown -- cancel and a failed sentinel write included.
         try:
             if shared_state is not None:
                 shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)

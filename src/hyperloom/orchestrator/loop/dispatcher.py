@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
@@ -115,21 +115,10 @@ _COOPERATIVE_CANCEL_GRACE_SEC: float = (
 _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
-#: Kinds registered for cancellation but never joined by the pump. The pump
-#: drains everything it joins before returning, so an off-loop compile there
-#: would hold every reactor turn for its whole duration. Admission is otherwise
-#: identical: these kinds pass the same budget, lane and lease gates.
+#: Kinds the pump dispatches but does not join: it drains what it joins before
+#: returning, and an off-loop compile there would hold every reactor turn for
+#: its duration. Admission is unchanged — same budget, lane and lease gates.
 _NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
-
-
-def _log_unjoined_task_outcome(atask: "asyncio.Task[Any]") -> None:
-    """Report the outcome of a handle no caller awaits."""
-    if atask.cancelled():
-        log.info("dispatcher: unjoined action cancelled")
-        return
-    exc = atask.exception()
-    if exc is not None:
-        log.error("dispatcher: unjoined action raised: %r", exc, exc_info=exc)
 
 
 class _InflightAction(NamedTuple):
@@ -394,9 +383,9 @@ class DispatcherCollaborator:
 
         Re-scans the queue whenever an in-flight task completes
         (FIRST_COMPLETED) or a short poll elapses, so a queued GPU task starts
-        the moment its lane frees. The pump still fully drains all currently
-        dispatchable work before returning. Each GPU lease is bound to its
-        task_id and released by the runner.
+        the moment its lane frees. Everything it joins is drained before it
+        returns; :data:`_NOT_JOINED_KINDS` is dispatched and left running. Each
+        GPU lease is bound to its task_id and released by the runner.
 
         Budget guard: once the phase's cyclic budget is spent
         (:meth:`_dispatch_paused_for_phase_budget`), stop spawning NEW
@@ -562,18 +551,20 @@ class DispatcherCollaborator:
     ) -> list[tuple[Task, "asyncio.Task[SubAgentResult]", Any]]:
         """Spawn every currently lane-fitting queued task not already in flight.
 
-        Returns the ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
-        (possibly empty). Pure dispatch — per-task completion bookkeeping is
-        handled by :meth:`_reap_dispatched_task`. Applies the capacity /
+        Pure dispatch — per-task completion bookkeeping is handled by
+        :meth:`_reap_dispatched_task`. Applies the capacity /
         GPU-specialist-lease gating; each lease is bound to its task_id.
 
         Args:
             exclude_ids: Task ids already dispatched this pump pass; skipped so
-                a task is never dispatched twice.
+                a task is never dispatched twice. A dispatched
+                :data:`_NOT_JOINED_KINDS` task is added here, since it is the
+                only record of it this pass carries back.
 
         Returns:
-            The ``(task, asyncio_task, gpu_lease)`` tuples spawned this pass
-            (possibly empty).
+            The ``(task, asyncio_task, gpu_lease)`` tuples the caller must join.
+            A :data:`_NOT_JOINED_KINDS` task is spawned and registered for
+            cancellation but deliberately absent from this list.
         """
         queued = await self.tasks.queued()
         if not queued:
@@ -606,8 +597,7 @@ class DispatcherCollaborator:
                 continue
             join_in_pump = task.kind not in _NOT_JOINED_KINDS
             if not join_in_pump and task.task_id in self._inflight_actions:
-                # Already running from an earlier pump, which returned without
-                # waiting for it; the row is only queued until it transitions.
+                # Still running from an earlier pump that returned without it.
                 continue
             if await self._cancel_queued_task_over_budget(task):
                 continue
@@ -834,11 +824,31 @@ class DispatcherCollaborator:
             if join_in_pump:
                 spawned.append((task, atask, gpu_lease))
             else:
-                # Nothing joins this handle, so surface its outcome here or the
-                # exception is only ever reported as never-retrieved at GC.
-                atask.add_done_callback(_log_unjoined_task_outcome)
+                # Nothing retrieves this handle's exception, so report it here.
+                atask.add_done_callback(self._report_unjoined_failure(task))
                 exclude_ids.add(task.task_id)
         return spawned
+
+    @staticmethod
+    def _report_unjoined_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
+        """Build the done-callback for a handle no caller awaits."""
+
+        def _report(atask: "asyncio.Task[Any]") -> None:
+            # A cancelled task has no exception to read, and cancelling is how
+            # shutdown reaches it, so it is not a failure worth reporting.
+            if atask.cancelled():
+                return
+            exc = atask.exception()
+            if exc is not None:
+                log.error(
+                    "dispatcher: %s (%s) raised: %r",
+                    task.task_id,
+                    task.kind,
+                    exc,
+                    exc_info=exc,
+                )
+
+        return _report
 
     async def run_task_registered(
         self,
@@ -1469,10 +1479,9 @@ class DispatcherCollaborator:
 
         Args:
             action_name: The proposed/delegated/inline action name.
-            fallback_cost_minutes: Cost to price the action at when the
-                catalogue does not carry it. Coordinator-internal kinds are
-                deliberately absent from the catalogue, and without this they
-                would be admitted at any remaining budget.
+            fallback_cost_minutes: What to price the action at when the
+                catalogue does not carry it. Without it, a kind deliberately
+                kept out of the catalogue is admitted at any remaining budget.
 
         Returns:
             A :class:`PolicyDenied` when the budget cannot fit the action, else
@@ -1547,8 +1556,8 @@ class DispatcherCollaborator:
         Returns:
             ``True`` when the task was cancelled and must be skipped this pass.
         """
-        # A kind the catalogue does not carry is priced by the lease the enqueue
-        # sized for it, which is the only cost estimate that exists for it.
+        # An uncatalogued kind is priced by the lease its enqueue sized, the
+        # only cost estimate it has.
         ttl_sec = int(getattr(task, "lease_ttl_sec", 0) or 0)
         denied = self._time_budget_denial_for_action(
             task.kind,
