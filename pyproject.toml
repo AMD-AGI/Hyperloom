@@ -81,6 +81,12 @@ ast = [
 claude = [
     "claude-agent-sdk>=0.2.110",
 ]
+dev = [
+    "pre-commit>=4.0",
+    "ruff>=0.8,<1",
+    "mypy>=1.0",
+    "reuse>=5.0",
+]
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
@@ -385,4 +391,23 @@ ignore = ["E501", "E741"]
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.
 [tool.ruff.format]
 exclude = ["**/*.md", "**/*.rst"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/hyperloom"]
+exclude = [
+    ".*/tests/.*",
+    "build",
+    ".venv",
+    "_audit_artifacts",
+]
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+show_error_codes = true
 
