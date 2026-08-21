@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
+from ..framework.paths import (
+    resolve_session_framework_root,
+    resolve_source_file_allowlist,
+    resolved_within,
+    source_file_candidates,
+)
 from ..bus.gpu_pool import (
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
@@ -455,66 +459,8 @@ def _trace_path_allowlist() -> tuple[str, ...]:
     return (root,)
 
 
-def _resolved_within(value: str, root: str) -> bool:
-    """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
-
-    Replaces a raw ``str.startswith`` prefix test so that ``..`` traversal and
-    shared-prefix boundary tricks (e.g. ``/x/aiter`` vs ``/x/aiterX``) cannot
-    slip a path past an allowlist root. Legitimate real paths nested under a
-    root are accepted identically to the old prefix check.
-
-    Args:
-        value (str): the candidate path string.
-        root (str): an allowlist root (may carry a trailing slash).
-
-    Returns:
-        bool: True when the resolved ``value`` equals or is nested under the
-            resolved ``root``; False on any resolution error or escape.
-    """
-    try:
-        v = Path(str(value)).resolve()
-        r = Path(str(root)).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return v == r or v.is_relative_to(r)
-
-
-# A profile trace names a frame as ``<path>(<line>): <function>``. The suffix is
-# not part of the path and the path is relative to the tree being profiled.
-_TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
-
-
-def _source_file_candidates(value: str) -> tuple[str, ...]:
-    """Return the path forms a ``source_file`` value may legitimately take.
-
-    Roofline evidence reaches the orchestration prompt as trace frames, and the
-    model cites them verbatim when it dispatches. Checking such a frame as
-    written resolves it against the process CWD — the Hyperloom checkout — which
-    is under no allowlist root, so every citation is denied and the task it
-    carries is cancelled before it runs.
-
-    Traversal is not widened by this: each candidate is still resolved and
-    bounded by :func:`_resolved_within`, so ``../`` climbs out of the root and
-    fails as before.
-
-    Args:
-        value (str): The raw field value.
-
-    Returns:
-        tuple[str, ...]: ``value`` first (so absolute paths behave exactly as
-            they did), then the de-annotated form, then that form resolved
-            against the tree this session is optimizing.
-    """
-    raw = str(value).strip()
-    out: list[str] = [raw]
-    bare = _TRACE_FRAME_SUFFIX.sub("", raw).strip()
-    if bare and bare != raw:
-        out.append(bare)
-    if bare and not Path(bare).is_absolute():
-        root = resolve_session_framework_root()
-        if root:
-            out.append(str(Path(root) / bare))
-    return tuple(out)
+_resolved_within = resolved_within
+_source_file_candidates = source_file_candidates
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
