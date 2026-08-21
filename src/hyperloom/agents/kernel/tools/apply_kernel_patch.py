@@ -703,14 +703,7 @@ def _within_root(path: Path, root: Path) -> bool:
         r = root.resolve()
     except (OSError, RuntimeError):
         return False
-    try:
-        return p == r or p.is_relative_to(r)
-    except AttributeError:  # pragma: no cover — Python <3.9
-        try:
-            p.relative_to(r)
-            return True
-        except ValueError:
-            return False
+    return p == r or p.is_relative_to(r)
 
 
 def apply_snapshot(
@@ -1543,17 +1536,10 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
             ``allow_unknown_target`` is ``False``.
     """
     lower = str(target_file).lower()
-    roots = known_target_roots()
-    if not allow_unknown_target:
-        try:
-            from hyperloom.orchestrator.framework.paths import resolved_within
-            _within = resolved_within
-        except ImportError:
-            # Standalone (no orchestrator): fall back to substring for the gate only.
-            def _within(v: str, r: str) -> bool:  # type: ignore[misc]
-                return str(r).lower() in str(v).lower()
-        if not any(_within(str(target_file), str(root)) for root in roots):
-            raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
+    if not allow_unknown_target and not any(
+        _within_root(target_file, Path(root)) for root in known_target_roots()
+    ):
+        raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
 
     suffix = target_file.suffix.lower()
     compiled = suffix in COMPILED_SOURCE_SUFFIXES
