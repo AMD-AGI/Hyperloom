@@ -81,6 +81,14 @@ _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(
 # serialization-safe on a large TP=8 MoE. Tunable via
 # HYPERLOOM_PROFILE_MAX_STEPS_CAP.
 _DEFAULT_PROFILE_MAX_STEPS = 128
+# AgentX counterpart of the cap above. The 128 is calibrated in decode steps
+# against the synthetic 1024/1024 shape; an agentic step carries a measured ISL
+# p50 of 56k-96k tokens, so the same step count buffers orders of magnitude more
+# profiler events in HOST RAM. Measured on DeepSeek-V4-Pro: eight vLLM workers at
+# 113-127 GB each, Ray reported 1012/1024 GB and killed the capture three times.
+# The AgentX client bounds the window by wall clock anyway (~20s of steady
+# state), so the extra steps buy nothing. HYPERLOOM_PROFILE_MAX_ITERS overrides.
+_AGENTX_PROFILE_MAX_ITERS = 8
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
@@ -1066,6 +1074,29 @@ def materialize_config_with_envs(
         # host RAM until the OOM killer arrives.
         if agentx_enabled():
             delay_iters = 0
+            # ...and the bound itself has to come down, because the cap above is
+            # sized in DECODE STEPS against the synthetic OSL. Under AgentX the
+            # captured work per step is agentic: measured ISL p50 was 56k-96k
+            # tokens, two orders of magnitude past the 1024/1024 shape the cap
+            # was calibrated on. At the stock cap a DeepSeek-V4 profile round put
+            # each of the eight vLLM workers at 113-127 GB of HOST RAM -- Ray
+            # reported 1012/1024 GB and killed them mid-capture, three attempts
+            # in a row, so the round produced no trace at all.
+            #
+            # A shorter capture is not a worse trace here: the client already
+            # bounds the window by wall clock (~20s of steady state), so the
+            # extra steps buy nothing and only inflate the in-memory event
+            # buffer. HYPERLOOM_PROFILE_MAX_ITERS still overrides this below.
+            if max_iters > _AGENTX_PROFILE_MAX_ITERS:
+                log.info(
+                    "AgentX: lowering captured profile steps %d -> %d. The cap is "
+                    "calibrated on the synthetic ISL/OSL shape; an agentic step "
+                    "carries orders of magnitude more, and the torch profiler "
+                    "buffers events in host RAM until the OOM killer arrives.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
+                max_iters = _AGENTX_PROFILE_MAX_ITERS
         # Operator hard-override of captured steps (e.g. a small eager FlyDSL
         # profile). Honored verbatim; warn when outside the safe band rather
         # than silently clamping.

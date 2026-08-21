@@ -586,3 +586,51 @@ def test_inherited_noncanonical_marker_does_not_leak_in(tmp_path):
     out = _result(res)
     assert not out["submission_invalid_reasons"]
     assert out["submission_valid"] is not False
+
+
+def test_reduced_warmup_is_flagged_non_canonical(tmp_path):
+    """Warmup is measurement-defining, so trimming it must void submittability.
+
+    Measured on a 743B model: the canonical 10 requests/lane is a ~2h warmup, so
+    an operator reaches for this knob under real time pressure. aiperf has no
+    concept of "enough warmup", so the scenario stamps submission_valid=true and
+    the round looks publishable while having measured a materially emptier cache.
+    Only the client knows the canonical value, so only the client can object.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_REQUESTS_PER_LANE="1")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any(
+        "warmup_per_lane=1" in x for x in out["submission_invalid_reasons"]
+    ), out["submission_invalid_reasons"]
+
+
+def test_reduced_warmup_grace_is_flagged_non_canonical(tmp_path):
+    """Same for the drain window: a shorter grace truncates the warmup it gates."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_GRACE_PERIOD="60")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any(
+        "warmup_grace=60s" in x for x in out["submission_invalid_reasons"]
+    ), out["submission_invalid_reasons"]
+
+
+def test_canonical_warmup_is_not_flagged(tmp_path):
+    """The canonical values must not trip the new check (no false positive)."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_WARMUP_REQUESTS_PER_LANE="10",
+        AGENTX_WARMUP_GRACE_PERIOD="1800",
+    )
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False

@@ -255,6 +255,16 @@ FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
 # leaderboard measurement -- by construction rather than by promise.
 CANON_ENTRIES=393
 CANON_DURATION=3600
+# Warmup is measurement-defining and was missing from this list until a measured
+# run exposed the gap: the agentic warmup is what puts the KV/radix cache under
+# realistic pressure before the window opens, so replaying at 1 request/lane
+# instead of 10 measures a materially emptier cache. It carries no scenario
+# marker either -- aiperf has no concept of "how much warmup is enough" -- so a
+# reduced-warmup round came back submission_valid=true and looked publishable.
+# On a 743B model the canonical 10/lane is a ~2h warmup, which is exactly when
+# an operator reaches for this knob, so the hole was reachable in practice.
+CANON_WARMUP_PER_LANE=10
+CANON_WARMUP_GRACE=1800
 # The corpus this model family canonically replays, before any operator pin.
 # CANON_DS is resolved with the corpus above. The family whitelist behind it is
 # a derivation, not a registry -- a model upstream runs on the full corpus but
@@ -274,6 +284,10 @@ NONCANON=()
 [ "$DURATION" != "$CANON_DURATION" ] && NONCANON+=("duration=${DURATION}s(canonical ${CANON_DURATION}s)")
 [ -n "${AGENTX_MAX_CTX:-}" ] && NONCANON+=("client_context_cap=${AGENTX_MAX_CTX}")
 [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ] && NONCANON+=("unsafe_override_forced")
+[ "$WARMLANE" != "$CANON_WARMUP_PER_LANE" ] && \
+  NONCANON+=("warmup_per_lane=${WARMLANE}(canonical ${CANON_WARMUP_PER_LANE})")
+[ "$WARMGRACE" != "$CANON_WARMUP_GRACE" ] && \
+  NONCANON+=("warmup_grace=${WARMGRACE}s(canonical ${CANON_WARMUP_GRACE}s)")
 
 SMOKE_ARGS=()
 if [ "$DURATION" -lt "$CANON_DURATION" ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then
@@ -348,6 +362,24 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # the upstream profile it lands squarely inside setup and captures nothing.
   PWARM="${AGENTX_PROFILE_WARMUP_S:-2700}"
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
+  # The delay is a blind wall clock: it does not know which phase aiperf is in,
+  # and the two ways to get it wrong are NOT symmetric. Opening late is fatal --
+  # aiperf exits, the branch below only logs a warning, and the round produces no
+  # trace at all. Opening early merely captures a still-loaded system slightly
+  # before steady state, which TraceLens can still use. Measured: a 743B model
+  # spends ~2.5h in the agentic warmup, so a delay tuned on a 35B round lands
+  # either mid-warmup or past the end depending on which way the estimate erred.
+  #
+  # So clamp toward "early". The round cannot outlast the measurement window plus
+  # the warmup that precedes it, and the only number known here is the window, so
+  # cap the delay at DURATION - PWIN - margin and say when the cap bites. A
+  # capture inside warmup is a usable trace; a capture that never happens is not.
+  _pmax=$(( DURATION - PWIN - 60 ))
+  [ "$_pmax" -lt 0 ] && _pmax=0
+  if [ "$PWARM" -gt "$_pmax" ]; then
+    log "WARN profile delay ${PWARM}s exceeds the safe bound for a ${DURATION}s window; clamping to ${_pmax}s so the capture cannot land after the round ends"
+    PWARM="$_pmax"
+  fi
   log "PROFILE=1: self-bracketing profile window (delay=${PWARM}s window=${PWIN}s)"
   run_aiperf & APID=$!
   sleep "$PWARM"
