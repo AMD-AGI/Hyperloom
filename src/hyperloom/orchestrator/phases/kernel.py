@@ -1659,7 +1659,7 @@ class KernelPhase(PhaseHandler):
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
                     tool="geak",
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey discovery replay failed", exc_info=True)
@@ -1679,14 +1679,14 @@ class KernelPhase(PhaseHandler):
                     skip_reason=str(disp.get("skip_reason") or ""),
                     orchestration_commit=commit,
                     task_group=disp.get("task_group"),
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
                 br = k.get("backend_result")
                 if isinstance(br, dict):
                     instrument.record_kernel_backend_result(
                         sdir,
                         br,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                     )
                 e2e = k.get("e2e")
                 if isinstance(e2e, dict):
@@ -1701,7 +1701,7 @@ class KernelPhase(PhaseHandler):
                         target_file=e2e.get("target_file"),
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                         # Replaying must land on the reading it originally
                         # recorded, not count itself as a fresh one.
                         occurrence=e2e.get("occurrence"),
@@ -1778,13 +1778,17 @@ class KernelPhase(PhaseHandler):
                     e2e_gain_pct=None,
                     validated=False,
                     decision="REVERT",
+                    # Same route as the KEEP that this withdraws. Leaving it on the default
+                    # re-parented the kernel under a synthetic Forge route at the moment it was
+                    # revoked, so a withdrawn GEAK kernel ended up filed under an optimizer that
+                    # never touched it.
+                    route_strategy="geak",
                     patch_path=e2e.get("patch_path"),
                     target_file=e2e.get("target_file"),
                     extra_server_args=str(
                         e2e.get("extra_server_args") or ""
                     ),
                     result=evidence,
-                    route_strategy="legacy_only",
                     # This is a second look at a kernel that was already kept,
                     # and ``evidence`` still carries the original integrate's
                     # identity. Without a namespace of its own, the reading
