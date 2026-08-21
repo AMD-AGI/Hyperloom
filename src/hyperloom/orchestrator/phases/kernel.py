@@ -2519,6 +2519,20 @@ class KernelPhase(PhaseHandler):
                             "error": f"{type(exc).__name__}: {exc}",
                         }
                     )
+            # Leaving the pre-validation envelope in place would be worse than
+            # the exception. The forge bridge already stamped decision="KEEP",
+            # requires_e2e_validation=True and the raw combined recommended_env
+            # on the strength of the micro result alone; the normal exit rewrites
+            # all three precisely so Orchestration never sees an unmeasured
+            # candidate and issues a bundled integrate against it. An arm that
+            # raised was not measured, so it has to read as REVERT.
+            result["decision"] = "REVERT"
+            result["requires_e2e_validation"] = False
+            result["e2e_validated"] = False
+            result["micro_decision"] = "e2e_validation_exception"
+            for stale in ("recommended_env", "extra_envs"):
+                if result.get(stale):
+                    result[stale] = {}
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 

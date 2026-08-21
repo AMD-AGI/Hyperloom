@@ -1370,28 +1370,20 @@ class TestForgeGemmHelperCoverage:
     # distinction those wordings exist to draw.
 
     @pytest.mark.asyncio
-    async def test_a_partial_run_that_delivered_an_env_is_still_a_candidate(
-        self, tmp_path, monkeypatch
-    ):
-        """``partial_failure`` with an env means some tuner delivered.
+    async def test_a_partial_wording_is_reverted_and_named(self, tmp_path, monkeypatch):
+        """``partial_failure`` reaches the bridge only with nothing to deploy.
 
-        Gating the bridge on the word ``candidate`` alone dropped it on the floor:
-        no decision, no E2E validation, and a deployable artifact never measured.
+        forge checks ``has_candidate`` before this wording, so a run where one
+        tuner crashed and another delivered reports ``candidate`` instead --
+        verified against the real ``build_report``. What arrives here is the case
+        with no env, which is a REVERT that still has to name itself so it is not
+        read as an honest no_improvement.
         """
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(
-            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
-        )
         sentinel = (
             "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
-            + json.dumps(
-                {
-                    "status": "ok",
-                    "micro_decision": "partial_failure",
-                    "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
-                }
-            )
+            + json.dumps({"status": "ok", "micro_decision": "partial_failure"})
             + "\nFORGE_GEMM_TUNE_RESULT_END\n"
         )
 
@@ -1402,39 +1394,8 @@ class TestForgeGemmHelperCoverage:
 
         result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        assert result["decision"] == "KEEP"
-        assert result["requires_e2e_validation"] is True
-        assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"}
-
-    @pytest.mark.asyncio
-    async def test_partial_output_with_an_env_is_a_candidate(self, tmp_path, monkeypatch):
-        """Fewer rows than shapes asked for, but the rows written are deployable."""
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(
-            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
-        )
-        sentinel = (
-            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
-            + json.dumps(
-                {
-                    "status": "ok",
-                    "micro_decision": "partial_output",
-                    "recommended_env": {"AITER_CONFIG_GEMM_BF16": "/ws/bf16.csv"},
-                }
-            )
-            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
-        )
-
-        async def _fake_subprocess(cmd, *, timeout_sec):
-            return 0, sentinel, ""
-
-        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
-
-        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
-
-        assert result["decision"] == "KEEP"
-        assert result["requires_e2e_validation"] is True
+        assert result["decision"] == "REVERT"
+        assert result["error_class"] == "forge_partial_failure"
 
     @pytest.mark.asyncio
     async def test_an_empty_run_is_reverted_and_says_so(self, tmp_path, monkeypatch):
@@ -1524,15 +1485,15 @@ class TestForgeGemmHelperCoverage:
         assert "Unsupported data type" in str(result.get("error") or "")
 
     @pytest.mark.asyncio
-    async def test_a_delivering_partial_run_keeps_both_the_env_and_the_reason(
+    async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(
         self, tmp_path, monkeypatch
     ):
         """One tuner crashed, another delivered: both facts have to survive.
 
-        The env must still be measured, and the crash must still be named. An
-        error_class alongside a KEEP is the accurate description of
-        ``partial_failure``, and nothing downstream may read it as a failure --
-        promotability is decided on ``status``.
+        forge reports this as ``candidate`` (``has_candidate`` outranks the
+        partial wordings), so the env is measured while the crash is still named.
+        An error_class alongside a KEEP is accurate here, and nothing downstream
+        may read it as a failure -- promotability is decided on ``status``.
         """
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
@@ -1544,7 +1505,7 @@ class TestForgeGemmHelperCoverage:
             + json.dumps(
                 {
                     "status": "ok",
-                    "micro_decision": "partial_failure",
+                    "micro_decision": "candidate",
                     "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
                     "tuners_run": [
                         {"tuner": "a8w8", "status": "failed", "error_class": "codegen_crash"},
