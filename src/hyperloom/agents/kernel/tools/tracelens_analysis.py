@@ -44,6 +44,13 @@ except ImportError:
     _resolve_flydsl_source_roots = None
 
 try:
+    from hyperloom.orchestrator.framework.paths import (
+        resolve_kernel_search_roots as _resolve_kernel_search_roots,
+    )
+except ImportError:
+    _resolve_kernel_search_roots = None
+
+try:
     from apply_kernel_patch import known_target_roots as _known_target_roots
 except ImportError:
     _known_target_roots = None
@@ -1640,15 +1647,102 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
     return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
 
 
-KNOWN_SEARCH_ROOTS = (
+#: Packages whose trees hold rewritable kernel source. Located at runtime so a
+#: wheel install, an editable checkout and a serving image all resolve, rather
+#: than only the one layout a literal happens to name.
+_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
+    "aiter",
+    "aiter_meta",
+    "sglang",
+    "sgl_kernel",
+    "vllm",
+)
+
+#: Last-resort checkout layouts for a host where nothing above is importable.
+#: Kept small on purpose: a pinned path cannot follow a package across
+#: container images or Python versions, and a list of them going stale in
+#: silence is what emptied this tier and stalled kernel-opt entirely.
+_FALLBACK_SEARCH_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter",
     "/sgl-workspace/sglang/sgl-kernel",
     "/sgl-workspace/sglang/python/sglang",
     "/sgl-workspace/vllm",
-    "/opt/venv/lib/python3.10/site-packages/sglang",
-    "/opt/venv/lib/python3.10/site-packages/aiter",
-    "/opt/venv/lib/python3.10/site-packages/vllm",
 )
+
+
+def _installed_package_dir(package: str) -> str:
+    """Locate a package's directory without importing it.
+
+    Args:
+        package (str): Importable package name.
+
+    Returns:
+        str: The package directory, or ``""`` when it is not on this
+            interpreter's path.
+    """
+    if not package or not package.isidentifier():
+        return ""
+    try:
+        spec = importlib.util.find_spec(package)
+    except (AttributeError, ImportError, ValueError):
+        return ""
+    if spec is None:
+        return ""
+    for location in list(getattr(spec, "submodule_search_locations", None) or []):
+        candidate = str(location).rstrip("/")
+        if candidate:
+            return candidate
+    origin = str(getattr(spec, "origin", "") or "")
+    return os.path.dirname(origin) if origin else ""
+
+
+@lru_cache(maxsize=1)
+def _discover_kernel_search_roots() -> tuple[str, ...]:
+    """Resolve the framework trees to grep for kernel source, at runtime.
+
+    Prefers the orchestrator's centralised resolver so this tool agrees with
+    PolicyGate and patch application on where framework source lives. When that
+    package is not importable (standalone CLI use) it falls back to locating
+    each known package itself, then to the pinned checkout layouts.
+
+    Non-existent roots are dropped: grepping them returns nothing and is
+    indistinguishable from a kernel that genuinely has no source here.
+
+    Returns:
+        tuple[str, ...]: Existing roots without trailing separators,
+            de-duplicated in discovery order.
+    """
+    discovered: list[str] = []
+    if _resolve_kernel_search_roots is not None:
+        discovered.extend(_resolve_kernel_search_roots())
+    else:
+        discovered.extend(
+            location
+            for location in (
+                _installed_package_dir(package) for package in _KERNEL_SOURCE_PACKAGES
+            )
+            if location
+        )
+        discovered.extend(_FALLBACK_SEARCH_ROOTS)
+    roots: list[str] = []
+    seen: set[str] = set()
+    for root in discovered:
+        normalized = str(root or "").rstrip("/")
+        if not normalized or normalized in seen or not os.path.isdir(normalized):
+            continue
+        seen.add(normalized)
+        roots.append(normalized)
+    if not roots:
+        log.warning(
+            "no framework source root exists on this host (looked for %s); "
+            "kernel source resolution will find nothing and every hot kernel "
+            "will be reported as non-routable",
+            ", ".join(_KERNEL_SOURCE_PACKAGES),
+        )
+    return tuple(roots)
+
+
+KNOWN_SEARCH_ROOTS = _discover_kernel_search_roots()
 # Extensions a grep hit may be admitted under. Deliberately narrow, and kept in
 # lockstep with source_type_for(): a suffix admitted here but unclassified there
 # lands as source_type="unknown", which classify_patchability rejects. Worse, it
@@ -4085,8 +4179,14 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         # playbook candidate has no rewritable device source, so point that
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").
-        if not str(item.get("source_file") or "").strip():
-            item["source_file"] = resolve_kernel_anchor_path(playbook)
+        #
+        # The anchor also overrides whatever the grep tier guessed. A registry
+        # match is a curated statement that this operator is tuned through a
+        # task bundle, whereas the guess can be a same-word collision --
+        # ``mori::EpDispatchCombineOp::dispatch`` reduces to the keyword
+        # "dispatch" and lands on an unrelated vendor header. Handing that path
+        # to a backend would rewrite the wrong file.
+        item["source_file"] = resolve_kernel_anchor_path(playbook)
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
@@ -7232,6 +7332,25 @@ def main() -> int:
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
+    # Without a single searchable root every kernel resolves to "" and the whole
+    # run reports zero routable candidates -- a host misconfiguration that reads
+    # exactly like a trace with nothing worth optimizing. Say so up front.
+    if not KNOWN_SEARCH_ROOTS:
+        trace_health_warnings.append(
+            {
+                "code": "no_framework_source_root",
+                "severity": "error",
+                "packages": list(_KERNEL_SOURCE_PACKAGES),
+                "message": (
+                    "No framework source root exists on this host (looked for "
+                    f"{', '.join(_KERNEL_SOURCE_PACKAGES)}). Source resolution "
+                    "cannot grep anything, so every hot kernel will be reported "
+                    "as non-routable and kernel-opt will have nothing to "
+                    "dispatch. Install the framework in this interpreter's "
+                    "environment or point $FRAMEWORK_REPO_PATH at its checkout."
+                ),
+            }
+        )
 
     try:
         update_status(
