@@ -275,27 +275,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
     return tuple(out)
 
 
-def _source_escapes_reusable_roots(source_file: str) -> bool:
-    """True only for a source_file that the substring check accepts but which
-    actually escapes the framework tree via ``..`` traversal.
-
-    Deliberately narrow: this adds *rejection* on top of the existing substring
-    match to close a trace-supplied ``kernel_file`` that embeds ``..`` to climb
-    out of the tree (the substring can still be present in the un-normalised
-    string). It never rejects a path the substring check would not already
-    accept, so no legitimate in-tree source is newly refused.
-    """
-    raw = str(source_file or "")
-    if ".." not in Path(raw).parts:
-        return False
-    # Contains a ``..`` segment: only escape if, after normalisation, it no
-    # longer lands under any reusable root.
-    try:
-        sf = Path(raw).resolve()
-    except (OSError, RuntimeError):
-        return True
-    lower = str(sf).lower()
-    return not any(root in lower for root in _reusable_source_roots())
 
 
 _APPLY_TOOL_MODULE: Any | None = None
@@ -889,11 +868,13 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "kernel_name": name,
             "source_file": source_file,
         }
-    lower_file = source_file.lower()
-    # Substring accept (unchanged for legitimate in-tree sources) plus a narrow
-    # traversal-escape rejection: a trace-supplied kernel_file that keeps a root
-    # substring but uses ``..`` to climb out of the tree is refused.
-    if not any(root in lower_file for root in _reusable_source_roots()) or _source_escapes_reusable_roots(source_file):
+    from ..framework.paths import resolve_patch_target_roots, source_file_candidates, resolved_within
+
+    if not any(
+        resolved_within(candidate, root)
+        for candidate in source_file_candidates(source_file)
+        for root in resolve_patch_target_roots()
+    ):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
@@ -3779,17 +3760,9 @@ async def _run_forge_gemm_tuning(
 def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, session_dir: Path) -> tuple[dict, str]:
     """Make a forge GEMM tuned CSV durable + recipe-portable.
 
-    The forge KEEP references the tuned CSV by its ephemeral tuner-workspace path,
-    so a recipe replayed after the workspace is gone (or on another box) loses the
-    tuning and aiter falls back to its default config. Mirror integrate_patch's
-    durability: copy the CSV into the serving aiter's ``configs/model_configs/``
-    (where aiter loads it), repoint the env there, and snapshot the realized file
-    via :func:`snapshot_source_layer` so it travels with the recipe.
-
-    The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
-    durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
-    ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
-    defeat the cross-environment recipe-portability this exists for.
+    Stages the tuned CSV under ``<session_dir>/optimization_stack/src/`` (outside
+    the ``runs/`` tree that the disk-pressure pruner touches) and snapshots it so
+    it travels with the recipe.  The env is repointed at the session-local copy.
 
     Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
     Returns ``(extra_envs, source_snapshot_dir)``.
@@ -3799,22 +3772,17 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     if not src_csv or not Path(src_csv).is_file():
         return extra_envs, ""
 
-    # Step 1 -- commit the durable copy + env repoint. This is what makes the
-    # KEEP survive: the CSV lands in aiter's default config dir and the env
-    # points there instead of the ephemeral tuner workspace.
-    try:
-        import importlib.util
+    slug = (
+        "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name).strip("_").lower()
+        or "model"
+    )
+    rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
+    # Staged root mirrors the relative layout aiter uses so the snapshot
+    # manifest shape (files/configs/model_configs/<name>.csv) is preserved.
+    staged_root = Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}" / "staged"
 
-        spec = importlib.util.find_spec("aiter")
-        if spec is None or not spec.origin:
-            return extra_envs, ""
-        aiter_pkg = Path(spec.origin).resolve().parent
-        slug = (
-            "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name).strip("_").lower()
-            or "model"
-        )
-        rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
-        dst = aiter_pkg / rel
+    try:
+        dst = staged_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_csv, dst)
         updated = dict(extra_envs)
@@ -3823,20 +3791,15 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
-    # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
-    # snapshot failure must NOT discard the copy + repoint committed above (the
-    # tuned CSV already lives in aiter's config dir and the env already points
-    # at it), so this runs in its own guard and only affects the returned dir.
+    # Snapshot failure must NOT discard the copy + repoint already committed above.
     snap_dir = ""
     try:
         from ..source_snapshot import snapshot_source_layer
 
         snap = snapshot_source_layer(
-            framework_root=aiter_pkg,
+            framework_root=staged_root,
             base_sha=None,
             rel_paths=[rel],
-            # Durable, run-cleanup-surviving location (mirrors integrate_patch),
-            # NOT the ephemeral runs/gemm_tuning workspace.
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="forge_gemm_tune",
             extra={"env_key": env_key, "model": slug},
