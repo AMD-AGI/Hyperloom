@@ -2468,7 +2468,6 @@ class IntegratePatchExecutor:
                 "config_changes_applied": {},
             }
 
-        git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
 
         # Per-patch root routing: grounding may have found that certain patches
