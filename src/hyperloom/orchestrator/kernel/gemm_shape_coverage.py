@@ -44,6 +44,16 @@ _AITER_SHAPE_HIT_RE = re.compile(
 Shape = tuple[int, int, int]
 FmoeDispatchKey = tuple[str, ...]
 
+# Short aliases and canonical torch dtype strings seen in fused-MoE logs/CSVs.
+# Only listed forms are normalized; anything else is preserved for exact matching.
+_FMoe_Q_DTYPE_ALIASES: dict[str, str] = {
+    "fp4": "torch.float4_e2m1fn_x2",
+    "torch.float4_e2m1fn_x2": "torch.float4_e2m1fn_x2",
+    "torch.float8_e4m3fn": "torch.float8_e4m3fn",
+    "torch.float8_e4m3fnuz": "torch.float8_e4m3fnuz",
+    "torch.float8_e5m2": "torch.float8_e5m2",
+}
+
 # ``get_2stage_cfgs`` indexes tuned rows on all fourteen columns below (see
 # ``aiter/fused_moe.py::_INDEX_COLS``). Runtime logs the same tuple after gfx
 # was added; the descriptor between ``using 2stage`` and ``for`` is either
@@ -257,6 +267,19 @@ def _split_fmoe_tuple(raw: str) -> list[str]:
     return parts
 
 
+def _normalize_fmoe_q_dtype(value: str) -> str:
+    """Map known q-dtype aliases to the canonical string aiter logs."""
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return text
+    if text in _FMoe_Q_DTYPE_ALIASES:
+        return _FMoe_Q_DTYPE_ALIASES[text]
+    lowered = text.lower()
+    if lowered in _FMoe_Q_DTYPE_ALIASES:
+        return _FMoe_Q_DTYPE_ALIASES[lowered]
+    return text
+
+
 def _normalize_fmoe_field(name: str, value: str) -> str:
     text = str(value or "").strip().strip("'\"")
     if name == "gfx":
@@ -271,21 +294,13 @@ def _normalize_fmoe_field(name: str, value: str) -> str:
         if lowered.startswith("torch.float16"):
             return "fp16"
     if name in ("q_dtype_a", "q_dtype_w"):
-        lowered = text.lower()
-        if "float4" in lowered or "fp4" in lowered or "e2m1" in lowered:
-            return "torch.float4_e2m1fn_x2"
-        if "float8" in lowered or "fp8" in lowered or "e4m3" in lowered:
-            if "fnuz" in lowered:
-                return "torch.float8_e4m3fnuz"
-            return "torch.float8_e4m3fn"
+        return _normalize_fmoe_q_dtype(text)
     if name in ("use_g1u1", "doweight_stage1"):
         lowered = text.lower()
         if lowered in ("true", "1"):
             return "1"
         if lowered in ("false", "0"):
             return "0"
-    if name == "q_type" and text.startswith("QuantType."):
-        return text
     return text
 
 
@@ -325,11 +340,7 @@ def _parse_fused_moe_dispatch_line(line: str) -> dict[str, str] | None:
     descriptor = "default"
     kernel_name1 = ""
     kernel_name2 = ""
-    if stage_desc.endswith(" default"):
-        pass
-    elif stage_desc.endswith("default"):
-        pass
-    else:
+    if not stage_desc.endswith("default"):
         desc_open = stage_desc.rfind("(")
         if desc_open < 0:
             return None
@@ -468,11 +479,6 @@ def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
             record["kernelName2"] = cols[kn2_idx].strip()
         out.append(record)
     return out
-
-
-def tuned_fmoe_csv_keys(path: str | Path) -> set[FmoeDispatchKey]:
-    """Return dispatch lookup keys present in a ``tuned_fmoe.csv``."""
-    return {fmoe_dispatch_lookup_key(row) for row in tuned_fmoe_csv_rows(path)}
 
 
 def _fmoe_candidate_row_for_dispatch(

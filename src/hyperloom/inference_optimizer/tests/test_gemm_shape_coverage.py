@@ -12,7 +12,6 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_padded_m_coarse,
     aiter_padded_m_fine,
     align_shapes_to_aiter_keys,
-    fmoe_dispatch_lookup_key,
     fmoe_tuned_config_coverage,
     load_shapes_json,
     parse_aiter_consulted_tables,
@@ -21,9 +20,9 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     resolve_fmoe_candidate_csv,
     tuned_config_coverage,
     tuned_csv_shapes,
-    tuned_fmoe_csv_keys,
     tuned_fmoe_csv_rows,
     write_shapes_json,
+    _normalize_fmoe_q_dtype,
 )
 
 
@@ -247,7 +246,14 @@ class TestFmoeDispatchParsing:
         merged.write_text("gfx\n", encoding="utf-8")
         assert resolve_fmoe_candidate_csv(merged) == bare
 
-    def test_q_dtype_aliases_normalize_to_log_form(self, tmp_path):
+    def test_q_dtype_aliases_normalize_known_forms_only(self, tmp_path):
+        assert _normalize_fmoe_q_dtype("torch.float8_e4m3fn") == "torch.float8_e4m3fn"
+        assert _normalize_fmoe_q_dtype("torch.float8_e5m2") == "torch.float8_e5m2"
+        assert _normalize_fmoe_q_dtype("torch.float8_e4m3fnuz") == "torch.float8_e4m3fnuz"
+        assert _normalize_fmoe_q_dtype("torch.float4_e2m1fn_x2") == "torch.float4_e2m1fn_x2"
+        assert _normalize_fmoe_q_dtype("fp4") == "torch.float4_e2m1fn_x2"
+        assert _normalize_fmoe_q_dtype("torch.float8_e5m2fn") == "torch.float8_e5m2fn"
+
         path = tmp_path / "candidate_fmoe.csv"
         path.write_text(
             "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
