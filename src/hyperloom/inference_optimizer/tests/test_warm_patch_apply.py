@@ -621,13 +621,13 @@ def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
 
-    result = _apply_warm_patches(
+    applied = _apply_warm_patches(
         {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]},
         str(install_root),
         output_dir,
     )
 
-    assert result["status"] == "prepared"
+    assert [p["status"] for p in applied] == ["applied_nogit"]
     assert "patched = True" in target.read_text()
     assert (output_dir / "warm_patches" / "patch_backups").is_dir()
 
@@ -641,10 +641,10 @@ def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
     target.write_text("# fp8 module\noriginal = True\n")
     params = {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]}
 
-    result = _apply_warm_patches(params, str(install_root), output_dir)
+    applied = _apply_warm_patches(params, str(install_root), output_dir)
 
-    assert result["status"] == "prepared"
-    assert not result.get("pre_sha"), "nogit tree has no sha to revert against"
+    assert [p["status"] for p in applied] == ["applied_nogit"]
+    assert not params.get("_warm_patch_snapshot_manifest"), "nogit has no git snapshot"
     assert params["_warm_patch_nogit_backups"], "teardown would have nothing to undo"
 
 
