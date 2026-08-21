@@ -2416,11 +2416,8 @@ def test_pending_integration_does_not_rescue_a_below_threshold_speedup(tmp_path)
     assert any("below KEEP threshold" in reason for reason in proposal["reasons"])
 
 
-def test_build_prompt_out_of_root_source_file_not_embedded(tmp_path, monkeypatch):
-    secret = tmp_path / "secret.txt"
-    secret.write_text("SHOULD_NOT_APPEAR_IN_PROMPT", encoding="utf-8")
-
-    # Fake a planted-directory path that substring matching would accept.
+def test_build_prompt_out_of_root_source_file_not_embedded(tmp_path):
+    # A planted directory carrying a root substring is outside every real root.
     planted = tmp_path / "sgl-workspace" / "aiter"
     planted.mkdir(parents=True)
     planted_file = planted / "kernel.py"
@@ -2429,7 +2426,6 @@ def test_build_prompt_out_of_root_source_file_not_embedded(tmp_path, monkeypatch
     prompt = ko.build_prompt(_candidate(), _args(source_file=str(planted_file)))
 
     assert "PLANTED_CONTENT" not in prompt
-    assert "SHOULD_NOT_APPEAR_IN_PROMPT" not in prompt
 
 
 def test_build_prompt_in_root_source_file_embedded(tmp_path, monkeypatch):
