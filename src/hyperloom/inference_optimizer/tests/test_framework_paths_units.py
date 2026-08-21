@@ -169,6 +169,59 @@ class TestResolvePatchTargetRoots:
         assert not any("flydsl" in root.lower() for root in allowlist)
 
 
+class TestResolveKernelSearchRoots:
+    def test_drops_roots_that_do_not_exist(self, monkeypatch, tmp_path):
+        """A pinned root that no longer exists must not reach the caller.
+
+        Grepping an absent directory yields no hits, which is indistinguishable
+        from a kernel whose source is genuinely absent -- the exact failure that
+        silently emptied kernel-opt's candidate list.
+        """
+        present = tmp_path / "vllm"
+        present.mkdir()
+        monkeypatch.setattr(
+            fp,
+            "_discover_installed_framework_roots",
+            lambda: (f"{present}/", "/gone/aiter/"),
+        )
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ())
+        assert fp.resolve_kernel_search_roots() == (f"{present}/",)
+
+    def test_excludes_bare_site_packages_parents(self, monkeypatch, tmp_path):
+        """Only package dirs, never the whole site-packages tree.
+
+        The allowlist reports the parent so an editability check can contain any
+        installed file; grepping it would scan every wheel on the host.
+        """
+        parent = tmp_path / "dist-packages"
+        (parent / "vllm").mkdir(parents=True)
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: (f"{parent}/",))
+        monkeypatch.setattr(
+            fp, "_discover_installed_framework_roots", lambda: (f"{parent}/vllm/",)
+        )
+        roots = fp.resolve_kernel_search_roots()
+        assert f"{parent}/vllm/" in roots
+        assert f"{parent}/" not in roots
+
+    def test_empty_when_nothing_is_installed(self, monkeypatch):
+        """No searchable root is reported as such, not as a silent success."""
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_scriptable_repo_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_explicit_framework_root", lambda: ())
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ("/gone/vllm/",))
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ("/gone/flydsl/",))
+        assert fp.resolve_kernel_search_roots() == ()
+
+    def test_includes_explicit_framework_checkout(self, monkeypatch, tmp_path):
+        """An editable checkout is invisible to importlib; the env var finds it."""
+        checkout = tmp_path / "my-vllm"
+        checkout.mkdir()
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
+
+
 class TestFlydslExtraSourceDirs:
     def test_lists_only_roots_that_exist(self, monkeypatch, tmp_path):
         monkeypatch.setenv("FLYDSL_ROOT", str(tmp_path / "missing"))

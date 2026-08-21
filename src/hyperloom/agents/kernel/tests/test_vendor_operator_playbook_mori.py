@@ -307,6 +307,29 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         assert tla.looks_like_source_path(source_file)
 
 
+def test_playbook_anchor_overrides_a_same_word_grep_collision():
+    """A registry match outranks whatever the grep tier guessed.
+
+    These operators reduce to the keywords "dispatch" and "combine", which
+    collide with unrelated vendor files (``mxfp4_moe_aux_dispatch.h``,
+    ``fmha_fwd_d64_bf16_combine.cu``) once the search roots actually resolve.
+    The registry is a curated statement that the operator is tuned through a
+    task bundle, so handing a backend the colliding path would rewrite the
+    wrong file.
+    """
+    collision = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/x_dispatch.h"
+    candidates = [
+        _mori_dispatch_candidate(source_file=collision),
+        _mori_combine_candidate(source_file=collision),
+    ]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    for item in out:
+        assert item["patch_strategy"] == "vendor_playbook"
+        assert item["source_file"] != collision
+        assert str(item["source_file"]).endswith("mori_ep_config.py")
+
+
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --
 
 
