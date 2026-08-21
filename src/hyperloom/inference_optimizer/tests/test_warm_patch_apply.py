@@ -16,6 +16,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _create_patch_snapshot,
     _resolve_recipe_patch_target,
     _revert_patches,
+    _revert_warm_patch_state,
 )
 
 
@@ -629,6 +630,50 @@ def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
     assert result["status"] == "prepared"
     assert "patched = True" in target.read_text()
     assert (output_dir / "warm_patches" / "patch_backups").is_dir()
+
+
+def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
+    """A nogit apply has no sha, so its backups are the only way back."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+    params = {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]}
+
+    result = _apply_warm_patches(params, str(install_root), output_dir)
+
+    assert result["status"] == "prepared"
+    assert not result.get("pre_sha"), "nogit tree has no sha to revert against"
+    assert params["_warm_patch_nogit_backups"], "teardown would have nothing to undo"
+
+
+def test_teardown_undoes_a_nogit_apply(tmp_path):
+    """Keying the revert on pre_sha alone leaked nogit patches into later tasks
+    that reuse the same checkout."""
+    target = tmp_path / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+    backup = tmp_path / "backups" / "p__vllm__fp8.py__0000.bak"
+    backup.parent.mkdir(parents=True)
+    shutil.copy2(target, backup)
+    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
+
+    result = _revert_warm_patch_state(
+        str(tmp_path),
+        pre_sha="",
+        nogit_backups=[
+            {
+                "target": str(target),
+                "existed": True,
+                "backup_path": str(backup),
+                "revert_action": "restore",
+            }
+        ],
+    )
+
+    assert result == {"ok": True, "errors": [], "channel": "nogit"}
+    assert "patched = True" not in target.read_text()
 
 
 def test_legacy_patch_skips_when_rollback_snapshot_fails(
