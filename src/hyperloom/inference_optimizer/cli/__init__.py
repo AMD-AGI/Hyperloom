@@ -1985,7 +1985,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
         # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
-        os.environ["MODEL_PATH"] = str(args.model)
+        from hyperloom.common.model_paths import resolve_serving_model_path
+
+        os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
 
         # Quantization prelude (one-shot, before any session/baseline work):
         # if --quantize was passed, quantize the source model now and rewrite

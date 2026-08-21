@@ -1380,8 +1380,10 @@ class TestForgeGemmHelperCoverage:
 
         result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
-        assert result["status"] == "failed"
+        # Skipped, not failed: forge never started, so it has no verdict.
+        assert result["status"] == "skipped"
         assert result["error_class"] == "model_path_unavailable"
+        assert result["skip_reason"]
         assert subprocess_called is False
 
     @pytest.mark.asyncio
@@ -1410,7 +1412,7 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
 
         assert missing_model_dir.is_absolute()
-        assert result["status"] == "failed"
+        assert result["status"] == "skipped"
         assert result["error_class"] == "model_path_unavailable"
         assert subprocess_called is False
 
@@ -1445,6 +1447,390 @@ class TestForgeGemmHelperCoverage:
         assert result["decision"] == "REVERT"
         assert result["status"] == "failed"
         assert result["backend"] == "forge"
+
+    # ---- forge wording -> coordinator decision ------------------------------
+    # forge reports seven micro_decision wordings; the bridge handled four, and
+    # the three it missed read in the breakdown like a genuine no_improvement.
+
+    @pytest.mark.asyncio
+    async def test_a_partial_wording_is_reverted_and_named(self, tmp_path, monkeypatch):
+        """A barren ``partial_failure`` is a REVERT that still names itself."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "partial_failure"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert result["error_class"] == "forge_partial_failure"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_run_is_reverted_and_says_so(self, tmp_path, monkeypatch):
+        """Writing zero rows is not the same outcome as finding nothing."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "empty_output"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert result["error_class"], "an empty run must name itself"
+        assert "empty" in result["error_class"]
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_no_improvement_stays_unadorned(self, tmp_path, monkeypatch):
+        """The distinction only works if the ordinary case stays ordinary."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "REVERT"
+        assert not result.get("error_class")
+
+    @pytest.mark.asyncio
+    async def test_a_tuner_error_class_reaches_the_envelope(self, tmp_path, monkeypatch):
+        """A crash a tuner named must be visible where the breakdown reads."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps(
+                {
+                    "status": "failed",
+                    "micro_decision": "failed",
+                    "tuners_run": [
+                        {
+                            "tuner": "fmoe_ck",
+                            "status": "failed",
+                            "error_class": "codegen_unsupported_dtype",
+                            "error": "Unsupported data type combination",
+                        }
+                    ],
+                }
+            )
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["error_class"] == "codegen_unsupported_dtype"
+        assert "Unsupported data type" in str(result.get("error") or "")
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(
+        self, tmp_path, monkeypatch
+    ):
+        """One tuner crashed, another delivered: forge reports ``candidate``, so
+        the env is measured and the crash is still named. Promotability keys on
+        ``status``, so a named crash must not demote the run."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
+        )
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps(
+                {
+                    "status": "ok",
+                    "micro_decision": "candidate",
+                    "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+                    "tuners_run": [
+                        {"tuner": "a8w8", "status": "failed", "error_class": "codegen_crash"},
+                        {"tuner": "fmoe_ck", "status": "ok"},
+                    ],
+                }
+            )
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "KEEP"
+        assert result["requires_e2e_validation"] is True
+        assert result["error_class"] == "codegen_crash"
+        # status decides promotability; a named crash must not demote the run.
+        assert result["status"] != "failed"
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_tuners_run_does_not_break_the_run(
+        self, tmp_path, monkeypatch
+    ):
+        """``tuners_run`` is forge's JSON and may be any shape; lifting a reason
+        out of it must not turn a run that happened into a reported crash."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        for malformed in (5, "not-a-list", {"tuner": "fmoe_ck"}, [None, 7]):
+            sentinel = (
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "no_improvement",
+                        "tuners_run": malformed,
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+            )
+
+            async def _fake_subprocess(cmd, *, timeout_sec, _s=sentinel):
+                return 0, _s, ""
+
+            monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+            result = await krh._run_forge_gemm_tuning(
+                {"task_id": f"malformed-{type(malformed).__name__}"},
+                session_dir=tmp_path,
+            )
+
+            # The verdict still lands, and no exception class leaks in as a cause.
+            assert result["decision"] == "REVERT", malformed
+            assert result.get("error_class") != "TypeError", malformed
+
+    @pytest.mark.asyncio
+    async def test_an_absent_micro_decision_is_left_alone(self, tmp_path, monkeypatch):
+        """No wording at all is not a verdict; the bridge must not invent one."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert "decision" not in result
+
+    # ---- MoE runtime key: log -> CSV -> payload -> forge argv ---------------
+    # Both ends were covered (the CSV writer, and KernelForge's preference for a
+    # caller-supplied CSV); the handoff between them was not, and deleting any
+    # link in it left the suite green.
+
+    #: A real dispatch line, gfx field included. Fixtures that dropped the gfx
+    #: field once let a regex that could never match production pass its tests.
+    _REAL_MOE_DISPATCH = (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+        "('gfx950', 256, 256, 4096, 512, 256, 6, 'ActivationType.Silu', "
+        "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', "
+        "'QuantType.per_1x32', True, False)"
+    )
+
+    @staticmethod
+    def _moe_state(tmp_path):
+        model_dir = tmp_path / "moe-model"
+        model_dir.mkdir(exist_ok=True)
+        SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path=str(model_dir),
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+        ).save(tmp_path)
+        return model_dir
+
+    @staticmethod
+    def _sentinel() -> str:
+        return (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_moe_key_travels_from_the_log_into_the_forge_payload(
+        self, tmp_path, monkeypatch
+    ):
+        """The values must come from the log, not from the config: a
+        config-derived key is what aiter would never look up."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        argv: dict[str, list[str]] = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            argv["cmd"] = list(cmd)
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "moe-key", "kernel_signature_log": str(log)}
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        csv_path = Path(written["moe_untuned_csv"])
+        assert csv_path.is_file(), "the payload must name a CSV that exists"
+
+        rows = csv_path.read_text(encoding="utf-8").strip().splitlines()
+        header = rows[0].split(",")
+        values = dict(zip(header, rows[1].split(",")))
+        # Straight off the log line, not inferred from the model config.
+        assert values["inter_dim"] == "512"
+        assert values["model_dim"] == "4096"
+        assert values["expert"] == "256"
+        assert values["topk"] == "6"
+        assert values["q_dtype_a"] == "torch.float8_e4m3fn"
+        assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
+        assert values["q_type"] == "QuantType.per_1x32"
+
+    def test_the_token_column_comes_from_the_workload(self, tmp_path):
+        """``tokens`` arrives as forge's comma-separated string, not a list.
+
+        Every prior case passed a list, so the tests agreed with the annotation
+        instead of with the only production caller.
+        """
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        for tokens, expected in (
+            ("1,32,64", ["1", "32", "64"]),
+            ("64", ["64"]),
+            ([1, 32, 64], ["1", "32", "64"]),
+            ("", ["1"]),
+            ("  16 , 16 ,bad,-8, 0 ", ["16"]),
+        ):
+            csv_path, _report = krh._write_fmoe_untuned_csv_from_log(
+                str(log), tokens, tmp_path / f"ws_{str(tokens)[:12].strip()}"
+            )
+            assert csv_path, f"no CSV for tokens={tokens!r}"
+            rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
+            got = [r.split(",")[0] for r in rows[1:]]
+            assert got == expected, f"tokens={tokens!r} -> {got}"
+
+    @pytest.mark.asyncio
+    async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
+        """Deriving the CSV is useless if the option never reaches forge."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        argv: dict[str, list[str]] = {}
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            argv["cmd"] = list(cmd)
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "moe-argv", "kernel_signature_log": str(log)}
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        # The handler hands the tool an input JSON; the tool builds forge's argv
+        # from it. Assert the field the tool reads is the CSV that was derived.
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["moe_untuned_csv"].endswith("untuned_fmoe_from_runtime.csv")
+        assert str(workspace) in written["moe_untuned_csv"]
+
+    @pytest.mark.asyncio
+    async def test_a_caller_supplied_moe_csv_wins(self, tmp_path, monkeypatch):
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+        supplied = tmp_path / "operator_moe.csv"
+        supplied.write_text(krh._FMOE_UNTUNED_CSV_HEADER + "\n", encoding="utf-8")
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {
+            "task_id": "moe-supplied",
+            "kernel_signature_log": str(log),
+            "moe_untuned_csv": str(supplied),
+        }
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["moe_untuned_csv"] == str(supplied)
+
+    @pytest.mark.asyncio
+    async def test_a_stale_moe_csv_path_falls_back_to_the_log(
+        self, tmp_path, monkeypatch
+    ):
+        """A path that no longer exists must not be forwarded to forge."""
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        log = tmp_path / "server.log"
+        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        payload = {
+            "task_id": "moe-stale",
+            "kernel_signature_log": str(log),
+            "moe_untuned_csv": str(tmp_path / "gone.csv"),
+        }
+
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        assert written["moe_untuned_csv"] != str(tmp_path / "gone.csv")
+        assert Path(written["moe_untuned_csv"]).is_file()
 
     @pytest.mark.asyncio
     async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(self, tmp_path, monkeypatch):

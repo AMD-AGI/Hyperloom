@@ -19,7 +19,9 @@ in ``hyperloom.common.__init__``) mirror this same strategy independently.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 
 def _identity_leaf(seg: str) -> str:
@@ -128,3 +130,60 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     if isinstance(hit, str) and Path(hit).is_file():
         return Path(hit).parent
     return None
+
+
+def resolve_serving_model_path(raw: str) -> str:
+    """Resolve a session model identity to a path suitable for launching servers.
+
+    Precedence mirrors ``run_hyperloom.sbatch``: an existing directory wins,
+    then ``HL_MODEL_BASE/<repo-tail>``, then the HuggingFace hub cache via
+    :func:`resolve_local_model_dir`. When nothing resolves, the original
+    string is returned unchanged.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        direct = Path(text).expanduser()
+        if direct.is_dir():
+            return str(direct)
+    except OSError:
+        pass
+    base = os.environ.get("HL_MODEL_BASE", "").strip()
+    if base:
+        leaf = text.rstrip("/").split("/")[-1]
+        if leaf:
+            candidate = Path(base) / leaf
+            try:
+                if candidate.is_dir():
+                    return str(candidate)
+            except OSError:
+                pass
+    resolved = resolve_local_model_dir(text)
+    if resolved is not None:
+        return str(resolved)
+    return text
+
+
+def resolve_session_model_path(
+    *,
+    params: dict[str, Any] | None = None,
+    state_model_path: str = "",
+    for_serving: bool = False,
+) -> str:
+    """Unified session model-path precedence for executors and handlers.
+
+    Order: ``params['model_path']`` → ``$MODEL_PATH`` → ``state.model_path``.
+    When ``for_serving`` is true, :func:`resolve_serving_model_path` is applied
+    to the chosen raw value.
+    """
+    raw = (
+        str((params or {}).get("model_path") or "").strip()
+        or os.environ.get("MODEL_PATH", "").strip()
+        or str(state_model_path or "").strip()
+    )
+    if not raw:
+        return ""
+    if for_serving:
+        return resolve_serving_model_path(raw)
+    return raw
