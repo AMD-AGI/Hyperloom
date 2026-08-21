@@ -115,6 +115,23 @@ _COOPERATIVE_CANCEL_GRACE_SEC: float = (
 _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 
 
+#: Kinds registered for cancellation but never joined by the pump. The pump
+#: drains everything it joins before returning, so an off-loop compile there
+#: would hold every reactor turn for its whole duration. Admission is otherwise
+#: identical: these kinds pass the same budget, lane and lease gates.
+_NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
+
+
+def _log_unjoined_task_outcome(atask: "asyncio.Task[Any]") -> None:
+    """Report the outcome of a handle no caller awaits."""
+    if atask.cancelled():
+        log.info("dispatcher: unjoined action cancelled")
+        return
+    exc = atask.exception()
+    if exc is not None:
+        log.error("dispatcher: unjoined action raised: %r", exc, exc_info=exc)
+
+
 class _InflightAction(NamedTuple):
     """A running action's handle: what it is, its task, and how to ask it to stop."""
 
@@ -587,21 +604,10 @@ class DispatcherCollaborator:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
                 continue
-            if task.kind == "targeted_build":
-                # Register in _inflight_actions but not in ``spawned``; the
-                # pump's FIRST_COMPLETED drain must not wait on a long compile.
-                if task.task_id not in self._inflight_actions:
-                    cancel_scope = CancelScope()
-                    atask = asyncio.create_task(
-                        self.run_task_registered(
-                            task,
-                            cancel_scope=cancel_scope,
-                        )
-                    )
-                    self._inflight_actions[task.task_id] = _InflightAction(
-                        task.kind, atask, cancel_scope
-                    )
-                    exclude_ids.add(task.task_id)
+            join_in_pump = task.kind not in _NOT_JOINED_KINDS
+            if not join_in_pump and task.task_id in self._inflight_actions:
+                # Already running from an earlier pump, which returned without
+                # waiting for it; the row is only queued until it transitions.
                 continue
             if await self._cancel_queued_task_over_budget(task):
                 continue
@@ -825,7 +831,13 @@ class DispatcherCollaborator:
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
-            spawned.append((task, atask, gpu_lease))
+            if join_in_pump:
+                spawned.append((task, atask, gpu_lease))
+            else:
+                # Nothing joins this handle, so surface its outcome here or the
+                # exception is only ever reported as never-retrieved at GC.
+                atask.add_done_callback(_log_unjoined_task_outcome)
+                exclude_ids.add(task.task_id)
         return spawned
 
     async def run_task_registered(
@@ -1439,6 +1451,8 @@ class DispatcherCollaborator:
     def _time_budget_denial_for_action(
         self,
         action_name: str,
+        *,
+        fallback_cost_minutes: float | None = None,
     ) -> PolicyDenied | None:
         """Refuse an action whose expected cost cannot fit the remaining session budget.
 
@@ -1455,6 +1469,10 @@ class DispatcherCollaborator:
 
         Args:
             action_name: The proposed/delegated/inline action name.
+            fallback_cost_minutes: Cost to price the action at when the
+                catalogue does not carry it. Coordinator-internal kinds are
+                deliberately absent from the catalogue, and without this they
+                would be admitted at any remaining budget.
 
         Returns:
             A :class:`PolicyDenied` when the budget cannot fit the action, else
@@ -1468,11 +1486,14 @@ class DispatcherCollaborator:
         reg = getattr(self, "action_registry", None)
         meta = reg.get(action) if reg is not None else None
         if meta is None:
-            return None
-        expected_min = expected_action_cost_minutes(
-            meta,
-            measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
-        )
+            if fallback_cost_minutes is None:
+                return None
+            expected_min = float(fallback_cost_minutes)
+        else:
+            expected_min = expected_action_cost_minutes(
+                meta,
+                measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
+            )
         usable_sec = self.shared_state.session_budget_usable_sec()
         if action_fits_time_budget(
             usable_sec=usable_sec,
@@ -1526,7 +1547,13 @@ class DispatcherCollaborator:
         Returns:
             ``True`` when the task was cancelled and must be skipped this pass.
         """
-        denied = self._time_budget_denial_for_action(task.kind)
+        # A kind the catalogue does not carry is priced by the lease the enqueue
+        # sized for it, which is the only cost estimate that exists for it.
+        ttl_sec = int(getattr(task, "lease_ttl_sec", 0) or 0)
+        denied = self._time_budget_denial_for_action(
+            task.kind,
+            fallback_cost_minutes=(ttl_sec / 60.0) if ttl_sec > 0 else None,
+        )
         if denied is None:
             return False
         try:

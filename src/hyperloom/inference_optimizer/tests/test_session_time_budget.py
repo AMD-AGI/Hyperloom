@@ -524,6 +524,55 @@ class TestPreDispatchBackstop:
         assert [t.task_id for t, _, _ in spawned] == []
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
+    @pytest.mark.asyncio
+    async def test_a_queued_targeted_build_is_dropped_when_the_budget_is_spent(
+        self,
+        coord: Coordinator,
+    ):
+        """The kind the pump does not join is still subject to the budget gate.
+
+        It is exempt from being *joined*, not from admission: a compile started
+        against a spent budget runs on past the session it was charged to.
+        """
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="targeted_build",
+            params={},
+            idempotency_key="q-build",
+            requires_lanes=["build_lane"],
+            lease_ttl_sec=900,
+        )
+        _set_budget(coord, minutes=600, elapsed_min=600.0)
+
+        spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=set())
+
+        assert [t.task_id for t, _, _ in spawned] == []
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+        assert task.task_id not in coord.dispatcher._inflight_actions
+
+    @pytest.mark.asyncio
+    async def test_a_targeted_build_that_fits_is_dispatched_but_not_joined(
+        self,
+        coord: Coordinator,
+    ):
+        """It is registered for cancellation and excluded, but never joined."""
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="targeted_build",
+            params={},
+            idempotency_key="q-build-fits",
+            requires_lanes=["build_lane"],
+            lease_ttl_sec=900,
+        )
+        exclude: set[str] = set()
+
+        spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=exclude)
+
+        assert [t.task_id for t, _, _ in spawned] == []
+        assert task.task_id in coord.dispatcher._inflight_actions
+        assert task.task_id in exclude
+        await coord.dispatcher.cancel_inflight_actions(reason="test_teardown")
+
 
     @pytest.mark.asyncio
     async def test_a_queued_conc_sweep_the_budget_outlived_is_recorded_as_skipped(
