@@ -39,9 +39,14 @@ import re
 from pathlib import Path
 
 #: Directory shapes a profile writes capture sidecars into, matched per path
-#: component: ``capture_traces`` exactly, plus any component carrying
-#: ``graph_capture`` (e.g. ``graph_capture_profile``).
-CAPTURE_DIR_RE = re.compile(r"\Acapture_traces\Z|graph_capture", re.IGNORECASE)
+#: component: ``capture_traces`` exactly, or a name *starting* with
+#: ``graph_capture`` (``graph_capture``, ``graph_capture_profile``), which
+#: covers every layout observed. Anchored, unlike the filename rule below: a
+#: directory is named for what it holds, so an unanchored token would also
+#: condemn e.g. ``torch_profiler_with_graph_capture/`` -- and because the
+#: capture-only preflight is an ``all(...)``, one such false positive rejects
+#: the entire input.
+CAPTURE_DIR_RE = re.compile(r"\Acapture_traces\Z|\Agraph_capture", re.IGNORECASE)
 
 #: Sidecar filename shapes: ``bs_<batch>[_rank<n>]`` anchored to the start, and
 #: ``graph_capture`` anywhere in the name (an unpatched SGLang prefixes it with
@@ -51,6 +56,24 @@ CAPTURE_DIR_RE = re.compile(r"\Acapture_traces\Z|graph_capture", re.IGNORECASE)
 #: out. ``graph_capture`` needs no such guard: a workload trace is not named
 #: after graph capture.
 CAPTURE_FRAGMENT_RE = re.compile(r"\Abs_\d+|graph_capture", re.IGNORECASE)
+
+
+def is_capture_dir_name(name: str) -> bool:
+    """Whether one path component names a graph-capture output directory.
+
+    Exposed separately from :func:`is_capture_fragment` because discovery has to
+    *find* the capture folder to hand it to TraceLens as ``--capture_folder``,
+    not merely recognise files already under it. Both answers come from one
+    pattern so a layout that is demoted during ranking is also the layout that
+    gets located here.
+
+    Args:
+        name: A single path component.
+
+    Returns:
+        True when the component names a capture directory.
+    """
+    return CAPTURE_DIR_RE.search(name) is not None
 
 
 def is_capture_fragment(path: str | Path, root: str | Path | None = None) -> bool:
@@ -83,4 +106,4 @@ def is_capture_fragment(path: str | Path, root: str | Path | None = None) -> boo
             parts = resolved.relative_to(root).parts
         except ValueError:
             parts = resolved.parts
-    return any(CAPTURE_DIR_RE.search(part) is not None for part in parts)
+    return any(is_capture_dir_name(part) for part in parts)

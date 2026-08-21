@@ -74,12 +74,12 @@ from _nccl_summary_candidates import extract_collective_candidates
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
 
-# Idle-gate threshold + high-idle warning: shared single source of truth so the
-# TraceLens and bypass routes gate on identical semantics.
-# Capture-vs-workload trace classification, shared with the bypass route so a
-# sidecar is recognised identically whichever backend reads the profile.
+# Capture-vs-workload trace classification, shared across routes so a sidecar is
+# recognised identically whichever backend reads the profile.
 from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 
+# Trace-health gate thresholds + warnings (high idle, low compute): shared single
+# source of truth so the TraceLens and bypass routes gate on identical semantics.
 from _idle_gate import (
     build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
@@ -4024,14 +4024,22 @@ def recover_other_bucket_candidates(
     GPU" when the true e2e shares were 0.5% and 4.7%). The basis actually used
     is recorded on each candidate as ``gpu_pct_basis``.
 
+    Note this bypasses rather than repairs the ambiguity: ``_RANK_PCT_KEYS``
+    still maps both ``% of compute time`` and ``%e2e`` onto one ``gpu_pct``, so
+    a run with no ``gpu_timeline.csv`` to supply ``total_window_us`` falls back
+    to whatever the sidecar reported and carries the original mixed-basis
+    hazard -- now labelled ``sidecar_reported`` rather than silent. Splitting
+    those aliases into separate fields is the real repair and is not done here.
+
     Args:
         skill_output_dir: The TraceLens skill output directory to scan.
         existing_candidates: Candidates already extracted from analysis.md.
         top_k: Maximum number of recovered candidates to return.
         min_gpu_pct: Minimum GPU-time percentage to qualify; defaults to the
             ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` env value (10%). Compared
-            against whichever basis was used, so it is a materially higher bar
-            under ``e2e_window`` than under the pre-existing bases.
+            against the sidecar's own share, not against ``gpu_pct``, so
+            admission is unchanged by the reporting basis (see
+            ``_admission_pct``).
         total_window_us: Wall span of the analyzed trace, in microseconds. When
             omitted or non-positive the function falls back to the sidecar's
             reported percentage, then to a share of the listed ops, and marks
@@ -4052,8 +4060,35 @@ def recover_other_bucket_candidates(
     listed_ops_us = sum(r["gpu_us"] for r in ranking if r.get("gpu_us") is not None) or 0.0
     window_us = float(total_window_us) if total_window_us is not None and total_window_us > 0 else 0.0
 
-    def _pct(rec: dict[str, Any]) -> tuple[float, str] | None:
-        """Return a record's GPU-time percentage and the basis it was computed on.
+    def _admission_pct(rec: dict[str, Any]) -> float | None:
+        """Return the share ``min_gpu_pct`` has always been compared against.
+
+        Deliberately the pre-existing quantity -- the sidecar's own percentage,
+        else the record's share of the rows we can see -- and NOT the e2e share
+        below. ``min_gpu_pct`` is a tuned constant (10%) whose meaning is "a
+        large slice of the GPU work we know about"; re-pointing it at the wall
+        span would silently raise the bar by the reciprocal of the compute
+        share, and on an ordinary compute-bound trace (60% compute, work spread
+        over eight kernels) that takes this whole recovery path from eight
+        candidates to zero. Admission stays on the old basis; only the number we
+        publish moves.
+
+        Args:
+            rec: A ranking record.
+
+        Returns:
+            The admission share, or ``None`` when the record carries neither a
+            reported percentage nor a usable GPU time.
+        """
+        if rec.get("gpu_pct") is not None:
+            return float(rec["gpu_pct"])
+        gpu_us = rec.get("gpu_us")
+        if listed_ops_us > 0 and gpu_us is not None:
+            return gpu_us / listed_ops_us * 100.0
+        return None
+
+    def _reported_pct(rec: dict[str, Any]) -> tuple[float, str] | None:
+        """Return the percentage to publish and the basis it was computed on.
 
         Args:
             rec: A ranking record.
@@ -4080,8 +4115,11 @@ def recover_other_bucket_candidates(
         if not name_l or name_l in have:
             continue
         # Gate on any high-GPU-time op missing from existing candidates.
-        scored = _pct(rec)
-        if scored is None or scored[0] < min_gpu_pct:
+        admission = _admission_pct(rec)
+        if admission is None or admission < min_gpu_pct:
+            continue
+        scored = _reported_pct(rec)
+        if scored is None:
             continue
         qualifying.append((scored[0], scored[1], rec))
 
@@ -4116,6 +4154,18 @@ def recover_other_bucket_candidates(
                 f"classify_patchability so a reusable native kernel still "
                 f"reaches GEAK"
             )
+    # One batch on two bases is the state this labelling exists to prevent: the
+    # percentages are then not comparable with each other, let alone with the
+    # analysis.md candidates they get ranked against. It is reachable when only
+    # some ranking rows carry an absolute GPU time, so say so rather than leave
+    # the evidence buried in a field nothing reads yet.
+    bases = {c["gpu_pct_basis"] for c in out}
+    if len(bases) > 1 and log is not None:
+        log(
+            f"candidate recovery fallback: gpu_pct spans {sorted(bases)} in one "
+            f"batch, so the recovered candidates are not mutually comparable; "
+            f"rank them on gpu_pct_basis-matched subsets only"
+        )
     return out
 
 
@@ -5476,6 +5526,53 @@ def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
         return []
 
 
+# TraceLens has spelled the compute / exposed-communication timeline rows
+# several ways across versions; accept every spelling seen in the wild rather
+# than silently reporting "no compute row" (which would disable the gate).
+_COMPUTE_TIMELINE_TYPES = ("computation_time", "compute_time", "computation", "compute")
+_EXPOSED_COMM_TIMELINE_TYPES = ("exposed_comm_time", "exposed_communication_time", "exposed_communication")
+
+#: Column spellings for the share and duration cells of a gpu_timeline row. The
+#: row *labels* were already matched by shape; the columns holding the numbers
+#: need the same tolerance, or a renamed header reads as "value 0" instead of
+#: "value unknown".
+_GPU_TIMELINE_PCT_COLUMNS = ("percent", "percentage", "percentage (%)", "pct", "%")
+_GPU_TIMELINE_MS_COLUMNS = ("time ms", "time (ms)", "time_ms", "ms")
+
+
+def _gpu_timeline_cell(row: dict[str, str], columns: tuple[str, ...]) -> float | None:
+    """Read one numeric cell from a gpu_timeline row, or ``None`` if unusable.
+
+    Absent, blank and unparseable all collapse to ``None`` rather than to a
+    number. A defaulted ``0`` is not a neutral answer here: the low-compute gate
+    fires *below* its threshold, so a renamed or truncated column would read as
+    "0% compute" and suppress the hot-kernel list on every trace, silently and
+    with ``status`` still ``ok``. Every caller must be able to distinguish "the
+    profile says zero" from "this file did not tell us".
+
+    Args:
+        row: A parsed ``gpu_timeline.csv`` row.
+        columns: Accepted column spellings, in priority order.
+
+    Returns:
+        The cell value, or ``None`` when no accepted column carries a number.
+    """
+    lowered = {str(k).strip().lower(): v for k, v in row.items() if k}
+    for column in columns:
+        if column not in lowered:
+            continue
+        raw = lowered[column]
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            # csv.DictReader hands back None for a short row, and float(None)
+            # raises TypeError rather than ValueError.
+            return float(str(raw).strip().rstrip("%"))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
     """Read GPU idle percentage directly from gpu_timeline.csv.
 
@@ -5485,23 +5582,12 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
 
     Returns:
         The GPU idle percentage, or ``None`` when the CSV is absent or has no
-        idle-time row.
+        usable idle-time row.
     """
-    try:
-        for row in _load_gpu_timeline_rows(output_dir):
-            if (row.get("type") or "").strip().lower() == "idle_time":
-                return float(row.get("percent", 0))
-    except ValueError:
-        # malformed CSV numeric field; treat as absent
-        return None
+    for row in _load_gpu_timeline_rows(output_dir):
+        if (row.get("type") or "").strip().lower() == "idle_time":
+            return _gpu_timeline_cell(row, _GPU_TIMELINE_PCT_COLUMNS)
     return None
-
-
-# TraceLens has spelled the compute / exposed-communication timeline rows
-# several ways across versions; accept every spelling seen in the wild rather
-# than silently reporting "no compute row" (which would disable the gate).
-_COMPUTE_TIMELINE_TYPES = ("computation_time", "compute_time", "computation", "compute")
-_EXPOSED_COMM_TIMELINE_TYPES = ("exposed_comm_time", "exposed_communication_time", "exposed_communication")
 
 
 def _extract_pct_from_gpu_timeline(output_dir: Path, row_types: tuple[str, ...]) -> float | None:
@@ -5513,19 +5599,15 @@ def _extract_pct_from_gpu_timeline(output_dir: Path, row_types: tuple[str, ...])
         row_types: Accepted ``type`` spellings, in priority order.
 
     Returns:
-        The percentage, or ``None`` when the CSV is absent or carries none of
-        the accepted row types.
+        The percentage, or ``None`` when the CSV is absent, carries none of the
+        accepted row types, or holds no readable share column.
     """
-    try:
-        rows = _load_gpu_timeline_rows(output_dir)
-        by_type = {(row.get("type") or "").strip().lower(): row for row in rows}
-        for row_type in row_types:
-            row = by_type.get(row_type)
-            if row is not None:
-                return float(row.get("percent", 0))
-    except ValueError:
-        # malformed CSV numeric field; treat as absent
-        return None
+    rows = _load_gpu_timeline_rows(output_dir)
+    by_type = {(row.get("type") or "").strip().lower(): row for row in rows}
+    for row_type in row_types:
+        row = by_type.get(row_type)
+        if row is not None:
+            return _gpu_timeline_cell(row, _GPU_TIMELINE_PCT_COLUMNS)
     return None
 
 
@@ -5564,15 +5646,12 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
 
     Returns:
         The trace total time in microseconds, or ``None`` when the CSV is
-        absent or has no total-time row.
+        absent or has no usable total-time row.
     """
-    try:
-        for row in _load_gpu_timeline_rows(output_dir):
-            if (row.get("type") or "").strip().lower() == "total_time":
-                return float(row.get("time ms", 0)) * 1000.0
-    except ValueError:
-        # malformed CSV numeric field; treat as absent
-        return None
+    for row in _load_gpu_timeline_rows(output_dir):
+        if (row.get("type") or "").strip().lower() == "total_time":
+            ms = _gpu_timeline_cell(row, _GPU_TIMELINE_MS_COLUMNS)
+            return None if ms is None else ms * 1000.0
     return None
 
 
@@ -8095,10 +8174,15 @@ def main() -> int:
                     if high_idle_warning is not None or low_compute_warning is not None:
                         agent_candidates = []
                         allow_empty_candidates = True
+                        # Both gates can fire on one window (95% idle AND 3%
+                        # compute is a real shape), so accumulate rather than
+                        # let the second suppression erase the first, matching
+                        # the "+".join the non-suppressed path already uses.
+                        skipped_sources: list[str] = []
                         if high_idle_warning is not None:
                             assert idle_pct_value is not None
                             trace_health_warnings.append(high_idle_warning)
-                            report_source = "skipped:high_gpu_idle_pct"
+                            skipped_sources.append("skipped:high_gpu_idle_pct")
                             append_log(
                                 log_path,
                                 f"TraceLens Executive Summary reports "
@@ -8113,7 +8197,7 @@ def main() -> int:
                         if low_compute_warning is not None:
                             assert compute_pct_value is not None
                             trace_health_warnings.append(low_compute_warning)
-                            report_source = "skipped:low_gpu_compute_pct"
+                            skipped_sources.append("skipped:low_gpu_compute_pct")
                             append_log(
                                 log_path,
                                 f"TraceLens Executive Summary reports "
@@ -8125,6 +8209,7 @@ def main() -> int:
                                 "will see this in trace_health_warnings[] and "
                                 "route to comm/parameter optimization.",
                             )
+                        report_source = "+".join(skipped_sources)
                     else:
                         if idle_pct_value is not None and graph_under_recorded_warning is None:
                             append_log(

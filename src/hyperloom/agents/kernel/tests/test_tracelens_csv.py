@@ -2495,6 +2495,40 @@ def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpa
     assert tla._is_capture_fragment(path, tmp_path) is expected
 
 
+def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
+    """``graph_capture`` anchors in a directory name, unlike in a filename.
+
+    A directory is named for what it holds, so an unanchored token would also
+    condemn ``torch_profiler_with_graph_capture/`` -- and the capture-only
+    preflight is an ``all(...)``, so one false positive rejects the whole input.
+    """
+    safe = tmp_path / "torch_profiler_with_graph_capture" / "rank_0.trace.json.gz"
+    assert tla._is_capture_fragment(safe, tmp_path) is False
+    for capture_dir in ("graph_capture", "graph_capture_profile", "capture_traces"):
+        assert tla._is_capture_fragment(tmp_path / capture_dir / "rank_0.trace.json.gz", tmp_path) is True
+
+
+def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
+    """The capture folder must be locatable, not merely demoted during ranking.
+
+    Ranking keeps the sidecars out of the analysis input; discovery is what
+    hands them to TraceLens as ``--capture_folder``. Two hard-coded names meant
+    a run could pick the right workload trace and still lose its graph-capture
+    input.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    (trace_dir / "graph_capture_profile").mkdir(parents=True)
+    real = _rank_trace(trace_dir / "1786735404.4274018-TP-0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
+
+
+def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    (trace_dir / "torch_profiler_with_graph_capture").mkdir(parents=True)
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(trace_dir, [real]) is None
+
+
 def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
     """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace.
 
@@ -5110,6 +5144,53 @@ def test_extract_compute_pct_returns_none_when_absent(tmp_path):
     _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,1000.0,100.0\n")
     assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
     assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Share column renamed beyond the known aliases: the row is found, the
+        # number is not. Column drift is not hypothetical -- the row *labels*
+        # already needed multi-spelling tolerance.
+        "type,time ms,share_of_total\ncomputation_time,725.85,3.99\n",
+        # Row truncated: DictReader yields None for the missing cell, and
+        # float(None) raises TypeError rather than ValueError.
+        "type,time ms,percent\ncomputation_time,725.85\n",
+        # Present but blank.
+        "type,time ms,percent\ncomputation_time,725.85,\n",
+        # Present but not a number.
+        "type,time ms,percent\ncomputation_time,725.85,n/a\n",
+    ],
+)
+def test_unreadable_compute_cell_is_none_not_zero(tmp_path, body):
+    """An unreadable share must fail open, never read as ``0%``.
+
+    The low-compute gate fires *below* its threshold, so defaulting a missing
+    or unparseable cell to 0 would suppress the hot-kernel list on every trace,
+    silently, with ``status`` still ``ok`` -- the exact opposite of the idle
+    gate, where a 0 default is harmless.
+    """
+    _write_gpu_timeline(tmp_path, body)
+    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
+    _, warning = tla._evaluate_low_compute_gate(
+        tla._extract_compute_pct_from_gpu_timeline(tmp_path),
+        None,
+        tmp_path / "analysis.md",
+    )
+    assert warning is None, "an unknown compute share must not suppress candidates"
+
+
+@pytest.mark.parametrize("column", ["percent", "percentage", "Percentage (%)", "pct"])
+def test_known_percent_column_spellings_are_read(tmp_path, column):
+    """Known alias spellings are read rather than discarded as unknown."""
+    _write_gpu_timeline(tmp_path, f"type,time ms,{column}\ncomputation_time,725.85,3.99\n")
+    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) == 3.99
+
+
+def test_total_time_is_none_when_its_cell_is_unreadable(tmp_path):
+    """Same fail-open contract for the window total the gpu_pct basis needs."""
+    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,,100.0\n")
+    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
 
 
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
