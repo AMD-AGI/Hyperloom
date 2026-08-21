@@ -458,17 +458,14 @@ class PatchGroundingResult:
 
     verdict: str
     detail: str = ""
-    # The allowlisted root that the patch was successfully grounded against, or
-    # empty when the verdict is not ``applies`` / ``stale``.
-    root: str = ""
 
     @property
     def is_garbage(self) -> bool:
         """True for verdicts that should drop the patch (clear hallucination).
 
         ``missing_target`` joins the structural failures: a patch modifying or
-        deleting a file that does not exist in the framework source tree can
-        never apply, so it is dropped before it wastes an ``integrate_patch``
+        deleting a file absent from *every* candidate source tree can never
+        apply, so it is dropped before it wastes an ``integrate_patch``
         benchmark slot (unlike ``stale``, which is kept because integrate's
         ``-p`` auto-detect / 3-way merge may still salvage it).
 
@@ -491,28 +488,23 @@ def ground_patch_text(
 ) -> PatchGroundingResult:
     """Validate + git-ground one patch.
 
-    Structural checks (unified diff, no path escape) always run.  The
-    ``git apply --check`` grounding runs against ``base_checkout`` first; when
-    that root returns ``missing_target`` and ``candidate_roots`` is non-empty,
-    each candidate root is tried in order before the patch is dropped.  This
-    handles the common case where a specialist writes a sglang patch from an
-    aiter worktree: the patch targets sglang files, so grounding must use the
-    sglang checkout.
+    Structural checks (unified diff, no path escape) always run. The
+    ``git apply --check`` grounding runs against ``base_checkout`` first, then
+    against each entry of ``candidate_roots`` whose tree holds the patch's
+    targets. A specialist handed an aiter worktree still writes sglang patches,
+    so grounding only against the worktree base drops them as ``missing_target``
+    when the sglang checkout would have accepted them.
 
     Args:
         patch_text: The unified-diff text to validate and ground.
         base_checkout: Primary clean git checkout to ground against, or
             ``None`` to skip the ``git apply --check`` step.
-        candidate_roots: Additional allowlisted checkouts to retry against
-            when the primary root returns ``missing_target``.  Tried in order;
-            the first that either finds all targets or lets ``git apply --check``
-            pass is used.
+        candidate_roots: Further checkouts to try when ``base_checkout`` does
+            not hold the patch's targets.
         git_timeout_sec: Timeout for each ``git apply --check`` subprocess.
 
     Returns:
         The :class:`PatchGroundingResult` with the verdict and detail.
-        ``result.root`` is the checkout path (as a str) when the verdict is
-        ``applies`` or ``stale``; empty otherwise.
     """
     if not is_unified_diff(patch_text):
         return PatchGroundingResult(GROUND_NOT_DIFF, "no unified-diff hunk header")
@@ -522,44 +514,35 @@ def ground_patch_text(
     if base_checkout is None or not Path(base_checkout).is_dir():
         return PatchGroundingResult(GROUND_UNCHECKED, "no base checkout")
 
-    def _try_root(root: Path) -> PatchGroundingResult | None:
-        """Attempt grounding against one root.  Returns None to keep trying."""
-        missing = patch_targets_missing(patch_text, root)
-        if missing:
-            return None  # targets not in this tree; try the next root
-        try:
-            proc = subprocess.run(
-                ["git", "-C", str(root), "apply", "--check", "-"],
-                input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
-                capture_output=True,
-                text=True,
-                timeout=git_timeout_sec,
-                check=False,
+    base = Path(base_checkout)
+    missing = patch_targets_missing(patch_text, base)
+    root = base
+    if missing:
+        for alt in candidate_roots:
+            if not patch_targets_missing(patch_text, alt):
+                root = alt
+                break
+        else:
+            return PatchGroundingResult(
+                GROUND_MISSING_TARGET,
+                "target file(s) not in any framework tree: " + ", ".join(missing[:5]),
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {exc!r}")
-        if proc.returncode == 0:
-            return PatchGroundingResult(GROUND_APPLIES, root=str(root))
-        return PatchGroundingResult(GROUND_STALE, (proc.stderr or "").strip()[:240], root=str(root))
-
-    # Try primary root first.
-    result = _try_root(Path(base_checkout))
-    if result is not None:
-        return result
-
-    # Primary root has missing targets.  Walk candidate roots.
-    for alt in candidate_roots:
-        if not alt.is_dir() or alt.resolve() == Path(base_checkout).resolve():
-            continue
-        result = _try_root(alt)
-        if result is not None:
-            return result
-
-    # All roots have missing targets — hallucinated layout.
-    missing = patch_targets_missing(patch_text, Path(base_checkout))
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "apply", "--check", "-"],
+            input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
+            capture_output=True,
+            text=True,
+            timeout=git_timeout_sec,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {exc!r}")
+    if proc.returncode == 0:
+        return PatchGroundingResult(GROUND_APPLIES)
     return PatchGroundingResult(
-        GROUND_MISSING_TARGET,
-        "target file(s) not in any framework tree: " + ", ".join(missing[:5]),
+        GROUND_STALE,
+        (proc.stderr or "").strip()[:240],
     )
 
 
@@ -670,30 +653,25 @@ def vet_patches(
     *,
     base_checkout: Path | None,
     candidate_roots: tuple[Path, ...] = (),
-) -> tuple[list[str], list[dict[str, str]], dict[str, str], dict[str, str]]:
+) -> tuple[list[str], list[dict[str, str]], dict[str, str]]:
     """Ground each patch file; drop clear garbage (non-diff / path escape).
 
     Stale-but-valid patches are kept (integrate_patch + Critic adjudicate)
-    with a grounding note.  When a patch's primary root has missing targets,
-    ``candidate_roots`` are tried in order so cross-repo patches (e.g. a sglang
-    fix written from an aiter worktree) are rescued instead of silently dropped.
+    with a grounding note.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.
         base_checkout: Primary clean git checkout to ground against, or
             ``None``.
-        candidate_roots: Additional allowlisted checkouts to retry against
-            for patches that fail ``missing_target`` on ``base_checkout``.
+        candidate_roots: Further checkouts to try for patches whose targets
+            are absent from ``base_checkout``.
 
     Returns:
-        A ``(kept_paths, dropped_records, grounding_by_path, patch_roots)``
-        tuple.  ``patch_roots`` maps each kept patch path to the checkout
-        root string where it was successfully grounded.
+        A ``(kept_paths, dropped_records, grounding_by_path)`` tuple.
     """
     kept: list[str] = []
     dropped: list[dict[str, str]] = []
     grounding: dict[str, str] = {}
-    patch_roots: dict[str, str] = {}
     for path in patch_paths:
         try:
             text = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -706,9 +684,7 @@ def vet_patches(
             dropped.append({"path": path, "verdict": res.verdict, "detail": res.detail})
             continue
         kept.append(path)
-        if res.root:
-            patch_roots[path] = res.root
-    return kept, dropped, grounding, patch_roots
+    return kept, dropped, grounding
 
 
 __all__ = [
@@ -741,5 +717,4 @@ __all__ = [
     "scan_numeric_claims",
     "strip_forbidden_proposal_fields",
     "vet_patches",
-    "parse_patch_targets",
 ]

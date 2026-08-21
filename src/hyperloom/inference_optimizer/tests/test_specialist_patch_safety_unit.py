@@ -378,12 +378,12 @@ def test_vet_patches(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(ps.subprocess, "run", lambda *a, **k: _Proc())
-    kept, dropped, grounding, patch_roots = ps.vet_patches([str(good), str(bad)], base_checkout=tmp_path)
+    kept, dropped, grounding = ps.vet_patches([str(good), str(bad)], base_checkout=tmp_path)
     assert str(good) in kept
     assert any(d["verdict"] == ps.GROUND_NOT_DIFF for d in dropped)
 
 
 def test_vet_patches_unreadable(tmp_path):
-    kept, dropped, grounding, patch_roots = ps.vet_patches([str(tmp_path / "missing.patch")], base_checkout=None)
+    kept, dropped, grounding = ps.vet_patches([str(tmp_path / "missing.patch")], base_checkout=None)
     assert kept == []
     assert dropped[0]["verdict"] == "unreadable"

@@ -74,12 +74,11 @@ class EnablementRound:
     last_build_failure: dict = field(default_factory=dict)
     build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
-    # Patches written by the last round that were grounding-dropped (all missing
-    # targets). Injected into the next round's prompt so the specialist knows
-    # to switch to artifacts instead of repeating a doomed patch.
+    # Why the last round's patches were all dropped for absent targets; injected
+    # into the next round's mandate so it stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)
-    # Installed whole-file artifacts that have been KEPT or ADVANCED; replayed
-    # at the start of each subsequent round (analogous to kept_patches).
+    # Whole-file installs from prior rounds that made progress; re-installed as a
+    # base before the next round's patch, the way kept_patches are re-applied.
     kept_artifacts: list = field(default_factory=list)
 
     @classmethod

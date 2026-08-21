@@ -1640,7 +1640,6 @@ def collect_enablement(
                 "kind": str(a.get("kind") or ""),
             }
             for a in kept_artifacts_raw
-            if isinstance(a, dict) and a.get("target")
         ]
     framework_root = str(_eg(state, "framework_root", "") or "")
     if framework_root:

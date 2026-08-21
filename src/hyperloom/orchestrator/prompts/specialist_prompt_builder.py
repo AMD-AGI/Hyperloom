@@ -932,9 +932,8 @@ class SpecialistPromptInputs:
     # for every non-enablement domain, and the mandate degrades gracefully.
     enablement_source_context: str = ""
     enablement_candidate_refs: tuple[str, ...] = ()
-    # Accumulated config from prior advanced rounds, injected so the specialist
-    # knows which env vars / server args are already in effect as a base.
-    # Empty dict => first round or no accumulated config.
+    # Env / server-arg layers prior advanced rounds accepted; the bench for this
+    # round launches with them, so the mandate has to name them.
     enablement_accepted_config: dict[str, Any] = field(default_factory=dict)
 
     # Workspace path (for transcript / heartbeat instructions)
@@ -2364,22 +2363,17 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
     rows.extend(mandate.task_description.splitlines())
-    # Inject accumulated config context so the specialist knows which envs /
-    # server args prior rounds already applied and that are active as the base.
     acc_cfg = inp.enablement_accepted_config or {}
     acc_envs = {str(k): str(v) for k, v in (acc_cfg.get("extra_envs") or {}).items()}
     acc_args = str(acc_cfg.get("extra_server_args") or "").strip()
     if acc_envs or acc_args:
         rows.append("")
-        rows.append("### Accumulated config already active as the base for this round")
+        rows.append("### Config already in effect")
         rows.append(
-            "The following env vars and server args were applied by prior advanced rounds "
-            "and are already in effect.  Your bench will launch WITH these as a base; "
-            "do NOT re-propose them unless you are overriding or removing one."
+            "Prior rounds accepted these and your bench launches with them. Re-propose "
+            "one only to override or remove it."
         )
-        if acc_envs:
-            for k, v in acc_envs.items():
-                rows.append(f"- `export {k}={v}`")
+        rows.extend(f"- `export {k}={v}`" for k, v in acc_envs.items())
         if acc_args:
             rows.append(f"- server args: `{acc_args}`")
     return rows
