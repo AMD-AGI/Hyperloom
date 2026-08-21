@@ -2907,9 +2907,45 @@ _FORGE_BARREN_MICRO_DECISIONS = (
 )
 
 
+def _fmoe_token_list(tokens: Any) -> list[int]:
+    """Return the positive token counts to sweep, from either shape of input.
+
+    The only production caller builds this with :func:`_normalize_tokens`, which
+    returns forge's comma-separated string; the annotation here used to say
+    ``list[int]`` and the body iterated it directly. A real multi-token workload
+    therefore reached ``int(',')`` and lost the whole MoE tuning to a ValueError
+    the envelope reported as a forge crash, while a single-token one silently
+    wrote each digit as its own token -- rows no runtime lookup can reach.
+
+    Unparseable and non-positive entries are dropped rather than raising: this
+    is the token sweep for a tuning input, and one bad entry is not worth the
+    run. Falls back to ``[1]`` so the caller always has a token to key on.
+    """
+    if isinstance(tokens, str):
+        raw: list[str] = [part.strip() for part in tokens.split(",")]
+    elif isinstance(tokens, (list, tuple, set, frozenset)):
+        raw = [str(item).strip() for item in tokens]
+    elif tokens is None:
+        raw = []
+    else:
+        raw = [str(tokens).strip()]
+
+    out: set[int] = set()
+    for item in raw:
+        if not item:
+            continue
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            out.add(value)
+    return sorted(out) or [1]
+
+
 def _write_fmoe_untuned_csv_from_log(
     server_log: str,
-    tokens: list[int],
+    tokens: Any,
     workspace: Path,
 ) -> tuple[str, dict[str, Any]]:
     """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
@@ -2951,7 +2987,7 @@ def _write_fmoe_untuned_csv_from_log(
     if not tunable:
         return "", report
 
-    token_list = sorted({int(t) for t in tokens if int(t) > 0}) or [1]
+    token_list = _fmoe_token_list(tokens)
     lines = [_FMOE_UNTUNED_CSV_HEADER]
     for key in tunable:
         for token in token_list:

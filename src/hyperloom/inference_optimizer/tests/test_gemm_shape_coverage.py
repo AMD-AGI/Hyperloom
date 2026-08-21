@@ -266,6 +266,40 @@ class TestFmoeCoverage:
         assert report["covered"] == 0
         assert report["coverage_pct"] == 0.0
 
+    def test_a_different_swept_token_still_covers_the_problem(self, tmp_path):
+        """The token count is not part of a problem's identity.
+
+        The tuner sweeps token and emits one row per batch size it chose; the
+        runtime asks for whichever batch size it happens to be running. Treating
+        token as part of the key made a table that does serve the problem report
+        zero coverage, which then lands in ``apply_blockers`` and vetoes a KEEP
+        whose throughput really did improve -- the misjudgement this module was
+        added to prevent, reproduced on the MoE path.
+        """
+        path = self._csv(
+            tmp_path,
+            [{"token": "1"}, {"token": "32"}, {"token": "64"}],
+        )
+
+        report = fmoe_tuned_config_coverage(
+            tuned_fmoe_csv_keys(path), [self.DISPATCH]  # runtime asked for token=256
+        )
+
+        assert report["covered"] == 1
+        assert report["coverage_pct"] == 100.0
+
+    def test_a_real_key_difference_is_still_reported(self, tmp_path):
+        """Ignoring token must not blunt the check it exists for."""
+        path = self._csv(tmp_path, [{"token": "1", "q_dtype_w": "torch.bfloat16"}])
+
+        report = fmoe_tuned_config_coverage(
+            tuned_fmoe_csv_keys(path), [self.DISPATCH]
+        )
+
+        assert report["covered"] == 0
+        assert report["uncovered_sample"], "an uncovered problem has to be named"
+        assert "token" not in report["uncovered_sample"][0]
+
     def test_fmoe_coverage_matches_runtime_dispatch(self, tmp_path):
         path = self._csv(tmp_path, [{}])
         report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [self.DISPATCH])

@@ -43,9 +43,9 @@ _AITER_SHAPE_HIT_RE = re.compile(
 
 Shape = tuple[int, int, int]
 
-#: Columns that identify one fused-MoE dispatch (matches aiter's untuned CSV and
-#: the runtime tuple after gfx/cu_num). Token is included because the tuner
-#: emits one row per swept batch size.
+#: Columns present in an aiter MoE CSV row (matches its untuned CSV and the
+#: runtime tuple after gfx/cu_num). Used to locate and validate the fields of a
+#: row; the identity of a *problem* is the narrower :data:`_FMOE_PROBLEM_COLUMNS`.
 _FMOE_DISPATCH_COLUMNS = (
     "token",
     "model_dim",
@@ -252,11 +252,23 @@ def _normalize_fmoe_field(name: str, value: str) -> str:
     return text
 
 
+#: Identity of one fused-MoE problem. ``token`` is excluded on purpose: the
+#: tuner sweeps it and emits a row per batch size it chose, while the runtime
+#: asks for whichever batch size it is running. Keying identity on it made a
+#: table that does serve the problem report zero coverage, and a zero there
+#: lands in ``apply_blockers`` and vetoes a KEEP whose throughput really
+#: improved -- the misjudgement this module exists to prevent. Matches the
+#: ``_FMOE_SHAPE_FIELDS`` the CSV writer dedupes on, which already omitted it.
+_FMOE_PROBLEM_COLUMNS = tuple(
+    name for name in _FMOE_DISPATCH_COLUMNS if name != "token"
+)
+
+
 def fmoe_dispatch_key(fields: dict[str, str]) -> tuple[str, ...]:
-    """Return the lookup key for one fused-MoE problem."""
+    """Return the lookup key identifying one fused-MoE problem (token-agnostic)."""
     return tuple(
         _normalize_fmoe_field(name, fields.get(name, ""))
-        for name in _FMOE_DISPATCH_COLUMNS
+        for name in _FMOE_PROBLEM_COLUMNS
     )
 
 
@@ -307,7 +319,7 @@ def fmoe_tuned_config_coverage(
         "coverage_pct": round(100.0 * len(covered) / len(requested), 2),
         "tuned_rows": len(tuned),
         "uncovered_sample": [
-            dict(zip(_FMOE_DISPATCH_COLUMNS, key, strict=True))
+            dict(zip(_FMOE_PROBLEM_COLUMNS, key, strict=True))
             for key in requested
             if key not in covered_set
         ][:10],
