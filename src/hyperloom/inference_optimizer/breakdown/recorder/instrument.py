@@ -1595,7 +1595,10 @@ def record_native_kernel_run_start(
             ),
             "subject_type": "kernel_optimizer_route",
             "role": "selected",
-            "name": "kernel_agent_forge",
+            # From route_name, like the operation above it. Left literal, a GEAK replay produced
+            # operation.name=geak next to subject.name=kernel_agent_forge — one record naming two
+            # different optimizers, and the subject is what identity lookups resolve against.
+            "name": route_name,
         },
     )
 

@@ -1778,6 +1778,11 @@ class KernelPhase(PhaseHandler):
                     e2e_gain_pct=None,
                     validated=False,
                     decision="REVERT",
+                    # Same route as the KEEP that this withdraws. Leaving it on the default
+                    # re-parented the kernel under a synthetic Forge route at the moment it was
+                    # revoked, so a withdrawn GEAK kernel ended up filed under an optimizer that
+                    # never touched it.
+                    route_strategy="geak",
                     patch_path=e2e.get("patch_path"),
                     target_file=e2e.get("target_file"),
                     extra_server_args=str(
