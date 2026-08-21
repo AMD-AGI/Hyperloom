@@ -38,6 +38,9 @@ from typing import Any
 
 import yaml
 
+from hyperloom.agents.kernel.tools._capture_shapes import (
+    is_capture_fragment as _shared_is_capture_fragment,
+)
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
@@ -397,17 +400,24 @@ PROFILE_DEFAULT_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.y
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
-def _is_capture_trace(path: Path) -> bool:
-    """True when ``path`` lives under a ``capture_traces`` directory.
+def _is_capture_trace(path: Path, root: Path | None = None) -> bool:
+    """True when ``path`` is a CUDA-graph capture sidecar rather than a trace.
 
-    CUDA-graph capture sidecars are written under ``capture_traces/`` by both
-    frameworks: SGLang as ``bs_*_rank*.json.gz`` and vLLM as
-    ``graph_capture_*.pt.trace.json.gz`` (which also ends in ``.trace.json.gz``
-    and would otherwise be mistaken for a real annotated trace). They carry no
-    per-iteration annotations, so the steady-state splitter cannot use them; the
-    parent directory is the only framework-agnostic discriminator.
+    Capture sidecars carry no per-iteration annotations, so the steady-state
+    splitter cannot use them, yet a vLLM ``graph_capture_*.pt.trace.json.gz``
+    also ends in ``.trace.json.gz`` and would otherwise be promoted as the
+    primary annotated trace.
+
+    Delegates to the shared classifier so this executor recognises the same
+    layouts the kernel-agent routes do. The exact-``capture_traces`` test this
+    replaced missed an unpatched SGLang's ``graph_capture_profile/``.
+
+    Args:
+        path: The candidate path.
+        root: Directory to judge the path relative to, so an unrelated ancestor
+            named after graph capture does not condemn everything beneath it.
     """
-    return any(part == "capture_traces" for part in path.parts)
+    return _shared_is_capture_fragment(path, root)
 
 
 def _trace_size_bytes(path: Path) -> int:
@@ -461,7 +471,7 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     """
     candidates = [
         p for p in trace_dir.rglob("*.trace.json.gz")
-        if not _is_capture_trace(p) and not _is_split_chunk(p, trace_dir)
+        if not _is_capture_trace(p, trace_dir) and not _is_split_chunk(p, trace_dir)
     ]
     return sorted(candidates, key=lambda p: (-_trace_size_bytes(p), str(p)))
 
@@ -478,7 +488,7 @@ def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     Returns:
         Sorted capture sidecar paths found under ``capture_traces/``.
     """
-    return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p))
+    return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p, trace_dir))
 
 
 def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path:

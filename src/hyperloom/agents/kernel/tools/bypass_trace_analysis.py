@@ -49,6 +49,7 @@ try:
     from hyperloom.common.provenance import build_provenance as _shared_build_provenance
 except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
     _shared_build_provenance = None
+from _capture_shapes import CAPTURE_FRAGMENT_RE as _shared_capture_fragment_re  # noqa: E402
 from _idle_gate import (  # noqa: E402
     build_graph_under_recorded_warning,
     build_high_idle_warning,
@@ -203,8 +204,15 @@ _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
 #: ``graph_capture_rank_*`` files whose batch/mode live in execution_details.json.
-_VARIANT_RE = re.compile(r"^(bs_\d+)", re.IGNORECASE)
-_CAPTURE_FILE_RE = re.compile(r"^(bs_\d+_rank\d+|graph_capture)", re.IGNORECASE)
+#: Unanchored because an unpatched SGLang prefixes the runner name, as in
+#: ``DecodeCudaGraphRunner_bs_104_rank0``; an anchored match fell through to the
+#: bare stem and lost the batch identity the manifest dedups on.
+_VARIANT_RE = re.compile(r"(bs_\d+)", re.IGNORECASE)
+#: Which files count as capture shards worth indexing. Shared with the ranking
+#: and preflight classifiers rather than re-spelled here: the local copy this
+#: replaced was start-anchored, so an unpatched SGLang's
+#: ``cuda_graph_capture-*`` shard was skipped and its shapes never indexed.
+_CAPTURE_FILE_RE = _shared_capture_fragment_re
 #: Optional cap on how many capture files to index (0 = all). Logged when hit.
 _MAX_CAPTURES_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES"
 
@@ -263,7 +271,9 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
             continue
         for cand in _reader._trace_candidates(root):
             name = cand.name
-            if not _CAPTURE_FILE_RE.match(name):
+            # ``search``: the shared pattern anchors only its ``bs_<digits>``
+            # alternative, so ``graph_capture`` still matches mid-name.
+            if not _CAPTURE_FILE_RE.search(name):
                 continue
             key = str(cand.resolve())
             if key in seen:
@@ -272,7 +282,7 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
             pdir = cand.parent
             if pdir not in exec_cache:
                 exec_cache[pdir] = _load_execution_details(pdir)
-            if name.lower().startswith("graph_capture"):
+            if "graph_capture" in name.lower():
                 meta = exec_cache[pdir].get(name, {})
                 bs = meta.get("batch_size")
                 mode = meta.get("mode")

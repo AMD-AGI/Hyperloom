@@ -34,6 +34,7 @@ from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _capture_shapes import is_capture_dir_name  # noqa: E402
 from _io_utils import safe_float  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     build_operator_identity,
@@ -282,9 +283,13 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
     """Find a graph-capture folder near a Magpie torch_trace input.
 
-    Checks the conventional ``capture_traces`` / ``graph_capture`` siblings of
-    the trace input directory and of the first trace file, returning the first
-    one that exists.
+    Scans the trace input directory and the first trace file's neighbourhood for
+    a subdirectory whose name matches the shared capture-directory shape, so a
+    layout that ranking already demotes is also a layout discovery can find.
+    Matching by shape rather than by two hard-coded names is what lets an
+    unpatched SGLang's ``graph_capture_profile/`` through: it was previously
+    missed here, so the capture folder went unpassed even on runs that had
+    correctly picked the workload trace.
 
     Args:
         trace_input (Path): The trace input path (file or directory).
@@ -294,24 +299,23 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
         Path | None: The capture folder if one exists nearby, else ``None``.
     """
 
-    candidates: list[Path] = []
+    search_roots: list[Path] = []
     if trace_input.is_dir():
-        candidates.extend(
-            [
-                trace_input / "capture_traces",
-                trace_input / "graph_capture",
-            ]
-        )
+        search_roots.append(trace_input)
     for trace_file in trace_files[:1]:
-        candidates.extend(
-            [
-                trace_file.parent / "capture_traces",
-                trace_file.parent.parent / "capture_traces",
-            ]
-        )
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
+        search_roots.extend([trace_file.parent, trace_file.parent.parent])
+    seen: set[Path] = set()
+    for root in search_roots:
+        if root in seen or not root.is_dir():
+            continue
+        seen.add(root)
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_dir() and is_capture_dir_name(child.name):
+                return child
     return None
 
 
