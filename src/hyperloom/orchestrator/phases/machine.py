@@ -7,6 +7,7 @@ and the per-phase entry dispatcher (``_on_phase_entered``)."""
 from __future__ import annotations
 import logging as _logging
 from typing import Any
+from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
@@ -312,9 +313,15 @@ class MachinePhase(PhaseHandler):
         ):
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
         allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
+        target_phase = str(target or "").strip().upper()
         cancelled = await self.tasks.cancel_queued_not_allowed(
             allowed_kinds=allowed_kinds,
             reason=f"phase_transition:{str(prior or '').strip().upper()}->{target}",
+            spare_queued=lambda _task_id, kind, params: _geak_rebench.spare_geak_rebench_on_phase_transition(
+                target_phase=target_phase,
+                kind=kind,
+                params=params,
+            ),
         )
         if cancelled:
             log.info(

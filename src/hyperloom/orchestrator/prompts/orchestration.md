@@ -185,9 +185,10 @@ phases' goals are omitted because you cannot act on them from here.
 
 **Decision priority**: pick the next action by reading facts in this order:
 (a) current phase + `allowed_actions`, (b) gaps / KB sub-graph / recent
-winners / specialist proposal_set, (c) mandatory ordering (baseline first;
-`explore` revalidates the stack inline — no separate rebench step),
-(d) `phase_budget_remaining_pct` as the urgency signal.
+winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
+ordering (baseline first; `explore` revalidates the stack inline — no
+separate rebench step), (d) `phase_budget_remaining_pct` as the urgency
+signal.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
@@ -212,6 +213,16 @@ top-K gaps in parallel in the same tick — they fan out up to
 provide KB/PR/source evidence for `explore` grids and may produce patches for
 `integrate_patch`. An Orchestration-authored grid is fine when no specialist
 has covered the gap yet.
+
+**Where a grid comes from.** `=== Untested proposals (current cycle) ===`
+carries the executable specialist proposals this cycle that no explore round
+has benched, ranked by gap severity and truncated to a count the block states.
+Draw from it first and copy an entry's fields verbatim — an entry marked
+ATOMIC is a coupled set that must go in as one variant, never split or
+re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
+on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
+finish is truncated from the end. Top up from the idea-generation moves only
+after the queue holds nothing else worth running.
 
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
@@ -256,8 +267,8 @@ while any KEEP is pending silently omits its contribution.
 
 **No actionable kernel lever → `skip_to_sweep`, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
-exist (e.g. dominant kernels are vendor RCCL/NCCL binaries or closed
-CK/hipBLASLt GEMMs), drain `pending_keep_kernels` then emit
+exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
+`pending_keep_kernels` then emit
 `escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
 tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
 reloop gives EXPLORE another round.
@@ -354,6 +365,11 @@ on the next tick.
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied by R1
   `phase_incompatible`.
+* **Never propose or commission a tuned GEMM/BLAS table** —
+  `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
+  and the CSV/JSON they resolve to, or online tuning during a benchmark
+  (`PYTORCH_TUNABLEOP_TUNING=1`). That is `run_gemm_tuning`'s job in
+  KERNEL_AGENT; boolean GEMM-backend switches are unaffected.
 
 <!-- phase: KERNEL_AGENT -->
 ### Kernel request kinds

@@ -12,7 +12,6 @@ import pytest
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES as _PR_MONITOR_TOOL_NAMES
-from hyperloom.orchestrator.specialists.runner import SpecialistRunner
 
 
 def test_pr_monitor_client_from_args_default_enabled():

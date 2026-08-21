@@ -59,7 +59,8 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._canonical_fingerprint import workload_signature
+from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -88,6 +89,7 @@ from ._server_lifecycle import (
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
+    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -126,33 +128,13 @@ def _initial_explore_search_state() -> dict[str, Any]:
     }
 
 
-def _coerce_args_str(value: Any) -> str:
-    """Coerce a payload ``extra_args`` / ``extra_server_args`` value into a
-    shell-arg string.
-
-    The LLM sometimes emits the server flags as a JSON list instead of a single
-    string; a naive ``str(list)`` yields the Python repr which the server
-    rejects. Lists/tuples are space-joined into individual tokens.
-
-    Args:
-        value: The raw payload value (string, list/tuple, or None).
-
-    Returns:
-        The coerced shell-arg string ("" when ``value`` is None).
-    """
-    if value is None:
-        return ""
-    if isinstance(value, (list, tuple)):
-        return " ".join(str(v).strip() for v in value if str(v).strip())
-    return str(value)
-
-
 # Audit/provenance metadata stashed on a GridVariant that must survive being
 # rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
     "scope",
     "overlay_pythonpath",
+    "accepted_kernels",
     "kb_evidence",
     "pr_evidence",
     "source_evidence",
@@ -176,7 +158,7 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 
 
 def _variant_control_fields(variant: Any) -> dict[str, Any]:
-    """Return non-default remove/unset/replace controls for ledger rows."""
+    """Return non-default remove/unset/replace controls for identity and ledger rows."""
     remove_args = to_str_list(getattr(variant, "remove_args", []))
     unset_envs = to_str_list(getattr(variant, "unset_envs", []))
     args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
@@ -223,17 +205,15 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
-        args = _coerce_args_str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
-        envs_raw = raw.get("extra_envs") or {}
-        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
+        fields = normalize_proposal(raw)
         gv = GridVariant(
-            name=str(raw["name"]),
-            extra_server_args=args,
-            extra_envs=envs,
+            name=fields["name"],
+            extra_server_args=fields["extra_args"],
+            extra_envs=fields["extra_envs"],
             note=str(raw.get("note") or raw.get("provenance") or ""),
-            remove_args=to_str_list(raw.get("remove_args")),
-            unset_envs=to_str_list(raw.get("unset_envs")),
-            args_mode=str(raw.get("args_mode") or "append"),
+            remove_args=fields["remove_args"],
+            unset_envs=fields["unset_envs"],
+            args_mode=fields["args_mode"],
         )
         # Stash extra metadata on the GridVariant so the ledger writer can
         # pull provenance/evidence.
@@ -242,6 +222,12 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag
         # variants. Consumed by _grid_runner._build_variant_yaml.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
+        # Authored kernels this variant's overlay installs. Carried so the
+        # decision row names the kernel instead of inheriting the flag string as
+        # its whole identity; empty for every flag/env-only variant.
+        gv.accepted_kernels = [  # type: ignore[attr-defined]
+            str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
+        ]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
@@ -626,6 +612,11 @@ def _default_grid_for_framework(
 DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min
 DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — roofline composite budget
 DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5  # hard cap ≥ baseline × (kill_ratio + 0.5)
+# AgentX ceiling. A measured round (35B / conc 64 / 3600s window) is ~111 min,
+# so the stock 4h ceiling would clamp the hard cap under the soft kill and
+# invert the layering. 8h keeps the ordering intact for baselines up to ~2.3h at
+# the default kill ratio, which covers the models this mode targets.
+AGENTX_EXPLORE_TIMEOUT_CEILING_SEC = 28800  # 8 h
 
 
 def _compute_explore_variant_timeout(
@@ -851,10 +842,25 @@ class ExploreExecutor:
                 )
             except (TypeError, ValueError):
                 safety_margin = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
+            # The stock 4h ceiling assumes a synthetic round measured in
+            # minutes. An AgentX round is a fixed measurement window plus corpus
+            # load, per-lane warmup and drain -- measured at ~111 min for a 35B
+            # model at conc 64 -- so the ceiling clamps the hard cap BELOW the
+            # soft kill and inverts the layering this function documents: the
+            # generic timeout fires first and the round is recorded as a plain
+            # timeout instead of KILLED_OVERTIME with its diagnostic ratio.
+            # Raise the ceiling (not the kill ratio) so the ordering holds for
+            # the long baselines AgentX produces.
+            _ceiling = (
+                AGENTX_EXPLORE_TIMEOUT_CEILING_SEC
+                if agentx_enabled()
+                else DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
+            )
             timeout_sec = _compute_explore_variant_timeout(
                 baseline_runtime_sec=baseline_runtime_sec,
                 kill_ratio=overtime_kill_ratio,
                 floor_sec=int(self.variant_timeout_sec),
+                ceiling_sec=_ceiling,
                 safety_margin=safety_margin,
             )
 
@@ -993,23 +999,13 @@ class ExploreExecutor:
         unique_in_round: dict[str, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
         for gv in grid:
-            identity_controls = _variant_control_fields(gv)
-            identity_remove_args = list(
-                dict.fromkeys(base_remove_args + to_str_list(identity_controls.get("remove_args")))
-            )
-            identity_unset_envs = list(
-                dict.fromkeys(base_unset_envs + to_str_list(identity_controls.get("unset_envs")))
-            )
-            if identity_remove_args:
-                identity_controls["remove_args"] = identity_remove_args
-            if identity_unset_envs:
-                identity_controls["unset_envs"] = identity_unset_envs
-            if base_args_mode == "replace":
-                identity_controls["args_mode"] = "replace"
-            fp = canonical_fingerprint(
+            fp = effective_fingerprint(
                 gv.extra_server_args,
                 gv.extra_envs,
-                **identity_controls,
+                controls=_variant_control_fields(gv),
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+                base_args_mode=base_args_mode,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
             if fp in unique_in_round:
@@ -1648,7 +1644,20 @@ class ExploreExecutor:
                             **effective_control_fields,
                             "note": gv.note,
                             "provenance": provenance,
+                            # Names of the authored kernels this config carried,
+                            # when an overlay was loaded. Empty for a flags-only
+                            # variant, so a downstream reader can tell a config
+                            # gain from a gain that also had a kernel running.
+                            "accepted_kernels": list(
+                                getattr(gv, "accepted_kernels", []) or []
+                            ),
                             "gain_pct": gain,
+                            # The verdict this KEEP rests on. ``None`` means the
+                            # variant was not gated (not high-risk, or no
+                            # baseline to compare against) rather than that it
+                            # scored nothing — without it the ledger cannot say
+                            # afterwards whether a kept config was ever checked.
+                            "accuracy": accuracy_value,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
                             "single_workspace": r.workspace,

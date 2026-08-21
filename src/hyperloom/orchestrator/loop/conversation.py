@@ -547,6 +547,12 @@ class ConversationCollaborator:
                 denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
                 if denial_summary:
                     sections.append(denial_summary)
+            # Outside the SEED gate: a queue seen once is the amnesia it fixes.
+            if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_EXPLORE:
+                untested_block = self.shared_state.to_untested_proposals_summary()
+                if untested_block:
+                    sections.append("=== Untested proposals (current cycle) ===")
+                    sections.append(untested_block)
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration" and push_full:
@@ -1196,8 +1202,12 @@ class ConversationCollaborator:
         return out
 
     def _research_scout_seed_block(self) -> str:
-        """Render all persisted research-scout findings for an Orchestration SEED."""
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+        """Render the persisted research-scout findings for an Orchestration SEED.
+
+        The scout's executable proposals are not rendered here: they go through
+        ``=== Untested proposals (current cycle) ===`` alongside every other
+        domain's, which also drops the ones already benched.
+        """
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
@@ -1215,38 +1225,15 @@ class ConversationCollaborator:
             for hint in hints:
                 lines.append(json.dumps(hint, sort_keys=True))
 
-        proposals: list[dict[str, Any]] = []
-        proposal_names: set[str] = set()
-        proposal_fingerprints: set[str] = set()
         questions: list[str] = []
         seen_questions: set[str] = set()
         for row in rounds:
-            for proposal in row.get("proposal_set") or []:
-                if not isinstance(proposal, dict):
-                    continue
-                name = str(proposal.get("name") or "").strip()
-                fingerprint = canonical_fingerprint(
-                    str(proposal.get("extra_args") or proposal.get("extra_server_args") or ""),
-                    proposal.get("extra_envs") if isinstance(proposal.get("extra_envs"), dict) else {},
-                    remove_args=proposal.get("remove_args"),
-                    unset_envs=proposal.get("unset_envs"),
-                    args_mode=str(proposal.get("args_mode") or "append"),
-                )
-                if (name and name in proposal_names) or fingerprint in proposal_fingerprints:
-                    continue
-                if name:
-                    proposal_names.add(name)
-                proposal_fingerprints.add(fingerprint)
-                proposals.append(proposal)
             for question in row.get("residual_questions") or []:
                 text = str(question).strip()
                 if text and text not in seen_questions:
                     seen_questions.add(text)
                     questions.append(text)
 
-        if proposals:
-            lines.append("Untested executable proposals:")
-            lines.extend(json.dumps(proposal, sort_keys=True) for proposal in proposals)
         if questions:
             lines.append("Residual questions:")
             lines.extend(f"- {question}" for question in questions)

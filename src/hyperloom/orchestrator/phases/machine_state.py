@@ -13,6 +13,7 @@ Any phase → CLOSE on terminal/abort; ``recover`` is phase-orthogonal.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
@@ -1306,18 +1307,32 @@ def session_remaining_seconds(
     *,
     now_unix: float | None = None,
 ) -> float | None:
-    """Total wall-clock seconds remaining for the session (``None`` when ``max_minutes`` 0 or ``start_ts`` unparseable).
+    """Total wall-clock seconds remaining for the session (``None`` when unbounded).
+
+    Prefers a stamped ``deadline_unix`` when present so this agrees with
+    admission and the Coordinator loop, even when persisted ``max_minutes``
+    was truncated to 0. Falls back to ``start_ts + max_minutes`` for sessions
+    that predate the stamp.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes`` and
             ``start_ts``.
-        now_unix (float | None): Accepted for signature parity; the deadline is
-            computed against the current UTC time.
+        now_unix (float | None): Override for the current time; the deadline is
+            subtracted from this when stamped, otherwise compared against
+            ``start_ts``.
 
     Returns:
         float | None: Non-negative seconds left in the session, or ``None``
-        when ``max_minutes`` is 0 or ``start_ts`` is missing/unparseable.
+        when unbounded (no stamp and ``max_minutes`` is 0) or ``start_ts`` is
+        missing/unparseable.
     """
+    try:
+        deadline = float(getattr(state, "deadline_unix", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        deadline = 0.0
+    if deadline > 0.0:
+        now = float(now_unix) if now_unix is not None else time.time()
+        return max(0.0, deadline - now)
     mm = _max_minutes(state)
     if mm <= 0:
         return None
@@ -1659,6 +1674,25 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
             return sr, {"reason_origin": "shared_state.stop_reason", "vocab": "unknown"}
         return sr, {"reason_origin": "shared_state.stop_reason"}
     return None
+
+
+def _closing_phase_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
+    """Return a CLOSE stop when the wall-clock path has entered the closing phase.
+
+    PRELUDE with a baseline otherwise advances to FRAMEWORK_AGENT, whose
+    allowlist does not include ``report``. That transition would cancel the
+    closing report ``_enter_closing_phase`` just enqueued.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``closing_phase``.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``("time_exhausted", evidence)``
+        when the closing phase is active, else ``None``.
+    """
+    if not bool(getattr(state, "closing_phase", False)):
+        return None
+    return "time_exhausted", {"reason_origin": "closing_phase"}
 
 
 # per-phase judgments
@@ -2945,7 +2979,8 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): global terminal first, then exit_terminal > exit_normal.
+    Priority (Inv-8.2): global terminal first, then the wall-clock closing
+    phase, then exit_terminal > exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
@@ -2968,6 +3003,11 @@ def compute_next_phase(
     terminal = _global_terminal(state)
     if terminal is not None and current != PHASE_CLOSE:
         reason, evidence = terminal
+        return PHASE_CLOSE, reason, {"terminal": True, **evidence}
+
+    closing = _closing_phase_terminal(state)
+    if closing is not None and current != PHASE_CLOSE:
+        reason, evidence = closing
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
 
     if current == PHASE_PRELUDE:

@@ -24,8 +24,10 @@ class _FakeTasks:
     def __init__(self):
         self.calls = []
 
-    async def create_or_return_existing(self, *, kind, params, idempotency_key):
-        self.calls.append({"kind": kind, "params": params, "idempotency_key": idempotency_key})
+    async def create_or_return_existing(self, *, kind, params, idempotency_key, **kwargs):
+        self.calls.append(
+            {"kind": kind, "params": params, "idempotency_key": idempotency_key, **kwargs}
+        )
         return SimpleNamespace(task_id="explore-task-1"), False
 
 
@@ -42,6 +44,9 @@ def _fake_self(**state_overrides):
         _MN_AUTO_EXPLORE_GRID_CAP=Coordinator._MN_AUTO_EXPLORE_GRID_CAP,
         shared_state=state,
         tasks=_FakeTasks(),
+        # The enqueue takes the action catalogue's TTL so the row is visible to
+        # ``reclaim_expired_running``; the dispatcher owns the real lookup.
+        _registry_lanes_ttl=lambda kind: ([], 1800),
     )
 
 
@@ -104,6 +109,8 @@ def test_multi_node_builds_explore_grid(monkeypatch):
     call = s.tasks.calls[0]
     assert call["kind"] == "explore"
     assert call["idempotency_key"] == "mn-auto-explore-task-abcdef1234"
+    # Without a TTL the row is invisible to ``reclaim_expired_running``.
+    assert call["lease_ttl_sec"] > 0
     params = call["params"]
     assert params["source"] == "coordinator_internal_mn"
     assert params["reason"] == "mn_auto_materialize:moe"

@@ -94,6 +94,10 @@ KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 _FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
 _INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
+# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync
+# so the feasibility check reasons about the budget the eval will really ask for.
+_EVAL_DEFAULT_MAX_TOKENS = 4096
+
 
 def _vram_guarded_server_args(extra_args: str) -> str:
     """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
@@ -1741,6 +1745,43 @@ def _forge_fusion_wrapper_timeout_sec(timeout_sec: int) -> int:
     return max(1, int(timeout_sec)) + _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC
 
 
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _fusion_session_serve_args(
+    state: object,
+    payload: dict,
+    *,
+    framework: str,
+    model_path: str,
+) -> dict[str, int]:
+    """TP / KV block size / max-model-len the serving smoke must match."""
+    tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
+    max_model_len = _positive_int(
+        payload.get("max_model_len") or getattr(state, "max_model_len", 0)
+    )
+    block_size = _positive_int(payload.get("block_size"))
+    if block_size <= 0 and "vllm" in (framework or "").strip().lower():
+        from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
+            _sparse_kv_block_size,
+        )
+
+        block_size = _positive_int(_sparse_kv_block_size(model_path))
+    args: dict[str, int] = {}
+    if tp:
+        args["tp"] = tp
+    if block_size:
+        args["block_size"] = block_size
+    if max_model_len:
+        args["max_model_len"] = max_model_len
+    return args
+
+
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     """Resolve the workspace directory for a GEMM-tuning run.
 
@@ -2870,7 +2911,46 @@ def _resolve_vllm_aiter_routing(
         )
 
         flags["aiter_fused_moe"] = model_supports_aiter_ck_fused_moe(model_path, tp)
+
+    _warn_if_moe_routing_is_coarser_than_the_log(server_log, flags)
     return flags
+
+
+def _warn_if_moe_routing_is_coarser_than_the_log(
+    server_log: str, flags: dict[str, bool]
+) -> None:
+    """Say so when one log shows both MoE backends and routing picks one.
+
+    The decision above is a substring scan: seeing an aiter fused-MoE marker
+    anywhere routes the whole run to the aiter tuner family, and
+    ``vllm_moe_triton`` then never runs. A run can dispatch both -- aiter CK over
+    part of the token range and vLLM's Triton path over the rest -- and forge's
+    own parser records exactly that as ``impl="mixed"``. Whichever way the single
+    flag falls, the range served by the other backend is left untuned.
+
+    Reported rather than acted on here: changing this routing changes which
+    tuners run for every aiter-served vLLM model, which is a bigger step than
+    the tuner-side addition that already covers the CK half. Forge adds
+    ``fmoe_ck`` from the same evidence, so the gap this warns about is the
+    Triton half.
+    """
+    if not flags.get("aiter_fused_moe"):
+        return
+    try:
+        from forge_gemm_tune.evidence import parse_log_file
+    except ImportError:
+        return
+    try:
+        moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
+    except Exception:  # noqa: BLE001 - a reporting aid must not break routing
+        return
+    if moe.get("impl") == "mixed" or moe.get("vllm_config_hit"):
+        log.warning(
+            "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
+            "(impl=%s, stages=%s); routing sends the whole run to the aiter "
+            "tuner family, so the token range Triton serves goes untuned",
+            server_log, moe.get("impl"), moe.get("stages_seen"),
+        )
 
 
 def _vllm_block_fp8_profile_capture_required(
@@ -4288,6 +4368,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "timeout": timeout,
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
         "verbose": bool(payload.get("verbose", False)),
+        **_fusion_session_serve_args(
+            state, payload, framework=framework, model_path=model_path
+        ),
     }
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -4301,16 +4384,29 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         if result is None:
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
+        from hyperloom.agents.kernel.tools.forge_fusion import (  # noqa: PLC0415
+            salvage_forge_fusion_from_workspace,
+        )
+
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
-            "decision": "REVERT",
-            "kept": False,
-        }
+        timeout_error = f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}"
+        salvaged = salvage_forge_fusion_from_workspace(str(workspace))
+        if salvaged:
+            result = {
+                **salvaged,
+                "error_class": "subprocess_timeout",
+                "error": timeout_error,
+            }
+        else:
+            result = {
+                "status": "failed",
+                "backend": "forge",
+                "engine": "forge_fusion",
+                "error_class": "subprocess_timeout",
+                "error": timeout_error,
+                "decision": "REVERT",
+                "kept": False,
+            }
 
     result.setdefault("backend", "forge")
     result.setdefault("engine", "forge_fusion")
@@ -4844,6 +4940,47 @@ async def run_collective_handler(payload: dict, *, session_dir: Path) -> Handler
     return result
 
 
+# A tuner error is a diagnostic pointer, not the diagnosis: the full text lives
+# in the run's own result.json and tune.log. 400 characters is enough to carry
+# the argparse line or the aiter marker that says which of the two it was.
+_TRACE_TUNER_ERROR_MAXLEN = 400
+
+# Emitted even when null. ``kept`` is null on every row observed so far, and an
+# absent key would be indistinguishable from ``false``.
+_TRACE_TUNER_ALWAYS_KEYS = ("tuner", "best_micro_speedup", "kept")
+
+
+def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
+    """One per-tuner entry for the audit row, keeping why it ended as it did.
+
+    The row used to carry only ``tuner``/``best_micro_speedup``/``kept``, which
+    cannot separate a tuner that crashed from one that ran and found nothing --
+    the single question the audit trail exists to answer. Across one campaign 38
+    of 337 tuner runs ended ``failed`` or ``empty_output`` and the trace showed
+    none of them; one of those was 82 runs rejected by argparse in 11 seconds
+    and recorded as a clean ``no_improvement`` (#1211), which stayed invisible
+    for three weeks because this row had nowhere to put it.
+    """
+    error = tuner.get("error")
+    if isinstance(error, str) and len(error) > _TRACE_TUNER_ERROR_MAXLEN:
+        error = error[:_TRACE_TUNER_ERROR_MAXLEN] + "..."
+    row = {
+        "tuner": tuner.get("tuner") or tuner.get("name"),
+        "best_micro_speedup": tuner.get("best_micro_speedup"),
+        "kept": tuner.get("kept"),
+        "status": tuner.get("status"),
+        "elapsed_s": tuner.get("elapsed_s"),
+        "error_class": tuner.get("error_class"),
+        "error": error,
+    }
+    # A clean run stays as compact as before: everything added here is dropped
+    # when it is null, so a successful row gains only status and elapsed_s.
+    return {
+        k: v for k, v in row.items()
+        if k in _TRACE_TUNER_ALWAYS_KEYS or v is not None
+    }
+
+
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
 
@@ -4862,17 +4999,15 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
     engine = str(result.get("engine") or result.get("backend") or "").strip().lower() or "unknown"
-    tuners: list[dict[str, Any]] = []
-    for t in result.get("tuners_run") or []:
-        if not isinstance(t, dict):
-            continue
-        tuners.append(
-            {
-                "tuner": t.get("tuner") or t.get("name"),
-                "best_micro_speedup": t.get("best_micro_speedup"),
-                "kept": t.get("kept"),
-            }
-        )
+    tuners: list[dict[str, Any]] = [
+        _trace_tuner_row(t) for t in (result.get("tuners_run") or []) if isinstance(t, dict)
+    ]
+    # The envelope reported no error class even when a tuner had named one, so a
+    # crashed run and a barren one looked alike at the top level too. Take the
+    # first one a tuner supplied rather than leaving the field null.
+    error_class = result.get("error_class") or next(
+        (t["error_class"] for t in tuners if t.get("error_class")), None
+    )
     row = {
         "kind": "gemm_tuning",
         "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -4889,7 +5024,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "workspace": result.get("workspace"),
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
-        "error_class": result.get("error_class"),
+        "error_class": error_class,
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:
@@ -7051,12 +7186,30 @@ async def _run_integrate_rebaseline_with_lock_retry(
     return retry_result
 
 
+def _eval_generation_budget() -> int:
+    """Completion tokens the eval harness reserves per sample.
+
+    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS``
+    when it parses as a positive integer, else the shim's own default. ``0``
+    means the operator disabled the clamp, so no budget can be assumed.
+    """
+    raw = (os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
+    if not raw:
+        return _EVAL_DEFAULT_MAX_TOKENS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _EVAL_DEFAULT_MAX_TOKENS
+    return value if value >= 0 else _EVAL_DEFAULT_MAX_TOKENS
+
+
 def _grade_integrate_accuracy(
     bench_result: dict[str, Any],
     *,
     session_dir: Path,
     workspace: Path,
     strict: bool = False,
+    server_args: str = "",
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
@@ -7090,6 +7243,8 @@ def _grade_integrate_accuracy(
         accuracy_passed,
         parse_eval_results,
         require_kernel_accuracy_default,
+        resolve_served_context,
+        served_context_hosts_eval,
     )
 
     baseline_accuracy = 0.0
@@ -7132,6 +7287,28 @@ def _grade_integrate_accuracy(
             "accuracy gate produced no eval result and this artifact has no "
             "other end-to-end correctness evidence"
         )
+    # A verdict can be missing because the eval broke, or because the serving
+    # configuration cannot answer an eval request at all. Only the first says
+    # anything about the patch. The second reproduces on every retry, so
+    # charging it to the patch discards a kernel over a configuration choice.
+    infeasible = False
+    if accuracy_pass is None:
+        fits, why = served_context_hosts_eval(
+            served_max_model_len=resolve_served_context(
+                server_args=server_args,
+                env_max_model_len=os.environ.get("MAX_MODEL_LEN", 0),
+            ),
+            eval_max_tokens=_eval_generation_budget(),
+        )
+        if not fits:
+            infeasible = True
+            reason = why
+            log.warning(
+                "integrate_handler: the accuracy gate cannot run under this "
+                "serving configuration, so no kernel can clear it until the "
+                "configuration changes: %s",
+                why,
+            )
     log.info(
         "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f source=%s",
         accuracy_pass,
@@ -7146,6 +7323,7 @@ def _grade_integrate_accuracy(
         "accuracy_pass": accuracy_pass,
         "reason": reason,
         "degraded": degraded,
+        "infeasible": infeasible,
         "accuracy": new_accuracy,
         "baseline_accuracy": baseline_accuracy,
         "task": task,
@@ -7620,8 +7798,8 @@ async def integrate_handler(
     # ONLY for a candidate that already cleared the throughput bar, so a
     # regressing patch never spends a verdict on itself, and graded from the
     # re-baseline's own eval output, so the verdict costs no extra GPU time.
-    # Placed ahead of the optional source-import / paired-A/B passes so a patch
-    # that loses accuracy short-circuits before they run.
+    # Placed ahead of the optional source-import pass so a patch that loses
+    # accuracy short-circuits before it runs.
     # An apply-back carries only reference correctness, so this run is the sole
     # end-to-end evidence it will ever get.
     # Anything other than a recorded pass still owes the verdict, so an absent or
@@ -7637,8 +7815,28 @@ async def integrate_handler(
             session_dir=session_dir,
             workspace=workspace,
             strict=applyback_pending,
+            server_args=extra_args,
         )
         if accuracy_gate["blocked"]:
+            if accuracy_gate.get("infeasible"):
+                # The gate cannot run under this configuration, so this round
+                # measured nothing about the patch. Report it as an integration
+                # fault: faults carry their own budget and never consume one of
+                # the three attempts a patch gets to prove itself.
+                from ..actions.executors._accuracy_gate import (
+                    EVAL_KIND_CONTEXT_TOO_SMALL,
+                )
+
+                revert_result = _maybe_revert_kernel_patch(apply_result)
+                return {
+                    "status": "failed",
+                    "error_class": EVAL_KIND_CONTEXT_TOO_SMALL,
+                    "error": accuracy_gate["reason"],
+                    "decision": "NEEDS_REVIEW",
+                    "gain_pct": gain_pct,
+                    "accuracy_gate": accuracy_gate,
+                    "revert_result": revert_result,
+                }
             # A measured regression is hard negative evidence -> REVERT. A
             # missing verdict is only an evidence gap -> NEEDS_REVIEW.
             decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"

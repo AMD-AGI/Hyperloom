@@ -483,7 +483,9 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
         class _Res:
             state = "succeeded"
 
-        async def fake_run_task(task):
+        # Close steps run through ``run_task_registered``, which forwards the
+        # lease and per-task extras the real runner takes.
+        async def fake_run_task(task, **_kwargs):
             if task.kind == "report":
                 rd = reports_dir(session_dir)
                 rd.mkdir(parents=True, exist_ok=True)
@@ -558,7 +560,9 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
         class _Succeeded:
             state = "succeeded"
 
-        async def fake_run_task(task):
+        # Close steps run through ``run_task_registered``, which forwards the
+        # lease and per-task extras the real runner takes.
+        async def fake_run_task(task, **_kwargs):
             return _Failed() if task.kind == "report" else _Succeeded()
 
         monkeypatch.setattr(
@@ -620,7 +624,9 @@ async def test_on_enter_close_emits_report_error_for_exception(
         class _Succeeded:
             state = "succeeded"
 
-        async def fake_run_task(task):
+        # Close steps run through ``run_task_registered``, which forwards the
+        # lease and per-task extras the real runner takes.
+        async def fake_run_task(task, **_kwargs):
             if task.kind == "report":
                 raise RuntimeError("report boom")
             return _Succeeded()

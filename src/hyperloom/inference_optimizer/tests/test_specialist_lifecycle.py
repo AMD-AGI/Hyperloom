@@ -19,7 +19,6 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
-    IntentType,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 

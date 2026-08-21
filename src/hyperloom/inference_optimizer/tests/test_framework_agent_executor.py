@@ -1401,4 +1401,3 @@ def test_framework_meta_loads():
     assert fp is not None
     assert fp.name == "framework_agent"
     assert fp.family == "shallow"
-    assert "Bash" in fp.allowed_tools

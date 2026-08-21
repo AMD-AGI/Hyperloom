@@ -97,12 +97,17 @@ class _RenderMixin:
             if bool(getattr(self, "resume_pending_revalidation", False))
             else ""
         )
-        geak_pending_tag = (
-            " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
+        geak_pending_status = (
+            str(self.geak_pending.get("status") or "")
             if isinstance(getattr(self, "geak_pending", None), dict)
-            and self.geak_pending.get("status") == "awaiting_rebench"
             else ""
         )
+        if geak_pending_status == "awaiting_rebench":
+            geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
+        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
+            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
+        else:
+            geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry
 
         lines = [
@@ -437,6 +442,120 @@ class _RenderMixin:
         if len(ordered) > max_entries:
             rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
+
+    def _untested_proposal_rows(self) -> list[dict[str, Any]]:
+        """Executable proposals from this cycle that no explore round has benched.
+
+        Matched on the proposal's own content. The ledger is keyed on the
+        variant folded together with whatever removal controls the stack
+        carried at the time, so a KEEP that changes those controls mid-round
+        would otherwise make everything benched before it look untried.
+
+        Returns:
+            Rows ranked by gap severity then recency, each carrying the
+            normalized proposal fields plus ``domain`` / ``severity``.
+        """
+        from hyperloom.common.coerce import to_int
+
+        from ...actions.executors._proposal_identity import (
+            controls_of,
+            effective_fingerprint,
+            is_executable,
+            normalize_proposal,
+        )
+
+        def content_fingerprint(fields: dict[str, Any]) -> str:
+            return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+
+        cycle = to_int(self.macro_cycle, default=0)
+        benched = {
+            content_fingerprint(normalize_proposal(row))
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
+        severity_of = {
+            str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
+            for g in (self.gaps or [])
+            if isinstance(g, dict)
+        }
+        rank = {"high": 3, "medium": 2, "low": 1}
+
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for order, entry in enumerate(self.specialist_rounds or []):
+            if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
+                continue
+            domain = str(entry.get("domain") or "?").removesuffix("_specialist")
+            severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
+            task_id = str(entry.get("task_id") or "")[:8]
+            for index, proposal in enumerate(entry.get("proposal_set") or []):
+                if not isinstance(proposal, dict):
+                    continue
+                row = normalize_proposal(proposal)
+                if not is_executable(row):
+                    continue
+                fingerprint = content_fingerprint(row)
+                if fingerprint in benched or fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
+                row["domain"] = domain
+                row["severity"] = severity
+                ranked.append((rank.get(severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1]))
+        return [row for _, _, row in ranked]
+
+    @staticmethod
+    def _untested_proposal_line(row: dict[str, Any]) -> str:
+        """Render one queue row, marking each field it carries.
+
+        Args:
+            row: One row from :meth:`_untested_proposal_rows`.
+
+        Returns:
+            A single ``•``-prefixed line.
+        """
+        parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+        if row["atomic"]:
+            parts.append("ATOMIC")
+        if row["extra_args"]:
+            parts.append(f"+args={row['extra_args']}")
+        if row["extra_envs"]:
+            parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
+        if row["remove_args"]:
+            parts.append("-args=" + " ".join(row["remove_args"]))
+        if row["unset_envs"]:
+            parts.append("-envs=" + ",".join(row["unset_envs"]))
+        if row["args_mode"] == "replace":
+            parts.append("mode=replace")
+        reason = row["reason"].replace("\n", " ").strip()[:80].rstrip()
+        if reason:
+            parts.append(f"why={reason}")
+        return _flatten_for_prompt(" ".join(parts))
+
+    def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
+        """Render the specialist proposals still waiting for a benchmark slot.
+
+        Args:
+            max_entries (int): Rows to render before collapsing the rest into a
+                count.
+
+        Returns:
+            str: The rendered queue, or ``""`` when nothing is waiting.
+        """
+        rows = self._untested_proposal_rows()
+        if not rows:
+            return ""
+        out = [
+            "Executable specialist proposals from this cycle that no explore round has benched.",
+            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
+            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            "",
+        ]
+        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
+        if len(rows) > max_entries:
+            out.append(f"(+{len(rows) - max_entries} more not shown)")
+        return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
         """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores.

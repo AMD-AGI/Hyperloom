@@ -1545,7 +1545,12 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     """
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
-    def _fake_accuracy_gate(bench_result, *, session_dir, workspace):
+    seen: dict[str, object] = {}
+
+    def _fake_accuracy_gate(bench_result, *, session_dir, workspace, server_args=""):
+        # The lane must hand the gate the args the bench server ran under, or a
+        # context too small to host an eval reads as a broken eval.
+        seen["server_args"] = server_args
         return {
             "blocked": True,
             "accuracy_pass": False,
@@ -1567,6 +1572,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     result = await c._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "NEEDS_REVIEW"
+    assert "server_args" in seen
     # NEEDS_REVIEW is non-KEEP so reverts must have been called and succeeded.
     assert result["revert_result"]["status"] == "ok"
 

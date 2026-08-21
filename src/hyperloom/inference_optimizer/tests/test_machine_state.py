@@ -131,6 +131,20 @@ def test_session_remaining_seconds() -> None:
         SimpleNamespace(max_minutes=60, start_ts=now_iso),
     )
     assert rem is not None and 0.0 < rem <= 3600.0
+    assert (
+        ps.session_remaining_seconds(
+            SimpleNamespace(max_minutes=60, start_ts=now_iso, deadline_unix=1000.0),
+            now_unix=400.0,
+        )
+        == 600.0
+    )
+    assert (
+        ps.session_remaining_seconds(
+            SimpleNamespace(max_minutes=0, deadline_unix=2000.0),
+            now_unix=1400.0,
+        )
+        == 600.0
+    )
 
 
 def test_post_prelude_target() -> None:

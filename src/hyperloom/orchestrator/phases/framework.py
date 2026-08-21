@@ -2528,16 +2528,6 @@ class FrameworkPhase(PhaseHandler):
             "kind": "specialist",
             "params": params,
             "requires_lanes": lanes,
-            "allowed_tools": [
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             "side_effects": ["writes_results", "writes_patches"],
             "lease_ttl_sec": ttl,
         }

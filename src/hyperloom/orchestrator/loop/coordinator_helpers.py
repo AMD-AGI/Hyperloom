@@ -1265,6 +1265,238 @@ def _normalize_geak_overlay_dir(overlay: str) -> str:
     return overlay
 
 
+# A GEAK candidate slot tag (``cand_c0_triton``, ``c1_triton``), as opposed to
+# the name of the kernel the slot produced.
+_GEAK_CAND_TAG_RE = re.compile(r"^(cand[_-])?c\d+([_-]|$)", re.IGNORECASE)
+
+
+def geak_is_cand_tag(name: Any) -> bool:
+    """Return True when ``name`` is a GEAK slot tag, not a kernel symbol.
+
+    ``cand_c0_triton`` names the slot a candidate was dispatched into;
+    ``dsa_sparse_attn_prefill_main_kernel`` names what the slot produced. Both
+    spell the same acceptance, so every reader that has to pick one must pick
+    the same one. The symbol is the stable id — it survives a re-run into a
+    different slot — so the symbol wins and the tag becomes an alias.
+
+    Args:
+        name (Any): A candidate identity, in any of the written shapes.
+
+    Returns:
+        bool: True when the text matches the slot-tag form.
+    """
+    text = str(name or "").strip()
+    return bool(text) and bool(_GEAK_CAND_TAG_RE.match(text))
+
+
+def _geak_spec_name(spec: Any) -> str:
+    """Return the display name of one GEAK acceptance entry.
+
+    Accepts both shapes an acceptance is written in: the dict GEAK emits, and
+    the bare string the revalidation path carries. One resolver keeps the
+    ledger and the attribution row naming a kernel the same way.
+    """
+    if isinstance(spec, str):
+        return spec.strip()
+    if not isinstance(spec, dict):
+        return ""
+    return str(spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or "").strip()
+
+
+def geak_spec_name(spec: Any) -> str:
+    """Public alias of :func:`_geak_spec_name` for out-of-module readers."""
+    return _geak_spec_name(spec)
+
+
+def geak_spec_kind(spec: Any) -> str | None:
+    """Return the acceptance ``kind``, or ``None`` when the source omits it.
+
+    ``None`` is a real state, not a default. The ``kernel_journey.json`` rows
+    carry no ``kind`` field at all — measured over ``/shared_nfs/hyperloom-claw``,
+    0 of 36 accepted journey rows have one — so a reader that treats a missing
+    ``kind`` as "not env" and one that treats it as "env" would disagree on the
+    same run. Callers get the unknown and must say what they do with it.
+    """
+    if not isinstance(spec, dict):
+        return None
+    raw = spec.get("kind")
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    return text or None
+
+
+def geak_spec_is_env(spec: Any) -> bool:
+    """Return True only when the acceptance is *known* to be an env selection.
+
+    An env acceptance picks an existing library or environment variable; no
+    kernel was authored, so it belongs in the config half of GEAK's gain. An
+    unknown ``kind`` is not env: it is admitted and tagged, never guessed.
+    """
+    return geak_spec_kind(spec) == "env"
+
+
+def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
+    """Return the authored kernels a GEAK result accepted, both lanes, deduped.
+
+    GEAK routes an acceptance to ``accepted_kernels`` or to ``accepted_heads``
+    purely by which queue proposed it (``kernelQueue`` vs ``headQueue`` in
+    ``run_e2e.py``); both entries have the same shape and both carry the same
+    parity-checked same-config ``e2e_delta_pct``. GEAK's own evidence helper
+    ``_wf_best_accepted_delta_pct`` reads the two lanes together, so a reader
+    that takes only one of them silently drops most of the campaign — measured
+    over ``/shared_nfs/hyperloom-claw``, 8 of the 11 sessions with an
+    acceptance carry it in ``accepted_heads`` alone.
+
+    Two filters apply:
+
+    * ``e2e_delta_pct`` must be positive. This is the same admission test the
+      journey backfill uses.
+    * ``kind == "env"`` is excluded. Those acceptances select an existing
+      library or environment variable (``ck_gemm_a8w8_blockscale_bpreshuffle``,
+      ``moe_grouped_gemm_ck2stage``); no kernel was authored, so they belong in
+      the config half of GEAK's gain, not in the per-kernel adoption ledger.
+
+    Alias twins — one acceptance written under both the candidate tag and the
+    kernel symbol — are collapsed on ``(op_kind, e2e_delta_pct)``, and the
+    surviving row is the one named after the kernel. A candidate tag
+    (``cand_c0_triton``) says only which slot proposed it; the symbol
+    (``dsa_sparse_attn_prefill_main_kernel``) is what a report can name.
+    """
+    if not isinstance(result, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    index: dict[tuple[str, str], int] = {}
+    lanes = (result.get("accepted_kernels") or []) + (result.get("accepted_heads") or [])
+    for k in lanes:
+        if not isinstance(k, dict):
+            continue
+        if geak_spec_is_env(k):
+            continue
+        try:
+            delta = float(k.get("e2e_delta_pct") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if delta <= 0.0:
+            continue
+        name = str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip()
+        if not name:
+            continue
+        twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
+        pos = index.get(twin)
+        if pos is None:
+            index[twin] = len(out)
+            out.append(k)
+            continue
+        existing_name = _geak_spec_name(out[pos])
+        if _GEAK_CAND_TAG_RE.match(existing_name) and not _GEAK_CAND_TAG_RE.match(name):
+            out[pos] = k
+            continue
+        if _GEAK_CAND_TAG_RE.match(name) and not _GEAK_CAND_TAG_RE.match(existing_name):
+            continue
+        if name == existing_name:
+            continue
+        out.append(k)
+    return out
+
+
+def _geak_has_accepted_kernel(result: Any) -> bool:
+    """Report whether a GEAK result carries an accepted kernel that gained.
+
+    The delta behind this is GEAK's own parity-checked A/B of the kernel
+    against the identical config, and it is independent of the run-level
+    ``status``, which is a verdict on the promoted throughput basis alone. A
+    ``no_gain`` run can therefore still hold a real kernel.
+    """
+    return bool(_geak_accepted_kernel_specs(result))
+
+
+def _geak_overlay_is_loadable(overlay: str) -> bool:
+    """Report whether an overlay dir can actually install an authored kernel.
+
+    ``run_grid`` prepends the overlay onto ``PYTHONPATH``; the kernel is only
+    installed when the interpreter then imports the overlay's
+    ``sitecustomize.py``. A path that does not exist, or a directory holding no
+    ``sitecustomize.py``, is inert: the server launches as plain baseline and
+    ``run_grid`` logs a warning nobody reads. Callers use this to refuse to
+    dispatch a revalidation whose only material is an overlay that cannot load.
+
+    An importable overlay is not automatically a *kernel* overlay. GEAK also
+    emits a config-only overlay -- ``{"modules": [], "rebinds": [], "note":
+    "config-only result: no kernel overlay accepted ..."}`` -- which imports
+    cleanly and installs nothing. Treating that as loadable would label a pure
+    config win as a kernel win, which is the exact mis-crediting this gate
+    exists to stop. So when a manifest is present it must name at least one
+    module or rebind. An overlay with no manifest keeps the old behaviour:
+    absence of evidence is not evidence of an empty overlay.
+    """
+    if not overlay:
+        return False
+    try:
+        if not (Path(overlay) / "sitecustomize.py").is_file():
+            return False
+        manifest = Path(overlay) / "_overlay_manifest.json"
+        if not manifest.is_file():
+            return True
+        spec = json.loads(manifest.read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(spec, dict):
+        return False
+    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
+
+
+def _geak_overlay_digest(overlay: str) -> str:
+    """Digest the overlay's bind manifest, or ``""`` when it has none.
+
+    ``_overlay_manifest.json`` is written by GEAK and records exactly which
+    modules/rebinds/captures the overlay installs. Hashing it gives the
+    revalidation a check on the overlay's *content*, which
+    ``canonical_fingerprint`` deliberately excludes (it fingerprints
+    ``(args, envs)`` only, so an overlay silently dropped between dispatch and
+    launch still matches). Not every overlay carries a manifest, so an empty
+    return means "no content evidence available", never "mismatch".
+
+    The manifest names the *target* of each bind, not the kernel body, so it
+    alone does not identify what would run: measured over
+    ``/shared_nfs/hyperloom-claw``, three unrelated sessions share one manifest
+    digest because all three patch
+    ``sglang.kernels.ops.attention.decode_attention``. The bodies each entry
+    points at are therefore folded in too, so the digest tracks the kernel and
+    not just its address. A referenced body that cannot be read contributes its
+    path alone -- the digest stays stable and comparable rather than collapsing
+    to ``""``.
+    """
+    if not overlay:
+        return ""
+    root = Path(overlay)
+    try:
+        raw = (root / "_overlay_manifest.json").read_bytes()
+    except (OSError, ValueError):
+        return ""
+    hasher = hashlib.sha256()
+    hasher.update(raw)
+    try:
+        spec = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        spec = None
+    if isinstance(spec, dict):
+        bodies: set[str] = set()
+        for mod in spec.get("modules") or []:
+            if isinstance(mod, dict) and str(mod.get("file") or "").strip():
+                bodies.add(str(mod["file"]).strip())
+        for rebind in spec.get("rebinds") or []:
+            if isinstance(rebind, dict) and str(rebind.get("impl_module") or "").strip():
+                bodies.add(f"{str(rebind['impl_module']).strip()}.py")
+        for rel in sorted(bodies):
+            hasher.update(rel.encode("utf-8", "replace"))
+            try:
+                hasher.update(hashlib.sha256((root / rel).read_bytes()).digest())
+            except (OSError, ValueError):
+                continue
+    return hasher.hexdigest()[:16]
+
+
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
     """Extract a single measured throughput from a ``sweep_via_geak`` result.
 

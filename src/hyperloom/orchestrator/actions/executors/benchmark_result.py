@@ -724,6 +724,16 @@ def _merge_raw_result(
         )
     if measurement.get("raw_result_path") is None:
         measurement["raw_result_path"] = str(source_path)
+    # AgentX scenario verdict. The KEY'S PRESENCE marks the result as AgentX
+    # produced; synthetic results never carry it, so nothing here changes for
+    # them. The VALUE is tri-state (True / False / None-unknown) and must not be
+    # collapsed -- see is_valid_measurement.
+    if "submission_valid" in raw and "submission_valid" not in measurement:
+        measurement["submission_valid"] = raw.get("submission_valid")
+        reasons = raw.get("submission_invalid_reasons") or []
+        measurement["submission_invalid_reasons"] = (
+            [str(r) for r in reasons] if isinstance(reasons, list) else [str(reasons)]
+        )
 
 
 def extract_benchmark_measurement(
@@ -912,6 +922,14 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     have no serving request counter, so they are valid on positive output
     throughput alone (images/sec); ``completed_requests`` is optional.
 
+    AgentX results additionally carry the scenario's own verdict. A run that
+    violated a scenario invariant (or was cancelled, or exceeded the
+    context-overflow limit) still produces plausible throughput -- on whatever
+    subset survived -- so throughput alone cannot tell it apart from a clean
+    run. The verdict is consulted only under ``HYPERLOOM_AGENTX``, and only when
+    the result actually carries one, so neither the synthetic path nor a
+    scriptable run is affected.
+
     Args:
         result (dict[str, Any] | None): The measurement dict to check.
 
@@ -922,6 +940,28 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         return False
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
+        return False
+    # Gated on BOTH the mode and the key's presence, and each half earns its
+    # keep. Mode: this helper is hot for every synthetic measurement too, and
+    # the InferenceX revision the synthetic harness runs is not frozen -- were a
+    # future upstream to stamp the key into a synthetic inferencex_result.json,
+    # a presence-only check would silently invalidate every synthetic
+    # measurement session-wide while throughput still looked healthy. Presence:
+    # under AgentX a scriptable framework skips the aiperf switch entirely
+    # (apply_agentx_switch returns early), so its result legitimately carries no
+    # verdict and must stay selectable.
+    from ._workload_envs import agentx_enabled
+
+    if (
+        agentx_enabled()
+        and "submission_valid" in result
+        and result.get("submission_valid") is not True
+    ):
+        # False = the scenario rejected it. None = the verdict is unknown (no
+        # scenario, or an aiperf too old to stamp one); map_aiperf writes the
+        # key unconditionally, so None still arrives as a present key. Neither
+        # is comparable, and treating "unknown" as valid is exactly how an
+        # incomparable run would reach the leaderboard-comparable set.
         return False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable,
