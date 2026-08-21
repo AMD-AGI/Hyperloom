@@ -628,8 +628,6 @@ class PreludePhase(PhaseHandler):
             "target_file": target,
             "source_file": target,
             "kernel_id": kernel_id,
-            # Champion targets live in the installed framework tree, which is
-            # not a known patch repo root.
             "allow_unknown_target": True,
         }
 
