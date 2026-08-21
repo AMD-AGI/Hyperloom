@@ -4701,6 +4701,8 @@ class FrameworkPhase(PhaseHandler):
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
             generation=int(state.enablement.revalidation_generation or 0),
             label="revalidation",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("baseline")[1],
         )
         state.enablement.revalidation_generation = generation
         return task
