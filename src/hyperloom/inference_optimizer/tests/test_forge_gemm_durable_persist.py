@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""forge GEMM tuned-CSV durability: KEEP must persist the CSV into the session
-directory and snapshot it (recipe-portable), not reference the ephemeral
-tuner workspace path and not write into the shared installed aiter package.
+"""forge GEMM tuned-CSV durability: the KEEP must persist the CSV into the
+session directory and snapshot it, never into the shared installed aiter package.
 """
 from __future__ import annotations
 

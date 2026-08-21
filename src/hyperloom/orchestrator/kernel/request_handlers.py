@@ -254,9 +254,11 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
-    """Framework install roots for patchability checks.
+    """Framework install roots for the runtime-generated kernel classifier.
 
-    Emits a lower-case variant per root for case-insensitive matching.
+    Emits a lower-case variant per root because that classifier matches against
+    a lower-cased source path. Path containment uses
+    :func:`~hyperloom.orchestrator.framework.paths.resolved_within` instead.
 
     Returns:
         The de-duplicated framework install roots (each with a lower-case
@@ -868,7 +870,11 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "kernel_name": name,
             "source_file": source_file,
         }
-    from ..framework.paths import resolve_patch_target_roots, source_file_candidates, resolved_within
+    from ..framework.paths import (
+        resolve_patch_target_roots,
+        resolved_within,
+        source_file_candidates,
+    )
 
     if not any(
         resolved_within(candidate, root)
@@ -3760,9 +3766,9 @@ async def _run_forge_gemm_tuning(
 def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, session_dir: Path) -> tuple[dict, str]:
     """Make a forge GEMM tuned CSV durable + recipe-portable.
 
-    Stages the tuned CSV under ``<session_dir>/optimization_stack/src/`` (outside
-    the ``runs/`` tree that the disk-pressure pruner touches) and snapshots it so
-    it travels with the recipe.  The env is repointed at the session-local copy.
+    Stages the CSV under ``<session_dir>/optimization_stack/src/``, outside the
+    ``runs/`` tree the disk-pressure pruner trims, repoints the env at that copy
+    and snapshots it so it travels with the recipe.
 
     Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
     Returns ``(extra_envs, source_snapshot_dir)``.
@@ -3777,9 +3783,9 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         or "model"
     )
     rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
-    # Staged root mirrors the relative layout aiter uses so the snapshot
-    # manifest shape (files/configs/model_configs/<name>.csv) is preserved.
-    staged_root = Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}" / "staged"
+    snapshot_dir = Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}"
+    # Mirrors aiter's relative layout so the snapshot manifest keeps its shape.
+    staged_root = snapshot_dir / "staged"
 
     try:
         dst = staged_root / rel
@@ -3791,7 +3797,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
-    # Snapshot failure must NOT discard the copy + repoint already committed above.
+    # A snapshot failure must not discard the copy and repoint already committed.
     snap_dir = ""
     try:
         from ..source_snapshot import snapshot_source_layer
@@ -3800,7 +3806,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             framework_root=staged_root,
             base_sha=None,
             rel_paths=[rel],
-            dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
+            dest_dir=snapshot_dir,
             provenance="forge_gemm_tune",
             extra={"env_key": env_key, "model": slug},
         )
