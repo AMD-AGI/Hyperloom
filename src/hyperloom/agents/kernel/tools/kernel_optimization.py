@@ -1502,8 +1502,26 @@ def build_prompt(
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
     if source_file and Path(str(source_file)).exists():
-        content = Path(str(source_file)).read_text(encoding="utf-8", errors="replace")
-        source_block = f"\nSource content:\n```\n{content[:12000]}\n```"
+        _embed = False
+        try:
+            from hyperloom.orchestrator.framework.paths import (
+                resolve_patch_target_roots,
+                resolved_within,
+                source_file_candidates,
+            )
+            sf_str = str(source_file)
+            _embed = any(
+                resolved_within(c, root)
+                for c in source_file_candidates(sf_str)
+                for root in resolve_patch_target_roots()
+            )
+        except ImportError:
+            # Standalone: no orchestrator available; skip the embed rather than
+            # reading an arbitrary path without a containment check.
+            pass
+        if _embed:
+            content = Path(str(source_file)).read_text(encoding="utf-8", errors="replace")
+            source_block = f"\nSource content:\n```\n{content[:12000]}\n```"
     kernel_repo = str(candidate.get("kernel_repo") or "")
     bench_files = candidate.get("benchmark_files") or []
     if isinstance(bench_files, str):
