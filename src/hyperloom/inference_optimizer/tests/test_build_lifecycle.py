@@ -174,6 +174,95 @@ async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, t
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
+@pytest.mark.asyncio
+async def test_cancel_kills_the_compile_before_releasing_the_lane(
+    build_coord, build_lifecycle, executor, tmp_path
+):
+    """A cancelled build must not leave the compile running.
+
+    The lane is released as this coroutine unwinds, so a surviving process group
+    would compile on while the next build holds build_lane.
+    """
+    import asyncio
+
+    from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
+
+    spawned: list = []
+    real_spawn = tbe_mod.spawn_build
+
+    def _capture(*a, **kw):
+        handle = real_spawn(*a, **kw)
+        spawned.append(handle)
+        return handle
+
+    tbe_mod.spawn_build = _capture
+    try:
+        run = asyncio.create_task(
+            _enqueue_and_run(
+                build_lifecycle, executor,
+                action=_action([sys.executable, "-c", "import time; time.sleep(600)"]),
+                session_dir=tmp_path,
+            )
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if spawned:
+                break
+        assert spawned, "build never spawned"
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    finally:
+        tbe_mod.spawn_build = real_spawn
+
+    handle = spawned[0]
+    with pytest.raises(ProcessLookupError):
+        os.killpg(handle.pgid, 0)
+    assert build_coord.shared_state.pending_targeted_build == {}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_sentinel_write_still_kills_the_compile(
+    build_coord, build_lifecycle, executor, tmp_path
+):
+    """The spawn is inside the teardown's scope, so a raise cannot orphan it."""
+    from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
+
+    spawned: list = []
+    real_spawn = tbe_mod.spawn_build
+
+    def _capture(*a, **kw):
+        handle = real_spawn(*a, **kw)
+        spawned.append(handle)
+        return handle
+
+    original_save = type(build_coord.shared_state).save
+    calls = {"n": 0}
+
+    def _fail_first_save(self, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("state dir is read-only")
+        return original_save(self, *a, **kw)
+
+    tbe_mod.spawn_build = _capture
+    type(build_coord.shared_state).save = _fail_first_save
+    try:
+        task, _ = await _enqueue_and_run(
+            build_lifecycle, executor,
+            action=_action([sys.executable, "-c", "import time; time.sleep(600)"]),
+            session_dir=tmp_path,
+        )
+    finally:
+        tbe_mod.spawn_build = real_spawn
+        type(build_coord.shared_state).save = original_save
+
+    assert spawned, "build never spawned"
+    assert task.state == "failed"
+    with pytest.raises(ProcessLookupError):
+        os.killpg(spawned[0].pgid, 0)
+
+
 # ---------------------------------------------------------------------------
 # Driver wiring
 # ---------------------------------------------------------------------------

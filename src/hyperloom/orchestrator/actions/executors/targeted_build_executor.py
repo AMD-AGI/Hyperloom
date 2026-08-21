@@ -5,9 +5,9 @@
 
 Runs compiled-component builds through the standard sub_agent_runner path so
 the in-flight asyncio.Task is registered in ``_inflight_actions`` (reachable
-by ``cancel_inflight_actions`` at shutdown).  The build runs in a detached
-subprocess; ``asyncio.wait_for`` enforces the wall-clock budget without
-blocking the tick loop.
+by ``cancel_inflight_actions`` at shutdown). This coroutine owns the build for
+its whole life: ``asyncio.wait_for`` is the only wall-clock budget, and one
+teardown covers every way out of the wait.
 
 attempt_root is always ``session_dir / "enablement" / "builds" / task_id``.
 This derivation must stay identical to the fallback in
@@ -18,7 +18,6 @@ This derivation must stay identical to the fallback in
 from __future__ import annotations
 
 import asyncio
-import signal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,17 +25,14 @@ from ...framework.build_actions import BuildResult, TargetedBuildAction
 from ...framework.stack_actions import FrameworkRuntime
 from ...framework.targeted_build import (
     _resolve_budget_sec,
-    kill_build_pgroup,
-    poll_build,
+    classify_build_exit,
+    ensure_build_dead,
     spawn_build,
 )
 from ...loop.build_lifecycle import _driver_command
 
 if TYPE_CHECKING:
     from ...loop.sub_agent_runner import RunnerContext
-
-# Seconds between SIGTERM (inside poll_build) and SIGKILL (hard wall).
-_KILL_GRACE_SEC = 5.0
 
 
 class TargetedBuildExecutor:
@@ -92,14 +88,32 @@ class TargetedBuildExecutor:
             command=_driver_command(action, attempt_root),
         )
 
-        if shared_state is not None:
-            shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)
-            shared_state.save(session_dir)
-
+        # From here every exit runs the teardown, including a cancel from
+        # ``cancel_inflight_actions`` and a failure to persist the sentinel:
+        # the build is detached, so returning without killing it leaves a
+        # compile running against a lane this coroutine is about to release.
         try:
-            result = await self._await_build(handle, budget_sec=budget_sec)
-        finally:
             if shared_state is not None:
+                shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)
+                shared_state.save(session_dir)
+            rc = await asyncio.wait_for(
+                asyncio.to_thread(handle.proc.wait),
+                timeout=budget_sec,
+            )
+            result = classify_build_exit(handle, rc)
+        except asyncio.TimeoutError:
+            result = BuildResult(
+                ok=False,
+                attempt_root=handle.attempt_root,
+                runtime=FrameworkRuntime(),
+                build_log_path=handle.build_log_path,
+                failure_class="timeout",
+                failure_summary="targeted build exceeded wall-clock budget",
+                error="timeout",
+            )
+        finally:
+            confirmed_dead = ensure_build_dead(handle)
+            if shared_state is not None and confirmed_dead:
                 shared_state.pending_targeted_build = {}
                 shared_state.save(session_dir)
 
@@ -110,30 +124,6 @@ class TargetedBuildExecutor:
                 f" summary={result.failure_summary or result.error!r}"
             )
         return result.to_state()
-
-    async def _await_build(self, handle: Any, *, budget_sec: float) -> BuildResult:
-        """Poll until the process exits or budget + grace expires."""
-
-        async def _poll_loop() -> BuildResult:
-            while True:
-                result = poll_build(handle)
-                if result is not None:
-                    return result
-                await asyncio.sleep(0.1)
-
-        try:
-            return await asyncio.wait_for(_poll_loop(), timeout=budget_sec + _KILL_GRACE_SEC)
-        except asyncio.TimeoutError:
-            kill_build_pgroup(handle.pgid, sig=signal.SIGKILL)
-            return BuildResult(
-                ok=False,
-                attempt_root=handle.attempt_root,
-                runtime=FrameworkRuntime(),
-                build_log_path=handle.build_log_path,
-                failure_class="timeout",
-                failure_summary="targeted build exceeded wall-clock budget",
-                error="timeout",
-            )
 
     @staticmethod
     def _record_result(result: Any, shared_state: Any) -> None:
