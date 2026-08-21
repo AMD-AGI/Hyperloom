@@ -441,6 +441,39 @@ _WARM_REPLAY_ACTION = "replay_warm_recipe"
 _REMOTE_RECIPE_FILES_PARTS = ("runtime", "remote_recipe", "files")
 _MAX_POLICY_PATCH_BYTES = 4 * 1024 * 1024
 
+# Placeholder/not-found sentinels that upstream lookups (or an LLM restating
+# a miss as prose) can leave in a SOURCE_LIKE_FIELDS value instead of leaving
+# the field empty. Treated as an absent field, not a bogus path: a resolver
+# miss should degrade the delegate gracefully, not deny the whole intent.
+# Includes the vendor-label and TraceLens placeholder forms pinned by
+# reject_non_path_source()'s own test (test_source_resolution_guards.py
+# _SENTINELS) -- those reach here verbatim when a stale/cached candidate
+# still carries a placeholder TraceLens meant to zero at the producer.
+#
+# Not made redundant by tracelens_analysis.reject_non_path_source(): that
+# guard only runs inside _finalize_candidates(), so it only protects
+# source_file values that flowed through the TraceLens candidate pipeline. A
+# delegate request can still carry one of these placeholders some other way
+# (an LLM restating a miss as prose directly into a task field, or a resumed
+# session replaying kernel_candidates.json written before this producer guard
+# existed) and this is the last check before PolicyGate would otherwise deny
+# or admit it as a bogus path.
+_SOURCE_FILE_ABSENT_SENTINELS: frozenset[str] = frozenset(
+    {
+        "not found",
+        "none",
+        "n/a",
+        "null",
+        "unknown",
+        "unresolved",
+        "missing",
+        "tbd",
+        "<unresolved>",
+        "aiter (vendor)",
+        "triton (vendor)",
+    }
+)
+
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
@@ -630,6 +663,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "pending_escalate_hint",
         "last_consumed_escalate_hint",
         "last_consumed_escalate_hint_ts",
+        "last_discarded_escalate_hint",
+        "last_discarded_escalate_hint_ts",
         "plateau_overrides",
         # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
@@ -2365,6 +2400,16 @@ class PolicyGate:
                 return
             key = path_keys[-1] if path_keys else ""
             if key in SOURCE_LIKE_FIELDS:
+                if node.strip().lower() in _SOURCE_FILE_ABSENT_SENTINELS:
+                    log.info(
+                        "role=%r %s payload field %r=%r is an absent-value "
+                        "sentinel; treating as omitted and admitting the delegate",
+                        role.name,
+                        intent_type.value,
+                        key,
+                        node,
+                    )
+                    return
                 if any(
                     self._path_in_source_allowlist(c) or self._path_under_session(c)
                     for c in _source_file_candidates(node)

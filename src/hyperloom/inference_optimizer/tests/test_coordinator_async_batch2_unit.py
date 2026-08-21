@@ -2115,6 +2115,132 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
     assert coord.shared_state.stop_reason == "target_reached"
 
 
+@pytest.mark.asyncio
+async def test_advance_phase_hint_survives_transition_toward_explore(coord: Coordinator, monkeypatch) -> None:
+    """A skip_to_kernel hint set during FRAMEWORK_AGENT must survive an unrelated
+    FRAMEWORK_AGENT -> EXPLORE transition, since exit_normal_explore (the hint's
+    only consumer) only ever checks it once the phase is EXPLORE.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "framework_phase_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "EXPLORE"
+    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_survives_transition_toward_framework_agent(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """The same survival requirement, one hop earlier: a hint set during
+    PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT, since EXPLORE (the hint's
+    only consumer) is still ahead whenever explore is enabled. Discarding here
+    is the FRAMEWORK_AGENT -> EXPLORE bug moved one phase upstream.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    coord.shared_state.explore_enabled = True
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
+    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_discarded_toward_framework_agent_when_explore_disabled(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """When explore is disabled for the session, FRAMEWORK_AGENT is not a step
+    on the way to EXPLORE -- it never runs -- so a hint riding there is
+    genuinely stale and must still be discarded, not preserved forever.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    coord.shared_state.explore_enabled = False
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Coordinator, monkeypatch) -> None:
+    """A pending hint is genuinely stale once the transition target isn't
+    EXPLORE -- it can never reach exit_normal_explore's check again -- so this
+    is the one case the unrelated-transition cleanup should still clear it.
+
+    A discard is not a consumption: it must land in last_discarded_escalate_hint,
+    not last_consumed_escalate_hint, which specifically means "this hint drove
+    a transition" and this one never did.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "SWEEP"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
+    assert coord.shared_state.last_discarded_escalate_hint_ts
+    assert coord.shared_state.last_consumed_escalate_hint == ""
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: Coordinator, monkeypatch) -> None:
+    """The complementary case: a hint-driven transition must record consumption,
+    not a discard, so the two are distinguishable in the breakdown.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(
+        ps,
+        "compute_next_phase",
+        lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
+    )
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_consumed_escalate_hint == "skip_to_kernel"
+    assert coord.shared_state.last_consumed_escalate_hint_ts
+    assert coord.shared_state.last_discarded_escalate_hint == ""
+
+
 # -- _materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
     from hyperloom.orchestrator.loop.coordinator import PendingProposal

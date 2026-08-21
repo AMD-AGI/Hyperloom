@@ -176,6 +176,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "pending_escalate_hint",
         "last_consumed_escalate_hint",
         "last_consumed_escalate_hint_ts",
+        "last_discarded_escalate_hint",
+        "last_discarded_escalate_hint_ts",
         "plateau_overrides",
         # CLOSE phase sequencer flag.
         "close_sequence_done",
