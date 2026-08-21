@@ -212,7 +212,9 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
     CLI flag is not written here: :func:`_apply_operator_supplied_paths`
     publishes it, and must see a vacant env for the flag to win. Archive is
     therefore applied only when neither the flag nor the env is set, matching
-    how ``--server-args`` / ``--extra-env`` resume.
+    how ``--server-args`` / ``--extra-env`` resume. ``benchmark_backend`` has
+    no CLI flag (env / install.sh only), so the env check alone is the full
+    precedence chain for that field.
 
     Args:
         args: Parsed CLI namespace (reads ``framework_path`` /
@@ -250,6 +252,10 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
 
     No-op for shipped frameworks. Must run after GPU_TYPE is resolved: the
     runner suffix is part of the filename.
+
+    Side effect: publishes ``CUSTOM_REPO_PATH`` / ``CUSTOM_DIR`` into
+    ``os.environ`` via ``apply_scriptable_runtime_defaults``, which PolicyGate
+    needs anyway to allowlist the custom checkout.
 
     Args:
         framework: Resolved session framework.
