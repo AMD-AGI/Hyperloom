@@ -1740,7 +1740,7 @@ class KernelPhase(PhaseHandler):
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
                     tool="geak",
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey discovery replay failed", exc_info=True)
@@ -1760,14 +1760,14 @@ class KernelPhase(PhaseHandler):
                     skip_reason=str(disp.get("skip_reason") or ""),
                     orchestration_commit=commit,
                     task_group=disp.get("task_group"),
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
                 br = k.get("backend_result")
                 if isinstance(br, dict):
                     instrument.record_kernel_backend_result(
                         sdir,
                         br,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                     )
                 e2e = k.get("e2e")
                 if isinstance(e2e, dict):
@@ -1782,7 +1782,7 @@ class KernelPhase(PhaseHandler):
                         target_file=e2e.get("target_file"),
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                         # Replaying must land on the reading it originally
                         # recorded, not count itself as a fresh one.
                         occurrence=e2e.get("occurrence"),
@@ -1859,13 +1859,17 @@ class KernelPhase(PhaseHandler):
                     e2e_gain_pct=None,
                     validated=False,
                     decision="REVERT",
+                    # Same route as the KEEP that this withdraws. Leaving it on the default
+                    # re-parented the kernel under a synthetic Forge route at the moment it was
+                    # revoked, so a withdrawn GEAK kernel ended up filed under an optimizer that
+                    # never touched it.
+                    route_strategy="geak",
                     patch_path=e2e.get("patch_path"),
                     target_file=e2e.get("target_file"),
                     extra_server_args=str(
                         e2e.get("extra_server_args") or ""
                     ),
                     result=evidence,
-                    route_strategy="legacy_only",
                     # This is a second look at a kernel that was already kept,
                     # and ``evidence`` still carries the original integrate's
                     # identity. Without a namespace of its own, the reading
@@ -1914,7 +1918,13 @@ class KernelPhase(PhaseHandler):
         still boots and benchmarks fine, so the gate sees an honest "no gain" and
         the real cause -- an artifact the runtime never applied -- stays invisible.
         Replaying the lookup against the round's ``server.log`` separates the two.
+
+        For ``fmoe_ck``, delegates to ``_fmoe_tuned_config_coverage``, which
+        matches fused-MoE dispatch lines against ``candidate_fmoe.csv`` rather
+        than dense ``(M, N, K)`` GEMM lookups.
         """
+        if tuner_name == "fmoe_ck":
+            return self._fmoe_tuned_config_coverage(envs)
         from ..kernel.gemm_shape_coverage import (
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
@@ -1955,6 +1965,80 @@ class KernelPhase(PhaseHandler):
             report["not_applied_reason"] = "artifact_table_not_consulted"
         elif not report["artifact_applied"]:
             report["not_applied_reason"] = "no_shape_key_matched"
+        return report
+
+    def _fmoe_tuned_config_coverage(
+        self,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Report whether a ``tuned_fmoe.csv`` covers logged fused-MoE dispatches.
+
+        Dense BF16 GEMM lookups in the same log are ignored: they belong to
+        linears the ``fmoe_ck`` tuner never wrote, and treating
+        ``bf16_tuned_gemm.csv`` as evidence produced false
+        ``artifact_table_not_consulted`` blockers on MoE models.
+        """
+        from ..kernel.gemm_shape_coverage import (
+            aiter_log_tuned_config_enabled,
+            fmoe_tuned_config_coverage,
+            log_has_fused_moe_activity,
+            parse_aiter_fused_moe_dispatches,
+            read_latest_integrate_server_log,
+            resolve_fmoe_candidate_csv,
+            tuned_fmoe_csv_rows,
+        )
+
+        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+        if not csv_paths:
+            return None
+        loaded = read_latest_integrate_server_log(self.session_dir)
+        if loaded is None:
+            return None
+        log_path, log_text = loaded
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
+        dispatches = parse_aiter_fused_moe_dispatches(log_text)
+        hit_logging = aiter_log_tuned_config_enabled(envs)
+        report: dict[str, Any] = {
+            "server_log": str(log_path),
+            "requested": len(dispatches),
+        }
+        if not dispatches:
+            if log_has_fused_moe_activity(log_text):
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "fused_moe_parse_inconclusive"
+                report["conclusive"] = False
+            elif not hit_logging:
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "fused_moe_logging_disabled"
+                report["conclusive"] = False
+            else:
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "no_fused_moe_dispatch"
+                report["conclusive"] = True
+            report["runtime_lookup_miss"] = 0
+            report["runtime_lookup_hit"] = 0
+            return report
+        if candidate_path is None:
+            report["artifact_applied"] = False
+            report["not_applied_reason"] = "candidate_csv_missing"
+            report["runtime_lookup_miss"] = len(dispatches)
+            report["runtime_lookup_hit"] = 0
+            report["conclusive"] = False
+            return report
+        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
+        report["candidate_csv"] = str(candidate_path)
+        report.update(fmoe_tuned_config_coverage(candidate_rows, dispatches))
+        report["artifact_applied"] = bool(report.get("covered"))
+        report["conclusive"] = True
+        report["runtime_lookup_miss"] = report.get("requested", 0) - report.get("covered", 0)
+        report["runtime_lookup_hit"] = report.get("covered", 0)
+        if not report["artifact_applied"]:
+            if report.get("runtime_default"):
+                report["not_applied_reason"] = "runtime_default_config"
+            elif report.get("kernel_name_mismatch"):
+                report["not_applied_reason"] = "kernel_name_mismatch"
+            else:
+                report["not_applied_reason"] = "no_shape_key_matched"
         return report
 
     async def _confirm_gemm_gain_paired(
@@ -2047,7 +2131,13 @@ class KernelPhase(PhaseHandler):
         served the requests"; it cannot see the case where the table never
         arrived and the server loaded its bundled default instead, because the
         CSV on our disk still contains the right rows either way.
+
+        For ``fmoe_ck``, delegates to ``_fmoe_apply_verdict``, which attributes
+        fused-MoE kernel pairs from dispatch lines instead of dense merge/hit
+        logging.
         """
+        if tuner_name == "fmoe_ck":
+            return self._fmoe_apply_verdict(envs)
         from ..measurement.apply_verification import verify_applied
 
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
@@ -2090,6 +2180,158 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 - verification must never fail the run
             log.warning("apply verification failed for %s", tuner_name, exc_info=True)
             return None
+
+    def _fmoe_apply_verdict(
+        self,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Apply verdict for ``fmoe_ck`` based on fused-MoE dispatch, not dense GEMM.
+
+        Dense ``bf16_tuned_gemm.csv`` consulted-table lines in the same log must
+        not drive ``not_merged`` for a tuner that only deploys ``tuned_fmoe.csv``.
+        """
+        from ..kernel.gemm_shape_coverage import (
+            aiter_log_tuned_config_enabled,
+            fmoe_tuned_config_coverage,
+            log_has_fused_moe_activity,
+            parse_aiter_fused_moe_dispatches,
+            read_latest_integrate_server_log,
+            resolve_fmoe_candidate_csv,
+            tuned_fmoe_csv_rows,
+        )
+
+        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+        if not csv_paths:
+            return None
+        loaded = read_latest_integrate_server_log(self.session_dir)
+        if loaded is None:
+            run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
+            log.warning(
+                "forge gemm E2E: no server.log under %s; apply verification "
+                "cannot run for fmoe_ck", run_dir,
+            )
+            return None
+        log_path, log_text = loaded
+        hit_logging = aiter_log_tuned_config_enabled(envs)
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
+        dispatches = parse_aiter_fused_moe_dispatches(log_text)
+        if not dispatches:
+            if log_has_fused_moe_activity(log_text):
+                return {
+                    "verdict": "fused_moe_parse_inconclusive",
+                    "hits": 0,
+                    "misses": 0,
+                    "blocks_keep": False,
+                    "conclusive": False,
+                    "merged_tables": [],
+                    "unmerged_artifacts": list(csv_paths),
+                    "detail": (
+                        "server.log contains fused-MoE activity but no dispatch "
+                        "lines could be parsed"
+                    ),
+                }
+            if not hit_logging:
+                return {
+                    "verdict": "fused_moe_logging_disabled",
+                    "hits": 0,
+                    "misses": 0,
+                    "blocks_keep": False,
+                    "conclusive": False,
+                    "merged_tables": [],
+                    "unmerged_artifacts": list(csv_paths),
+                    "detail": (
+                        "AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch "
+                        "attribution cannot run"
+                    ),
+                }
+            return {
+                "verdict": "no_fused_moe_dispatch",
+                "hits": 0,
+                "misses": 0,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": list(csv_paths),
+                "detail": (
+                    "server.log exists but contains no [aiter] [fused_moe] "
+                    "dispatch lines"
+                ),
+            }
+
+        if candidate_path is None:
+            return {
+                "verdict": "candidate_csv_missing",
+                "hits": 0,
+                "misses": len(dispatches),
+                "blocks_keep": False,
+                "conclusive": False,
+                "merged_tables": [],
+                "unmerged_artifacts": list(csv_paths),
+                "detail": (
+                    "env points at a merged fmoe CSV but the sibling bare "
+                    "candidate file is absent; cannot attribute runtime "
+                    "kernel names to the tuner candidate"
+                ),
+            }
+
+        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
+        coverage = fmoe_tuned_config_coverage(candidate_rows, dispatches)
+        covered = int(coverage.get("covered") or 0)
+        requested = int(coverage.get("requested") or 0)
+        if covered > 0:
+            return {
+                "verdict": "served",
+                "hits": covered,
+                "misses": requested - covered,
+                "blocks_keep": False,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    f"{covered} fused-MoE dispatch(es) match candidate "
+                    f"kernelName1/kernelName2 in {candidate_path.name}"
+                ),
+            }
+        if coverage.get("runtime_default"):
+            return {
+                "verdict": "runtime_default_config",
+                "hits": 0,
+                "misses": requested,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    "runtime served default heuristics; tuned candidate "
+                    "kernels were not selected"
+                ),
+            }
+        if coverage.get("kernel_name_mismatch"):
+            return {
+                "verdict": "kernel_name_mismatch",
+                "hits": 0,
+                "misses": requested,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    "lookup key matched bundled rows but runtime kernelName1/"
+                    "kernelName2 differ from candidate_fmoe.csv"
+                ),
+            }
+        return {
+            "verdict": "no_shape_key_matched",
+            "hits": 0,
+            "misses": requested,
+            "blocks_keep": True,
+            "conclusive": True,
+            "merged_tables": [],
+            "unmerged_artifacts": [],
+            "detail": (
+                f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row"
+            ),
+        }
 
     def _merge_gemm_candidate_with_runtime(
         self, env_var: str, candidate_csv_path: str
@@ -2847,7 +3089,7 @@ class KernelPhase(PhaseHandler):
             coverage = self._gemm_tuned_config_coverage(tuner_name, env)
             if coverage is not None:
                 cand = {**cand, "tuned_config_coverage": coverage}
-                if not coverage.get("artifact_applied"):
+                if not coverage.get("artifact_applied") and coverage.get("conclusive", True):
                     apply_blockers.append(
                         str(coverage.get("not_applied_reason") or "no_shape_key_matched")
                     )
@@ -2858,6 +3100,12 @@ class KernelPhase(PhaseHandler):
                         tuner_name,
                         coverage.get("requested") or 0,
                         gain_pct,
+                    )
+                elif not coverage.get("artifact_applied"):
+                    log.info(
+                        "gemm E2E: tuner=%s tuned-config coverage inconclusive — %s",
+                        tuner_name,
+                        coverage.get("not_applied_reason"),
                     )
                 else:
                     log.info(
