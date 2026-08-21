@@ -81,6 +81,13 @@ ast = [
 claude = [
     "claude-agent-sdk>=0.2.110",
 ]
+# Local dev tooling: pre-commit hooks, formatters, type checker.
+dev = [
+    "pre-commit>=4.0",
+    "ruff>=0.8,<1",
+    "mypy>=1.0",
+    "reuse>=5.0",
+]
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"

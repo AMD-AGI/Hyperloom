@@ -47,7 +47,33 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 - To mirror the coverage CI job locally:  
   `pip install -e ".[test,ci]"` then run `pytest` with the same arguments as in the `[tool.hyperloom.tests_coverage]` table in `pyproject.toml` (see ``tests-coverage.yml`` for the exact list: marker filter + ``--cov`` flags).
 - If you plan to run lint/type checks, install tools:  
-  `pip install ruff mypy`
+  `pip install ruff mypy`  
+  Or install the bundled dev extra: `pip install -e ".[test,dev]"`
+
+## Pre-commit (recommended)
+
+Hyperloom ships a [`.pre-commit-config.yaml`](.pre-commit-config.yaml) that mirrors most static-analysis gates before code reaches CI.
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files   # optional baseline after clone
+```
+
+### Hooks
+
+| Hook | Purpose |
+|------|---------|
+| **pre-commit-hooks** | Trailing whitespace, EOF, merge conflicts, large files, private keys |
+| **ruff** | Python lint (`E`/`F`/`W`), same as `lint.yml` |
+| **bandit** | Security lint on production Python (tests excluded) |
+| **shellcheck** | Shell script analysis |
+| **yamllint** / **actionlint** | YAML and GitHub Actions workflow lint |
+| **reuse** | REUSE/SPDX compliance |
+| **gitleaks** | Secret scan (mirrors `secret-scan.yml`) |
+| **codespell** | Typos in docs and comments |
+
+**Intentionally not in pre-commit** (too slow or environment-specific): full **pytest**/coverage, **Pylint**, **CodeQL**, and E2E pytest markers.
 
 ## Testing
 - Run the full test suite from the repo root:  
