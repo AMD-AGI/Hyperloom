@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import sqlite3
 
-# ensure_schema creates the current schema under BEGIN IMMEDIATE. Databases
-# written by older versions are not supported and must be recreated.
+# Recorded by ensure_schema for provenance only: nothing compares it against the
+# version already in the DB, so a database written by an older version keeps its
+# own columns and is read as-is. Rows are addressed by column name, so a column
+# this version no longer writes is inert rather than a migration hazard.
 SCHEMA_VERSION = 4
 
 
