@@ -42,11 +42,25 @@ _AITER_SHAPE_HIT_RE = re.compile(
 )
 
 Shape = tuple[int, int, int]
+FmoeDispatchKey = tuple[str, ...]
 
-#: Columns present in an aiter MoE CSV row (its untuned CSV and the runtime
-#: tuple after gfx/cu_num). Locates and validates a row's fields; a *problem's*
-#: identity is the narrower :data:`_FMOE_PROBLEM_COLUMNS`.
-_FMOE_DISPATCH_COLUMNS = (
+# Short aliases and canonical torch dtype strings seen in fused-MoE logs/CSVs.
+# Only listed forms are normalized; anything else is preserved for exact matching.
+_FMoe_Q_DTYPE_ALIASES: dict[str, str] = {
+    "fp4": "torch.float4_e2m1fn_x2",
+    "torch.float4_e2m1fn_x2": "torch.float4_e2m1fn_x2",
+    "torch.float8_e4m3fn": "torch.float8_e4m3fn",
+    "torch.float8_e4m3fnuz": "torch.float8_e4m3fnuz",
+    "torch.float8_e5m2": "torch.float8_e5m2",
+}
+
+# ``get_2stage_cfgs`` indexes tuned rows on all fourteen columns below (see
+# ``aiter/fused_moe.py::_INDEX_COLS``). Runtime logs the same tuple after gfx
+# was added; the descriptor between ``using 2stage`` and ``for`` is either
+# ``default`` or ``(kernelName1='…', kernelName2='…')``.
+FMOE_INDEX_COLS = (
+    "gfx",
+    "cu_num",
     "token",
     "model_dim",
     "inter_dim",
@@ -61,6 +75,9 @@ _FMOE_DISPATCH_COLUMNS = (
     "doweight_stage1",
 )
 
+_KERNEL_DESCRIPTOR_RE = re.compile(
+    r"kernelName1='(?P<kn1>[^']*)'.*?kernelName2='(?P<kn2>[^']*)'"
+)
 
 def aiter_padded_m_fine(m: int) -> int:
     """Return aiter's ``gl=0`` padded M (fine-grained lookup key)."""
@@ -229,6 +246,303 @@ def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     return missed, hit
 
 
+def _split_fmoe_tuple(raw: str) -> list[str]:
+    """Split a fused-MoE dispatch tuple, respecting single-quoted fields."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quote = False
+    for ch in raw:
+        if ch == "'":
+            in_quote = not in_quote
+            continue
+        if ch == "," and not in_quote:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _normalize_fmoe_q_dtype(value: str) -> str:
+    """Map known q-dtype aliases to the canonical string aiter logs."""
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return text
+    if text in _FMoe_Q_DTYPE_ALIASES:
+        return _FMoe_Q_DTYPE_ALIASES[text]
+    lowered = text.lower()
+    if lowered in _FMoe_Q_DTYPE_ALIASES:
+        return _FMoe_Q_DTYPE_ALIASES[lowered]
+    return text
+
+
+def _normalize_fmoe_field(name: str, value: str) -> str:
+    text = str(value or "").strip().strip("'\"")
+    if name == "gfx":
+        return text
+    if name == "act_type" and "." in text:
+        # Runtime logs ``ActivationType.Swiglu``; CSVs may store the suffix.
+        text = text.rsplit(".", 1)[-1]
+    if name == "dtype":
+        lowered = text.lower()
+        if lowered.startswith("torch.bfloat"):
+            return "bf16"
+        if lowered.startswith("torch.float16"):
+            return "fp16"
+    if name in ("q_dtype_a", "q_dtype_w"):
+        return _normalize_fmoe_q_dtype(text)
+    if name in ("use_g1u1", "doweight_stage1"):
+        lowered = text.lower()
+        if lowered in ("true", "1"):
+            return "1"
+        if lowered in ("false", "0"):
+            return "0"
+    return text
+
+
+def _extract_paren_group(text: str, start: int) -> str | None:
+    """Return the parenthesised group starting at ``start``, or ``None``."""
+    if start >= len(text) or text[start] != "(":
+        return None
+    depth = 0
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : idx]
+    return None
+
+
+def _parse_fused_moe_dispatch_line(line: str) -> dict[str, str] | None:
+    """Parse one ``[fused_moe] using … for (…)`` line."""
+    marker = "[fused_moe] using "
+    pos = line.find(marker)
+    if pos < 0:
+        return None
+    rest = line[pos + len(marker) :]
+    for_sep = " for ("
+    for_pos = rest.find(for_sep)
+    if for_pos < 0:
+        return None
+
+    stage_desc = rest[:for_pos].strip()
+    keys_raw = _extract_paren_group(rest, for_pos + len(" for "))
+    if keys_raw is None:
+        return None
+
+    descriptor = "default"
+    kernel_name1 = ""
+    kernel_name2 = ""
+    if not stage_desc.endswith("default"):
+        desc_open = stage_desc.rfind("(")
+        if desc_open < 0:
+            return None
+        descriptor = stage_desc[desc_open:].strip()
+        kn_match = _KERNEL_DESCRIPTOR_RE.search(descriptor)
+        if kn_match is None:
+            return None
+        kernel_name1 = kn_match.group("kn1")
+        kernel_name2 = kn_match.group("kn2")
+
+    record = _fmoe_dispatch_record(_split_fmoe_tuple(keys_raw))
+    if record is None:
+        return None
+    record["descriptor"] = descriptor
+    record["kernelName1"] = kernel_name1
+    record["kernelName2"] = kernel_name2
+    return record
+
+
+def _fmoe_dispatch_record(parts: list[str]) -> dict[str, str] | None:
+    """Map a fused-MoE dispatch tuple to the fourteen-column lookup schema."""
+    if len(parts) < len(FMOE_INDEX_COLS):
+        return None
+    record: dict[str, str] = {}
+    for idx, name in enumerate(FMOE_INDEX_COLS):
+        record[name] = _normalize_fmoe_field(name, parts[idx])
+    if not all(record.get(field) for field in FMOE_INDEX_COLS[:7]):
+        return None
+    return record
+
+
+def fmoe_dispatch_lookup_key(record: dict[str, str]) -> FmoeDispatchKey:
+    """Return the fourteen-column lookup key ``get_2stage_cfgs`` uses."""
+    return tuple(record[field] for field in FMOE_INDEX_COLS)
+
+
+def parse_aiter_fused_moe_dispatches(log_text: str) -> list[dict[str, str]]:
+    """Return every fused-MoE dispatch the server logged."""
+    seen: set[tuple[str, str, FmoeDispatchKey]] = set()
+    out: list[dict[str, str]] = []
+    for line in (log_text or "").splitlines():
+        record = _parse_fused_moe_dispatch_line(line)
+        if record is None:
+            continue
+        dedupe = (
+            record.get("descriptor") or "",
+            record.get("kernelName1") or "",
+            fmoe_dispatch_lookup_key(record),
+        )
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        out.append(record)
+    return out
+
+
+def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
+    """Resolve the bare candidate CSV used for runtime attribution.
+
+    E2E envs often point at ``merged_<name>.csv`` (for example
+    ``merged_candidate_fmoe.csv`` or ``merged_tuned_fmoe.csv``). Attribution
+    must use the sibling bare file when it exists; the merged superset must
+    not impersonate a candidate row the tuner never produced.
+    """
+    resolved = Path(path)
+    if not resolved.is_file():
+        return None
+    if resolved.name.startswith("merged_"):
+        bare = resolved.parent / resolved.name[len("merged_") :]
+        return bare if bare.is_file() else None
+    return resolved
+
+
+FMOE_INTEGRATE_RUN = "integrate-gemm_tune_fmoe_ck"
+
+
+def log_has_fused_moe_activity(log_text: str) -> bool:
+    """Return True when server.log shows fused-MoE activity we might parse."""
+    text = log_text or ""
+    return "[aiter] [fused_moe]" in text or "Mxfp4 MoE backend" in text
+
+
+def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
+    """Mirror dense apply verification: dispatch attribution needs the flag."""
+    raw = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
+    return raw not in ("", "0", "false", "no", "off")
+
+
+def read_latest_integrate_server_log(
+    session_dir: Path,
+    integrate_name: str = FMOE_INTEGRATE_RUN,
+) -> tuple[Path, str] | None:
+    """Return the newest ``server.log`` under an integrate run, if readable."""
+    run_dir = session_dir / "runs" / "integrate" / integrate_name
+    logs = sorted(
+        run_dir.rglob("server.log"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+    )
+    if not logs:
+        return None
+    try:
+        return logs[-1], logs[-1].read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
+    """Return candidate rows with lookup keys and kernel names."""
+    out: list[dict[str, str]] = []
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return out
+    if not lines:
+        return out
+    header = [col.strip() for col in lines[0].split(",")]
+    try:
+        indices = {name: header.index(name) for name in FMOE_INDEX_COLS}
+    except ValueError:
+        return out
+    kn1_idx = header.index("kernelName1") if "kernelName1" in header else None
+    kn2_idx = header.index("kernelName2") if "kernelName2" in header else None
+    for line in lines[1:]:
+        cols = line.split(",")
+        if len(cols) <= max(indices.values()):
+            continue
+        record = {
+            name: _normalize_fmoe_field(name, cols[index])
+            for name, index in indices.items()
+        }
+        if not all(record.get(field) for field in FMOE_INDEX_COLS[:7]):
+            continue
+        if kn1_idx is not None and kn1_idx < len(cols):
+            record["kernelName1"] = cols[kn1_idx].strip()
+        if kn2_idx is not None and kn2_idx < len(cols):
+            record["kernelName2"] = cols[kn2_idx].strip()
+        out.append(record)
+    return out
+
+
+def _fmoe_candidate_row_for_dispatch(
+    record: dict[str, str],
+    candidate_rows: dict[FmoeDispatchKey, dict[str, str]],
+) -> dict[str, str] | None:
+    return candidate_rows.get(fmoe_dispatch_lookup_key(record))
+
+
+def fmoe_tuned_config_coverage(
+    candidate_rows: Iterable[dict[str, str]],
+    requested_dispatches: Iterable[dict[str, str]],
+) -> dict[str, Any]:
+    """Report how many logged dispatches hit a candidate row *and* kernel pair."""
+    by_key = {fmoe_dispatch_lookup_key(row): row for row in candidate_rows}
+    requested = list(requested_dispatches)
+    if not requested:
+        return {
+            "requested": 0,
+            "covered": 0,
+            "coverage_pct": None,
+            "tuned_rows": len(by_key),
+        }
+    covered: list[dict[str, str]] = []
+    uncovered: list[dict[str, str]] = []
+    default_count = 0
+    kernel_mismatch = 0
+    for record in requested:
+        if record.get("descriptor") == "default":
+            default_count += 1
+            uncovered.append(record)
+            continue
+        row = _fmoe_candidate_row_for_dispatch(record, by_key)
+        if row is None:
+            uncovered.append(record)
+            continue
+        if (
+            record.get("kernelName1") == row.get("kernelName1")
+            and record.get("kernelName2") == row.get("kernelName2")
+        ):
+            covered.append(record)
+        else:
+            kernel_mismatch += 1
+            uncovered.append(record)
+    total = len(requested)
+    return {
+        "requested": total,
+        "covered": len(covered),
+        "coverage_pct": round(100.0 * len(covered) / total, 2) if total else None,
+        "tuned_rows": len(by_key),
+        "runtime_default": default_count,
+        "kernel_name_mismatch": kernel_mismatch,
+        "uncovered_sample": [
+            {
+                "gfx": record.get("gfx"),
+                "token": record.get("token"),
+                "descriptor": record.get("descriptor"),
+                "kernelName1": record.get("kernelName1"),
+                "kernelName2": record.get("kernelName2"),
+            }
+            for record in uncovered[:10]
+        ],
+    }
+
+
 def parse_aiter_consulted_tables(log_text: str) -> set[str]:
     """Return the tuned-config files the runtime actually looked in.
 
@@ -239,88 +553,6 @@ def parse_aiter_consulted_tables(log_text: str) -> set[str]:
     row, and one worth naming separately.
     """
     return {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
-
-
-def _normalize_fmoe_field(name: str, value: str) -> str:
-    """Normalize one MoE dispatch field for stable CSV/log comparison."""
-    text = str(value or "").strip()
-    if name in {"use_g1u1", "doweight_stage1"}:
-        if text in {"1", "True", "true"}:
-            return "True"
-        if text in {"0", "False", "false"}:
-            return "False"
-    return text
-
-
-#: Identity of one fused-MoE problem. ``token`` is excluded because the tuner
-#: sweeps it while the runtime asks for whichever batch size it is running;
-#: requiring them equal reported zero coverage for a table that does serve the
-#: problem. Matches ``_FMOE_SHAPE_FIELDS``, which already omitted it.
-_FMOE_PROBLEM_COLUMNS = tuple(
-    name for name in _FMOE_DISPATCH_COLUMNS if name != "token"
-)
-
-
-def fmoe_dispatch_key(fields: dict[str, str]) -> tuple[str, ...]:
-    """Return the lookup key identifying one fused-MoE problem (token-agnostic)."""
-    return tuple(
-        _normalize_fmoe_field(name, fields.get(name, ""))
-        for name in _FMOE_PROBLEM_COLUMNS
-    )
-
-
-def tuned_fmoe_csv_keys(path: str | Path) -> set[tuple[str, ...]]:
-    """Return the fused-MoE dispatch keys present in an aiter MoE tuned CSV."""
-    out: set[tuple[str, ...]] = set()
-    try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return out
-    if not lines:
-        return out
-    header = [col.strip() for col in lines[0].split(",")]
-    try:
-        indexes = {name: header.index(name) for name in _FMOE_DISPATCH_COLUMNS}
-    except ValueError:
-        return out
-    width = max(indexes.values()) + 1
-    for line in lines[1:]:
-        cols = line.split(",")
-        if len(cols) < width:
-            continue
-        fields = {name: cols[index] for name, index in indexes.items()}
-        if all(str(fields.get(name) or "").strip() for name in _FMOE_DISPATCH_COLUMNS):
-            out.add(fmoe_dispatch_key(fields))
-    return out
-
-
-def fmoe_tuned_config_coverage(
-    tuned_keys: Iterable[tuple[str, ...]],
-    requested_keys: Iterable[dict[str, str]],
-) -> dict[str, Any]:
-    """Report how many runtime MoE dispatches a tuned fmoe CSV can serve."""
-    tuned = {tuple(key) for key in tuned_keys}
-    requested = [fmoe_dispatch_key(key) for key in requested_keys]
-    if not requested:
-        return {
-            "requested": 0,
-            "covered": 0,
-            "coverage_pct": None,
-            "tuned_rows": len(tuned),
-        }
-    covered = [key for key in requested if key in tuned]
-    covered_set = set(covered)
-    return {
-        "requested": len(requested),
-        "covered": len(covered),
-        "coverage_pct": round(100.0 * len(covered) / len(requested), 2),
-        "tuned_rows": len(tuned),
-        "uncovered_sample": [
-            dict(zip(_FMOE_PROBLEM_COLUMNS, key, strict=True))
-            for key in requested
-            if key not in covered_set
-        ][:10],
-    }
 
 
 def tuned_csv_shapes(path: str | Path) -> set[Shape]:

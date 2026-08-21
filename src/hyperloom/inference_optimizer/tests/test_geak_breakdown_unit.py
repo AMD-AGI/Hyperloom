@@ -22,7 +22,10 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.collectors import collect_geak
-from hyperloom.inference_optimizer.breakdown.collectors.geak import _geak_kind_index
+from hyperloom.inference_optimizer.breakdown.collectors.geak import (
+    _geak_accepted_kernels_from_journey,
+    _geak_kind_index,
+)
 from hyperloom.orchestrator.actions.executors._geak_sweep import (
     _parse_isl_osl,
     _serving_gpus,
@@ -271,6 +274,47 @@ def test_collect_geak_full_success_maps_fields(tmp_path: Path) -> None:
     assert out["validated_regimes"] == [{"isl": 8192, "osl": 1024, "conc": 64}]
     # eval_dir lives under the session dir, so it is relativized.
     assert out["eval_dir"] == "runs/geak/eval"
+
+
+def test_collect_geak_result_reads_accepted_heads_lane(tmp_path: Path) -> None:
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [],
+            "accepted_heads": [
+                {
+                    "short_name": "dsa_sparse_attn_prefill_main_kernel",
+                    "kind": "authored",
+                    "e2e_delta_pct": 12.5,
+                }
+            ],
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 1
+    assert out["accepted_kernels_source"] == "result"
+    assert out["accepted_kernels"][0]["short_name"] == "dsa_sparse_attn_prefill_main_kernel"
+
+
+def test_collect_geak_result_excludes_env_kind(tmp_path: Path) -> None:
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "accepted_kernels": [
+                {
+                    "short_name": "ck_gemm_selection",
+                    "kind": "env",
+                    "e2e_delta_pct": 8.0,
+                }
+            ],
+            "accepted_heads": [],
+        },
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 0
+    assert out["accepted_kernels"] == []
 
 
 def _write_kernel_journey(eval_dir: Path) -> Path:
@@ -864,7 +908,13 @@ def test_collect_geak_backfill_dedupes_repeated_kernel_across_cycles(tmp_path: P
     assert out["kernels_optimized"] == 1
 
 
-def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> None:
+def _alias_journey(
+    eval_dir: Path,
+    *,
+    primary_gain: float,
+    twin_gain: float,
+    op_kind: str = "sparse_attn",
+) -> None:
     """Journey holding one accepted kernel written twice (candidate + symbol)."""
     eval_dir.mkdir(parents=True, exist_ok=True)
     (eval_dir / "kernel_journey.json").write_text(
@@ -875,6 +925,7 @@ def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> 
                     {
                         "kernel_id": "c0_triton",
                         "name": "c0_triton",
+                        "op_kind": op_kind,
                         "gpu_pct": 20.2,
                         "micro_speedup": 2.2024,
                         "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": primary_gain},
@@ -882,6 +933,7 @@ def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> 
                     {
                         "kernel_id": "dsa_sparse_attn_prefill_main_kernel",
                         "name": "dsa_sparse_attn_prefill_main_kernel",
+                        "op_kind": op_kind,
                         "gpu_pct": None,
                         "micro_speedup": 1.13,
                         "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": twin_gain},
@@ -891,6 +943,66 @@ def _alias_journey(eval_dir: Path, *, primary_gain: float, twin_gain: float) -> 
         ),
         encoding="utf-8",
     )
+
+
+def test_journey_backfill_projects_op_kind(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": "k1",
+                        "name": "k1",
+                        "op_kind": "sparse_attn",
+                        "gpu_pct": 10.0,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 12.0},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = _geak_accepted_kernels_from_journey({"eval_dir": str(eval_dir)}, [])
+    assert rows[0]["op_kind"] == "sparse_attn"
+
+
+def test_journey_backfill_keeps_distinct_op_kinds_at_same_gain(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "geak" / "e2e_cycle0"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "kernel_journey.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kernels": [
+                    {
+                        "kernel_id": "kernel_a",
+                        "name": "kernel_a",
+                        "op_kind": "prefill_attn",
+                        "gpu_pct": 10.0,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 5.0},
+                    },
+                    {
+                        "kernel_id": "kernel_b",
+                        "name": "kernel_b",
+                        "op_kind": "decode_attn",
+                        "gpu_pct": 12.0,
+                        "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 5.0},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {"status": "ok", "accepted_kernels": [], "eval_dir": str(eval_dir)},
+    }
+    out = collect_geak(tmp_path, state, [])
+    assert out["kernels_optimized"] == 2
+    assert {k["kernel_id"] for k in out["accepted_kernels"]} == {"kernel_a", "kernel_b"}
 
 
 def test_collect_geak_backfill_collapses_alias_twin(tmp_path: Path) -> None:

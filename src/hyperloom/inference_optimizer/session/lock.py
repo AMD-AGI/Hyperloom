@@ -25,12 +25,19 @@ The lock file is intentionally never unlinked on release: unlinking a flock'd
 path races a concurrent acquirer (it would flock a now-unlinked inode while a
 newcomer creates and flocks a fresh file). A stale body is harmless — the next
 acquirer flocks the same inode and overwrites it.
+
+That overwrite keeps only the *current* owner, so each acquisition is also
+appended to ``<session_dir>/runtime/pod_history.jsonl``. A session whose sandbox
+is rebuilt mid-run otherwise records only its first owner (in
+``manifest.json``) and its last (in the lock body), and reads like a single-pod
+session in post-mortem.
 """
 
 from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import socket
 from contextlib import suppress
@@ -40,6 +47,8 @@ from typing import Any
 from hyperloom.common.timeutil import now_iso
 
 from . import session_paths
+
+log = logging.getLogger(__name__)
 
 try:  # POSIX runtime (Linux): authoritative flock-based exclusion.
     import fcntl
@@ -177,7 +186,9 @@ class SessionLock:
                 os.close(fd)
                 raise SessionAlreadyRunning(self.session_dir, owner)
         self._fd = fd
-        self._write_owner(self._now_owner(started_at=now_iso(timespec="seconds")))
+        owner = self._now_owner(started_at=now_iso(timespec="seconds"))
+        self._write_owner(owner)
+        self._append_pod_history(owner)
         return self
 
     def heartbeat(self) -> None:
@@ -208,6 +219,30 @@ class SessionLock:
             "started_at": self._started_at,
             "heartbeat_at": now,
         }
+
+    def _append_pod_history(self, owner: dict[str, Any]) -> None:
+        """Append this acquisition to the pod-ownership ledger (never raises).
+
+        One line per acquire, so a session whose sandbox is rebuilt mid-run keeps
+        the full owner chain instead of just the first (``manifest.json``) and
+        last (``optimizer.lock``) pod. Purely observational: a failure here must
+        never stop an optimizer that already holds the lock.
+
+        Args:
+            owner (dict): The owner document just written to the lock body.
+        """
+        record = {
+            "acquired_at": owner.get("started_at"),
+            "hostname": owner.get("hostname"),
+            "pid": owner.get("pid"),
+        }
+        try:
+            path = session_paths.pod_history_path(self.session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError:
+            log.debug("session lock: pod history append failed", exc_info=True)
 
     def _write_owner(self, owner: dict[str, Any]) -> None:
         """Atomically rewrite the lock body (truncate + write while holding it)."""

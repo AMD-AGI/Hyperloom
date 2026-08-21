@@ -141,6 +141,9 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "ab_isl", "--ab-isl")
     _add_opt(cmd, args, "ab_osl", "--ab-osl")
     _add_opt(cmd, args, "framework_root", "--framework-root")
+    _add_opt(cmd, args, "tp", "--tp")
+    _add_opt(cmd, args, "block_size", "--block-size")
+    _add_opt(cmd, args, "max_model_len", "--max-model-len")
     # Author all source-confirmed patterns together by default; set
     # fuse_all_confirmed=false to author only the top recipe.
     if bool(args.get("fuse_all_confirmed", True)):
@@ -357,9 +360,86 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     return result
 
 
+def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
+    """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill.
+
+    ``forge-fuse`` is often SIGKILLed during serving smoke (default 7200s). The
+    micro KEEP and ``fusion.patch`` are written before smoke so Hyperloom can
+    still hand them to formal e2e integrate.
+    """
+    root = Path(output_dir or "")
+    if not root.is_dir():
+        return None
+    ckpt_path = root / "kernel_keep_checkpoint.json"
+    patch_path = root / "fusion.patch"
+    manifest_path = root / "fusion_manifest.json"
+    kept = False
+    speedup = None
+    env_flag = ""
+    source_file = ""
+    repo_root = ""
+    patch = None
+    if ckpt_path.is_file():
+        try:
+            ckpt = json.loads(ckpt_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            ckpt = {}
+        if isinstance(ckpt, dict) and ckpt.get("kept"):
+            kept = True
+            speedup = ckpt.get("kernel_speedup")
+            env_flag = str(ckpt.get("env_flag") or "")
+            source_file = str(ckpt.get("source_file") or "")
+            repo_root = str(ckpt.get("repo_root") or "")
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        if isinstance(manifest, dict):
+            loop = manifest.get("fusion_loop") or {}
+            compile_pass = manifest.get("compile_pass") or {}
+            if loop.get("kept") or compile_pass.get("kept"):
+                kept = True
+            speedup = speedup or (loop.get("best") or {}).get("kernel_speedup") or compile_pass.get("speedup")
+            env_flag = env_flag or str(loop.get("best_env_flag") or "")
+            source_file = source_file or str((manifest.get("fusion") or {}).get("source_file") or "")
+            artifacts = manifest.get("artifacts") or {}
+            if artifacts.get("patch"):
+                patch = artifacts.get("patch")
+            repo_root = repo_root or str(artifacts.get("repo_root") or "")
+    if patch_path.is_file():
+        patch = str(patch_path)
+    if not kept or not patch or not Path(str(patch)).is_file():
+        return None
+    flags = [f for f in env_flag.split() if f]
+    return {
+        "status": "ok",
+        "engine": "forge_fusion",
+        "micro_decision": "candidate",
+        "decision": "KEEP",
+        "kept": True,
+        "kernel_speedup": speedup,
+        "env_flags": {f: "1" for f in flags},
+        "baseline_env_flags": {f: "0" for f in flags},
+        "artifact_files": [],
+        "patch": str(patch),
+        "source_file": source_file,
+        "kernel_repo": repo_root,
+        "requires_e2e_validation": True,
+        "salvaged": True,
+        "workspace": str(root),
+    }
+
+
 def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutExpired) -> dict[str, Any]:
-    """Shape a timed-out forge-fusion run as a normal REVERT result."""
+    """Shape a timed-out forge-fusion run; salvage a micro KEEP when present."""
+    salvaged = salvage_forge_fusion_from_workspace(output_dir)
     cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or []))
+    timeout_error = f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}"
+    if salvaged:
+        salvaged["error_class"] = "subprocess_timeout"
+        salvaged["error"] = timeout_error
+        return salvaged
     return {
         "status": "failed",
         "engine": "forge_fusion",
@@ -374,7 +454,7 @@ def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutEx
         "requires_e2e_validation": False,
         "workspace": str(output_dir or ""),
         "error_class": "subprocess_timeout",
-        "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+        "error": timeout_error,
     }
 
 
@@ -436,9 +516,15 @@ def main(argv: list[str] | None = None) -> int:
 
     _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
     output_dir = str(payload.get("output_dir") or "")
-    # The output dir is keyed on the task, so a run that dies before writing a
-    # manifest would otherwise have the previous run's KEEP read back as its own.
-    (Path(output_dir or ".") / "fusion_manifest.json").unlink(missing_ok=True)
+    # The output dir is keyed on the task, so a run that dies before writing new
+    # artifacts must not salvage the previous run's KEEP as its own.
+    output_root = Path(output_dir or ".")
+    for stale_name in (
+        "fusion_manifest.json",
+        "kernel_keep_checkpoint.json",
+        "fusion.patch",
+    ):
+        (output_root / stale_name).unlink(missing_ok=True)
     timeout_sec = _timeout_sec(payload)
     try:
         proc = _run_with_tree_timeout(cmd, timeout_sec)
