@@ -260,12 +260,13 @@ class SubAgentRunner:
                         },
                         context="dispatch_policy_denied",
                     )
+                    rule = denied.rule or "denied"
                     return SubAgentResult(
                         task_id=task.task_id,
                         state="failed",
                         result={},
                         error=str(denied),
-                        error_class=f"policy_{denied.rule or 'denied'}",
+                        error_class=f"policy_{rule}",
                     )
 
             # Running an action whose lanes nobody holds would run it

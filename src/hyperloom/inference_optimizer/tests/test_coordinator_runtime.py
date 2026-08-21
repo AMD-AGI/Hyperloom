@@ -2184,7 +2184,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
         action="explore",
         ttl_sec=600,
     )
-    await tr.transition(task.task_id, "cancelled", evidence={"reason": "kill_task"})
+    await tr.transition(task.task_id, "cancelled", evidence={"reason": "prune_branch"})
 
     with pytest.raises(IllegalTransition):
         await sub.run_task(task, prebound_lease=lease)
