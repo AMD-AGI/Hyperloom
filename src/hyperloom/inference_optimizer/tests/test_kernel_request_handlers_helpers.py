@@ -307,3 +307,79 @@ def test_source_escapes_reusable_roots(monkeypatch) -> None:
     assert krh._source_escapes_reusable_roots("/sgl-workspace/aiter/../../etc/passwd") is True
     # No ``..`` at all -> never treated as an escape here (substring check owns it).
     assert krh._source_escapes_reusable_roots("/etc/passwd") is False
+
+
+# -- unattempted_skip_reason / gate-rejected dispatch ----------------------
+def test_unattempted_skip_reason_covers_the_bookkeeping_reasons() -> None:
+    """Only reasons meaning "no backend ran" count as unattempted."""
+    assert krh.unattempted_skip_reason("below_min_gpu_pct=5.0")
+    assert krh.unattempted_skip_reason("group_exhausted")
+    assert krh.unattempted_skip_reason("opfanout_merged_into=k002")
+    assert not krh.unattempted_skip_reason("")
+    assert not krh.unattempted_skip_reason("non_reusable_kernel")
+
+
+def test_batch_candidates_reports_its_skip_reasons(tmp_path: Path) -> None:
+    """The filter's reasons reach the caller, not just the log."""
+    artifact = tmp_path / "kernel_candidates.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {
+                        "kernel_id": "k001",
+                        "name": "cold_kernel",
+                        "gpu_pct": 1.0,
+                        "reusable_native_kernel": True,
+                        "source_file": "/pkg/k.py",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    skipped: dict[str, str] = {}
+    selected = krh._batch_kernel_candidates(
+        {"candidates_path": str(artifact)},
+        skipped_out=skipped,
+    )
+    assert selected == []
+    assert skipped["k001"].startswith("below_min_gpu_pct")
+
+
+def test_gate_rejected_named_kernel_is_skipped_not_failed(tmp_path: Path) -> None:
+    """A threshold is not an optimization failure.
+
+    Recording one spends the source's retry quota on a decision no backend made,
+    and the report then explains a technical failure that never happened.
+    """
+    import asyncio
+
+    artifact = tmp_path / "kernel_candidates.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {
+                        "kernel_id": "k001",
+                        "name": "cold_kernel",
+                        "gpu_pct": 1.0,
+                        "reusable_native_kernel": True,
+                        "source_file": "/pkg/k.py",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = tmp_path / "session"
+    session.mkdir()
+    out = asyncio.run(
+        krh.run_optimization_handler(
+            {"candidates_path": str(artifact), "kernel_id": "k001"},
+            session_dir=session,
+        )
+    )
+    assert out["status"] == "skipped"
+    assert out["reason"].startswith("below_min_gpu_pct")
+    assert out["kernel_id"] == "k001"
