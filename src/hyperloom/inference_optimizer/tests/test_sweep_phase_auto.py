@@ -306,11 +306,17 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
 
 
 @pytest.mark.asyncio
-async def test_stack_validation_surfaces_partial_inner_revert(
+async def test_stack_validation_partial_revert_becomes_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A tampered inner manifest can make one stack revert partial; surface it."""
+    """A partial inner revert means the patch may still be on a remote pod.
+
+    Under the new patch lifecycle contract, partial non-KEEP reverts are not
+    treated as successful: the top-level status becomes "failed" and
+    patch_cleanup_status becomes "recovery_required" so the coordinator knows
+    the tree may be in an unknown state.
+    """
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
@@ -318,7 +324,10 @@ async def test_stack_validation_surfaces_partial_inner_revert(
     result = await c._run_kernel_stack_validation_e2e(stack)
 
     assert result["decision"] == "REVERT"
-    assert result["revert_result"]["status"] == "partial"
+    # partial -> failed at the aggregate level: patch still live on remote pod
+    assert result["status"] == "failed"
+    assert result["patch_cleanup_status"] == "recovery_required"
+    assert result["patch_cleanup_action"] == "revert"
     assert all(r["status"] == "partial" for r in result["revert_result"]["stack_reverts"])
 
 
@@ -1449,3 +1458,176 @@ def test_validate_intent_denies_llm_conc_sweep_delegate_as_coordinator_managed()
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
     assert excinfo.value.rule == "phase_incompatible"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Patch lifecycle convergence — new tests (P1-19 fix verification)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_failed_revert_sets_status_failed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A completely failed stack revert must set top-level status='failed'.
+
+    Previously _stack_revert_status mapped {"status": "failed"} -> "ok",
+    causing a silent false success. The new contract surfaces it as top-level
+    failure so the coordinator does not promote a patch that may still be live.
+    """
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="failed")
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "REVERT"
+    assert result["status"] == "failed"
+    assert result["patch_cleanup_status"] == "recovery_required"
+    assert result["patch_cleanup_action"] == "revert"
+    assert result.get("error_class") == "patch_revert_incomplete"
+    assert all(r["status"] == "failed" for r in result["revert_result"]["stack_reverts"])
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_keep_calls_finalize(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A KEEP result must call _maybe_finalize_kernel_patch for each applied patch.
+
+    Previously the KEEP path never called finalize because the synthetic
+    apply_result had no manifest_path. The new contract calls it explicitly and
+    records patch_cleanup_status.
+    """
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    finalize_calls: list[dict] = []
+
+    def _spy_finalize(apply_result):
+        finalize_calls.append(apply_result)
+        return {"status": "ok", "manifest_path": str(apply_result.get("manifest_path") or "")}
+
+    monkeypatch.setattr(krh, "_maybe_finalize_kernel_patch", _spy_finalize)
+
+    def _fake_apply_with_manifest(payload, *, session_dir, kernel_id):
+        return {
+            "status": "ok",
+            "kernel_id": kernel_id,
+            "manifest_path": f"/tmp/{kernel_id}.manifest",
+        }
+
+    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", _fake_apply_with_manifest)
+
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "KEEP"
+    assert result["status"] == "ok"
+    assert result["patch_cleanup_status"] == "complete"
+    # One finalize call per patch in the two-entry stack.
+    assert len(finalize_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW.
+
+    The eval already runs (RUN_EVAL=true by default, no defer_accuracy set for
+    this lane), so calling the gate is zero extra GPU cost.
+    """
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    def _fake_accuracy_gate(bench_result, *, session_dir, workspace):
+        return {
+            "blocked": True,
+            "accuracy_pass": False,
+            "reason": "accuracy regression detected",
+            "degraded": False,
+            "accuracy": 0.70,
+            "baseline_accuracy": 0.85,
+            "task": "gsm8k",
+            "metric": "exact_match",
+            "source_file": "/tmp/result.json",
+        }
+
+    monkeypatch.setattr(krh, "_grade_integrate_accuracy", _fake_accuracy_gate)
+
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "NEEDS_REVIEW"
+    # NEEDS_REVIEW is non-KEEP so reverts must have been called and succeeded.
+    assert result["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_revert_partial_becomes_failed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Non-KEEP + partial revert must set top-level status='failed'.
+
+    Previously revert_complete accepted "ok" or "partial", hiding multinode
+    revert failures where the patch remained live on a remote pod.
+    """
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    import hyperloom.orchestrator.actions.executors.benchmark_result as br
+
+    monkeypatch.setattr(
+        krh,
+        "_maybe_revert_kernel_patch",
+        lambda apply_result: {"status": "partial", "reason": "mn_revert_failed"},
+    )
+    monkeypatch.setattr(
+        krh,
+        "_maybe_apply_kernel_patch",
+        lambda payload, *, session_dir, kernel_id=None: {
+            "status": "ok",
+            "kernel_id": str(kernel_id or ""),
+            "manifest_path": "/tmp/fake.manifest",
+        },
+    )
+
+    class _FakeBaseline:
+        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+
+        def __init__(self, *, session_dir):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            return {"output_throughput": 98.0}  # below base_tput -> REVERT
+
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", _FakeBaseline)
+    monkeypatch.setattr(br, "is_valid_measurement", lambda r: True)
+
+    from hyperloom.orchestrator.kernel.request_handlers import integrate_handler
+
+    result = await integrate_handler(
+        {
+            "task_id": "test-partial-revert",
+            "kernel_id": "k-test",
+            "patch_path": "/tmp/fake.patch",
+            "target_file": "/tmp/fake.cu",
+            "base_tput": 100.0,
+            "config_path": str(tmp_path / "base.yaml"),
+        },
+        session_dir=tmp_path,
+    )
+
+    assert result["decision"] == "REVERT"
+    assert result["status"] == "failed"
+    assert result["patch_cleanup_status"] == "recovery_required"
+    assert result["patch_cleanup_action"] == "revert"
+    assert result.get("error_class") == "patch_revert_incomplete"

@@ -329,7 +329,7 @@ def test_collective_replay_preserves_completed_integration(tmp_path):
 
     state.record_collective(campaign, tmp_path)
 
-    assert state.last_collective["integration_status"] == "complete"
+    assert state.last_collective["patch_cleanup_status"] == "complete"
     assert state.last_collective["integration_decision"] == "KEEP"
 
 
@@ -583,3 +583,63 @@ def test_policy_gate_rejects_an_llm_issued_lane_request():
             )
         assert exc.value.rule == "phase_incompatible"
         assert kind in str(exc.value)
+
+
+def test_resume_compat_old_integration_status_accepted(tmp_path):
+    """A state.json written before the patch_cleanup_status migration must load cleanly.
+
+    The validator and classifiers fall back to the legacy 'integration_status'
+    field so a --resume of a session that was mid-collective-integration when
+    the binary was updated does not raise.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.kernel.attempt_summary import (
+        _classify_collective_attempt,
+        CATEGORY_INTEGRATED,
+        CATEGORY_KEEP_PENDING,
+    )
+    from hyperloom.orchestrator.phases.machine_state import collective_integration_pending
+    from types import SimpleNamespace
+
+    state = SharedState.load_or_init(tmp_path)
+    campaign = {
+        "collective_attempt_id": "attempt-legacy",
+        "integration_id": "integ-legacy",
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+    }
+    state.record_collective(campaign, tmp_path)
+
+    # Simulate a state.json written by old code: integration_status instead of
+    # patch_cleanup_status.
+    old_style_result = {
+        "status": "ok",
+        "decision": "KEEP",
+        "integration_status": "complete",   # old field name
+        "integration_recovery_action": "",
+    }
+    # Should not raise despite using the old field.
+    state.record_collective_integration(old_style_result, tmp_path, integration_id="integ-legacy")
+
+    # Reads are also backward-compat.
+    last = state.last_collective
+    assert last.get("patch_cleanup_status") == "complete" or last.get("integration_status") == "complete"
+    assert last["integration_decision"] == "KEEP"
+
+    # Classifiers handle old records.
+    old_record = {"integration_decision": "KEEP", "integration_status": "complete"}
+    assert _classify_collective_attempt(old_record) == CATEGORY_INTEGRATED
+
+    old_pending = {"integration_decision": "KEEP", "integration_status": "pending"}
+    assert _classify_collective_attempt(old_pending) == CATEGORY_KEEP_PENDING
+
+    # collective_integration_pending uses fallback too.
+    fake_state = SimpleNamespace(last_collective={
+        "kept": True,
+        "requires_e2e_validation": True,
+        "integration_status": "pending",   # old field, no patch_cleanup_status
+    })
+    assert collective_integration_pending(fake_state) is True
