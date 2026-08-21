@@ -38,6 +38,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
@@ -713,6 +714,7 @@ class ExploreExecutor:
                 "error": f"config not found: {config_path}",
             }
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
@@ -723,7 +725,11 @@ class ExploreExecutor:
         # ----- Workload-contract materialization ---------------------------
         # Re-materialize so variant YAMLs honour the operator's actual
         # workload (CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION).
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=str(getattr(shared_state, "model_path", "") or "") if shared_state else "",
+            for_serving=True,
+        )
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )

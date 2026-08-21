@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for aiter tuned-GEMM shape alignment and coverage reporting."""
+"""Unit tests for aiter tuned-GEMM shape alignment and coverage reporting.
+
+Also covers the fail-open guards around that reporting: its verdict can block a
+KEEP, so every way it can fail to reach one has to degrade to "undetermined"
+rather than to "the artifact did not apply".
+"""
 
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_lookup_keys,
@@ -285,6 +292,19 @@ class TestTunedCsvCoverage:
     def test_missing_file_is_empty(self, tmp_path):
         assert tuned_csv_shapes(tmp_path / "nope.csv") == set()
 
+    def test_an_fmoe_csv_yields_no_dense_shapes(self, tmp_path):
+        """An MoE table has no M,N,K columns; reading one as dense would invent
+        shapes and report coverage against a schema it never described."""
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelName\n"
+            "256,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
+            "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,kernel_a\n",
+            encoding="utf-8",
+        )
+        assert tuned_csv_shapes(path) == set()
+
     def test_coverage_flags_an_unreachable_artifact(self, tmp_path):
         """Reproduces the observed failure: raw-M rows, drifted runtime M."""
         path = self._csv(tmp_path, [(1076, 5120, 17408), (4142, 5120, 5120)])
@@ -310,3 +330,226 @@ class TestTunedCsvCoverage:
         report = tuned_config_coverage([(1, 2, 3)], [])
         assert report["requested"] == 0
         assert report["coverage_pct"] is None
+
+
+class TestCoverageGateDoesNotBlockOnMissingEvidence:
+    """The coverage report can block a KEEP, so it must never guess.
+
+    A report of 0% is a claim the runtime could not reach the tuned rows. When
+    the CSV yields no keys at all, we have not established that -- we have
+    failed to read our own artifact. Reporting it as 0% lets an unreadable file
+    revert a candidate whose throughput genuinely improved, which is the exact
+    conflation this change set exists to remove.
+    """
+
+    ENVS = {"AITER_CONFIG_GEMM": ""}
+    LOOKUP_LINE = (
+        "[aiter] shape is M:1082, N:5120, K:17408, not found tuned config in "
+        "/x/candidate.csv, will use default config!"
+    )
+    HEADER = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
+
+    def _phase(self, tmp_path):
+        from types import SimpleNamespace
+
+        run_dir = tmp_path / "runs" / "integrate" / "integrate-gemm_tune_aiter_dense"
+        run_dir.mkdir(parents=True)
+        (run_dir / "server.log").write_text(self.LOOKUP_LINE + "\n", encoding="utf-8")
+        return SimpleNamespace(session_dir=tmp_path)
+
+    def _call(self, phase, csv_path):
+        """Exercise the body directly, so a bound-method slip cannot fake a pass."""
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        return KernelPhase._gemm_tuned_config_coverage_impl(
+            phase, "aiter_dense", {"AITER_CONFIG_GEMM": str(csv_path)}
+        )
+
+    def test_unreadable_csv_is_undetermined_not_zero_coverage(self, tmp_path):
+        phase = self._phase(tmp_path)
+        empty = tmp_path / "candidate.csv"
+        empty.write_text("", encoding="utf-8")
+
+        assert self._call(phase, empty) is None
+
+    def test_missing_csv_is_undetermined(self, tmp_path):
+        phase = self._phase(tmp_path)
+
+        assert self._call(phase, tmp_path / "absent.csv") is None
+
+    def test_csv_without_shape_columns_is_undetermined(self, tmp_path):
+        phase = self._phase(tmp_path)
+        odd = tmp_path / "candidate.csv"
+        odd.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
+
+        assert self._call(phase, odd) is None
+
+    def test_readable_csv_with_wrong_keys_still_reports_zero(self, tmp_path):
+        """Fail-open on unreadable input must not weaken the real check."""
+        phase = self._phase(tmp_path)
+        wrong = tmp_path / "candidate.csv"
+        wrong.write_text(
+            f"{self.HEADER}\ngfx950,256,4096,5120,5120,ck,0,0,1.0,name,1,1,0\n",
+            encoding="utf-8",
+        )
+
+        report = self._call(phase, wrong)
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["coverage_pct"] == 0.0
+
+    def test_matching_csv_reports_applied(self, tmp_path):
+        phase = self._phase(tmp_path)
+        good = tmp_path / "candidate.csv"
+        good.write_text(
+            f"{self.HEADER}\ngfx950,256,1088,5120,17408,ck,0,0,1.0,name,1,1,0\n",
+            encoding="utf-8",
+        )
+
+        report = self._call(phase, good)
+        assert report is not None
+        assert report["artifact_applied"] is True
+        assert report["coverage_pct"] == 100.0
+
+    def test_unexpected_failure_is_undetermined(self, tmp_path):
+        """The wrapper swallows anything the body throws (it can block a KEEP)."""
+        from types import SimpleNamespace
+
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("coverage exploded")
+
+        phase = SimpleNamespace(
+            session_dir=tmp_path,
+            _gemm_tuned_config_coverage_impl=_boom,
+        )
+
+        assert (
+            KernelPhase._gemm_tuned_config_coverage(phase, "fmoe_ck", self.ENVS)
+            is None
+        )
+
+
+class TestSafeMtime:
+    def test_missing_path_sorts_last_instead_of_raising(self, tmp_path):
+        from hyperloom.orchestrator.phases.kernel import _safe_mtime
+
+        assert _safe_mtime(tmp_path / "gone.log") == 0.0
+
+    def test_existing_path_returns_its_mtime(self, tmp_path):
+        from hyperloom.orchestrator.phases.kernel import _safe_mtime
+
+        path = tmp_path / "server.log"
+        path.write_text("x", encoding="utf-8")
+        assert _safe_mtime(path) == path.stat().st_mtime
+
+
+class TestE2EValidationFailsOpen:
+    """E2E validation owns the coverage check, so its own failure cannot escape.
+
+    Both entrypoints into gemm tuning guard only the tuning call, not the
+    validation that follows it. An exception escaping here takes the KERNEL
+    phase down over a candidate that simply went unmeasured.
+    """
+
+    def _phase(self, tmp_path, validate):
+        from types import SimpleNamespace
+
+        recorded: list[dict] = []
+        saved: list[object] = []
+        state = SimpleNamespace(
+            record_gemm_tuning=recorded.append,
+            save=saved.append,
+            macro_cycle=0,
+        )
+        return SimpleNamespace(
+            session_dir=tmp_path,
+            shared_state=state,
+            _sync_profile_state_after_gemm_roofline=lambda _r: None,
+            _validate_gemm_tuning_e2e=validate,
+        ), recorded
+
+    @pytest.mark.asyncio
+    async def test_exception_is_recorded_as_a_fault_not_raised(self, tmp_path):
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        async def _boom(_result):
+            raise RuntimeError("e2e exploded")
+
+        phase, recorded = self._phase(tmp_path, _boom)
+        result: dict = {"backend": "forge"}
+
+        await KernelPhase._handle_gemm_tuning_result(phase, result)
+
+        assert recorded == [result]
+        fault = result["e2e_results"]["faults"][0]
+        assert fault["error_class"] == "e2e_validation_exception"
+        assert "RuntimeError: e2e exploded" in fault["error"]
+
+    @pytest.mark.asyncio
+    async def test_the_unmeasured_envelope_is_neutralised(self, tmp_path):
+        """An arm that raised was never measured, so it must not read as a KEEP.
+
+        Recording the fault while leaving the bridge's KEEP envelope in place
+        would let Orchestration bundle an integrate against it.
+        """
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        async def _boom(_result):
+            raise RuntimeError("e2e exploded")
+
+        phase, _ = self._phase(tmp_path, _boom)
+        result: dict = {
+            "backend": "forge",
+            "decision": "KEEP",
+            "requires_e2e_validation": True,
+            "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+            "extra_envs": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+        }
+
+        await KernelPhase._handle_gemm_tuning_result(phase, result)
+
+        assert result["decision"] == "REVERT"
+        assert result["requires_e2e_validation"] is False
+        assert result["e2e_validated"] is False
+        assert not result["recommended_env"]
+        assert not result["extra_envs"]
+        # The reason still has to be legible, not just absent.
+        assert result["e2e_results"]["faults"][0]["error_class"] == "e2e_validation_exception"
+
+    @pytest.mark.asyncio
+    async def test_existing_faults_are_preserved(self, tmp_path):
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        async def _boom(_result):
+            raise ValueError("second failure")
+
+        phase, _ = self._phase(tmp_path, _boom)
+        result: dict = {
+            "backend": "forge",
+            "e2e_results": {"faults": [{"tuner": "fmoe_ck", "error_class": "server_died"}]},
+        }
+
+        await KernelPhase._handle_gemm_tuning_result(phase, result)
+
+        faults = result["e2e_results"]["faults"]
+        assert [f["error_class"] for f in faults] == [
+            "server_died",
+            "e2e_validation_exception",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_success_path_adds_no_fault(self, tmp_path):
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+        async def _ok(_result):
+            return None
+
+        phase, recorded = self._phase(tmp_path, _ok)
+        result: dict = {"backend": "forge"}
+
+        await KernelPhase._handle_gemm_tuning_result(phase, result)
+
+        assert recorded == [result]
+        assert "e2e_results" not in result
