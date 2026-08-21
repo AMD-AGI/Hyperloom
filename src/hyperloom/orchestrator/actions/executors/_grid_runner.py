@@ -2616,10 +2616,12 @@ async def run_grid(
                 # actual failure instead of a blank `error`.
                 if not error.strip():
                     error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
-                # Bypass writes the real diagnostic into benchmark_report.json
-                # ``errors`` on a pre-spawn miss (script not found) before any
-                # log file exists. Read it last so abort_reason.json is never
-                # blank when the report already named the failure.
+                # Last resort: report.errors when the pipe and on-disk logs are
+                # all empty. Scriptable pre-spawn miss normally hits the log
+                # fallback (run_scriptable writes scriptable_stderr.log, then
+                # write_log_aliases copies it to benchmark_stderr.log). This
+                # rung covers log-write OSError and other backends that named
+                # the failure only in the report.
                 if not error.strip():
                     error = redact_secret_values(_report_errors_summary(report))
                 invalid_class = "magpie_nonzero_invalid_measurement"
@@ -2800,10 +2802,10 @@ def _write_variant_abort_marker(
 def _report_errors_summary(report: dict[str, Any] | None, limit: int = 2000) -> str:
     """Join ``benchmark_report.json`` ``errors`` into a single diagnostic.
 
-    The bypass scriptable path records a pre-spawn miss (missing entrypoint)
-    here and nowhere else when the child logs were never opened. Empty or
-    non-list ``errors`` yield ``""`` so callers can chain this after the
-    on-disk log fallback.
+    Last-resort fallback after the parent pipe and on-disk logs: the report
+    may still name the failure when log writes were swallowed (``OSError``)
+    or another backend never opened a log. Empty or non-list ``errors``
+    yield ``""`` so callers can chain this after ``_on_disk_stderr_tail``.
 
     Args:
         report: Parsed ``benchmark_report.json`` mapping, or None.

@@ -466,7 +466,13 @@ class TestKeepGoingAsymmetry:
         assert results[0].returncode == 1
 
     def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
-        """Pre-spawn miss: empty pipe + empty logs, diagnostic lives in report.errors."""
+        """Last-resort: empty pipe and no log files, diagnostic only in report.errors.
+
+        The live scriptable miss writes ``scriptable_stderr.log`` (then aliased
+        to ``benchmark_stderr.log``), so the on-disk log fallback fires first.
+        This fixture is the remaining contract: abort_reason.json still gets
+        ``error`` when nothing on disk exists except the report.
+        """
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
