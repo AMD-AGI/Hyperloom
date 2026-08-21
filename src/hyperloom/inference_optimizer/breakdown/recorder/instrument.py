@@ -3501,7 +3501,6 @@ def record_kernel_e2e(
             )
             measurement_refs.append(measurement_id)
         parity = evidence.get("parity") or evidence.get("output_parity") or evidence.get("accuracy_pass")
-        paired_ab = evidence.get("paired_ab") if isinstance(evidence.get("paired_ab"), Mapping) else {}
         decision_reason = str(evidence.get("decision_reason") or "")
         final_validated = bool(validated) and decision_value in {"KEEP", "ADOPTED"}
         gate = {
@@ -3512,7 +3511,6 @@ def record_kernel_e2e(
             "decision": "allow" if final_validated else "deny" if decision_value in {"REVERT", "REJECTED"} else "review",
             "reason": decision_reason,
             "evidence": {
-                "paired_ab": dict(paired_ab),
                 "parity": parity,
                 "validated": validated,
                 "validation_tier": validation_tier or evidence.get("validation_tier"),
@@ -3594,7 +3592,6 @@ def record_kernel_e2e(
             adoption_refs=adoption_refs,
             extensions={
                 "integrate": {
-                    "paired_ab": dict(paired_ab),
                     "parity": parity,
                     "decision_reason": decision_reason,
                 }
