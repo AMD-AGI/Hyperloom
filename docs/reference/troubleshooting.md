@@ -9,7 +9,7 @@ myst:
 A consolidated symptom → cause → fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
-[`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/kernel-execution-path.md),
+[`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md),
 [`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
 [`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
 
@@ -287,7 +287,7 @@ and the runtime never self-heals the checkout.
 **Cause**: The open-source deps now default to the writable, repo-local
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}`, cloned per revision as
 `TraceLens@<sha>`. A stale `kernel-agent.env.sh` or `.env` that still
-pins `TRACELENS_ROOT` to an old path (e.g. `/tmp/...` or
+pins `TRACELENS_ROOT` to an old path (for example, `/tmp/...` or
 `/opt/hyperloom/open-source-repos/...`) is treated as an explicit
 operator override — self-heal is scoped to the installer-managed default
 only, so a non-default path is never auto-re-cloned and fails fast when
@@ -304,7 +304,7 @@ that path is missing or reaped.
    The installer rewrites `kernel-agent.env.sh` with the
    `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` default and
    clones and pins TraceLens there.
-2. **Point the deps cache at a different writable directory** (e.g. a
+2. **Point the deps cache at a different writable directory** (for example, a
    shared or larger volume):
    ```bash
    export HYPERLOOM_CACHE_DIR="$USER_DATA_PATH/.hyperloom-cache"
