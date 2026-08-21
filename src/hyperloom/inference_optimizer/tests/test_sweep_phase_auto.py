@@ -1534,6 +1534,46 @@ async def test_stack_validation_keep_calls_finalize(
 
 
 @pytest.mark.asyncio
+async def test_stack_validation_keep_partial_finalize_requires_recovery(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """KEEP + partial finalize must ask for recovery, not report cleanup complete.
+
+    finalize returns "partial" when a backup could not be deleted, a backup path
+    failed containment, or a remote pod's finalize failed. The patch itself is
+    correctly on tree, so the top status stays "ok".
+    """
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    monkeypatch.setattr(
+        krh,
+        "_maybe_finalize_kernel_patch",
+        lambda apply_result: {"status": "partial", "issues": [{"kind": "multinode_finalize"}]},
+    )
+    monkeypatch.setattr(
+        krh,
+        "_maybe_apply_kernel_patch",
+        lambda payload, *, session_dir, kernel_id: {
+            "status": "ok",
+            "kernel_id": kernel_id,
+            "manifest_path": f"/tmp/{kernel_id}.manifest",
+        },
+    )
+
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=115.0)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "KEEP"
+    assert result["status"] == "ok"
+    assert result["patch_cleanup_status"] == "recovery_required"
+    assert result["patch_cleanup_action"] == "finalize"
+
+
+@pytest.mark.asyncio
 async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     tmp_path: Path,
     monkeypatch,

@@ -429,7 +429,7 @@ class KernelStackPhase(PhaseHandler):
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
-        from ..kernel.patch_lifecycle import cleanup_complete, cleanup_verdict
+        from ..kernel.patch_lifecycle import cleanup_verdict, lifecycle_complete
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
             _grade_integrate_accuracy,
@@ -537,17 +537,14 @@ class KernelStackPhase(PhaseHandler):
             if decision == "KEEP":
                 for applied in apply_results:
                     finalize_results.append(_maybe_finalize_kernel_patch(applied))
-                all_finalized = all(cleanup_complete(fr) for fr in finalize_results)
+                all_finalized = all(lifecycle_complete(fr) for fr in finalize_results)
                 cs = "complete" if all_finalized else "recovery_required"
                 ca = "" if all_finalized else "finalize"
                 revert_result: dict[str, Any] = {"status": "skipped", "reason": "KEEP decision"}
                 top_status = "ok"
             else:
                 stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-                all_reverted = all(
-                    str(r.get("status") or "") in {"ok", "skipped"}
-                    for r in stack_reverts
-                )
+                all_reverted = all(lifecycle_complete(r) for r in stack_reverts)
                 top_status, cs, ca = cleanup_verdict(
                     decision=decision,
                     revert_result={"status": "ok" if all_reverted else "failed"},
