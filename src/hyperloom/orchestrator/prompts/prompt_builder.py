@@ -1046,10 +1046,7 @@ def build_orchestration_prompt(
     # the model how to answer. Nothing later in the pipeline can tell that apart
     # from a fragment that simply had nothing to say.
     if transport and transport not in TRANSPORTS:
-        raise ValueError(
-            f"unknown prompt transport {transport!r}; expected one of "
-            f"{', '.join(sorted(TRANSPORTS))}"
-        )
+        raise ValueError(f"unknown prompt transport {transport!r}; expected one of {', '.join(sorted(TRANSPORTS))}")
     actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
         action_registry,
         enabled_actions,

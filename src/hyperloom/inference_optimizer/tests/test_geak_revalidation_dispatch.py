@@ -418,9 +418,7 @@ def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
 
 
 def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
-    facts, warnings = _render_final(
-        {"status": "awaiting_rebench", "self_reported_gain_pct": 12.5}
-    )
+    facts, warnings = _render_final({"status": "awaiting_rebench", "self_reported_gain_pct": 12.5})
 
     assert any("AWAITING" in f for f in facts)
     assert warnings

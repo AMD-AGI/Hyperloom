@@ -168,9 +168,7 @@ def test_sglang_context_agentx_skips_isl_osl_cap(tmp_path, monkeypatch):
     """AgentX ON sizes the window off the model, not the placeholder ISL/OSL."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    out = inject_sglang_context_length(
-        "", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=_NATIVE
-    )
+    out = inject_sglang_context_length("", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=_NATIVE)
     assert out.strip() == f"--context-length {_NATIVE}"
 
 
@@ -178,9 +176,7 @@ def test_sglang_context_agentx_still_honours_explicit_ceiling(tmp_path, monkeypa
     """An explicit MAX_MODEL_LEN ceiling keeps clamping under AgentX."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    out = inject_sglang_context_length(
-        "", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=131072
-    )
+    out = inject_sglang_context_length("", "sglang", _model_dir(tmp_path), 1024, 1024, max_model_len=131072)
     assert out.strip() == "--context-length 131072"
 
 

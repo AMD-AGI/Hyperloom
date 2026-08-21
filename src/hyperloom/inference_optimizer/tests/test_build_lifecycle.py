@@ -25,24 +25,34 @@ from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
 
 
 def _action(cmd, **kw):
-    base = dict(
-        gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", build_command=tuple(cmd)
-    )
+    base = dict(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", build_command=tuple(cmd))
     base.update(kw)
     return TargetedBuildAction(**base)
 
 
 def _real_action(**kw):
-    base = dict(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe",
-                ref="v0.1.0", repo_url="https://github.com/ROCm/aiter", gpu_arch="gfx950")
+    base = dict(
+        gap_id="g",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
+        ref="v0.1.0",
+        repo_url="https://github.com/ROCm/aiter",
+        gpu_arch="gfx950",
+    )
     base.update(kw)
     return TargetedBuildAction(**base)
 
 
 def _fake_action(**kw):
     """Action with an explicit build_command (fake-builder path)."""
-    base = dict(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe",
-                build_command=(sys.executable, "-c", "print('fake')"))
+    base = dict(
+        gap_id="g",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
+        build_command=(sys.executable, "-c", "print('fake')"),
+    )
     base.update(kw)
     return TargetedBuildAction(**base)
 
@@ -64,6 +74,7 @@ async def _drain(bl, *, ticks=200, sleep=0.05):
 # ---------------------------------------------------------------------------
 # pump/reap lifecycle
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_enqueue_then_build_succeeds(build_coord, build_lifecycle):
@@ -122,7 +133,9 @@ async def test_timeout_kills_and_marks_failed(build_coord, build_lifecycle):
 @pytest.mark.asyncio
 async def test_build_lane_serializes_two_builds(build_coord, build_lifecycle):
     """Capacity-1 build_lane: the second build stays queued until the first ends."""
-    a1 = await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "import time; time.sleep(2)"], ref="v1"))
+    a1 = await build_lifecycle.enqueue_targeted_build(
+        _action([sys.executable, "-c", "import time; time.sleep(2)"], ref="v1")
+    )
     a2 = await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "print('two')"], ref="v2"))
     assert a1 != a2
     await build_lifecycle._maybe_pump_targeted_build(tick=0)
@@ -157,6 +170,7 @@ async def test_build_lane_empty_conflict_does_not_block_serving(build_coord, bui
 # ---------------------------------------------------------------------------
 # lifecycle -> driver wiring
 # ---------------------------------------------------------------------------
+
 
 def test_driver_command_real_component_uses_driver_module(tmp_path):
     action = _real_action()
@@ -194,6 +208,7 @@ async def test_pump_real_component_writes_plan_json(build_coord, build_lifecycle
         raise RuntimeError("captured")
 
     from hyperloom.orchestrator.loop import build_lifecycle as blc_mod
+
     original = blc_mod.spawn_build
     blc_mod.spawn_build = _capture_spawn
     try:
@@ -224,6 +239,7 @@ async def test_pump_fake_component_runs_literal_command(build_coord, build_lifec
         raise RuntimeError("captured")
 
     from hyperloom.orchestrator.loop import build_lifecycle as blc_mod
+
     original = blc_mod.spawn_build
     blc_mod.spawn_build = _capture_spawn
     try:
@@ -242,6 +258,7 @@ async def test_pump_fake_component_runs_literal_command(build_coord, build_lifec
 # resume recovery for an in-flight build
 # ---------------------------------------------------------------------------
 
+
 def _silent_plan():
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -255,10 +272,7 @@ def _silent_plan():
 def _build_backends():
     from hyperloom.orchestrator.roles import MockBackend
 
-    return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "critic", "robustness")
-    }
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 @pytest.fixture
@@ -281,9 +295,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
     resume_coord._resumed_from["is_resume"] = True
     import subprocess
 
-    proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True
-    )
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
     pgid = os.getpgid(proc.pid)
 
     attempt_root = Path(resume_coord.session_dir) / "enablement" / "builds" / "t-orphan"
@@ -310,9 +322,7 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 
     report = await resume_coord._resume_consistency_pass()
 
-    fix = next(
-        f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "reclaimed_pending_targeted_build"
-    )
+    fix = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "reclaimed_pending_targeted_build")
     assert fix["task_id"] == task.task_id
     assert resume_coord.shared_state.pending_targeted_build == {}
     assert resume_coord.shared_state.enablement.last_build_failure["failure_class"] == "timeout"
@@ -332,7 +342,4 @@ async def test_resume_no_pending_targeted_build_is_noop(resume_coord):
     resume_coord._resumed_from["is_resume"] = True
     resume_coord.shared_state.pending_targeted_build = {}
     report = await resume_coord._resume_consistency_pass()
-    assert not any(
-        isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build"
-        for f in report["fixes"]
-    )
+    assert not any(isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build" for f in report["fixes"])

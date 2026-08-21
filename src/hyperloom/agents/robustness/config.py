@@ -402,5 +402,3 @@ def _discover_llm_model(provider: str) -> str:
     if provider == "openai":
         return env.get("OPENAI_MODEL", "").strip() or env.get("CODEX_MODEL", "").strip() or "gpt-5.6-sol"
     return env.get("ANTHROPIC_MODEL", "").strip() or env.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
-
-

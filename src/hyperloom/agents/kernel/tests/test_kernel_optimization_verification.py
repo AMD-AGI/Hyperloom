@@ -1086,9 +1086,7 @@ def test_build_patch_snapshot_uses_exported_files_without_kernel_repo(
     )
 
     assert res is not None
-    assert (
-        Path(res["snapshot_dir"]) / "vllm" / "ops" / "kernel.py"
-    ).read_text() == "VALUE = 2\n"
+    assert (Path(res["snapshot_dir"]) / "vllm" / "ops" / "kernel.py").read_text() == "VALUE = 2\n"
 
 
 def test_prepare_deploy_patch_drops_python_cache_entries(tmp_path):
@@ -1119,14 +1117,7 @@ def test_prepare_deploy_patch_drops_python_cache_entries(tmp_path):
 def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
     deploy_root = tmp_path / "site-packages"
     source = deploy_root / "vllm" / "model_executor" / "attention.py"
-    changed = (
-        deploy_root
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
-    )
+    changed = deploy_root / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     source.parent.mkdir(parents=True)
     changed.parent.mkdir(parents=True)
     source.write_text("def wrapper():\n    return True\n")
@@ -1134,10 +1125,7 @@ def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
     descriptors = [
         {
             "op": "write",
-            "path": (
-                "vllm/v1/attention/ops/"
-                "triton_unified_attention.py"
-            ),
+            "path": ("vllm/v1/attention/ops/triton_unified_attention.py"),
             "is_new": False,
         }
     ]
@@ -1230,28 +1218,14 @@ def test_verification_deploys_sibling_forge_change_without_kernel_repo(
 ):
     deploy_root = tmp_path / "site-packages"
     source = deploy_root / "vllm" / "model_executor" / "attention.py"
-    changed = (
-        deploy_root
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
-    )
+    changed = deploy_root / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     source.parent.mkdir(parents=True)
     changed.parent.mkdir(parents=True)
     source.write_text("def wrapper():\n    return True\n")
     changed.write_text("def kernel():\n    return 1\n")
 
     exported = tmp_path / "canonical-files"
-    exported_changed = (
-        exported
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
-    )
+    exported_changed = exported / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     exported_changed.parent.mkdir(parents=True)
     exported_changed.write_text("def kernel():\n    return 2\n")
     patch = tmp_path / "forge.patch"
@@ -1297,16 +1271,9 @@ def test_verification_deploys_sibling_forge_change_without_kernel_repo(
     assert verification["artifact_valid"] is True
     assert bundle["type"] == "patch_snapshot"
     assert bundle["repo_root"] == str(deploy_root)
-    assert bundle["write_paths"] == [
-        "vllm/v1/attention/ops/triton_unified_attention.py"
-    ]
+    assert bundle["write_paths"] == ["vllm/v1/attention/ops/triton_unified_attention.py"]
     assert (
-        Path(bundle["snapshot_dir"])
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
+        Path(bundle["snapshot_dir"]) / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     ).read_text() == "def kernel():\n    return 2\n"
 
 
@@ -1361,14 +1328,8 @@ def test_forge_patch_builds_multifile_deploy_bundle(tmp_path):
     runtime = repo / "csrc" / "cpp_itfs" / "pa" / "pa_kernels.cuh"
     mirror.parent.mkdir(parents=True)
     runtime.parent.mkdir(parents=True)
-    old_mirror = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void original_kernel() {}\n'
-    )
-    new_mirror = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void optimized_kernel() {}\n'
-    )
+    old_mirror = '#include <hip/hip_runtime.h>\nextern "C" void original_kernel() {}\n'
+    new_mirror = '#include <hip/hip_runtime.h>\nextern "C" void optimized_kernel() {}\n'
     mirror.write_text(old_mirror, encoding="utf-8")
     runtime.write_text("OLD_RUNTIME\n", encoding="utf-8")
     artifact = tmp_path / "v1_forge.cu"
@@ -1502,8 +1463,7 @@ def test_unrecoverable_forge_timeout_is_not_promoted_to_partial(
     output_dir = tmp_path / "forge-output"
     output_dir.mkdir()
     (output_dir / "optimization_report.md").write_text(
-        "micro_speedup: N/A (no validated improvement kept)\n"
-        "[correctness] fail\n"
+        "micro_speedup: N/A (no validated improvement kept)\n[correctness] fail\n"
     )
     source = tmp_path / "kernel.py"
     source.write_text("def kernel(x):\n    return x\n")
@@ -2385,8 +2345,7 @@ def test_pending_integration_keeps_the_micro_proposal_and_names_the_deferral(tmp
 
     assert proposal["decision"] == "KEEP"
     assert proposal["reasons"] == [
-        "framework apply-back reference-verified; framework E2E/accuracy "
-        "deferred to integrate"
+        "framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"
     ]
 
 
@@ -2513,8 +2472,7 @@ def test_rewrite_backend_result_reaches_a_reference_verified_keep(tmp_path, monk
     proposal = ko.make_proposal(verification)
     assert proposal["decision"] == "KEEP"
     assert proposal["reasons"] == [
-        "framework apply-back reference-verified; framework E2E/accuracy "
-        "deferred to integrate"
+        "framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"
     ]
 
 

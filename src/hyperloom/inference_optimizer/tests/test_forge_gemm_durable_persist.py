@@ -4,6 +4,7 @@
 aiter config dir + snapshot it (recipe-portable), not reference the ephemeral
 tuner workspace path.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -20,9 +21,7 @@ def _fake_aiter(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(
         importlib.util,
         "find_spec",
-        lambda name: types.SimpleNamespace(origin=str(aiter_pkg / "__init__.py"))
-        if name == "aiter"
-        else None,
+        lambda name: types.SimpleNamespace(origin=str(aiter_pkg / "__init__.py")) if name == "aiter" else None,
     )
     return aiter_pkg
 
@@ -35,9 +34,7 @@ def test_persist_copies_into_aiter_config_and_snapshots(tmp_path, monkeypatch):
     src.write_text("gfx,cu_num,M,N,K,splitK\ngfx950,256,64,5120,5120,2\n", encoding="utf-8")
 
     extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
-    out, snap = rh._persist_forge_gemm_csv_durably(
-        extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws
-    )
+    out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws)
 
     dst = aiter_pkg / "configs" / "model_configs" / "a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv"
     assert dst.is_file()  # copied where aiter reads it
@@ -91,9 +88,7 @@ def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
     monkeypatch.setattr(ss, "snapshot_source_layer", _boom)
 
     extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
-    out, snap = rh._persist_forge_gemm_csv_durably(
-        extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws
-    )
+    out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws)
 
     dst = aiter_pkg / "configs" / "model_configs" / "a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv"
     assert dst.is_file()  # copy committed despite the snapshot failure

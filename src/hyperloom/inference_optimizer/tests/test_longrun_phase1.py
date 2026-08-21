@@ -523,6 +523,12 @@ def test_malformed_env_override_falls_back_to_default(monkeypatch):
 def test_evidence_keys_present():
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
     _, ev = ps.should_reloop_to_explore(st)
-    for key in ("macro_cycle", "min_gain_pct", "cycle_gain_delta", "cycle_gained",
-                "no_gain_cycle_streak_effective", "min_remaining_sec_effective"):
+    for key in (
+        "macro_cycle",
+        "min_gain_pct",
+        "cycle_gain_delta",
+        "cycle_gained",
+        "no_gain_cycle_streak_effective",
+        "min_remaining_sec_effective",
+    ):
         assert key in ev, f"missing evidence key: {key}"

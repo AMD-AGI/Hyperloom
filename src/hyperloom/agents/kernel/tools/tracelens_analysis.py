@@ -1853,11 +1853,7 @@ def _relaxed_candidate_keywords(name: str) -> list[str]:
     relaxed: list[str] = []
     for token in tokens:
         token = token.strip("_")
-        if (
-            len(token) < 3
-            or token in seen
-            or token in _TYPE_BLOCKLIST
-        ):
+        if len(token) < 3 or token in seen or token in _TYPE_BLOCKLIST:
             continue
         seen.add(token)
         relaxed.append(token)
@@ -2141,9 +2137,7 @@ def _inject_collective_candidates(
     the report surfaces it -- a log line alone leaves the lane looking as if the
     workload simply had no collective.
     """
-    if not isinstance(candidates, list) or any(
-        not isinstance(item, dict) for item in candidates
-    ):
+    if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
         raise ValueError("Collective candidates must be a list of mappings")
     existing = [dict(item) for item in candidates]
     roots = list(source_roots or [])
@@ -2151,6 +2145,7 @@ def _inject_collective_candidates(
         aiter_csrc = _aiter_csrc_root().rstrip("/")
         if aiter_csrc and Path(aiter_csrc).is_dir():
             roots.append(aiter_csrc)
+
     def _skip(code: str, detail: str, notes: list[str] | None = None) -> list[dict[str, Any]]:
         """Record a visible reason the collective lane got no candidate."""
         message = f"nccl_summary: {detail}; skipping injection"
@@ -2210,8 +2205,7 @@ def _inject_collective_candidates(
         # the lane still got nothing.
         return _skip(
             "collective_symbols_unresolved",
-            "no summary row resolved to a device source under "
-            + ", ".join(roots),
+            "no summary row resolved to a device source under " + ", ".join(roots),
             notes=messages,
         )
 
@@ -2224,31 +2218,19 @@ def _inject_collective_candidates(
         values = item.get("input_dtypes") or item.get("dtypes") or []
         if not values:
             values = _dtypes_from_shapes(item.get("shapes") or [])
-        return [
-            str(value).strip()
-            for value in values
-            if isinstance(value, str) and value.strip()
-        ]
+        return [str(value).strip() for value in values if isinstance(value, str) and value.strip()]
 
     def _has_workload(item: dict[str, Any]) -> bool:
         """Return whether the trace row carries driver inputs."""
-        return bool(
-            item.get("input_shapes") or item.get("shapes")
-        ) and bool(_workload_dtypes(item))
+        return bool(item.get("input_shapes") or item.get("shapes")) and bool(_workload_dtypes(item))
 
     def _is_all_reduce_workload(item: dict[str, Any]) -> bool:
         """Return whether a traced workload has all-reduce semantics."""
         contract = item.get("kernel_contract")
-        if (
-            isinstance(contract, dict)
-            and str(contract.get("kind") or "") == "collective"
-        ):
+        if isinstance(contract, dict) and str(contract.get("kind") or "") == "collective":
             return str(contract.get("collective_op") or "") == "all_reduce"
         name = _name(item)
-        return any(
-            tag in name
-            for tag in ("all_reduce", "allreduce", "cross_device_reduce")
-        )
+        return any(tag in name for tag in ("all_reduce", "allreduce", "cross_device_reduce"))
 
     def _workload_family(item: dict[str, Any]) -> str:
         """Collapse prefill and decode rows from one profiled wrapper."""
@@ -2303,18 +2285,12 @@ def _inject_collective_candidates(
         if dtypes:
             target["input_dtypes"] = dtypes
         provenance = next(
-            (
-                str(donor.get("shape_provenance") or "")
-                for donor in donors
-                if donor.get("shape_provenance")
-            ),
+            (str(donor.get("shape_provenance") or "") for donor in donors if donor.get("shape_provenance")),
             "",
         )
         if provenance:
             target["shape_provenance"] = provenance
-        target["workload_source_kernels"] = [
-            str(donor.get("name") or "") for donor in donors
-        ]
+        target["workload_source_kernels"] = [str(donor.get("name") or "") for donor in donors]
         hottest = max(
             donors,
             key=lambda donor: float(donor.get("duration_us") or 0.0),
@@ -2322,22 +2298,18 @@ def _inject_collective_candidates(
         target["workload_source_kernel"] = str(hottest.get("name") or "")
 
     by_name = {_name(item): item for item in existing if _name(item)}
-    workload_rows = [
-        item
-        for item in existing
-        if _has_workload(item) and _is_all_reduce_workload(item)
-    ]
+    workload_rows = [item for item in existing if _has_workload(item) and _is_all_reduce_workload(item)]
     workload_families: dict[str, list[dict[str, Any]]] = {}
     for row in workload_rows:
         family = _workload_family(row)
         if family:
             workload_families.setdefault(family, []).append(row)
-    allow_inferred_shapes = (
-        os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "")
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"}
-    )
+    allow_inferred_shapes = os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     appended: list[dict[str, Any]] = []
     for item in extracted:
         exact = by_name.get(_name(item))
@@ -2356,11 +2328,7 @@ def _inject_collective_candidates(
         if exact is not None and _has_workload(exact):
             donors = [exact]
             borrowed = False
-        elif (
-            allow_inferred_shapes
-            and len(workload_families) == 1
-            and _is_all_reduce_workload(item)
-        ):
+        elif allow_inferred_shapes and len(workload_families) == 1 and _is_all_reduce_workload(item):
             # Shapes are inferred from the sole all-reduce family, valid only
             # because the symbol is itself an all-reduce. Handing the driver
             # shapes the traced kernel never ran would yield confident SNR and
@@ -3424,11 +3392,7 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
         return None
     return {
         "operation": str(row.get("name") or ""),
-        "input_shapes": (
-            [{"call_num": 1, "shape": "<br>".join(operands)}]
-            if operands
-            else []
-        ),
+        "input_shapes": ([{"call_num": 1, "shape": "<br>".join(operands)}] if operands else []),
         "input_dtypes": tensor_dtypes,
         "raw_arg_spec": raw_arg_spec,
     }
@@ -4012,10 +3976,7 @@ def recover_other_bucket_candidates(
 # vs ".h", ordering makes the intent explicit.
 _SOURCE_EXT_RE = re.compile(
     r"\.(?:"
-    + "|".join(
-        re.escape(ext.lstrip("."))
-        for ext in sorted(PATH_SHAPED_EXTENSIONS, key=len, reverse=True)
-    )
+    + "|".join(re.escape(ext.lstrip(".")) for ext in sorted(PATH_SHAPED_EXTENSIONS, key=len, reverse=True))
     + r")\b",
     re.IGNORECASE,
 )
@@ -4137,9 +4098,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     try:
         import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
 
-        payload = yaml.safe_load(
-            Path(config_path).expanduser().read_text(encoding="utf-8")
-        )
+        payload = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - runtime context is advisory
         log.warning("could not read source runtime config: %s", type(exc).__name__)
         return ""
@@ -4150,9 +4109,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     return " ".join(
         str(value).strip()
         for key, value in envs.items()
-        if str(key).startswith("EXTRA_")
-        and str(key).endswith("_ARGS")
-        and str(value).strip()
+        if str(key).startswith("EXTRA_") and str(key).endswith("_ARGS") and str(value).strip()
     )
 
 
@@ -4257,9 +4214,7 @@ def _apply_llm_source_fallback(item: dict[str, Any]) -> None:
             return
         # Answered but not accepted: invented path, low confidence, or refusal.
         audit["outcome"] = "declined"
-        _append_resolution_reason(
-            item, f"llm_fallback_declined: {reason or 'no candidate accepted'}"
-        )
+        _append_resolution_reason(item, f"llm_fallback_declined: {reason or 'no candidate accepted'}")
         log.info(
             "LLM source fallback declined for %r over %d shortlist entr(ies): %s",
             name,
@@ -4400,9 +4355,7 @@ def _resolve_trace_launchers(
             for item in candidates:
                 if _trace_launcher_key(item) in wanted:
                     item.setdefault("source_resolution_reason", reason)
-        summary = (
-            f"trace launcher tier: resolved {len(found)}/{len(wanted)} unresolved candidate(s)"
-        )
+        summary = f"trace launcher tier: resolved {len(found)}/{len(wanted)} unresolved candidate(s)"
         log.info("%s", summary)
         # Also to the run log: that is where an operator looks when candidates
         # come out unresolved, and a logger record does not survive there.
@@ -4415,8 +4368,7 @@ def _resolve_trace_launchers(
         # hides unreadable traces, import errors and parse failures alike.
         reason = f"trace_resolver_error: {type(exc).__name__}: {exc}"
         log.warning(
-            "trace launcher resolution failed for %d candidate(s) (%s); "
-            "falling back to grep",
+            "trace launcher resolution failed for %d candidate(s) (%s); falling back to grep",
             len(wanted),
             reason,
         )
@@ -4493,11 +4445,7 @@ def _finalize_candidates(
             if _fused_moe_shapes is None:
                 _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
             if _fused_moe_invocation_cases is None:
-                _fused_moe_invocation_cases = (
-                    resolve_fused_moe_invocation_cases_from_csv(
-                        perf_report_csv_dir
-                    )
-                )
+                _fused_moe_invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
             invocation_cases = list(_fused_moe_invocation_cases or [])
             if not item.get("shapes") and _fused_moe_shapes:
                 item["shapes"] = list(_fused_moe_shapes)
@@ -4520,11 +4468,7 @@ def _finalize_candidates(
                 invocation_cases = [
                     {
                         "operation": operation,
-                        "input_shapes": (
-                            item.get("input_shapes")
-                            or item.get("shapes")
-                            or []
-                        ),
+                        "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
                         "input_dtypes": item.get("input_dtypes") or [],
                         "raw_arg_spec": item.get("raw_arg_spec") or {},
                     },
@@ -4597,9 +4541,7 @@ def _finalize_candidates(
                     else:
                         item.pop("source_line", None)
                         item.pop("source_function", None)
-                        item["source_resolution_method"] = getattr(
-                            _KSC, "METHOD_GREP", "name_grep"
-                        )
+                        item["source_resolution_method"] = getattr(_KSC, "METHOD_GREP", "name_grep")
                         if trace_source:
                             _append_resolution_reason(
                                 item,
@@ -4752,12 +4694,8 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             confidence=item.get("source_resolution_confidence"),
             reason=str(item.get("source_resolution_reason") or ""),
             rejected_value=str(item.get("source_file_rejected") or ""),
-            previous_source_file=str(
-                item.get("source_resolution_previous_file") or ""
-            ),
-            previous_method=str(
-                item.get("source_resolution_previous_method") or ""
-            ),
+            previous_source_file=str(item.get("source_resolution_previous_file") or ""),
+            previous_method=str(item.get("source_resolution_previous_method") or ""),
         )
         audit = item.get("source_resolution_llm_audit")
         if isinstance(audit, dict):
@@ -4874,14 +4812,10 @@ def apply_resolution_entries_to_candidates(
         item["source_resolution_previous_method"] = str(entry.get("previous_method") or "")
         item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
         item["source_type"] = source_type_for(item.get("name", ""), new_source)
-        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
-            item.get("name", ""), new_source
-        ):
+        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(item.get("name", ""), new_source):
             item["source_type"] = "vendor_binary"
             item["vendor_dispatch_wrapper"] = True
-        item["runtime_generated_kernel"] = is_runtime_generated_kernel(
-            item.get("name", ""), new_source
-        )
+        item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
         _stamp_candidate_metadata(item, op_cat_map)
         changed += 1
     return changed
@@ -4943,12 +4877,8 @@ def write_source_resolution_artifact(
             _review_source_resolution(doc, log_path=log_path)
         # Fold any revision back onto the candidates: they, not this file, are
         # what the dispatch stage reads.
-        reviewed_entries = [
-            entry for entry in (doc.get("entries") or []) if isinstance(entry, dict)
-        ]
-        applied = apply_resolution_entries_to_candidates(
-            reviewed_entries, candidates, op_cat_map
-        )
+        reviewed_entries = [entry for entry in (doc.get("entries") or []) if isinstance(entry, dict)]
+        applied = apply_resolution_entries_to_candidates(reviewed_entries, candidates, op_cat_map)
         if applied:
             review_metadata = {
                 str(entry.get("kernel_id") or ""): {
@@ -4982,10 +4912,7 @@ def write_source_resolution_artifact(
         atomic_write_json(path, doc)
         final_entries = doc.get("entries") or []
         resolved = sum(1 for entry in final_entries if entry.get("source_file"))
-        summary = (
-            f"source resolution: {resolved}/{len(final_entries)} "
-            f"kernel(s) located -> {path.name}"
-        )
+        summary = f"source resolution: {resolved}/{len(final_entries)} kernel(s) located -> {path.name}"
         log.info("%s", summary)
         if log_path:
             append_log(log_path, summary)
@@ -6874,9 +6801,7 @@ def write_reports(
                         )
                         if _est:
                             _diff_report["analytic_ceiling"] = _est
-                            _actual_us = float(
-                                _diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0
-                            )
+                            _actual_us = float(_diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0)
                             if _est.get("ideal_ms") and _actual_us > 0:
                                 _diff_report["analytic_within_pct"] = round(
                                     _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
@@ -7028,10 +6953,7 @@ def main() -> int:
     parser.add_argument(
         "--runtime-config",
         default="",
-        help=(
-            "Materialized workload YAML used only to recover EXTRA_*_ARGS for "
-            "bounded source-resolution context."
-        ),
+        help=("Materialized workload YAML used only to recover EXTRA_*_ARGS for bounded source-resolution context."),
     )
     parser.add_argument(
         "--height",
@@ -7198,16 +7120,10 @@ def main() -> int:
         for key, value in os.environ.items()
         if key.startswith("EXTRA_") and key.endswith("_ARGS") and value.strip()
     )
-    materialized_server_args = _runtime_server_args_from_config(
-        str(getattr(args, "runtime_config", "") or "")
-    )
+    materialized_server_args = _runtime_server_args_from_config(str(getattr(args, "runtime_config", "") or ""))
     set_runtime_context(
         model_path=str(getattr(args, "model_path", "") or ""),
-        server_args=" ".join(
-            value
-            for value in (inherited_server_args, materialized_server_args)
-            if value
-        ),
+        server_args=" ".join(value for value in (inherited_server_args, materialized_server_args) if value),
         framework=str(getattr(args, "framework", "") or ""),
         precision=str(getattr(args, "precision", "") or ""),
     )
@@ -7298,8 +7214,7 @@ def main() -> int:
                     break
             append_log(
                 log_path,
-                f"trace_gpu_kernel_events={kernel_event_count} "
-                f"(probed={', '.join(probed)})",
+                f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
             )
             if analysis_trace_path != trace_files[0]:
                 promotion_warning: dict[str, Any] = {
@@ -8026,9 +7941,7 @@ def main() -> int:
                     allow_review=False,
                 )
             if source_resolution_path.is_file():
-                artifacts["kernel_source_resolution"] = str(
-                    source_resolution_path
-                )
+                artifacts["kernel_source_resolution"] = str(source_resolution_path)
         artifacts.update(
             write_reports(
                 run_dir,

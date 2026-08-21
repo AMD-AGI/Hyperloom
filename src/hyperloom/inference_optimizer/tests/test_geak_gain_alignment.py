@@ -273,10 +273,7 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     )
     coord.shared_state.geak_result["kernel_journey_path"] = str(journey_path)
     coord._record_geak_kernel_journey(coord.shared_state.geak_result)
-    provisional_rows = {
-        row["kernel_id"]: row
-        for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
-    }
+    provisional_rows = {row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]}
     provisional = provisional_rows["candidate-kernel"]["e2e"]
     assert provisional["decision"] == "KEEP"
     assert provisional["validated"] is True
@@ -297,9 +294,7 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not ss.geak_pending
     rejected = assemble_parts(tmp_path)
-    rejected_rows = {
-        row["kernel_id"]: row for row in rejected["kernel_journey"]["kernels"]
-    }
+    rejected_rows = {row["kernel_id"]: row for row in rejected["kernel_journey"]["kernels"]}
     e2e = rejected_rows["candidate-kernel"]["e2e"]
     assert e2e["decision"] == "REVERT"
     assert e2e["validated"] is False
@@ -457,7 +452,9 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     """A GEAK rebench that beats baseline but loses to current_best is measured, not a KEEP."""
     base, current_best, measured = 7380.7, 10067.9, 9623.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    coord.shared_state.optimization_stack = [{"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}]
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
+    ]
     coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
 
@@ -769,10 +766,7 @@ async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path:
     ],
 )
 def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expected) -> None:
-    assert (
-        _geak_result_has_material(result, prev_best_flags=prev_flags, prev_best_envs=prev_envs)
-        is expected
-    )
+    assert _geak_result_has_material(result, prev_best_flags=prev_flags, prev_best_envs=prev_envs) is expected
 
 
 @pytest.mark.asyncio
@@ -819,9 +813,7 @@ async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -
     }
     coord.shared_state.geak_result = geak_result
     coord._record_geak_kernel_journey(geak_result)
-    provisional_rows = {
-        row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
-    }
+    provisional_rows = {row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]}
     assert provisional_rows["provisional-kernel"]["e2e"]["decision"] == "KEEP"
 
     async def _must_not_fallback(**_kwargs):
@@ -840,9 +832,7 @@ async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -
     assert ss.current_best["tput"] == pytest.approx(current_best)
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.geak_result["revalidation_status"] == "no_material"
-    rejected_rows = {
-        row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
-    }
+    rejected_rows = {row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]}
     e2e = rejected_rows["provisional-kernel"]["e2e"]
     assert e2e["decision"] == "REVERT"
     assert e2e["validated"] is False

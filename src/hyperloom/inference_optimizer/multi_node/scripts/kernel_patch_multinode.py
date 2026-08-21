@@ -276,9 +276,7 @@ def _do_apply(args: argparse.Namespace) -> int:
         ]
         for node_id, ref in rollback_refs:
             try:
-                rollback.append(
-                    {"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)}
-                )
+                rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)})
             except Exception as exc:  # noqa: BLE001
                 rollback.append(
                     {
@@ -315,12 +313,8 @@ def _do_revert(args: argparse.Namespace) -> int:
     """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     try:
-        records_by_host: dict[str, list[dict]] = json.loads(
-            args.records_json or "{}"
-        )
-        backup_map: dict[str, str] = json.loads(
-            args.backup_map_json or "{}"
-        )
+        records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
+        backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         sys.stdout.write(
             json.dumps(
@@ -413,9 +407,7 @@ def _do_revert(args: argparse.Namespace) -> int:
 def _do_finalize(args: argparse.Namespace) -> int:
     """Finalize accepted patch transactions on every recorded host."""
     try:
-        records_by_host: dict[str, list[dict]] = json.loads(
-            args.records_json or "{}"
-        )
+        records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
     except json.JSONDecodeError as exc:
         sys.stdout.write(
             json.dumps(
@@ -452,9 +444,7 @@ def _do_finalize(args: argparse.Namespace) -> int:
     per_node = []
     for host, ref in refs:
         try:
-            per_node.append(
-                {"host": host, **ray.get(ref, timeout=args.timeout_sec)}
-            )
+            per_node.append({"host": host, **ray.get(ref, timeout=args.timeout_sec)})
         except Exception as exc:  # noqa: BLE001
             failures.append({"host": host, "error": str(exc)})
     payload = {

@@ -1201,9 +1201,7 @@ def materialize_unified_patch_snapshot(
     # artifact lacks a trailing newline (observed in legacy KB records). Feed a
     # normalized in-memory copy so materialization is tolerant without mutating
     # the content-addressed downloaded artifact.
-    normalized_patch_text = (
-        patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
-    )
+    normalized_patch_text = patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
     proc = subprocess.run(
         ["git", "apply", "--unsafe-paths", "-"],
         cwd=snap,
@@ -1238,9 +1236,7 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
-        return _load_apply_tool().revert_kernel_patch(
-            apply_result["manifest_path"]
-        )
+        return _load_apply_tool().revert_kernel_patch(apply_result["manifest_path"])
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "failed",
@@ -1262,9 +1258,7 @@ def _maybe_finalize_kernel_patch(
     if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
-        return _load_apply_tool().finalize_kernel_patch(
-            apply_result["manifest_path"]
-        )
+        return _load_apply_tool().finalize_kernel_patch(apply_result["manifest_path"])
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "failed",
@@ -1415,9 +1409,11 @@ def _fill_integrate_defaults_from_state(
         # last_kernel_opt.best_artifact_path backfill.
         if attempt.get("vendor_playbook_deploy_blocked"):
             resolved["_vendor_playbook_deploy_blocked"] = True
-        elif isinstance(state.last_kernel_opt, dict) and str(
-            state.last_kernel_opt.get("kernel_id") or ""
-        ) == kernel_id and state.last_kernel_opt.get("vendor_playbook_deploy_blocked"):
+        elif (
+            isinstance(state.last_kernel_opt, dict)
+            and str(state.last_kernel_opt.get("kernel_id") or "") == kernel_id
+            and state.last_kernel_opt.get("vendor_playbook_deploy_blocked")
+        ):
             resolved["_vendor_playbook_deploy_blocked"] = True
 
     return resolved
@@ -1774,9 +1770,7 @@ def _fusion_session_serve_args(
 ) -> dict[str, int]:
     """TP / KV block size / max-model-len the serving smoke must match."""
     tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
-    max_model_len = _positive_int(
-        payload.get("max_model_len") or getattr(state, "max_model_len", 0)
-    )
+    max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
     block_size = _positive_int(payload.get("block_size"))
     if block_size <= 0 and "vllm" in (framework or "").strip().lower():
         from hyperloom.inference_optimizer.model_config_utils import (  # noqa: PLC0415
@@ -2751,9 +2745,7 @@ def _align_forge_shapes_for_aiter(
     max_shapes = max(1, max_shapes)
     if budget_sec > 0:
         try:
-            per_shape = int(
-                os.environ.get("HYPERLOOM_GEMM_TUNE_SEC_PER_SHAPE") or _AITER_TUNE_SEC_PER_SHAPE
-            )
+            per_shape = int(os.environ.get("HYPERLOOM_GEMM_TUNE_SEC_PER_SHAPE") or _AITER_TUNE_SEC_PER_SHAPE)
         except (TypeError, ValueError):
             per_shape = _AITER_TUNE_SEC_PER_SHAPE
         # Reserve a third of the window for JIT builds and the report step.
@@ -2767,8 +2759,7 @@ def _align_forge_shapes_for_aiter(
     except OSError:
         return shapes_json, {**report, "applied": False, "source_shapes_json": shapes_json}
     log.info(
-        "Forge GEMM shapes: re-keyed %d observed shape(s) onto %d aiter lookup key(s) "
-        "(observed M=%s -> aligned M=%s)",
+        "Forge GEMM shapes: re-keyed %d observed shape(s) onto %d aiter lookup key(s) (observed M=%s -> aligned M=%s)",
         report.get("observed"),
         report.get("aligned"),
         report.get("observed_m"),
@@ -2831,15 +2822,12 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
     except OSError:
         return False
     combos = {
-        (q_a.replace("torch.", ""), q_w.replace("torch.", ""))
-        for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
+        (q_a.replace("torch.", ""), q_w.replace("torch.", "")) for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
     }
     if not combos:
         # MoE evidence without a parseable problem tuple: let Forge decide.
         return True
-    return not any(
-        act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos
-    )
+    return not any(act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos)
 
 
 def _aiter_serving_evidence(server_log: str) -> set[str]:
@@ -2928,9 +2916,7 @@ def _resolve_vllm_aiter_routing(
     return flags
 
 
-def _warn_if_moe_routing_is_coarser_than_the_log(
-    server_log: str, flags: dict[str, bool]
-) -> None:
+def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[str, bool]) -> None:
     """Say so when one log shows both MoE backends and routing picks one.
 
     The decision above is a substring scan: seeing an aiter fused-MoE marker
@@ -2961,7 +2947,9 @@ def _warn_if_moe_routing_is_coarser_than_the_log(
             "gemm routing: %s shows both aiter CK and vLLM Triton MoE dispatch "
             "(impl=%s, stages=%s); routing sends the whole run to the aiter "
             "tuner family, so the token range Triton serves goes untuned",
-            server_log, moe.get("impl"), moe.get("stages_seen"),
+            server_log,
+            moe.get("impl"),
+            moe.get("stages_seen"),
         )
 
 
@@ -3562,12 +3550,7 @@ async def _run_forge_gemm_tuning(
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    raw_model_path = str(
-        payload.get("model_path")
-        or state.model_path
-        or os.environ.get("MODEL_PATH")
-        or ""
-    ).strip()
+    raw_model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
     if not raw_model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
     from hyperloom.inference_optimizer.model_config_utils import (
@@ -4398,9 +4381,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "timeout": timeout,
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
         "verbose": bool(payload.get("verbose", False)),
-        **_fusion_session_serve_args(
-            state, payload, framework=framework, model_path=model_path
-        ),
+        **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
     }
     input_json = workspace / "forge_fusion_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -4484,9 +4465,7 @@ def _parse_forge_collective_sentinel(stdout: str) -> dict[str, Any]:
     if not isinstance(parsed.get("kept"), bool):
         raise ValueError("collective wrapper result has invalid kept")
     if not isinstance(parsed.get("requires_e2e_validation"), bool):
-        raise ValueError(
-            "collective wrapper result has invalid requires_e2e_validation"
-        )
+        raise ValueError("collective wrapper result has invalid requires_e2e_validation")
     if parsed["kept"] != (decision == "KEEP"):
         raise ValueError("collective wrapper result has inconsistent decision")
     if parsed["requires_e2e_validation"] != parsed["kept"]:
@@ -4538,17 +4517,10 @@ def _validate_collective_candidate(
     index: int | None = None,
 ) -> None:
     """Validate fields required by the collective driver."""
-    label = (
-        f"collective candidate[{index}]"
-        if index is not None
-        else "collective candidate"
-    )
+    label = f"collective candidate[{index}]" if index is not None else "collective candidate"
     required_strings = ("kernel_id", "source_file", "source_function")
     missing = [
-        field
-        for field in required_strings
-        if not isinstance(candidate.get(field), str)
-        or not candidate[field].strip()
+        field for field in required_strings if not isinstance(candidate.get(field), str) or not candidate[field].strip()
     ]
     for field in ("input_shapes", "input_dtypes"):
         value = candidate.get(field)
@@ -4585,11 +4557,7 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
         eligible.append(entry)
     if not eligible:
         return None
-    resolved = [
-        entry
-        for entry in eligible
-        if str(entry.get("candidate_source") or "").strip() == "nccl_summary"
-    ]
+    resolved = [entry for entry in eligible if str(entry.get("candidate_source") or "").strip() == "nccl_summary"]
     pool = resolved or eligible
 
     def _gpu_pct(entry: dict[str, Any]) -> float:
@@ -4613,15 +4581,11 @@ def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
 
 # Session time held back for the E2E integrate round plus reporting.
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-_COLLECTIVE_PREP_GRACE_SEC = int(
-    _forge_loop_constant("kernel_agents.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000)
-)
+_COLLECTIVE_PREP_GRACE_SEC = int(_forge_loop_constant("kernel_agents.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000))
 # Wrapper grace to export the patch and restore the repository.
 _COLLECTIVE_FINALIZE_GRACE_SEC = 300
 # forge-loop rejects a campaign shorter than its own minimum.
-_COLLECTIVE_MIN_CAMPAIGN_SEC = int(
-    _forge_loop_constant("kernel_agents.cli", "MIN_MAX_HOURS", 1.0) * 3600
-)
+_COLLECTIVE_MIN_CAMPAIGN_SEC = int(_forge_loop_constant("kernel_agents.cli", "MIN_MAX_HOURS", 1.0) * 3600)
 # Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
 _COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
 
@@ -4658,26 +4622,15 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
             raise ValueError("remaining session minutes must be numeric")
         remaining = float(remaining)
         if not math.isfinite(remaining) or remaining < 0:
-            raise ValueError(
-                f"remaining session minutes must be finite and non-negative: {remaining}"
-            )
+            raise ValueError(f"remaining session minutes must be finite and non-negative: {remaining}")
         wall_limits.append(
             max(
                 0,
-                int(
-                    (remaining - _COLLECTIVE_BUDGET_RESERVE_MIN)
-                    * 60
-                ),
+                int((remaining - _COLLECTIVE_BUDGET_RESERVE_MIN) * 60),
             )
         )
-    if (
-        isinstance(timeout_sec, bool)
-        or not isinstance(timeout_sec, int)
-        or timeout_sec < 0
-    ):
-        raise ValueError(
-            f"collective timeout must be a non-negative integer: {timeout_sec!r}"
-        )
+    if isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 0:
+        raise ValueError(f"collective timeout must be a non-negative integer: {timeout_sec!r}")
     if timeout_sec > 0:
         wall_limits.append(timeout_sec)
     if requested_hours is None and not wall_limits:
@@ -4690,11 +4643,7 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
         return None, _COLLECTIVE_UNBOUNDED_WRAPPER_SEC
 
     wall_limit = min(wall_limits) if wall_limits else 0
-    campaign_capacity = (
-        wall_limit
-        - _COLLECTIVE_PREP_GRACE_SEC
-        - _COLLECTIVE_FINALIZE_GRACE_SEC
-    )
+    campaign_capacity = wall_limit - _COLLECTIVE_PREP_GRACE_SEC - _COLLECTIVE_FINALIZE_GRACE_SEC
     if requested_hours is None:
         campaign_sec = campaign_capacity
     else:
@@ -4702,27 +4651,17 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
             raise ValueError("collective max_hours must be numeric")
         requested = float(requested_hours)
         if not math.isfinite(requested) or requested <= 0:
-            raise ValueError(
-                f"collective max_hours must be finite and positive: {requested_hours!r}"
-            )
+            raise ValueError(f"collective max_hours must be finite and positive: {requested_hours!r}")
         requested_sec = int(requested * 3600)
         if requested_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
             return None, 0
-        campaign_sec = (
-            min(requested_sec, campaign_capacity)
-            if wall_limits
-            else requested_sec
-        )
+        campaign_sec = min(requested_sec, campaign_capacity) if wall_limits else requested_sec
     if campaign_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
         return None, 0
     # Truncate to two decimals so the hours we hand forge-loop never round up
     # past the budget they were derived from.
     hours = math.floor(campaign_sec / 3600 * 100) / 100.0
-    required = (
-        _COLLECTIVE_PREP_GRACE_SEC
-        + int(hours * 3600)
-        + _COLLECTIVE_FINALIZE_GRACE_SEC
-    )
+    required = _COLLECTIVE_PREP_GRACE_SEC + int(hours * 3600) + _COLLECTIVE_FINALIZE_GRACE_SEC
     return hours, required
 
 
@@ -4733,19 +4672,13 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     state = SharedState.load_or_init(session_dir)
 
     candidate_value = payload.get("candidate")
-    if candidate_value is not None and (
-        not isinstance(candidate_value, dict) or not candidate_value
-    ):
+    if candidate_value is not None and (not isinstance(candidate_value, dict) or not candidate_value):
         return _collective_revert_result(
             "invalid_collective_candidate",
             "candidate must be a non-empty object",
         )
     try:
-        candidate = (
-            dict(candidate_value)
-            if isinstance(candidate_value, dict)
-            else select_collective_candidate(state)
-        )
+        candidate = dict(candidate_value) if isinstance(candidate_value, dict) else select_collective_candidate(state)
     except (OSError, TypeError, ValueError) as exc:
         return _collective_revert_result(
             "invalid_collective_candidate_artifact",
@@ -4756,10 +4689,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     if not candidate:
         return _collective_revert_result(
             "no_collective_candidate",
-            (
-                "no rewritable collective in the latest trace analysis "
-                "(nccl/rccl are vendor binaries and never qualify)"
-            ),
+            ("no rewritable collective in the latest trace analysis (nccl/rccl are vendor binaries and never qualify)"),
             status="skipped",
             analysis_key=collective_analysis_key(state),
         )
@@ -4772,8 +4702,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     ):
         return _collective_revert_result(
             "unsupported_collective_contract",
-            "collective Forge supports "
-            + ", ".join(sorted(SUPPORTED_COLLECTIVE_OPS)),
+            "collective Forge supports " + ", ".join(sorted(SUPPORTED_COLLECTIVE_OPS)),
         )
     try:
         _validate_collective_candidate(candidate)
@@ -4792,11 +4721,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     if isinstance(raw_kernel_sources, str):
         raw_kernel_sources = [raw_kernel_sources]
     collective_sources = list(
-        dict.fromkeys(
-            str(path).strip()
-            for path in (source_file, *raw_kernel_sources)
-            if str(path or "").strip()
-        )
+        dict.fromkeys(str(path).strip() for path in (source_file, *raw_kernel_sources) if str(path or "").strip())
     )
     kernel_repo_raw = candidate.get("kernel_repo")
     if kernel_repo_raw is not None and not isinstance(kernel_repo_raw, str):
@@ -4804,9 +4729,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
             "invalid_collective_candidate",
             "collective candidate kernel_repo must be a string",
         )
-    kernel_repo = (kernel_repo_raw or "").strip() or _find_repo_root_for_source(
-        source_file
-    )
+    kernel_repo = (kernel_repo_raw or "").strip() or _find_repo_root_for_source(source_file)
     if not kernel_repo:
         return _collective_revert_result(
             "kernel_repo_missing",
@@ -4877,8 +4800,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
         "tp": tp,
         "timeout": timeout,
         "finalize_grace_sec": _COLLECTIVE_FINALIZE_GRACE_SEC,
-        "agent_timeout_sec": payload.get("agent_timeout_sec")
-        or os.environ.get("FORGE_COLLECTIVE_AGENT_TIMEOUT"),
+        "agent_timeout_sec": payload.get("agent_timeout_sec") or os.environ.get("FORGE_COLLECTIVE_AGENT_TIMEOUT"),
         "gpu_target": str(payload.get("gpu_target") or getattr(state, "gpu_type", "") or ""),
         "max_hours": max_hours,
         "agent_backend": agent_backend,
@@ -4932,11 +4854,10 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
     result.setdefault("world_size", tp)
     result.setdefault("requires_e2e_validation", False)
     result.setdefault("source", "forge_collective")
-    if (
-        str(result.get("status") or "") == "skipped"
-        and str(result.get("error_class") or "")
-        in {"no_collective_candidate", "insufficient_collective_budget"}
-    ):
+    if str(result.get("status") or "") == "skipped" and str(result.get("error_class") or "") in {
+        "no_collective_candidate",
+        "insufficient_collective_budget",
+    }:
         result.setdefault("analysis_key", collective_analysis_key(state))
     return result
 
@@ -5005,10 +4926,7 @@ def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
     }
     # A clean run stays as compact as before: everything added here is dropped
     # when it is null, so a successful row gains only status and elapsed_s.
-    return {
-        k: v for k, v in row.items()
-        if k in _TRACE_TUNER_ALWAYS_KEYS or v is not None
-    }
+    return {k: v for k, v in row.items() if k in _TRACE_TUNER_ALWAYS_KEYS or v is not None}
 
 
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
@@ -5035,9 +4953,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     # The envelope reported no error class even when a tuner had named one, so a
     # crashed run and a barren one looked alike at the top level too. Take the
     # first one a tuner supplied rather than leaving the field null.
-    error_class = result.get("error_class") or next(
-        (t["error_class"] for t in tuners if t.get("error_class")), None
-    )
+    error_class = result.get("error_class") or next((t["error_class"] for t in tuners if t.get("error_class")), None)
     row = {
         "kind": "gemm_tuning",
         "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -5220,11 +5136,7 @@ async def trace_analyze_handler(
     # splitter, which discards its raw diffusion GPU kernels.
     framework = payload_framework or state_framework
     framework_warnings: list[dict[str, Any]] = []
-    if (
-        payload_framework
-        and is_scriptable(state_framework)
-        and not is_scriptable(payload_framework)
-    ):
+    if payload_framework and is_scriptable(state_framework) and not is_scriptable(payload_framework):
         framework = state_framework
         framework_warnings.append(
             {
@@ -5375,9 +5287,7 @@ async def trace_analyze_handler(
 
         # Prepend handler validation warnings so they reach the LLM.
         result["trace_health_warnings"] = (
-            framework_warnings
-            + route_health_warnings
-            + list(result.get("trace_health_warnings") or [])
+            framework_warnings + route_health_warnings + list(result.get("trace_health_warnings") or [])
         )
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
@@ -6014,13 +5924,7 @@ def _batch_kernel_candidates(
     kernels = [
         k
         for k in kernels
-        if not (
-            isinstance(k, dict)
-            and (
-                k.get("shape_dispatchable") is False
-                or is_collective_candidate(k)
-            )
-        )
+        if not (isinstance(k, dict) and (k.get("shape_dispatchable") is False or is_collective_candidate(k)))
     ]
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
@@ -7313,10 +7217,7 @@ def _grade_integrate_accuracy(
     )
     if strict and degraded:
         blocked = True
-        reason = (
-            "accuracy gate produced no eval result and this artifact has no "
-            "other end-to-end correctness evidence"
-        )
+        reason = "accuracy gate produced no eval result and this artifact has no other end-to-end correctness evidence"
     # A verdict can be missing because the eval broke, or because the serving
     # configuration cannot answer an eval request at all. Only the first says
     # anything about the patch. The second reproduces on every retry, so
@@ -7540,10 +7441,7 @@ async def integrate_handler(
         manifest_path = Path(str(preapplied.get("manifest_path") or ""))
         patches_root = (Path(session_dir) / "patches").resolve()
         try:
-            trusted_preapplied = (
-                manifest_path.is_file()
-                and manifest_path.resolve().is_relative_to(patches_root)
-            )
+            trusted_preapplied = manifest_path.is_file() and manifest_path.resolve().is_relative_to(patches_root)
         except OSError:
             trusted_preapplied = False
         apply_result = (
@@ -7628,10 +7526,7 @@ async def integrate_handler(
             "extra_envs": dict(payload.get("extra_envs") or {}),
             # The only artifact that patches FlyDSL sources, so the only run that
             # needs the JIT cache key widened.
-            "flydsl_source_dirs": (
-                str(payload.get("artifact_kind") or "")
-                == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-            ),
+            "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
             "accuracy_timeout_sec": rebaseline_timeout_sec,
@@ -8001,10 +7896,7 @@ async def integrate_handler(
         )
     )
     revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
-    revert_complete = (
-        not revert_required
-        or revert_result.get("status") in {"ok", "partial"}
-    )
+    revert_complete = not revert_required or revert_result.get("status") in {"ok", "partial"}
 
     result: dict[str, Any] = {
         # Clean finish including any owed revert; the verdict is ``decision``,
@@ -8032,10 +7924,7 @@ async def integrate_handler(
     }
     if not revert_complete:
         result["error_class"] = "patch_revert_incomplete"
-        result["error"] = str(
-            revert_result.get("error")
-            or "Kernel patch revert did not complete"
-        )
+        result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
         result["stack_incremental_gain_pct"] = stack_incremental_gain_pct

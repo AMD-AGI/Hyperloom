@@ -123,9 +123,7 @@ def test_an_unparseable_command_line_yields_nothing():
 
 def test_inline_and_bare_flag_forms():
     """``--flag=value`` and a valueless flag are both understood."""
-    assert server_arg_flags("--attention-backend=aiter --api-key=sk-no") == {
-        "attention-backend": "aiter"
-    }
+    assert server_arg_flags("--attention-backend=aiter --api-key=sk-no") == {"attention-backend": "aiter"}
     assert server_arg_flags("--enable-torch-compile") == {"enable-torch-compile": True}
 
 
@@ -147,9 +145,7 @@ def test_common_selector_values_are_preserved():
         "kv-cache-dtype": "torch.bfloat16",
         "quantization": "compressed-tensors",
     }
-    assert runtime_flags(None, {"HIP_VISIBLE_DEVICES": "0,1"}) == {
-        "env": {"HIP_VISIBLE_DEVICES": "0,1"}
-    }
+    assert runtime_flags(None, {"HIP_VISIBLE_DEVICES": "0,1"}) == {"env": {"HIP_VISIBLE_DEVICES": "0,1"}}
 
 
 # --- model config ---------------------------------------------------------------

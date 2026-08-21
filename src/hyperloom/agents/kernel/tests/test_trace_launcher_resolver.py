@@ -148,6 +148,7 @@ def test_a_correlation_id_reused_across_ranks_resolves_nothing(tmp_path):
     the ambiguous id is the only answer that cannot attribute a kernel to
     another rank's source file.
     """
+
     def ev(base, pid):
         out = dict(base)
         out["pid"] = pid
@@ -177,16 +178,34 @@ def test_a_device_side_kernel_pairs_with_its_host_side_launch(tmp_path):
     """
     host_pid, gpu_pid, tid = 12345, 0, 777
     events = [
-        {"cat": "kernel", "name": "device_kernel", "pid": gpu_pid, "tid": 1,
-         "ts": 200.0, "dur": 10.0, "args": {"correlation": 42}},
-        {"cat": "cuda_runtime", "name": "hipLaunchKernel", "pid": host_pid,
-         "tid": tid, "ts": 150.0, "dur": 5.0, "args": {"correlation": 42}},
-        {"cat": "python_function", "name": "/repo/moe.py(120): run_moe",
-         "pid": host_pid, "tid": tid, "ts": 100.0, "dur": 200.0},
+        {
+            "cat": "kernel",
+            "name": "device_kernel",
+            "pid": gpu_pid,
+            "tid": 1,
+            "ts": 200.0,
+            "dur": 10.0,
+            "args": {"correlation": 42},
+        },
+        {
+            "cat": "cuda_runtime",
+            "name": "hipLaunchKernel",
+            "pid": host_pid,
+            "tid": tid,
+            "ts": 150.0,
+            "dur": 5.0,
+            "args": {"correlation": 42},
+        },
+        {
+            "cat": "python_function",
+            "name": "/repo/moe.py(120): run_moe",
+            "pid": host_pid,
+            "tid": tid,
+            "ts": 100.0,
+            "dur": 200.0,
+        },
     ]
-    got = resolve_launchers_from_trace(
-        [_write(tmp_path / "device.json", events)], {"device_kernel"}
-    )
+    got = resolve_launchers_from_trace([_write(tmp_path / "device.json", events)], {"device_kernel"})
     assert got["device_kernel"].frame == "/repo/moe.py(120): run_moe"
 
 
@@ -198,18 +217,58 @@ def test_one_host_process_driving_several_devices(tmp_path):
     """
     host_pid, tid = 999, 5
     events = [
-        {"cat": "python_function", "name": "/repo/a.py(1): launch_a",
-         "pid": host_pid, "tid": tid, "ts": 100.0, "dur": 100.0},
-        {"cat": "cuda_runtime", "name": "hipLaunchKernel", "pid": host_pid,
-         "tid": tid, "ts": 120.0, "dur": 5.0, "args": {"correlation": 1}},
-        {"cat": "kernel", "name": "kernel_on_gpu0", "pid": 0, "tid": 1,
-         "ts": 130.0, "dur": 5.0, "args": {"correlation": 1}},
-        {"cat": "python_function", "name": "/repo/b.py(2): launch_b",
-         "pid": host_pid, "tid": tid, "ts": 300.0, "dur": 100.0},
-        {"cat": "cuda_runtime", "name": "hipLaunchKernel", "pid": host_pid,
-         "tid": tid, "ts": 320.0, "dur": 5.0, "args": {"correlation": 2}},
-        {"cat": "kernel", "name": "kernel_on_gpu1", "pid": 1, "tid": 1,
-         "ts": 330.0, "dur": 5.0, "args": {"correlation": 2}},
+        {
+            "cat": "python_function",
+            "name": "/repo/a.py(1): launch_a",
+            "pid": host_pid,
+            "tid": tid,
+            "ts": 100.0,
+            "dur": 100.0,
+        },
+        {
+            "cat": "cuda_runtime",
+            "name": "hipLaunchKernel",
+            "pid": host_pid,
+            "tid": tid,
+            "ts": 120.0,
+            "dur": 5.0,
+            "args": {"correlation": 1},
+        },
+        {
+            "cat": "kernel",
+            "name": "kernel_on_gpu0",
+            "pid": 0,
+            "tid": 1,
+            "ts": 130.0,
+            "dur": 5.0,
+            "args": {"correlation": 1},
+        },
+        {
+            "cat": "python_function",
+            "name": "/repo/b.py(2): launch_b",
+            "pid": host_pid,
+            "tid": tid,
+            "ts": 300.0,
+            "dur": 100.0,
+        },
+        {
+            "cat": "cuda_runtime",
+            "name": "hipLaunchKernel",
+            "pid": host_pid,
+            "tid": tid,
+            "ts": 320.0,
+            "dur": 5.0,
+            "args": {"correlation": 2},
+        },
+        {
+            "cat": "kernel",
+            "name": "kernel_on_gpu1",
+            "pid": 1,
+            "tid": 1,
+            "ts": 330.0,
+            "dur": 5.0,
+            "args": {"correlation": 2},
+        },
     ]
     got = resolve_launchers_from_trace(
         [_write(tmp_path / "multigpu.json", events)],
@@ -226,19 +285,21 @@ def test_split_probes_leave_the_kernel_unresolved(tmp_path):
     whichever Counter saw first -- trace order, not evidence.
     """
     events = []
-    for i, path in enumerate(
-        ["/repo/x.py(1): fa", "/repo/y.py(2): fb", "/repo/z.py(3): fc"]
-    ):
+    for i, path in enumerate(["/repo/x.py(1): fa", "/repo/y.py(2): fb", "/repo/z.py(3): fc"]):
         base = 100.0 + i * 1000
         events.append(_frame(path, ts=base, dur=500.0, tid=7 + i))
         events.append(
-            {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "tid": 7 + i,
-             "ts": base + 10, "dur": 5.0, "args": {"correlation": i + 1}}
+            {
+                "cat": "cuda_runtime",
+                "name": "hipModuleLaunchKernel",
+                "tid": 7 + i,
+                "ts": base + 10,
+                "dur": 5.0,
+                "args": {"correlation": i + 1},
+            }
         )
         events.append(_kernel("split_kernel", i + 1))
-    got = resolve_launchers_from_trace(
-        [_write(tmp_path / "split.json", events)], {"split_kernel"}
-    )
+    got = resolve_launchers_from_trace([_write(tmp_path / "split.json", events)], {"split_kernel"})
     assert got == {}
 
 
@@ -340,18 +401,14 @@ def test_scan_is_bounded_when_kernels_never_resolve(tmp_path, monkeypatch):
     """
     files = []
     for i in range(10):
-        files.append(
-            _write(tmp_path / f"rank{i}.json", [_kernel("_never_launched_kernel", i + 1)])
-        )
+        files.append(_write(tmp_path / f"rank{i}.json", [_kernel("_never_launched_kernel", i + 1)]))
     opened: list[str] = []
 
     def _counting_open(path):
         opened.append(Path(path).name)
         return _open_trace_binary(path)
 
-    monkeypatch.setattr(
-        "_trace_launcher_resolver._open_trace_binary", _counting_open
-    )
+    monkeypatch.setattr("_trace_launcher_resolver._open_trace_binary", _counting_open)
     got = resolve_launchers_from_trace(files, {"_never_launched_kernel"})
     assert got == {}
     # Distinct files touched, not passes: bounded well below the 10 supplied.
@@ -360,10 +417,7 @@ def test_scan_is_bounded_when_kernels_never_resolve(tmp_path, monkeypatch):
 
 def test_scan_stops_when_barren_limit_is_reached(tmp_path, monkeypatch):
     """The first healthy barren file reaches the one-file stop threshold."""
-    files = [
-        _write(tmp_path / f"rank{i}.json", [_kernel("_never_launched_kernel", i + 1)])
-        for i in range(3)
-    ]
+    files = [_write(tmp_path / f"rank{i}.json", [_kernel("_never_launched_kernel", i + 1)]) for i in range(3)]
     opened: list[str] = []
 
     def _counting_open(path):
@@ -371,9 +425,7 @@ def test_scan_stops_when_barren_limit_is_reached(tmp_path, monkeypatch):
         opened.append(Path(path).name)
         return _open_trace_binary(path)
 
-    monkeypatch.setattr(
-        "_trace_launcher_resolver._open_trace_binary", _counting_open
-    )
+    monkeypatch.setattr("_trace_launcher_resolver._open_trace_binary", _counting_open)
     assert (
         resolve_launchers_from_trace(
             files,
@@ -402,8 +454,14 @@ def test_non_launch_runtime_events_are_not_retained(tmp_path):
         tmp_path / "t.json",
         [
             *_stack("/repo/pkg/k.py(7): launch_it"),
-            {"cat": "cuda_runtime", "name": "hipMemcpyAsync", "tid": _TID,
-             "ts": 140.0, "dur": 1.0, "args": {"correlation": 1}},
+            {
+                "cat": "cuda_runtime",
+                "name": "hipMemcpyAsync",
+                "tid": _TID,
+                "ts": 140.0,
+                "dur": 1.0,
+                "args": {"correlation": 1},
+            },
             _runtime(2),
             _kernel("k_one", 2),
         ],
@@ -414,11 +472,20 @@ def test_non_launch_runtime_events_are_not_retained(tmp_path):
 
 def _tied_frames_trace(tmp_path, *, outer_first: bool) -> Path:
     """Two frames sharing a ``ts``; only ``dur`` reveals which one is nested."""
-    outer = {"cat": "python_function", "name": "/opt/aiter/aiter/fused_moe.py(1169): fused_moe",
-             "tid": _TID, "ts": 100.0, "dur": 50.0}
-    inner = {"cat": "python_function",
-             "name": "/opt/aiter/aiter/ops/flydsl/moe_kernels.py(859): _moe_kernel",
-             "tid": _TID, "ts": 100.0, "dur": 10.0}
+    outer = {
+        "cat": "python_function",
+        "name": "/opt/aiter/aiter/fused_moe.py(1169): fused_moe",
+        "tid": _TID,
+        "ts": 100.0,
+        "dur": 50.0,
+    }
+    inner = {
+        "cat": "python_function",
+        "name": "/opt/aiter/aiter/ops/flydsl/moe_kernels.py(859): _moe_kernel",
+        "tid": _TID,
+        "ts": 100.0,
+        "dur": 10.0,
+    }
     frames = [outer, inner] if outer_first else [inner, outer]
     name = f"tied_{'outer' if outer_first else 'inner'}.json"
     return _write(
@@ -620,6 +687,7 @@ def test_flydsl_jit_plumbing_is_skipped_for_the_real_kernel(tmp_path):
 
 def test_two_flydsl_kernels_do_not_collapse_onto_the_compiler(tmp_path):
     """The concrete damage: both MoE GEMMs used to resolve to jit_executor.py."""
+
     def _flydsl_stack(kernel_line: int, base_ts: float) -> list[dict]:
         return _stack(
             f"aiter/ops/flydsl/moe_kernels.py({kernel_line}): flydsl_moe",

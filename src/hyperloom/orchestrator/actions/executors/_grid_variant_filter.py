@@ -263,9 +263,7 @@ def apply_aiter_moe_pin_filter(
         ``"aiter_moe_pinned_off"``).
     """
     pins = _operator_pinned_envs()
-    aiter_pinned_off = "SGLANG_USE_AITER" in pins and not is_truthy(
-        pins["SGLANG_USE_AITER"], default=True
-    )
+    aiter_pinned_off = "SGLANG_USE_AITER" in pins and not is_truthy(pins["SGLANG_USE_AITER"], default=True)
     if not aiter_pinned_off:
         return list(grid), []
 
@@ -273,9 +271,7 @@ def apply_aiter_moe_pin_filter(
     dropped: list[dict] = []
     for v in grid:
         envs = {str(k): str(val) for k, val in (getattr(v, "extra_envs", None) or {}).items()}
-        reenables_master = "SGLANG_USE_AITER" in envs and is_truthy(
-            envs["SGLANG_USE_AITER"], default=False
-        )
+        reenables_master = "SGLANG_USE_AITER" in envs and is_truthy(envs["SGLANG_USE_AITER"], default=False)
         selects_aiter_moe = bool(_RE_AITER_MOE_RUNNER.search(v.extra_server_args or ""))
         if not (reenables_master or selects_aiter_moe):
             kept.append(v)

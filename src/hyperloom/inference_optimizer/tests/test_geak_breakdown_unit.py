@@ -956,9 +956,7 @@ def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> 
         "geak_result": {
             "status": "ok",
             "accepted_kernels": [],
-            "accepted_heads": [
-                {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
-            ],
+            "accepted_heads": [{"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}],
             "eval_dir": str(eval_dir),
         },
     }
@@ -1029,9 +1027,7 @@ def test_collect_geak_backfill_stack_kind_is_labelled_as_from_the_stack(
         "optimization_stack": [
             {
                 "action": "geak_e2e",
-                "accepted_kernels": [
-                    {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
-                ],
+                "accepted_kernels": [{"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}],
                 "accepted_heads": [],
             }
         ],

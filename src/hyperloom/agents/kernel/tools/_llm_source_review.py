@@ -125,11 +125,7 @@ def _entry_block(
         # business file that merely calls it.
         lines.append("launcher_stack:\n" + "\n".join(f"  {f}" for f in stack))
     bare = _KSC.strip_line_suffix(src) if _KSC else src
-    canonical = (
-        _KSC.canonical_source_path(bare, framework_roots)
-        if with_preview and bare and _KSC
-        else ""
-    )
+    canonical = _KSC.canonical_source_path(bare, framework_roots) if with_preview and bare and _KSC else ""
     if canonical:
         lines.append(f"file_head:\n```\n{_preview(canonical)}\n```")
     return "\n".join(lines)
@@ -288,13 +284,10 @@ def review_resolution_document(
         return doc, [f"no entry at or above {min_gpu_pct}% GPU share"]
 
     sent_ids = [str(entry.get("kernel_id") or "") for entry in reviewable]
-    duplicate_sent = sorted(
-        kernel_id for kernel_id in set(sent_ids) if sent_ids.count(kernel_id) > 1
-    )
+    duplicate_sent = sorted(kernel_id for kernel_id in set(sent_ids) if sent_ids.count(kernel_id) > 1)
     if not all(sent_ids) or duplicate_sent:
-        note = (
-            "entries sent for review have missing or duplicate kernel_id values"
-            + (f": {duplicate_sent}" if duplicate_sent else "")
+        note = "entries sent for review have missing or duplicate kernel_id values" + (
+            f": {duplicate_sent}" if duplicate_sent else ""
         )
         return doc, [note]
     try:
@@ -347,11 +340,7 @@ def review_resolution_document(
         return doc, [f"unusable reply: {error}"]
 
     received_ids = [str(revision.get("kernel_id") or "") for revision in revisions]
-    duplicate_ids = sorted(
-        kernel_id
-        for kernel_id in set(received_ids)
-        if received_ids.count(kernel_id) > 1
-    )
+    duplicate_ids = sorted(kernel_id for kernel_id in set(received_ids) if received_ids.count(kernel_id) > 1)
     missing_ids = sorted(set(sent_ids) - set(received_ids))
     extra_ids = sorted(set(received_ids) - set(sent_ids))
     if duplicate_ids or missing_ids or extra_ids:
@@ -372,10 +361,7 @@ def review_resolution_document(
     notes: list[str] = []
     try:
         staged_entries = copy.deepcopy(entries)
-        staged_by_id = {
-            kernel_id: staged_entries[index]
-            for kernel_id, (index, _) in zip(sent_ids, reviewable_items)
-        }
+        staged_by_id = {kernel_id: staged_entries[index] for kernel_id, (index, _) in zip(sent_ids, reviewable_items)}
         for revision in revisions:
             # The batch check above already rejected any id that was not sent,
             # so every revision still here names a staged entry.

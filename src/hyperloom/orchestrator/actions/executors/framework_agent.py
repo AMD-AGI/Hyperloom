@@ -510,8 +510,7 @@ class FrameworkAgentExecutor:
             if explicit_framework_root:
                 _error_class = "framework_source_root_rejected"
                 _error = (
-                    f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured source allowlist"
+                    f"framework_source_root {explicit_framework_root!r} is not under the configured source allowlist"
                 )
             else:
                 _error_class = "no_framework_agent_root"

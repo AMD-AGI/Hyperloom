@@ -46,8 +46,24 @@ PIP_MARKER = "pip-install-called"
 # coreutils the extracted bash + the stubs need; PATH is curated so we control
 # whether apt-get is discoverable (for the no-apt branch).
 _PATH_TOOLS = (
-    "bash", "sh", "env", "cat", "tr", "touch", "mkdir", "rm", "printf",
-    "sed", "grep", "ls", "dirname", "chmod", "ln", "cp", "head", "tail",
+    "bash",
+    "sh",
+    "env",
+    "cat",
+    "tr",
+    "touch",
+    "mkdir",
+    "rm",
+    "printf",
+    "sed",
+    "grep",
+    "ls",
+    "dirname",
+    "chmod",
+    "ln",
+    "cp",
+    "head",
+    "tail",
 )
 
 
@@ -323,9 +339,7 @@ def test_failsoft_when_apt_log_never_created(tmp_path: Path) -> None:
         apt_creates_tool=False,
         tmpdir=str(missing_tmp),
     )
-    assert r["rc"] == 0 and r["reached_end"], (
-        f"missing apt_log must stay fail-soft (no abort):\n{r['out']}"
-    )
+    assert r["rc"] == 0 and r["reached_end"], f"missing apt_log must stay fail-soft (no abort):\n{r['out']}"
     assert "did not produce" in r["out"]
 
 
@@ -413,10 +427,7 @@ def test_static_call_ordered_after_all_pip_steps() -> None:
 
     # Top-level invocations: a line that is exactly a function name (col 0), i.e.
     # ensure_*/chain_* CALLS (definitions are `name() {`, which this won't match).
-    invocations = [
-        (m.start(), m.group(1))
-        for m in re.finditer(r"^(ensure_[a-z_]+|chain_[a-z_]+)$", text, re.M)
-    ]
+    invocations = [(m.start(), m.group(1)) for m in re.finditer(r"^(ensure_[a-z_]+|chain_[a-z_]+)$", text, re.M)]
     pip_steps_before = []
     for pos, name in invocations:
         if name == "ensure_rocprof_compute":
@@ -471,6 +482,4 @@ def test_static_fail_soft_no_hard_abort() -> None:
     for name in ("ensure_rocprof_compute", "_ensure_pandas_lt3_for_rocpc"):
         body = _extract_fn(name)
         assert "die " not in body, f"{name} must be fail-soft (no die)"
-        assert not re.search(r"^\s*exit\b", body, re.M), (
-            f"{name} must not exit the shell (only `return 0` / fail-soft)"
-        )
+        assert not re.search(r"^\s*exit\b", body, re.M), f"{name} must not exit the shell (only `return 0` / fail-soft)"

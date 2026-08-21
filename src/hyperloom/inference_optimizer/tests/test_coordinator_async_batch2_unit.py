@@ -45,10 +45,7 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "critic", "robustness")
-    }
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
@@ -73,18 +70,12 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
     monkeypatch.setattr(
         baseline_module,
         "_revert_patches",
-        lambda target, sha, manifest=None: (
-            restores.append((target, sha))
-            or {"ok": True, "errors": []}
-        ),
+        lambda target, sha, manifest=None: restores.append((target, sha)) or {"ok": True, "errors": []},
     )
     monkeypatch.setattr(
         kernel_handlers,
         "_maybe_revert_kernel_patch",
-        lambda result: (
-            kernel_restores.append(result)
-            or {"status": "ok"}
-        ),
+        lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
     task = await coord.tasks.create(
         kind="replay_warm_recipe",
@@ -134,9 +125,7 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
-        "recipe:missing_snapshot_manifest"
-    ]
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:missing_snapshot_manifest"]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
     assert kernel_restores == [{"manifest_path": "/tmp/kernel"}]
@@ -167,21 +156,14 @@ async def test_resume_retains_pending_when_any_restore_fails(
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
-        "restore failed"
-    ]
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["restore failed"]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
 
 
 def test_collective_resume_gate_is_delegated_to_kernel_phase() -> None:
     """Writeback resume must resolve the Collective gate."""
-    assert (
-        Coordinator._DELEGATED.get(
-            "_collective_required_before_kernel_opt"
-        )
-        == "phase_kernel"
-    )
+    assert Coordinator._DELEGATED.get("_collective_required_before_kernel_opt") == "phase_kernel"
 
 
 @pytest.fixture
@@ -383,9 +365,7 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
                     "domain": "serving_specialist",
                     "provenance": "specialist:serving_specialist",
                     "framework_agent_authoring": True,
-                    "source_manifest": (
-                        "/session/optimization_stack/src/spec-orphan/manifest.json"
-                    ),
+                    "source_manifest": ("/session/optimization_stack/src/spec-orphan/manifest.json"),
                     "target_files": ["vllm/model.py"],
                 },
             },
@@ -400,15 +380,11 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
     assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
     assert coord.shared_state.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
-    assert coord.shared_state.optimization_stack[-1]["provenance"] == (
-        "specialist:serving_specialist"
-    )
+    assert coord.shared_state.optimization_stack[-1]["provenance"] == ("specialist:serving_specialist")
     assert coord.shared_state.optimization_stack[-1]["source_manifest"] == (
         "/session/optimization_stack/src/spec-orphan/manifest.json"
     )
-    assert coord.shared_state.optimization_stack[-1]["target_files"] == [
-        "vllm/model.py"
-    ]
+    assert coord.shared_state.optimization_stack[-1]["target_files"] == ["vllm/model.py"]
     assert coord.shared_state.resume_pending_revalidation is True
 
 
@@ -652,9 +628,7 @@ async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord:
     report = await coord._resume_consistency_pass()
 
     assert not [
-        w
-        for w in report["warnings"]
-        if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
+        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
     ]
 
 
@@ -683,9 +657,7 @@ async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(
     report = await coord._resume_consistency_pass()
 
     orphan = next(
-        w
-        for w in report["warnings"]
-        if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
+        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
     )
     assert orphan["variant"] == "https://example.com/pull/8"
 

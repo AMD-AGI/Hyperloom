@@ -142,9 +142,7 @@ class TestServerLogParsing:
             "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, "
             "will use default config!"
         )
-        assert parse_aiter_consulted_tables(line) == {
-            "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
-        }
+        assert parse_aiter_consulted_tables(line) == {"/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"}
 
     def test_consulted_tables_of_empty_log(self):
         assert parse_aiter_consulted_tables("") == set()

@@ -87,8 +87,7 @@ def _resolve_critic_protocol(requested: str, *, provider_anthropic_only: bool) -
         # registered instead of being rejected by a copy nobody updated.
         if not has_anthropic_credential():
             raise ValueError(
-                "--critic-protocol=anthropic requires one of "
-                + " / ".join(llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER)
+                "--critic-protocol=anthropic requires one of " + " / ".join(llm_config.ANTHROPIC_CREDENTIAL_ENV_ORDER)
             )
         return requested
 
@@ -183,8 +182,7 @@ def _build_backends(
     # endpoint. Only `auto` consults this; an explicit --critic-protocol wins.
     provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
     provider_openai_only = (not codex_follows_claude) and (
-        _official_openai_only()
-        or os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1"
+        _official_openai_only() or os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1"
     )
 
     if critic_choice == "mock":

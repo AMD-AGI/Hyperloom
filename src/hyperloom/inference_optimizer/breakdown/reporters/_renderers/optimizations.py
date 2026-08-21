@@ -72,8 +72,7 @@ def _reconciliation_notes(validation: dict[str, Any]) -> list[str]:
     unscored = _count(validation.get("unscored_keep_count"))
     if unscored:
         notes.append(
-            f"{unscored} adopted step(s) were kept on the verdict alone, with "
-            "no accuracy gate having ruled on them."
+            f"{unscored} adopted step(s) were kept on the verdict alone, with no accuracy gate having ruled on them."
         )
     stale = _count(validation.get("stale_evidence_count"))
     if stale:
@@ -100,11 +99,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render adopted optimizations from the single canonical read model."""
 
     optimizations = breakdown.get("optimizations") or {}
-    entries = [
-        entry
-        for entry in optimizations.get("entries") or []
-        if isinstance(entry, dict)
-    ]
+    entries = [entry for entry in optimizations.get("entries") or [] if isinstance(entry, dict)]
     validation = optimizations.get("validation") or {}
 
     if optimizations.get("available") is False:
@@ -117,10 +112,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             key_facts=[f"No optimization read model was produced: {reason}."],
             markdown_block="",
             decisions=[],
-            warnings=[
-                "This section is absent, not empty. Nothing here says the "
-                "session optimized nothing."
-            ],
+            warnings=["This section is absent, not empty. Nothing here says the session optimized nothing."],
             skipped=False,
         )
 
@@ -143,17 +135,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 )
             )
 
-    facts = [
-        f"{len(entries)} adopted optimization entr"
-        f"{'y' if len(entries) == 1 else 'ies'} recorded."
-    ]
+    facts = [f"{len(entries)} adopted optimization entr{'y' if len(entries) == 1 else 'ies'} recorded."]
     validated = [entry for entry in entries if entry.get("validated") is True]
     facts.append(f"{len(validated)} entr{'y is' if len(validated) == 1 else 'ies are'} validated.")
-    positive = [
-        bucket
-        for bucket in summary.values()
-        if isinstance(bucket, dict) and bucket.get("total_gain_pct")
-    ]
+    positive = [bucket for bucket in summary.values() if isinstance(bucket, dict) and bucket.get("total_gain_pct")]
     if positive:
         facts.append(
             "Validated gain represented in canonical source summaries: "

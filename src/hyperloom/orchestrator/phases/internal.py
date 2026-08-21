@@ -75,7 +75,9 @@ class InternalTasksPhase(PhaseHandler):
                     proven.append({"name": name, "source": source})
         if proven:
             params["already_proven"] = proven
-        recipe_sites = [s.strip() for s in re.split(r"[,\s]+", os.environ.get("HYPERLOOM_RECIPE_SITES", "")) if s.strip()]
+        recipe_sites = [
+            s.strip() for s in re.split(r"[,\s]+", os.environ.get("HYPERLOOM_RECIPE_SITES", "")) if s.strip()
+        ]
         if recipe_sites:
             params["recipe_sites"] = recipe_sites
         rounds = getattr(self.shared_state, "specialist_rounds", None) or []

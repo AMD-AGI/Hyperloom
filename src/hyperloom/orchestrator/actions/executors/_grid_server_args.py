@@ -224,6 +224,7 @@ def _repair_unquoted_json(blob: str) -> str | None:
     This is a narrowly scoped recovery heuristic for known JSON-valued server
     flags after shlex damage, not a general parser for JSON-like syntax.
     """
+
     def _quote_value(m: "re.Match[str]") -> str:
         prefix, word = m.group(1), m.group(2)
         if word in ("true", "false", "null"):
@@ -288,12 +289,7 @@ def _reserialize_json_blobs(args: str) -> str:
             # These args are later expanded from an environment variable
             # without eval, so the wrappers become literal argv characters.
             # Strip only directly-adjacent wrappers around the balanced blob.
-            single_quote_wrapped = (
-                i > 0
-                and args[i - 1] == "'"
-                and out
-                and out[-1] == "'"
-            )
+            single_quote_wrapped = i > 0 and args[i - 1] == "'" and out and out[-1] == "'"
             # Walk to the balanced close, honouring quoted strings.
             depth = 0
             in_str = False
@@ -318,11 +314,7 @@ def _reserialize_json_blobs(args: str) -> str:
                         j += 1
                         break
                 j += 1
-            single_quote_wrapped = bool(
-                single_quote_wrapped
-                and j < n
-                and args[j] == "'"
-            )
+            single_quote_wrapped = bool(single_quote_wrapped and j < n and args[j] == "'")
             blob = args[i:j]
             rendered: str | None = None
             try:
@@ -764,10 +756,7 @@ def validate_warm_replay_context_length(
         return args, {"status": "target_shape_unknown"}
     max_len = optional_positive_int(max_model_len)
     if max_len is not None and max_len < required:
-        raise ValueError(
-            "target workload exceeds MAX_MODEL_LEN: "
-            f"isl+osl={required} > max_model_len={max_len}"
-        )
+        raise ValueError(f"target workload exceeds MAX_MODEL_LEN: isl+osl={required} > max_model_len={max_len}")
     parsed = tokenize_server_args_preserving_json(args)
     if parsed is None:
         raise ValueError("warm replay server args are not safely tokenizable")
@@ -790,9 +779,7 @@ def validate_warm_replay_context_length(
         try:
             value = int(raw_value)
         except ValueError as exc:
-            raise ValueError(
-                f"--context-length must be an integer, got {raw_value!r}"
-            ) from exc
+            raise ValueError(f"--context-length must be an integer, got {raw_value!r}") from exc
         if value <= 0:
             raise ValueError("--context-length must be positive")
         values.append(value)

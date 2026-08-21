@@ -230,10 +230,7 @@ class ContextProvider:
             if fe is None:
                 # Evicted from the in-memory cap, or never existed; the mirror
                 # under reports/failures/ answers both cases.
-                return (
-                    f"(get_failure: {fid!r} not in memory; "
-                    f"Read $SESSION_DIR/reports/failures/{fid}.json)"
-                )
+                return f"(get_failure: {fid!r} not in memory; Read $SESSION_DIR/reports/failures/{fid}.json)"
             return json.dumps(fe, default=str, indent=2)
 
         return self._safe(_read, "get_failure")

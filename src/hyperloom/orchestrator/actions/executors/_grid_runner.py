@@ -1458,8 +1458,7 @@ async def run_grid(
         _lock_sweep = sweep_stale_aiter_locks_if_dead()
         if _lock_sweep.get("deleted"):
             log.warning(
-                "grid_runner: reaped %d orphaned aiter JIT lock(s) under %s "
-                "before server launch (compiler_alive=%s)",
+                "grid_runner: reaped %d orphaned aiter JIT lock(s) under %s before server launch (compiler_alive=%s)",
                 _lock_sweep.get("deleted"),
                 _lock_sweep.get("dir"),
                 _lock_sweep.get("compiler_alive"),
@@ -2741,7 +2740,6 @@ def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Vari
         error_class=stopped.error_class,
         note=variant.note,
     )
-
 
 
 def _existing_log_path(path: Path) -> str | None:

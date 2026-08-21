@@ -214,15 +214,12 @@ class MaintenanceCollaborator:
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
         # Growth signal is the context-token water level; char count is the
         # fallback for backends that don't report token usage.
-        if (
-            not force
-            and not self._checkpoint_policy.should_checkpoint(
-                ticks_since_last=ticks_since,
-                minutes_since_last=minutes_since,
-                chars_since_last=tracker.chars_since_last,
-                phase_changed=phase_changed,
-                context_tokens_now=tracker.context_tokens_now,
-            )
+        if not force and not self._checkpoint_policy.should_checkpoint(
+            ticks_since_last=ticks_since,
+            minutes_since_last=minutes_since,
+            chars_since_last=tracker.chars_since_last,
+            phase_changed=phase_changed,
+            context_tokens_now=tracker.context_tokens_now,
         ):
             return False
 

@@ -1480,23 +1480,29 @@ def test_record_status_minute_buckets_runtime_clocks(tmp_path, monkeypatch):
     _write_manifest(sd)
     em = lfe.LangfuseEmitter(sd)
 
-    em.record_status(_status(
-        session_elapsed_s=121,
-        explore_elapsed_s=31,
-        explore_ratio=31 / 121,
-    ))
-    em.record_status(_status(
-        session_elapsed_s=139,
-        explore_elapsed_s=49,
-        explore_ratio=49 / 139,
-    ))
+    em.record_status(
+        _status(
+            session_elapsed_s=121,
+            explore_elapsed_s=31,
+            explore_ratio=31 / 121,
+        )
+    )
+    em.record_status(
+        _status(
+            session_elapsed_s=139,
+            explore_elapsed_s=49,
+            explore_ratio=49 / 139,
+        )
+    )
     assert em._counts["status_updates_sent"] == 1
 
-    em.record_status(_status(
-        session_elapsed_s=181,
-        explore_elapsed_s=61,
-        explore_ratio=61 / 181,
-    ))
+    em.record_status(
+        _status(
+            session_elapsed_s=181,
+            explore_elapsed_s=61,
+            explore_ratio=61 / 181,
+        )
+    )
     assert em._counts["status_updates_sent"] == 2
     status_spans = [s for s in client.spans if s.kwargs.get("name") == "session_status"]
     assert status_spans[-1].kwargs["output"]["session_elapsed_s"] == 181
