@@ -74,6 +74,7 @@ class MockBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Record the call and play back the next scripted turn.
@@ -195,6 +196,7 @@ class MockRowScanBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Emit one intent per not-yet-seen matched row, else a heartbeat.
@@ -203,6 +205,7 @@ class MockRowScanBackend:
             prompt (str): The composed turn prompt containing the rendered inbox.
             system_prompt (str | None): Unused; accepted for protocol parity.
             tools (list[str] | None): Unused; accepted for protocol parity.
+            disallowed_tools (list[str] | None): Unused; accepted for protocol parity.
             max_turns (int): Unused; accepted for protocol parity.
 
         Returns:

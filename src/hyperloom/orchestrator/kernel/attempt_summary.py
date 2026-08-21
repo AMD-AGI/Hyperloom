@@ -687,8 +687,9 @@ def _classify_collective_attempt(record: dict[str, Any]) -> str:
     integration_decision = str(
         record.get("integration_decision") or ""
     ).strip().upper()
+    # Fall back to legacy field name for --resume compat.
     integration_status = str(
-        record.get("integration_status") or ""
+        record.get("patch_cleanup_status") or record.get("integration_status") or ""
     ).strip().lower()
     run_decision = str(record.get("decision") or "").strip().upper()
     run_status = str(record.get("status") or "").strip().lower()

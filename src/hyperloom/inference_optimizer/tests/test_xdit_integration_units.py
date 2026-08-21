@@ -108,11 +108,10 @@ class TestXditBlacklist:
         assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
         assert gr.xdit_blacklist_reason({}) is None
 
-    def test_compatibility_filter_drops_blacklisted(self, monkeypatch):
-        monkeypatch.setenv("FRAMEWORK", "xdit")
+    def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
         bad = gr.GridVariant(name="xdit_fp4", extra_server_args="", extra_envs={"XDIT_USE_FP4_GEMMS": "1"})
-        kept, dropped = gr.apply_compatibility_filter([good, bad])
+        kept, dropped = gr.apply_compatibility_filter([good, bad], framework="xdit", model_path="")
         kept_names = {v.name for v in kept}
         dropped_names = {d["name"] for d in dropped}
         assert "xdit_ok" in kept_names

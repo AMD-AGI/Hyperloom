@@ -288,14 +288,11 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     params = spec["params"]
     assert params["framework_agent_authoring"] is True
     assert params["domain"] == "serving_specialist"
-    assert params["readonly"] is False
     assert params["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
     assert params.get("task_kind") == "framework_authoring"
     pr_lead = params.get("pr_lead") or {}
     assert _CANDIDATE["pr_url"] == pr_lead.get("url") or _CANDIDATE["pr_url"] in params.get("notes", "")
     assert _CANDIDATE["diff_url"] == pr_lead.get("diff_url") or _CANDIDATE["diff_url"] in params.get("notes", "")
-    assert "Write" in spec["allowed_tools"]
-    assert "Edit" in spec["allowed_tools"]
     assert spec["requires_lanes"] == ["research_lane"]
 
 

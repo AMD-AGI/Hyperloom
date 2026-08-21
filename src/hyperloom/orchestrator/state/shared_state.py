@@ -2010,8 +2010,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "requires_e2e_validation": result[
                 "requires_e2e_validation"
             ],
-            "integration_status": str(
-                result.get("integration_status") or ""
+            "patch_cleanup_status": str(
+                result.get("patch_cleanup_status")
+                or result.get("integration_status")
+                or ""
             ),
             "integration_decision": str(
                 result.get("integration_decision") or ""
@@ -2051,11 +2053,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Build the integration fields stored on a collective campaign."""
         revert = result.get("revert_result")
         finalize = result.get("finalize_result")
+        # Fall back to legacy field names for --resume compat with older sessions.
+        patch_cleanup_status = str(
+            result.get("patch_cleanup_status") or result.get("integration_status") or ""
+        )
+        patch_cleanup_action = str(
+            result.get("patch_cleanup_action") or result.get("integration_recovery_action") or ""
+        )
         return {
-            "integration_status": str(result["integration_status"]),
-            "integration_recovery_action": str(
-                result.get("integration_recovery_action") or ""
-            ),
+            "patch_cleanup_status": patch_cleanup_status,
+            "patch_cleanup_action": patch_cleanup_action,
             "integration_decision": str(result["decision"]).strip().upper(),
             "integration_result_status": str(result.get("status") or ""),
             "integration_gain_pct": result.get("gain_pct"),
@@ -2138,7 +2145,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     f"Collective result has invalid {field_name}"
                 )
         recorded.setdefault(
-            "integration_status",
+            "patch_cleanup_status",
             "pending"
             if requires_e2e
             else "complete",
@@ -2188,23 +2195,28 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             raise ValueError(
                 f"Invalid collective integration decision: {decision!r}"
             )
-        integration_status = str(
-            integration.get("integration_status") or ""
+        # Fall back to legacy field names for --resume compat with older sessions.
+        patch_cleanup_status = str(
+            integration.get("patch_cleanup_status")
+            or integration.get("integration_status")
+            or ""
         ).strip()
-        if integration_status not in {"complete", "recovery_required"}:
+        if patch_cleanup_status not in {"complete", "recovery_required"}:
             raise ValueError(
-                "Collective integration_status must be complete or "
+                "Collective patch_cleanup_status must be complete or "
                 "recovery_required"
             )
         recovery_action = str(
-            integration.get("integration_recovery_action") or ""
+            integration.get("patch_cleanup_action")
+            or integration.get("integration_recovery_action")
+            or ""
         ).strip()
-        if integration_status == "complete" and recovery_action:
+        if patch_cleanup_status == "complete" and recovery_action:
             raise ValueError(
                 "Completed collective integration cannot require recovery"
             )
         if (
-            integration_status == "recovery_required"
+            patch_cleanup_status == "recovery_required"
             and recovery_action not in {"finalize", "revert"}
         ):
             raise ValueError(
@@ -2223,7 +2235,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     f"Collective integration has invalid {field_name}"
                 )
         integration["decision"] = decision
-        integration["integration_status"] = integration_status
+        integration["patch_cleanup_status"] = patch_cleanup_status
+        integration["patch_cleanup_action"] = recovery_action
         if not isinstance(self.last_collective, dict):
             raise ValueError("last_collective must be a mapping")
         last = dict(self.last_collective)

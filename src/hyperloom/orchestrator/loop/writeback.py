@@ -5200,6 +5200,8 @@ class WritebackCollaborator:
                     kind="explore",
                     params=params_ps,
                     idempotency_key=idempotency_key,
+                    # Without a TTL the row is invisible to ``reclaim_expired_running``.
+                    lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
                 )
                 try:
                     from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -5269,6 +5271,8 @@ class WritebackCollaborator:
             kind="explore",
             params=params,
             idempotency_key="resume-stack-revalidate",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 

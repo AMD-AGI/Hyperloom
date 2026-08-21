@@ -68,16 +68,8 @@ def test_robustness_only_intents_match_upstream():
 
     _, upstream_policy, _ = _UPSTREAM  # type: ignore[misc]
     upstream_set = {t.value for t in upstream_policy.ROBUSTNESS_ONLY_INTENTS}
-    upstream_set.add("kill_task")  # upstream lists kill_task separately as KILL_TASK_SOURCE_ALLOWLIST
     local_set = {t.value for t in ROBUSTNESS_ONLY_INTENTS}
     assert local_set == upstream_set
-
-
-def test_kill_task_scope_matches_upstream():
-    from hyperloom.agents.robustness.role.envelope import KILL_TASK_ALLOWED_SCOPES
-
-    _, upstream_policy, _ = _UPSTREAM  # type: ignore[misc]
-    assert KILL_TASK_ALLOWED_SCOPES == upstream_policy.KILL_TASK_ALLOWED_SCOPES
 
 
 def test_core_state_fields_match_upstream():

@@ -292,11 +292,14 @@ def test_maybe_setup_worktree_in_process_mode(tmp_path):
     assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
 
 
-def test_maybe_setup_worktree_readonly(tmp_path):
+def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
+    from hyperloom.orchestrator.specialists.profile import resolve_specialist_profile
+
     cfg = sr.SpecialistSubprocessConfig()
     r = _runner(backend_factory=None, subprocess_config=cfg)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"readonly": True}))
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"mode": "research"}))
+    profile = resolve_specialist_profile(ctx.task.params)
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "")
 
 
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):

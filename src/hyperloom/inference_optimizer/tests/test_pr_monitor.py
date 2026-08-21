@@ -11,11 +11,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
-from hyperloom.orchestrator.specialists.runner import (
-    DEFAULT_SPECIALIST_TOOLS,
-    PR_MONITOR_MCP_TOOLS,
-    SpecialistRunner,
-)
+from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES as _PR_MONITOR_TOOL_NAMES
 
 
 def test_pr_monitor_client_from_args_default_enabled():
@@ -50,57 +46,8 @@ def test_plane_enabled_returns_mcp_url():
     assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
 
 
-def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
-    for t in PR_MONITOR_MCP_TOOLS:
-        assert t in DEFAULT_SPECIALIST_TOOLS
-    assert len(PR_MONITOR_MCP_TOOLS) == 12
-
-
-def test_specialist_runner_strips_pr_monitor_when_plane_disabled():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=False),
-    )
-    runner = SpecialistRunner(
-        backend_factory=lambda d: None,
-        knowledge_plane=plane,
-    )
-    tools = runner._resolve_tools()
-    for t in PR_MONITOR_MCP_TOOLS:
-        assert t not in tools
-
-
-def test_specialist_runner_keeps_pr_monitor_when_plane_enabled():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=True),
-    )
-    runner = SpecialistRunner(
-        backend_factory=lambda d: None,
-        knowledge_plane=plane,
-    )
-    tools = runner._resolve_tools()
-    for t in PR_MONITOR_MCP_TOOLS:
-        assert t in tools
-
-
-def test_specialist_runner_explicit_mcp_config_is_authoritative():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=True),
-    )
-    runner = SpecialistRunner(
-        backend_factory=lambda d: None,
-        knowledge_plane=plane,
-        forced_mcp_servers=("pr_monitor",),
-    )
-    tools = runner._resolve_tools()
-    for t in PR_MONITOR_MCP_TOOLS:
-        assert t in tools
-
-
-def test_specialist_runner_without_plane_keeps_default_tools():
-    runner = SpecialistRunner(backend_factory=lambda d: None)
-    tools = runner._resolve_tools()
-    for t in DEFAULT_SPECIALIST_TOOLS:
-        assert t in tools
+def test_pr_monitor_tool_names_count():
+    assert len(_PR_MONITOR_TOOL_NAMES) == 12
 
 
 def test_mcp_config_writes_pr_monitor_only(tmp_path):

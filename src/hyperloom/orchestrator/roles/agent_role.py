@@ -17,10 +17,10 @@ Three persistent LLM agent roles and their permitted intents::
     │ name         │ backend  │ allowed intents (high level)            │
     ├──────────────┼──────────┼─────────────────────────────────────────┤
     │ orchestration│ Claude   │ propose_action / delegate / request /   │
-    │              │          │ update_state / kill_task / ...          │
+    │              │          │ update_state / extend_lease / ...       │
     │ critic       │ Codex    │ review_verdict (only) / send_message /  │
     │              │ no-tools │ alert                                   │
-    │ robustness   │ Claude   │ alert / kill_task / prune_branch /      │
+    │ robustness   │ Claude   │ alert / prune_branch /                  │
     │              │          │ escalate_strategy_change                │
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
@@ -69,7 +69,6 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
         IntentType.DELEGATE,
         IntentType.UPDATE_STATE,
         IntentType.REQUEST,
-        IntentType.KILL_TASK,
         IntentType.EXTEND_LEASE,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
@@ -85,14 +84,23 @@ _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# Robustness — health monitoring + RCA + recovery; holds KILL_TASK exclusively.
+# Robustness — health monitoring + RCA + recovery.
 _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.UPDATE_STATE,  # crash_count / current_action only
-        IntentType.DELEGATE,  # only handle actions: accuracy_gate / recover / server_lifecycle
-        IntentType.KILL_TASK,
+        IntentType.DELEGATE,  # only recover; enforced by PolicyGate ROBUSTNESS_DELEGATE_ONLY_ACTIONS
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
+    }
+)
+
+
+# Specialist — single exit signal, optional heartbeats and alerts only.
+# Exact mirror of runner.py's accept-set (specialist_done | send_message | alert).
+# Public because the specialist has no AgentRole record to reach it through.
+SPECIALIST_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
+    {
+        IntentType.SPECIALIST_DONE,
     }
 )
 
@@ -188,5 +196,6 @@ __all__ = [
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_API_KEY_ENV",
     "DEFAULT_CODEX_MODEL",
+    "SPECIALIST_INTENTS",
     "default_role_registry",
 ]

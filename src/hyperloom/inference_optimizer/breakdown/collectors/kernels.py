@@ -1424,7 +1424,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
 _COLLECTIVE_INTEGRATION_FIELDS = (
     "integration_id",
     "integration_decision",
-    "integration_status",
+    "patch_cleanup_status",
     "integration_result_status",
     "integration_revert_status",
     "integration_finalize_status",
@@ -1474,7 +1474,11 @@ def _normalize_collective_record(raw: dict[str, Any]) -> dict[str, Any]:
         "integration_new_tput": _to_float(raw.get("integration_new_tput")),
     }
     for field in _COLLECTIVE_INTEGRATION_FIELDS:
-        out[field] = str(raw.get(field) or "")
+        value = raw.get(field) or ""
+        if not value and field == "patch_cleanup_status":
+            # Resume compat: older state.json records use "integration_status".
+            value = raw.get("integration_status") or ""
+        out[field] = str(value)
     if isinstance(raw.get("bandwidth"), dict):
         out["bandwidth"] = raw["bandwidth"]
     if isinstance(raw.get("artifact_files"), list):

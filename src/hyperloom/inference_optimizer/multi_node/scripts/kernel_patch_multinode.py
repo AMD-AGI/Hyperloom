@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import py_compile
 import shutil
@@ -101,7 +102,8 @@ def _apply_remote(
 
     bdir = Path(backup_dir)
     bdir.mkdir(parents=True, exist_ok=True)
-    backup_name = f"{_safe_name(kernel_id or target.stem)}_{host}_{int(time.time())}.bak"
+    path_hash = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
+    backup_name = f"{_safe_name(kernel_id or target.stem)}_{path_hash}_{host}_{time.time_ns()}.bak"
     backup_path = bdir / backup_name
     shutil.copy2(target, backup_path)
 

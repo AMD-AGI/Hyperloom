@@ -3,11 +3,11 @@
 
 """Off-loop targeted-build runner.
 
-Spawns a build command as a **detached** subprocess (its own process group) so a
-multi-hour compile never blocks the coordinator tick loop, then polls it across
-ticks against a monotonic wall-clock deadline. On timeout it tears the whole
-process group down non-blocking (SIGTERM, then SIGKILL after a grace window so a
-poll never sleeps).
+Spawns a build command as a subprocess in its own process group, so tearing a
+build down reaches the compiler's own children. The wall-clock budget and the
+teardown belong to the coroutine that owns the build
+(``actions/executors/targeted_build_executor.py``); this module spawns it,
+classifies how it exited, and can make sure it is dead.
 
 The build command is argv-only (never a shell string). Each build gets a
 per-attempt ``INFERENCE_OPTIMIZER_AITER_JIT_DIR`` so it never shares the
@@ -37,8 +37,8 @@ from .build_actions import BuildResult, FrameworkRuntime, TargetedBuildAction
 
 log = logging.getLogger(__name__)
 
-# Seconds between SIGTERM and the escalation to SIGKILL on the process group.
-_KILL_GRACE_SEC = 5.0
+# Upper bound on confirming a SIGKILLed process group is gone.
+_REAP_TIMEOUT_SEC = 5.0
 
 # Default per-component build budgets (upper bounds), in seconds.
 _DEFAULT_BUDGET_SEC: dict[str, int] = {
@@ -58,9 +58,10 @@ def default_budget_sec(component: str) -> int:
 class BuildHandle:
     """In-memory handle for one in-flight detached build.
 
-    Not persisted directly; the durable copy is ``pending_targeted_build`` in
-    shared state. ``sigterm_at`` tracks the two-phase kill across poll calls so
-    the reaper never blocks the tick.
+    The wall-clock budget is enforced by the coroutine that owns the build, so
+    the handle carries no deadline of its own. Not persisted directly; the
+    durable copy is ``pending_targeted_build`` in shared state, which exists so
+    a resume after a hard crash can still reach the process group.
     """
 
     action: TargetedBuildAction
@@ -70,8 +71,6 @@ class BuildHandle:
     proc: Any
     pid: int
     pgid: int
-    deadline: float
-    sigterm_at: float = 0.0
 
     def to_sentinel(self, task_id: str) -> dict[str, Any]:
         """Project onto the ``pending_targeted_build`` sentinel dict."""
@@ -81,7 +80,6 @@ class BuildHandle:
             "pgid": self.pgid,
             "attempt_root": self.attempt_root,
             "aiter_jit_dir": self.aiter_jit_dir,
-            "deadline": self.deadline,
             "action": self.action.to_state(),
             "build_log_path": self.build_log_path,
             "ts": time.time(),
@@ -99,7 +97,6 @@ def spawn_build(
     attempt_root: str,
     command: list[str] | None = None,
     run: Callable[..., Any] = subprocess.Popen,
-    now: Callable[[], float] = time.monotonic,
 ) -> BuildHandle:
     """Spawn a targeted build as a detached process group.
 
@@ -115,10 +112,9 @@ def spawn_build(
             (``build_lifecycle._driver_command``) always passes this, using the
             off-loop driver entrypoint when ``action.build_command`` is empty.
         run: Injectable process spawner (defaults to ``subprocess.Popen``).
-        now: Injectable monotonic clock (defaults to ``time.monotonic``).
 
     Returns:
-        BuildHandle: The in-flight handle (pid/pgid/deadline/log path).
+        BuildHandle: The in-flight handle (pid/pgid/log path).
 
     Raises:
         ValueError: If neither ``command`` nor ``action.build_command`` yields a
@@ -159,7 +155,6 @@ def spawn_build(
     except (ProcessLookupError, PermissionError, OSError):
         pgid = pid
 
-    deadline = now() + float(_resolve_budget_sec(action))
     log.info(
         "targeted_build: spawned %s build pid=%d pgid=%d budget=%ds root=%s",
         action.component,
@@ -176,7 +171,6 @@ def spawn_build(
         proc=proc,
         pid=pid,
         pgid=pgid,
-        deadline=deadline,
     )
 
 
@@ -212,59 +206,57 @@ def _finalize(handle: BuildHandle, *, ok: bool, failure_class: str, summary: str
     )
 
 
-def poll_build(
-    handle: BuildHandle,
-    *,
-    now: Callable[[], float] = time.monotonic,
-) -> BuildResult | None:
-    """Poll a build once; return ``None`` while still running.
+def classify_build_exit(handle: BuildHandle, rc: int) -> BuildResult:
+    """Turn an exited build into a :class:`BuildResult`.
 
-    Non-blocking: on deadline it sends SIGTERM and records ``sigterm_at``, then
-    on a later poll past the grace window escalates to SIGKILL, so the reaper
-    never sleeps inside a tick.  When the process exits, attempts to load a
-    rich ``result.json`` written by the driver; falls back to the exit-code
-    classification when the file is absent.
+    Prefers the rich ``result.json`` the driver writes; falls back to the exit
+    code when the file is absent.
 
     Args:
-        handle: The in-flight build handle.
-        now: Injectable monotonic clock.
+        handle: The handle for the build that just exited.
+        rc: The process exit code.
 
     Returns:
-        BuildResult when terminal (exited / timed out+dead), else ``None``.
+        BuildResult: The classified outcome.
     """
-    rc = handle.proc.poll()
-    if rc is not None:
-        if handle.sigterm_at > 0.0:
-            return _finalize(
-                handle,
-                ok=False,
-                failure_class="timeout",
-                summary=f"build exceeded wall-clock budget and was terminated (rc={rc})",
-            )
-        # Try to load a rich result written by the driver subprocess.
-        rich = _load_result_json(handle.attempt_root)
-        if rich is not None:
-            return rich
-        if int(rc) == 0:
-            return _finalize(handle, ok=True, failure_class="ok", summary="")
-        return _finalize(
-            handle,
-            ok=False,
-            failure_class="compile_error",
-            summary=f"build command exited {int(rc)}",
-        )
+    rich = _load_result_json(handle.attempt_root)
+    if rich is not None:
+        return rich
+    if int(rc) == 0:
+        return _finalize(handle, ok=True, failure_class="ok", summary="")
+    return _finalize(
+        handle,
+        ok=False,
+        failure_class="compile_error",
+        summary=f"build command exited {int(rc)}",
+    )
 
-    t = now()
-    if handle.sigterm_at > 0.0:
-        # Already asked to stop; escalate to SIGKILL once the grace elapses.
-        if t - handle.sigterm_at >= _KILL_GRACE_SEC:
-            kill_build_pgroup(handle.pgid, sig=signal.SIGKILL)
-        return None
-    if t >= handle.deadline:
-        kill_build_pgroup(handle.pgid, sig=signal.SIGTERM)
-        handle.sigterm_at = t
-        return None
-    return None
+
+def ensure_build_dead(handle: BuildHandle) -> bool:
+    """SIGKILL the build's process group unless it already exited.
+
+    No SIGTERM grace: a half-finished build tree is discarded either way, so
+    there is nothing a graceful stop would preserve.
+
+    Args:
+        handle: The build to make sure is not still running.
+
+    Returns:
+        bool: True when the process is known to be gone, so the caller may drop
+            the durable sentinel. False leaves it for a resume to reclaim.
+    """
+    if handle.proc.poll() is not None:
+        return True
+    kill_build_pgroup(handle.pgid, sig=signal.SIGKILL)
+    try:
+        handle.proc.wait(timeout=_REAP_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "targeted_build: pgid=%d unreaped after SIGKILL; keeping the sentinel",
+            handle.pgid,
+        )
+        return False
+    return True
 
 
 def _load_result_json(attempt_root: str) -> BuildResult | None:
@@ -1130,9 +1122,10 @@ __all__ = [
     "BuildHandle",
     "_driver_main",
     "_load_result_json",
+    "classify_build_exit",
     "default_budget_sec",
+    "ensure_build_dead",
     "kill_build_pgroup",
-    "poll_build",
     "run_aiter_build",
     "run_sgl_kernel_build",
     "run_vllm_source_build",

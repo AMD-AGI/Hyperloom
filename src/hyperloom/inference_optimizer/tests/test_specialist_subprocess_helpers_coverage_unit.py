@@ -135,17 +135,23 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     wt.mkdir()
     ws = tmp_path / "ws"
     ws.mkdir()
+    sys_file = ws / "system_prompt.md"
     cmd = d._build_claude_cmd(
-        prompt_file=tmp_path / "p.txt",
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=wt,
-        allowed_tools=("read_file", "emit_intent", "edit"),
+        disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
     )
     assert "--model" in cmd and "claude-opus-4-7" in cmd
+    assert cmd[cmd.index("--system-prompt-file") + 1] == str(sys_file)
     assert "--mcp-config" in cmd and "/cfg/mcp.json" in cmd
-    tools_idx = cmd.index("--allowedTools") + 1
-    assert "emit_intent" not in cmd[tools_idx]
-    assert "read_file" in cmd[tools_idx] and "edit" in cmd[tools_idx]
+    assert "--allowedTools" not in cmd
+    assert "-p" not in cmd
+    deny_idx = cmd.index("--disallowedTools") + 1
+    denied = set(cmd[deny_idx].split(","))
+    assert "KillShell" in denied and "SlashCommand" in denied
     assert str(wt) in cmd and str(ws) in cmd and str(fw) in cmd
     assert cmd[-2:] == ["--foo", "bar"]
 
@@ -154,16 +160,19 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
     d = _dispatcher()
     ws = tmp_path / "ws"
     ws.mkdir()
+    sys_file = ws / "system_prompt.md"
     cmd = d._build_claude_cmd(
-        prompt_file=tmp_path / "p.txt",
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
-        allowed_tools=("emit_intent",),  # only the dropped tool
     )
     assert "--model" not in cmd
     assert "--mcp-config" not in cmd
     assert "--allowedTools" not in cmd
-    assert "--agents" not in cmd
+    assert "-p" not in cmd
+    assert "--agents" in cmd
 
 
 def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) -> None:
@@ -173,11 +182,13 @@ def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) 
     d = _dispatcher()
     ws = tmp_path / "ws"
     ws.mkdir()
+    sys_file = ws / "system_prompt.md"
     cmd = d._build_claude_cmd(
-        prompt_file=tmp_path / "p.txt",
+        system_prompt_file=sys_file,
+        system_prompt="SYS",
+        user_prompt_file=tmp_path / "p.txt",
         workspace=ws,
         worktree=None,
-        allowed_tools=("Read", "Bash", "Task"),
     )
     agents_idx = cmd.index("--agents") + 1
     agents = json.loads(cmd[agents_idx])

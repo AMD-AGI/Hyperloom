@@ -34,9 +34,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...phases import machine_state as _phase_state
-from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
-from ..cancel_channel import stop_was_asked_for
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -234,23 +232,35 @@ def _validate_magpie_python_override(value: str) -> str:
     return str(resolved)
 
 
-def _resolve_probe_python() -> str:
+def _resolve_probe_python(framework: str = "vllm") -> str:
     """Resolve the interpreter a build-accuracy probe must use.
 
     A capability probe only produces a correct drop decision when it inspects
     the SAME framework install the benchmark server loads, so a bare ``python3``
     off ``$PATH`` is deliberately NOT a fallback.
 
+    Only vLLM may live in its own venv, so that one leads for vLLM alone.
+
     Resolution order:
-    1. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
+    1. ``$VLLM_VENV_ROOT/bin/python`` when probing vLLM and it is executable.
+    2. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
        harness; on a single-venv install this is also the vLLM venv.
-    2. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
+    3. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
        alongside ``shutil.which("vllm")``) when it exists on disk.
-    3. ``_resolve_magpie_python()``'s canonical fallback via step 1.
+    4. ``_resolve_magpie_python()``'s canonical fallback via step 2.
+
+    Args:
+        framework (str): Framework whose install the probe must inspect.
 
     Returns:
         str: Path to the interpreter the probe should invoke.
     """
+    if (framework or "").strip().lower() == "vllm":
+        venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
+        if venv_root:
+            venv_python = str(Path(venv_root) / "bin" / "python")
+            if os.access(venv_python, os.X_OK):
+                return venv_python
     magpie_python = _resolve_magpie_python()
     # Prefer the harness interpreter; on a single-venv box it already IS the
     # vLLM venv.
@@ -1481,7 +1491,7 @@ async def run_grid(
 
         _, _mn_ref_envs = resolve_reference_base()
 
-    # Reported on entry, not on completion: ``_pulse_after_variant`` only runs once a
+    # Reported on entry, not on completion: ``_report_finished_variant`` only runs once a
     # result has been appended, so a first variant that hangs — or a branch that
     # raises before reaching it — would emit nothing at all, which is exactly
     # the silence the heartbeat exists to break.
@@ -1526,47 +1536,20 @@ async def run_grid(
         ) as activity:
             return await asyncio.to_thread(_run_magpie, on_output=activity.note, **kwargs)
 
-    # Variant boundary: a bounded robustness tick so a mid-grid leak/crash
-    # surfaces between variants, plus a progress heartbeat so a grid that runs
-    # for hours is distinguishable from one that hung on its first variant.
-    # Both best-effort.
-    async def _pulse_after_variant(idx: int) -> None:
-        """Report the finished variant and run a best-effort robustness pulse.
+    # Variant boundary: a progress heartbeat so a grid that runs for hours is
+    # distinguishable from one that hung on its first variant. Stall detection
+    # reads this note as the counter-evidence that withholds an accusation
+    # against the agent the work is attributed to.
+    async def _report_finished_variant(idx: int) -> None:
+        """Report the variant that just landed.
 
-        Called once the variant's result has been appended, so the progress
-        note carries what actually landed. The robustness tick is skipped once
-        the action has been asked to stop: a cooperative stop returns its
-        sentinel rather than raising, so this is reached on the ordinary path
-        with the cancel already outstanding, and the tick is a subprocess
-        spawned and waited out for its whole timeout -- serially, between
-        recording the row and releasing what the round held, inside the one
-        window the canceller allows the entire unwind. What it would observe
-        is the reap the orchestrator just ordered, and what waiting for it costs
-        is every row this grid has already built.
-
-        The gate is the cancel scope rather than the round's returncode because a
-        variant can be failing for its own reasons when the cancel lands: that
-        row is a genuine failure and its tick is just as unaffordable.
-
-        Exceptions from the pulse are swallowed (logged at debug) so a pulse
-        failure never aborts the grid.
+        Called once the variant's result has been appended, so the note carries
+        what actually landed rather than what was about to run.
 
         Args:
-            idx (int): Zero-based index of the just-finished variant, passed
-                through as the pulse ``tick_index``.
+            idx (int): Zero-based index of the just-finished variant.
         """
         await report_progress(**_variant_progress_note(grid, results, idx))
-        if stop_was_asked_for():
-            log.info(
-                "grid_runner: variant %d/%d robustness pulse skipped; the orchestrator cancelled this action",
-                idx + 1,
-                len(grid),
-            )
-            return
-        try:
-            await _robustness_pulse(tick_index=idx)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("robustness pulse swallowed: %r", exc)
 
     def _round_timeout_sec(idx: int, name: str, *, round_label: str, reserve_sec: float = 0.0) -> int:
         """``variant_timeout_sec`` capped at what the session can still pay for.
@@ -1796,7 +1779,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1840,7 +1823,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -1934,7 +1917,7 @@ async def run_grid(
                         note=variant.note,
                     )
                 )
-                await _pulse_after_variant(i)
+                await _report_finished_variant(i)
                 if not keep_going_on_failure:
                     break
                 continue
@@ -2000,7 +1983,7 @@ async def run_grid(
                         nonfatal_warnings=["run_grid_warmup_round_failed"],
                     )
                 )
-                await _pulse_after_variant(i)
+                await _report_finished_variant(i)
                 if not keep_going_on_failure:
                     break
                 continue
@@ -2018,7 +2001,7 @@ async def run_grid(
                     started_unix=warmup_started_unix,
                     server_log=warmup_server_log,
                 )
-                await _pulse_after_variant(i)
+                await _report_finished_variant(i)
                 if grid_is_over:
                     break
                 continue
@@ -2090,7 +2073,7 @@ async def run_grid(
                         ],
                     )
                 )
-                await _pulse_after_variant(i)
+                await _report_finished_variant(i)
                 if not keep_going_on_failure:
                     break
                 continue
@@ -2165,7 +2148,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2247,7 +2230,7 @@ async def run_grid(
                     started_unix=_mn_warm_started_unix,
                     server_log=_mn_warm_slot / "server.log",
                 )
-                await _pulse_after_variant(i)
+                await _report_finished_variant(i)
                 if grid_is_over:
                     break
                 continue
@@ -2311,7 +2294,7 @@ async def run_grid(
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in to_harvested],
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2354,7 +2337,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2406,7 +2389,7 @@ async def run_grid(
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2458,7 +2441,7 @@ async def run_grid(
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2475,7 +2458,7 @@ async def run_grid(
                 started_unix=variant_started_unix,
                 server_log=server_log,
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if grid_is_over:
                 break
             continue
@@ -2530,7 +2513,7 @@ async def run_grid(
                 float(soft_deadline_sec or 0.0),
                 f"{estimated_tput:.1f}" if estimated_tput is not None else "n/a",
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if not keep_going_on_failure:
                 break
             continue
@@ -2583,7 +2566,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -2657,7 +2640,7 @@ async def run_grid(
                     note=variant.note,
                 )
             )
-            await _pulse_after_variant(i)
+            await _report_finished_variant(i)
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
@@ -2695,7 +2678,7 @@ async def run_grid(
             variant.name,
             results[-1].output_throughput or 0.0,
         )
-        await _pulse_after_variant(i)
+        await _report_finished_variant(i)
     return results
 
 

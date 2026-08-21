@@ -37,7 +37,6 @@ class IntentType(str, Enum):
     REQUEST = "request"
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"
-    KILL_TASK = "kill_task"
     # Robustness never emits this; kept in the mirror for the contract test.
     EXTEND_LEASE = "extend_lease"
     PRUNE_BRANCH = "prune_branch"
@@ -50,7 +49,6 @@ class IntentType(str, Enum):
 # to fail fast, still enforced server-side by the gate.
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
     {
-        IntentType.KILL_TASK,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
@@ -64,7 +62,6 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.ALERT,
         IntentType.UPDATE_STATE,
         IntentType.DELEGATE,
-        IntentType.KILL_TASK,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
@@ -75,20 +72,9 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
-# Allowed kill_task scopes.
-KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
-
-
-# Handle actions robustness may delegate; ``report`` is allowed only as a last-resort
-# wind-down lever. Here we only enforce the allowlist.
-ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset(
-    {
-        "accuracy_gate",
-        "recover",
-        "report",
-        "server_lifecycle",
-    }
-)
+# Mirrors upstream ``ROBUSTNESS_DELEGATE_ONLY_ACTIONS``; every other remediation
+# rides an alert for Orchestration to act on.
+ROBUSTNESS_DELEGATE_ACTIONS: frozenset[str] = frozenset({"recover"})
 
 
 # Core SharedState fields the robustness role must not write via ``update_state``;
@@ -259,7 +245,7 @@ class PolicyViolation(ValueError):
 
     Attributes:
         rule: short identifier matching upstream ``PolicyDenied.rule``
-            (``role`` / ``payload`` / ``state_field`` / ``kill_scope`` /
+            (``role`` / ``payload`` / ``state_field`` /
             ``robustness_only_source`` / ``delegate_action``).
         hint: optional one-line corrective suggestion.
     """
@@ -404,33 +390,6 @@ def build_escalate(
     )
 
 
-def build_kill_task(task_id: str, reason: str) -> Intent:
-    """Construct a ``kill_task`` intent.
-
-    Robustness-only. ``scope`` is hardcoded to ``"task"`` because
-    PolicyGate rejects any other value (server / process kills go
-    through delegate(server_lifecycle) under IR-5).
-
-    Args:
-        task_id (str): Non-empty id of the task to kill.
-        reason (str): Non-empty reason for the kill.
-
-    Returns:
-        Intent: A ``kill_task`` intent scoped to ``"task"``.
-
-    Raises:
-        ValueError: If ``task_id`` or ``reason`` is empty.
-    """
-    if not task_id:
-        raise ValueError("kill_task task_id must be non-empty")
-    if not reason:
-        raise ValueError("kill_task reason must be non-empty")
-    return Intent(
-        type=IntentType.KILL_TASK,
-        payload={"task_id": task_id, "reason": reason, "scope": "task"},
-    )
-
-
 def build_prune_branch(family: str, reason: str) -> Intent:
     """Construct a ``prune_branch`` intent. Robustness-only.
 
@@ -462,10 +421,9 @@ def build_delegate(
 ) -> Intent:
     """Construct a ``delegate`` intent.
 
-    Robustness may only delegate handle actions listed in
-    :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Other action names will be
-    rejected by PolicyGate's ``KERNEL_AGENT_OWNED_ACTIONS`` / role check; we
-    fail fast locally to keep error context.
+    Robustness may only delegate the actions listed in
+    :data:`ROBUSTNESS_DELEGATE_ACTIONS`. Upstream PolicyGate rejects anything
+    else for this role; we fail fast locally to keep error context.
 
     Args:
         action_name (str): Action to delegate; must be in
@@ -578,31 +536,6 @@ def _validate_escalate_payload(payload: dict[str, Any]) -> None:
         )
 
 
-def _validate_kill_task_payload(payload: dict[str, Any]) -> None:
-    """Validate a ``kill_task`` payload, including its scope.
-
-    Args:
-        payload (dict[str, Any]): The kill_task intent payload.
-
-    Raises:
-        PolicyViolation: If task_id/reason is empty or the scope is not in
-            the robustness-allowed scope set.
-    """
-    task_id = str(payload.get("task_id", "")).strip()
-    if not task_id:
-        raise PolicyViolation("kill_task.task_id must be non-empty", rule="payload")
-    reason = str(payload.get("reason", "")).strip()
-    if not reason:
-        raise PolicyViolation("kill_task.reason must be non-empty", rule="payload")
-    scope = str(payload.get("scope", "task")).strip()
-    if scope not in KILL_TASK_ALLOWED_SCOPES:
-        raise PolicyViolation(
-            f"kill_task.scope={scope!r} not in {sorted(KILL_TASK_ALLOWED_SCOPES)!r}",
-            rule="kill_scope",
-            hint="upstream v0.6 keeps server / process kills out per IR-5",
-        )
-
-
 def _validate_prune_branch_payload(payload: dict[str, Any]) -> None:
     """Validate a ``prune_branch`` payload.
 
@@ -639,7 +572,7 @@ def _validate_delegate_payload(payload: dict[str, Any]) -> None:
             f"robustness; allowed: "
             f"{sorted(ROBUSTNESS_DELEGATE_ACTIONS)!r}",
             rule="delegate_action",
-            hint="kernel_agent-owned actions go via REQUEST(target_agent='kernel_agent')",
+            hint="raise an alert and let Orchestration own the remediation",
         )
 
 
@@ -713,7 +646,7 @@ class IntentSpec:
     validator: Callable[[dict[str, Any]], None]
 
 
-# The 7 intents the robustness role may actually emit; each carries its
+# The 6 intents the robustness role may actually emit; each carries its
 # builder + validator so the required-field map and the validator dispatch
 # stay in lock-step. Insertion order is irrelevant — ``PAYLOAD_REQUIRED`` is
 # rebuilt in ``IntentType`` declaration order below.
@@ -737,11 +670,6 @@ INTENT_SPEC: Mapping[IntentType, IntentSpec] = {
         required=("severity", "summary"),
         builder=build_alert,
         validator=_validate_alert_payload,
-    ),
-    IntentType.KILL_TASK: IntentSpec(
-        required=("task_id", "reason"),
-        builder=build_kill_task,
-        validator=_validate_kill_task_payload,
     ),
     IntentType.PRUNE_BRANCH: IntentSpec(
         required=("family", "reason"),

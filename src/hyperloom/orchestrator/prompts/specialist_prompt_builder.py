@@ -20,6 +20,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.prompt_safety import defang_prompt_structure
+
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
@@ -1289,7 +1291,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(["", brief])
 
     if inp.pr_lead:
-        title = str(inp.pr_lead.get("title") or "").strip()
+        title = defang_prompt_structure(str(inp.pr_lead.get("title") or "").strip())
         url = str(inp.pr_lead.get("url") or "").strip()
         diff_url = str(inp.pr_lead.get("diff_url") or "").strip()
         rows.append("")
@@ -1802,7 +1804,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
         # Version-mismatch annotation; the LLM gets the final call.
         version_note = _format_version_note(inp, attrs)
-        rows.append(f"- **{statement}**{meta}{version_note}")
+        rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
         if impact_str:
             rows.append(f"    impact: {impact_str}")
     if len(rows) == 2:  # only the header + blank line, all lessons filtered out
@@ -2479,7 +2481,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             [
                 "## 10. NOTES FROM ORCHESTRATION",
                 "",
-                inp.notes,
+                defang_prompt_structure(inp.notes),
             ]
         )
 
