@@ -57,6 +57,8 @@ class RecipeScope:
     @classmethod
     def from_state(cls, state: Any) -> "RecipeScope":
         optimizer = str(getattr(state, "kernel_optimizer", "") or "").strip().lower()
+        # CLI bootstrap records an explicitly enabled Forge backend as
+        # "native"; KB Store uses the public backend name "forge".
         backend = "forge" if optimizer in {"native", "forge", "kernel_agent_forge"} else optimizer
         scope = cls(
             kernel_optimizer=backend,
