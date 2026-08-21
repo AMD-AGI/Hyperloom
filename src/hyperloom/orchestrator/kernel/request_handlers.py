@@ -5709,7 +5709,12 @@ async def run_optimization_handler(
         return data_guard
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
-    candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
+    dispatch_skips: dict[str, str] = {}
+    candidates = _batch_kernel_candidates(
+        payload,
+        session_dir=session_dir,
+        skipped_out=dispatch_skips,
+    )
     if len(candidates) <= 1:
         single_payload = dict(payload)
         kernel_id_pinned = False
@@ -5730,12 +5735,46 @@ async def run_optimization_handler(
             )
         else:
             # No routable candidate: canonicalize an aliased id against the full set.
+            all_candidates = _all_kernel_candidates(payload)
             canon = _resolve_candidate_id(
                 single_payload.get("kernel_id"),
-                _all_kernel_candidates(payload),
+                all_candidates,
             )
             if canon:
                 single_payload["kernel_id"] = canon
+                # The filter dropped this kernel for a reason it already knows.
+                # When that reason means "never dispatched", say so instead of
+                # falling through to the validation guards: a failure recorded
+                # here spends the source's retry quota on a decision no backend
+                # made, and the report then explains a technical failure that
+                # never happened.
+                skip_reason = dispatch_skips.get(canon, "")
+                if unattempted_skip_reason(skip_reason):
+                    return {
+                        "status": "skipped",
+                        "reason": skip_reason,
+                        "kernel_id": canon,
+                        "kernels_considered": len(all_candidates),
+                        "message": (
+                            f"kernel {canon} was not dispatched: {skip_reason}"
+                        ),
+                    }
+                # Otherwise the guards below decide, and they need the candidate
+                # to report against. Without it the attempt ledger files this
+                # kernel under an empty source and splits its identity from the
+                # one a later dispatch would use.
+                named = next(
+                    (
+                        row
+                        for row in all_candidates
+                        if isinstance(row, dict) and str(row.get("kernel_id") or "") == canon
+                    ),
+                    None,
+                )
+                if named is not None:
+                    single_payload.setdefault("candidate", named)
+                    if named.get("source_file"):
+                        single_payload.setdefault("source_file", named["source_file"])
             elif not _names_specific_kernel(single_payload):
                 # Empty eligible queue and no specific target (e.g. the post-GEMM
                 # auto pass): finish cleanly as "skipped", not a failure.
@@ -6147,10 +6186,28 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
 
 
+#: Skip reasons that mean "never dispatched", not "the optimizer tried and
+#: failed". A caller that named such a kernel must report it as skipped:
+#: recording an attempt for it spends the source's retry quota on a decision no
+#: backend ever made, and reads in the report as a technical failure when the
+#: cause was a threshold or a sibling already holding the task.
+_UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
+    "below_min_gpu_pct",
+    "group_exhausted",
+    "opfanout_merged_into",
+)
+
+
+def unattempted_skip_reason(reason: str) -> bool:
+    """Whether ``reason`` means the kernel was never handed to a backend."""
+    return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
+
+
 def _batch_kernel_candidates(
     payload: dict,
     *,
     session_dir: Path | None = None,
+    skipped_out: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Select the reusable native kernels to dispatch for a batch run.
 
@@ -6480,6 +6537,8 @@ def _batch_kernel_candidates(
             len(selected),
             skipped,
         )
+    if skipped_out is not None:
+        skipped_out.update(skipped)
     return selected
 
 
@@ -6864,15 +6923,31 @@ async def _run_optimization_single(
     kernel_id = payload.get("kernel_id")
     if not kernel_id:
         return {"status": "failed", "error": "missing 'kernel_id' in payload"}
+    # A guard result is recorded as an attempt, and the attempt ledger keys on
+    # kernel_id plus source_file. Carrying the source through means a rejection
+    # and a later real dispatch share one identity instead of splitting into an
+    # empty-source row nothing can reconcile.
+    guard_source = str(
+        payload.get("source_file")
+        or (payload.get("candidate") or {}).get("source_file")
+        or ""
+    )
+
+    def _with_source(guard: HandlerResult) -> HandlerResult:
+        """Stamp the resolved source onto a guard result that omitted it."""
+        if guard_source and not guard.get("source_file"):
+            guard = {**guard, "source_file": guard_source}
+        return guard
+
     guard = _validate_reusable_native_kernel(payload)
     if guard is not None:
-        return guard
+        return _with_source(guard)
     shape_guard = _validate_kernel_shape_and_paths(
         payload,
         session_dir=session_dir,
     )
     if shape_guard is not None:
-        return shape_guard
+        return _with_source(shape_guard)
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
