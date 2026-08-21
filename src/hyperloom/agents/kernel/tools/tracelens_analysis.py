@@ -3114,8 +3114,6 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
 def analyze_trace_files(
     trace_files: list[Path],
     top_k: int,
-    *,
-    allow_model_tiers: bool = True,
 ) -> list[dict[str, Any]]:
     """Aggregate GPU kernels across raw trace files into top-K candidates.
 
@@ -3126,9 +3124,6 @@ def analyze_trace_files(
     Args:
         trace_files (list[Path]): Trace files (optionally gzipped) to scan.
         top_k (int): Number of hottest kernels to keep.
-        allow_model_tiers (bool): Whether source resolution may call a model.
-            The deterministic route sets this to false, so the "no model calls"
-            promise holds on this path too.
 
     Returns:
         list[dict[str, Any]]: Finalized hot-kernel candidate dicts.
@@ -3183,7 +3178,6 @@ def analyze_trace_files(
         top,
         total_dur=total_dur,
         trace_files=trace_files,
-        allow_model_tiers=allow_model_tiers,
     )
 
 
@@ -4274,10 +4268,6 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item.setdefault("source_path", item.get("source_file", ""))
 
 
-#: A candidate below this GPU share is not worth an LLM round-trip.
-_LLM_FALLBACK_MIN_GPU_PCT = 5.0
-
-
 #: Populated once per run from the CLI args so both model tiers see the same
 #: serving configuration. Empty when the analysis runs without that context.
 _RUNTIME_CONTEXT: dict[str, Any] = {}
@@ -4357,91 +4347,6 @@ def _append_resolution_reason(item: dict[str, Any], reason: str) -> None:
         item["source_resolution_reason"] = reason
     elif reason not in current:
         item["source_resolution_reason"] = f"{current}; {reason}"
-
-
-def _apply_llm_source_fallback(item: dict[str, Any]) -> None:
-    """Last-resort LLM pick for a candidate every deterministic tier missed.
-
-    No-op unless the operator enabled the tier and the candidate is hot enough to
-    justify the call. Mutates ``item`` in place only on an accepted answer.
-    """
-    name = str(item.get("name") or "")
-    try:
-        from _llm_source_fallback import (  # noqa: PLC0415
-            llm_source_audit,
-            llm_source_provider_configured,
-            select_source_via_llm,
-        )
-
-        try:
-            gpu_pct = float(item.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            gpu_pct = 0.0
-        if gpu_pct < _LLM_FALLBACK_MIN_GPU_PCT:
-            _append_resolution_reason(
-                item,
-                f"llm_fallback_skipped: gpu_pct {gpu_pct:.2f} < {_LLM_FALLBACK_MIN_GPU_PCT}",
-            )
-            return
-        # Settle the provider before gathering the shortlist. That grep walks
-        # every framework root once per keyword, and on a deployment that never
-        # configured a provider the tier would pay for it on every hot kernel
-        # only to decline the call.
-        if not llm_source_provider_configured():
-            audit = llm_source_audit()
-            audit["outcome"] = "configuration_error"
-            item["source_resolution_llm_audit"] = audit
-            _append_resolution_reason(item, "llm_fallback_skipped: no provider configured")
-            return
-        shortlist = collect_source_candidates_via_grep(name)
-        if not shortlist:
-            _append_resolution_reason(item, "llm_fallback_no_shortlist")
-            log.info("LLM source fallback: no grep shortlist for %r", name)
-            return
-        audit = llm_source_audit()
-        audit["outcome"] = "requested"
-        item["source_resolution_llm_audit"] = audit
-        call_errors: list[str] = []
-        picked, confidence, reason = select_source_via_llm(
-            name,
-            shortlist,
-            framework_roots=tuple(KNOWN_SEARCH_ROOTS),
-            context_block=_source_context_block(),
-            log=_forward_to_log,
-            errors=call_errors,
-        )
-        if picked:
-            audit["outcome"] = "accepted"
-            item["source_file"] = picked
-            item["source_resolution_method"] = "llm_fallback"
-            item["source_resolution_confidence"] = confidence
-            item["source_resolution_reason"] = reason
-            return
-        if call_errors:
-            audit["outcome"] = "error"
-            failure = f"llm_fallback_error: {call_errors[0]}"
-            _append_resolution_reason(item, failure)
-            log.warning("LLM source fallback failed for %r (%s)", name, failure)
-            return
-        # Answered but not accepted: invented path, low confidence, or refusal.
-        audit["outcome"] = "declined"
-        _append_resolution_reason(item, f"llm_fallback_declined: {reason or 'no candidate accepted'}")
-        log.info(
-            "LLM source fallback declined for %r over %d shortlist entr(ies): %s",
-            name,
-            len(shortlist),
-            reason or "no candidate accepted",
-        )
-    except Exception as exc:  # noqa: BLE001 - advisory tier, never breaks finalization
-        # Import errors, gateway 401s and timeouts all land here; without a
-        # trail they look identical to the tier being switched off.
-        reason = f"llm_fallback_error: {type(exc).__name__}: {exc}"
-        audit = item.get("source_resolution_llm_audit")
-        if isinstance(audit, dict):
-            audit["outcome"] = "error"
-        log.warning("LLM source fallback failed for %r (%s)", name, reason)
-        _append_resolution_reason(item, reason)
-        return
 
 
 @functools.lru_cache(maxsize=64)
@@ -4598,7 +4503,6 @@ def _finalize_candidates(
     trace_files: list[Path] | None = None,
     log_path: Path | str | None = None,
     source_resolution_out: Path | str | None = None,
-    allow_model_tiers: bool = True,
     model_name: str = "",
 ) -> list[dict[str, Any]]:
     """Apply shared post-processing to parsed candidate rows.
@@ -4620,8 +4524,6 @@ def _finalize_candidates(
         trace_files: Optional raw trace files. When given, Python launcher
             frames are retained as evidence and accepted as source only when
             name grep independently resolves the same file.
-        allow_model_tiers: Whether fallback and artifact review may call an LLM.
-            The deterministic CLI route sets this to false.
         model_name: Runtime model identity recorded in the resolution artifact.
 
     Returns:
@@ -4763,14 +4665,10 @@ def _finalize_candidates(
                         item,
                         f"trace launcher unconfirmed by name grep: {trace_source}",
                     )
-            if not item.get("source_file"):
-                if allow_model_tiers:
-                    _apply_llm_source_fallback(item)
-                else:
-                    _append_resolution_reason(
-                        item,
-                        "llm_fallback_skipped: deterministic route",
-                    )
+            # An unresolved candidate stops here. The agent review pass runs
+            # once over the finished table rather than per kernel, so it can
+            # weigh a blank against the rest of the evidence instead of
+            # guessing from a symbol alone.
             # Promote a tiny pybind shim TU to the real device code.
             item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
             item["source_file"] = upgrade_pybind_shim_source(
@@ -4809,8 +4707,6 @@ def _finalize_candidates(
             framework=framework or "",
             model_name=model_name,
             log_path=log_path,
-            op_cat_map=op_cat_map,
-            allow_review=allow_model_tiers,
         )
     return top
 
@@ -4968,97 +4864,6 @@ def _is_curated_resolution(item: dict[str, Any]) -> bool:
     }
 
 
-def apply_resolution_entries_to_candidates(
-    entries: list[dict[str, Any]],
-    candidates: list[dict[str, Any]],
-    op_cat_map: dict[str, str] | None = None,
-) -> int:
-    """Fold reviewed entries back onto the candidates, and re-classify.
-
-    Without this the review tier is inert: it revises the audit artifact while
-    every downstream stage keeps reading ``kernel_candidates.json``. Re-running
-    ``_stamp_candidate_metadata`` matters as much as copying the path -- a
-    rewrite changes ``source_type``, which decides ``reusable_native_kernel``
-    and therefore whether the kernel is dispatched at all.
-
-    Two invariants keep a rewritten candidate internally consistent:
-
-    * A curated resolution is never overwritten (see
-      :func:`_is_curated_resolution`).
-    * Otherwise every field derived from the previous path is cleared before the
-      new one is stamped, so no downstream reader can pick up metadata that
-      describes the source the candidate no longer points at.
-
-    Returns:
-        The number of candidates actually changed.
-    """
-    by_id = {str(c.get("kernel_id")): c for c in candidates if isinstance(c, dict)}
-    changed = 0
-    for entry in entries:
-        if not isinstance(entry, dict) or "previous_source_file" not in entry:
-            continue
-        item = by_id.get(str(entry.get("kernel_id") or ""))
-        if item is None:
-            continue
-        new_source = str(entry.get("source_file") or "")
-        if new_source == str(item.get("source_file") or ""):
-            continue
-        if _is_curated_resolution(item):
-            entry["review_rejected"] = "curated_resolution_not_overridable"
-            entry["source_file"] = str(item.get("source_file") or "")
-            entry["source_line"] = item.get("source_line")
-            entry["source_function"] = str(item.get("source_function") or "")
-            entry["method"] = _candidate_resolution_method(item)
-            entry["reason"] = str(item.get("source_resolution_reason") or "")
-            continue
-        for key in _SOURCE_DERIVED_METADATA:
-            item.pop(key, None)
-        item["source_file"] = new_source
-        item["source_path"] = new_source
-        item["source_line"] = entry.get("source_line")
-        item["source_function"] = str(entry.get("source_function") or "")
-        item["source_resolution_method"] = str(entry.get("method") or "")
-        item["source_resolution_reason"] = str(entry.get("reason") or "")
-        item["source_resolution_previous_file"] = str(entry.get("previous_source_file") or "")
-        item["source_resolution_previous_method"] = str(entry.get("previous_method") or "")
-        item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
-        item["source_type"] = source_type_for(item.get("name", ""), new_source)
-        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(item.get("name", ""), new_source):
-            item["source_type"] = "vendor_binary"
-            item["vendor_dispatch_wrapper"] = True
-        item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
-        _stamp_candidate_metadata(item, op_cat_map)
-        changed += 1
-    return changed
-
-
-def _review_source_resolution(doc: dict[str, Any], *, log_path: Path | str | None) -> None:
-    """Let the opt-in review tier revise the table before it is written.
-
-    Runs on the whole table rather than only the blanks: the deterministic
-    tiers' failure mode is a confidently wrong path, which a blanks-only tier
-    can never reach. Revisions carry their own guard rails (see the module) and
-    are applied in place; any failure leaves the deterministic result standing.
-    """
-    try:
-        from _llm_source_review import review_resolution_document  # noqa: PLC0415
-
-        _, notes = review_resolution_document(
-            doc,
-            framework_roots=tuple(KNOWN_SEARCH_ROOTS),
-            context_block=_source_context_block(),
-            log=_forward_to_log,
-        )
-        summary = f"source-resolution review: {len(notes)} change(s)"
-        log.info("%s", summary)
-        if log_path:
-            append_log(log_path, summary)
-            for note in notes:
-                append_log(log_path, f"  review: {note}")
-    except Exception as exc:  # noqa: BLE001 - advisory tier, never fatal
-        log.warning("source-resolution review failed (%r); keeping deterministic result", exc)
-
-
 def write_source_resolution_artifact(
     candidates: list[dict[str, Any]],
     out_path: Path | str,
@@ -5066,8 +4871,6 @@ def write_source_resolution_artifact(
     framework: str = "",
     model_name: str = "",
     log_path: Path | str | None = None,
-    op_cat_map: dict[str, str] | None = None,
-    allow_review: bool = True,
 ) -> Path | None:
     """Write the source-resolution artifact next to the candidate report.
 
@@ -5084,33 +4887,6 @@ def write_source_resolution_artifact(
             model_name=model_name,
             framework=framework,
         )
-        if allow_review:
-            _review_source_resolution(doc, log_path=log_path)
-        # Fold any revision back onto the candidates: they, not this file, are
-        # what the dispatch stage reads.
-        reviewed_entries = [entry for entry in (doc.get("entries") or []) if isinstance(entry, dict)]
-        applied = apply_resolution_entries_to_candidates(reviewed_entries, candidates, op_cat_map)
-        if applied:
-            review_metadata = {
-                str(entry.get("kernel_id") or ""): {
-                    key: entry[key]
-                    for key in (
-                        "previous_source_file",
-                        "previous_method",
-                        "review_rejected",
-                    )
-                    if key in entry
-                }
-                for entry in reviewed_entries
-            }
-            rebuilt = build_source_resolution_entries(candidates)
-            for entry in rebuilt:
-                entry.update(review_metadata.get(str(entry.get("kernel_id") or ""), {}))
-            doc["entries"] = rebuilt
-            note = f"source-resolution review applied to {applied} candidate(s)"
-            log.info("%s", note)
-            if log_path:
-                append_log(log_path, note)
         problems = _KSC.validate_document(doc)
         if problems:
             log.warning(
@@ -6918,6 +6694,216 @@ def build_audit_summary(
     }
 
 
+def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
+    """Recompute everything that follows from ``source_file`` after a revision.
+
+    The review returns a location, not a verdict. Re-running the deterministic
+    stamping keeps :func:`classify_patchability` the only gate that decides
+    routability, so the vendor-binary, dispatch-wrapper and runtime-generated
+    rejections still apply to a path the model supplied.
+    """
+    new_source = str(item.get("source_file") or "")
+    for key in _SOURCE_DERIVED_METADATA:
+        item.pop(key, None)
+    item["source_path"] = new_source
+    item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
+    item["source_type"] = source_type_for(item.get("name", ""), new_source)
+    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
+        item.get("name", ""), new_source
+    ):
+        item["source_type"] = "vendor_binary"
+        item["vendor_dispatch_wrapper"] = True
+    item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
+    _stamp_candidate_metadata(item, op_cat_map)
+    # A restrictive hint is honoured, a permissive one is not. The reviewer can
+    # veto a kernel it knows is not worth a tuning session, but it cannot talk
+    # the gate into dispatching something the deterministic rules rejected.
+    if item.get("review_reusable_hint") is False and item.get("reusable_native_kernel"):
+        item["reusable_native_kernel"] = False
+        item["skip_reason"] = (
+            str(item.get("review_skip_reason") or "").strip()
+            or f"review: {item.get('review_reason') or 'not worth a tuning session'}"
+        )
+
+
+def run_candidate_review_stage(
+    run_dir: Path,
+    *,
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    log_path: Path | str | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Audit the deterministic candidate table with one agent session.
+
+    The deterministic tiers resolve a kernel from its symbol alone; they cannot
+    tell a file that defines a kernel from one that merely launches it, and they
+    have no view of the model or how it is being served. This hands that table
+    to an agent together with the paths of everything the run already produced,
+    and folds back the revisions it can verify.
+
+    Mandatory on the agent route, but never fatal: a definitive failure records
+    an ``error``-severity trace-health warning and leaves the deterministic
+    table standing. Losing the audit costs some candidates; failing the run
+    would cost the hours of benchmarking that produced the trace.
+
+    Args:
+        run_dir: The per-run output directory.
+        candidates: The finalized candidate rows, revised in place.
+        args: Parsed CLI args (model name, framework, source root).
+        log_path: Optional log file for diagnostics.
+        trace_health_warnings: Warning sink surfaced to the Coordinator.
+
+    Returns:
+        dict[str, str]: Artifact paths produced by this stage.
+    """
+    artifacts: dict[str, str] = {}
+    warnings = trace_health_warnings if trace_health_warnings is not None else []
+
+    def _note(message: str) -> None:
+        log.info("%s", message)
+        if log_path:
+            append_log(log_path, message)
+
+    try:
+        from _candidate_review_agent import (  # noqa: PLC0415
+            RAW_CANDIDATES_FILENAME,
+            REVISIONS_FILENAME,
+            apply_revisions,
+            fingerprint_drift,
+            run_candidate_review,
+            source_fingerprint,
+        )
+    except ImportError as exc:  # pragma: no cover - packaging fault
+        warnings.append(
+            {
+                "code": "candidate_review_unavailable",
+                "severity": "error",
+                "message": (
+                    "The candidate review agent could not be imported "
+                    f"({type(exc).__name__}); the candidate table is the "
+                    "unreviewed deterministic result."
+                ),
+            }
+        )
+        return artifacts
+
+    tracelens_dir = run_dir / "tracelens"
+    raw_path = run_dir / RAW_CANDIDATES_FILENAME
+    routable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
+    atomic_write_json(
+        raw_path,
+        {
+            "model_name": args.model_name,
+            "framework": args.framework,
+            "source": "tracelens_analysis:deterministic",
+            "hot_kernels": candidates,
+            "routable_kernels": routable,
+        },
+    )
+    artifacts["kernel_candidates_raw"] = str(raw_path)
+
+    source_paths = [str(c.get("source_file") or "") for c in candidates if isinstance(c, dict)]
+    before = source_fingerprint(source_paths)
+
+    reference_paths = {
+        "source resolution audit": str(run_dir / _SOURCE_RESOLUTION_NAME),
+        "tracelens report": str(tracelens_dir / "analysis.md"),
+        "per-category metrics": str(tracelens_dir / "category_data"),
+        "priority data": str(tracelens_dir / "priority_data.json"),
+        "trace input manifest": str(run_dir / "trace_input_manifest.json"),
+        "model directory": str(_RUNTIME_CONTEXT.get("model_path") or ""),
+    }
+    outcome = run_candidate_review(
+        run_dir=run_dir,
+        raw_candidates_path=raw_path,
+        reference_paths={k: v for k, v in reference_paths.items() if v},
+        framework_roots=KNOWN_SEARCH_ROOTS,
+        context_block=_source_context_block(),
+        log=_forward_to_log,
+    )
+
+    if not outcome.ok:
+        warnings.append(
+            {
+                "code": "candidate_review_failed",
+                "severity": "error",
+                "status": outcome.status,
+                "detail": outcome.detail,
+                "message": (
+                    f"The mandatory candidate review did not complete "
+                    f"({outcome.status}: {outcome.detail}). kernel_candidates.json "
+                    "is the unreviewed deterministic result; a wrongly resolved "
+                    "kernel will not have been caught."
+                ),
+            }
+        )
+        _note(f"candidate review failed ({outcome.status}): {outcome.detail}")
+        return artifacts
+
+    drifted = fingerprint_drift(before, source_fingerprint(source_paths))
+    if drifted:
+        warnings.append(
+            {
+                "code": "candidate_review_touched_source",
+                "severity": "error",
+                "paths": drifted[:16],
+                "message": (
+                    "The candidate review session modified framework source "
+                    f"({len(drifted)} file(s)); its revisions were discarded. "
+                    "Any benchmark run after this point would measure an "
+                    "unrecorded edit."
+                ),
+            }
+        )
+        _note(f"candidate review discarded: it modified {len(drifted)} source file(s)")
+        return artifacts
+
+    op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")
+    before_state = {
+        str(c.get("kernel_id") or ""): str(c.get("source_file") or "") for c in candidates
+    }
+    protected_ids = {
+        str(c.get("kernel_id") or "")
+        for c in candidates
+        if isinstance(c, dict) and _is_curated_resolution(c)
+    }
+    notes = apply_revisions(
+        candidates,
+        outcome.revisions,
+        framework_roots=KNOWN_SEARCH_ROOTS,
+        protected_ids=protected_ids,
+    )
+    changed = 0
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        kernel_id = str(item.get("kernel_id") or "")
+        if str(item.get("source_file") or "") == before_state.get(kernel_id) and (
+            item.get("review_reusable_hint") is None
+        ):
+            continue
+        _rederive_after_review(item, op_cat_map)
+        changed += 1
+
+    revisions_path = run_dir / REVISIONS_FILENAME
+    atomic_write_json(
+        revisions_path,
+        {
+            "status": outcome.status,
+            "revisions": outcome.revisions,
+            "applied_notes": notes,
+            "candidates_changed": changed,
+            "raw_candidates": str(raw_path),
+        },
+    )
+    artifacts["kernel_candidates_revisions"] = str(revisions_path)
+    _note(f"candidate review applied {changed} change(s) over {len(outcome.revisions)} revision(s)")
+    for line in notes:
+        _note(f"  review: {line}")
+    return artifacts
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -8048,7 +8034,6 @@ def main() -> int:
                             trace_files=trace_files,
                             log_path=log_path,
                             source_resolution_out=(run_dir / _SOURCE_RESOLUTION_NAME),
-                            allow_model_tiers=False,
                             model_name=args.model_name,
                         )
                         append_log(
@@ -8315,11 +8300,7 @@ def main() -> int:
                     log_path,
                     "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
                 )
-                candidates = analyze_trace_files(
-                    trace_files,
-                    _default_top_k(),
-                    allow_model_tiers=not use_deterministic,
-                )
+                candidates = analyze_trace_files(trace_files, _default_top_k())
             else:
                 raise RuntimeError(
                     "No hot-kernel candidates produced by any TraceLens "
@@ -8341,10 +8322,19 @@ def main() -> int:
                     framework=args.framework or "",
                     model_name=args.model_name or "",
                     log_path=log_path,
-                    allow_review=False,
                 )
             if source_resolution_path.is_file():
                 artifacts["kernel_source_resolution"] = str(source_resolution_path)
+        if not use_deterministic:
+            artifacts.update(
+                run_candidate_review_stage(
+                    run_dir,
+                    candidates=candidates,
+                    args=args,
+                    log_path=log_path,
+                    trace_health_warnings=trace_health_warnings,
+                )
+            )
         artifacts.update(
             write_reports(
                 run_dir,
