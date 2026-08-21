@@ -36,6 +36,7 @@ def _payload() -> dict:
         "global_timeout": 456,
         "tuner": "fmoe_ck",
         "untuned_csv": "/tmp/in.csv",
+        "moe_untuned_csv": "/tmp/untuned_fmoe_from_runtime.csv",
         "shapes_json": "/tmp/shapes.json",
         "tunableop_input": "/tmp/tunable.txt",
         "kernel_signature_log": "/tmp/server.log",
@@ -57,10 +58,57 @@ def test_build_cmd_maps_all_options():
     assert cmd[cmd.index("--quant-type") + 1] == "auto"
     assert cmd[cmd.index("--mp") + 1] == "8"
     assert cmd[cmd.index("--tuner") + 1] == "fmoe_ck"
+    assert cmd[cmd.index("--untuned-csv") + 1] == "/tmp/in.csv"
+    assert cmd[cmd.index("--kernel-signature-log") + 1] == "/tmp/server.log"
+    assert cmd[cmd.index("--tp") + 1] == "1"
+    assert cmd[cmd.index("--conc") + 1] == "256"
+    assert cmd[cmd.index("--timeout") + 1] == "123"
+    assert cmd[cmd.index("--global-timeout") + 1] == "456"
     assert cmd[cmd.index("--tokens") + 1] == "64,128"
     assert "--skip-gpu-check" in cmd
     assert "--verbose" in cmd
     assert "--thorough" in cmd
+
+
+def test_build_cmd_forwards_the_moe_untuned_csv():
+    """The runtime-derived MoE key reaches forge only through this option.
+
+    The orchestrator derives the CSV from the dispatch tuple in the server log;
+    without the option forge infers the key from the model config instead --
+    the exact failure this lane exists to remove, and one that leaves no trace
+    because the tuning still reports success.
+    """
+    cmd = forge_gemm_tuning._build_cmd(_payload())
+
+    assert cmd[cmd.index("--moe-untuned-csv") + 1] == "/tmp/untuned_fmoe_from_runtime.csv"
+
+
+def test_build_cmd_omits_the_moe_untuned_csv_when_absent():
+    """No runtime key observed: forge must not receive an empty option."""
+    payload = _payload()
+    payload.pop("moe_untuned_csv")
+
+    assert "--moe-untuned-csv" not in forge_gemm_tuning._build_cmd(payload)
+
+
+def test_build_cmd_asserts_every_option_it_can_emit():
+    """Meta-guard: an option added to _build_cmd must be asserted in this file.
+
+    This file is the only guard on the agent-tool argv, and it had drifted to
+    covering 10 of the options it emits -- which is how the MoE CSV option went
+    unasserted while being the whole point of this lane. Comparing the emitted
+    flags against a declared set makes the next omission fail here.
+    """
+    emitted = {tok for tok in forge_gemm_tuning._build_cmd(_payload()) if tok.startswith("--")}
+    declared = {
+        "--model-path", "--framework", "--precision", "--quant-type", "--gpu-type",
+        "--tp", "--conc", "--mp", "--output-dir", "--iters", "--warmup",
+        "--min-improvement-pct", "--timeout", "--global-timeout", "--tuner",
+        "--untuned-csv", "--moe-untuned-csv", "--shapes-json", "--tunableop-input",
+        "--kernel-signature-log", "--gpu-ids", "--skip-gpu-check", "--verbose",
+        "--thorough", "--tokens", "--kb-current-lib",
+    }
+    assert emitted <= declared, f"option(s) not declared here: {sorted(emitted - declared)}"
 
 
 def test_build_cmd_forwards_provenance_but_no_knowledge_base_options(monkeypatch):

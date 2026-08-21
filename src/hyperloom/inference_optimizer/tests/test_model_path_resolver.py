@@ -107,3 +107,25 @@ def test_load_model_config_dict_local_dir_unchanged(tmp_path):
     data = _load_model_config_dict(str(d))
     assert isinstance(data, dict)
     assert data.get("model_type") == "mixtral"
+
+
+def test_resolve_serving_model_path_prefers_hl_model_base(tmp_path, monkeypatch):
+    from hyperloom.common.model_paths import resolve_serving_model_path
+
+    local = tmp_path / "DeepSeek-V4-Pro"
+    local.mkdir()
+    (local / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
+
+    resolved = resolve_serving_model_path("amd/DeepSeek-V4-Pro")
+    assert resolved == str(local)
+
+
+def test_resolve_session_model_path_honors_params_then_env_then_state(monkeypatch):
+    from hyperloom.common.model_paths import resolve_session_model_path
+
+    monkeypatch.setenv("MODEL_PATH", "/env/model")
+    assert resolve_session_model_path(params={"model_path": "/params/model"}) == "/params/model"
+    assert resolve_session_model_path(state_model_path="/state/model") == "/env/model"
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    assert resolve_session_model_path(state_model_path="/state/model") == "/state/model"

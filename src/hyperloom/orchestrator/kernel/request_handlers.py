@@ -30,6 +30,9 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from hyperloom.agents.kernel.tools._capture_shapes import (
+    is_capture_fragment as _shared_is_capture_fragment,
+)
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
@@ -2793,17 +2796,99 @@ _AITER_SERVING_MARKERS = {
     "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
 }
 
-#: aiter logs the fused-MoE problem it dispatched as
-#: ``[fused_moe] using ... (cu, token, dim, inter, experts, topk, act, dtype,
-#: q_dtype_a, q_dtype_w, q_type, ...)``.
+#: aiter logs every fused-MoE problem it dispatches as a 14-field tuple. The
+#: wording before it varies -- measured across 2948 real lines there are three
+#: forms, and one of them interposes its own parenthesised kernel names:
+#:
+#:   [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, ...)
+#:   [fused_moe] no tuned FlyDSL config for ('gfx950', 256, 256, 4096, ...)
+#:   [fused_moe] using 2stage (kernelName1='...', kernelName2='...') for ('gfx950', ...)
+#:
+#: so the tuple is anchored on `` for (`` rather than on the wording. The field
+#: order matches aiter's untuned CSV columns after dropping gfx and cu_num, which
+#: the runtime supplies itself.
 _AITER_FUSED_MOE_TUPLE_RE = re.compile(
-    r"\[fused_moe\] using \S+ \S+ for \(\d+, \d+, \d+, \d+, \d+, \d+, "
-    r"'[^']*', '[^']*', '([^']*)', '([^']*)'"
+    r"\[fused_moe\].*? for \("
+    r"'(?P<gfx>[^']*)', "
+    r"(?P<cu_num>\d+), (?P<token>\d+), (?P<model_dim>\d+), (?P<inter_dim>\d+), "
+    r"(?P<expert>\d+), (?P<topk>\d+), "
+    r"'(?P<act_type>[^']*)', '(?P<dtype>[^']*)', "
+    r"'(?P<q_dtype_a>[^']*)', '(?P<q_dtype_w>[^']*)', '(?P<q_type>[^']*)', "
+    r"(?P<use_g1u1>True|False), (?P<doweight_stage1>True|False)\)"
+)
+
+#: Which dtypes fall in each of aiter's width buckets. Mirrors ``bit16_list`` /
+#: ``bit8_list`` / ``bit4_list`` in
+#: ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages_common.py``.
+_AITER_BIT16_DTYPES = frozenset({"bfloat16", "float16"})
+_AITER_BIT8_DTYPES = frozenset({"float8_e4m3fn", "float8_e4m3fnuz", "int8"})
+_AITER_BIT4_DTYPES = frozenset({"float4_e2m1fn_x2", "uint32", "int4"})
+
+#: The fields that identify one MoE problem, ignoring the token count (which the
+#: tuner sweeps) and cu_num/gfx (which the runtime supplies).
+_FMOE_SHAPE_FIELDS = (
+    "model_dim",
+    "inter_dim",
+    "expert",
+    "topk",
+    "act_type",
+    "dtype",
+    "q_dtype_a",
+    "q_dtype_w",
+    "q_type",
+    "use_g1u1",
+    "doweight_stage1",
 )
 
 
+def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
+    """Return whether aiter's CK MoE codegen has a kernel family for this pair.
+
+    ``get_gemm1_kernels_list`` / ``get_gemm2_kernels_list`` pick a family from the
+    activation/weight widths and raise ``Unsupported data type combination`` for
+    anything else. Notably a BF16 activation against FP4 weights -- which the
+    serving path runs happily -- matches no family, so handing it to the tuner
+    trades a silent no-op for a hard error.
+    """
+    act = q_dtype_a.replace("torch.", "")
+    weight = q_dtype_w.replace("torch.", "")
+    if act in _AITER_BIT16_DTYPES and weight in _AITER_BIT16_DTYPES:
+        return True
+    if act in _AITER_BIT8_DTYPES and weight in _AITER_BIT8_DTYPES:
+        return True
+    # The a8w4 family is FP8-only on the activation side; INT8 does not qualify.
+    if act.startswith("float8") and weight in _AITER_BIT4_DTYPES:
+        return True
+    return act in _AITER_BIT4_DTYPES and weight in _AITER_BIT4_DTYPES
+
+
+def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
+    """Return the distinct MoE problems a server log shows aiter dispatching.
+
+    Deduplicated on everything but the token count, preserving first-seen order.
+    One model routinely yields several problems -- the same checkpoint dispatches
+    both a BF16-activation and an FP8-activation variant, and the EP path appends
+    a masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
+    model config states. Neither is derivable from the config, which is why the
+    log is the authoritative source for what to tune.
+    """
+    if not server_log:
+        return []
+    try:
+        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    seen: dict[tuple[str, ...], dict[str, str]] = {}
+    for match in _AITER_FUSED_MOE_TUPLE_RE.finditer(text):
+        fields = match.groupdict()
+        identity = tuple(fields[name] for name in _FMOE_SHAPE_FIELDS)
+        if identity not in seen:
+            seen[identity] = fields
+    return list(seen.values())
+
+
 def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
-    """Return whether aiter's CK MoE tuner can tune what the server dispatched.
+    """Return whether aiter's CK MoE tuner can tune anything the server dispatched.
 
     The tuner builds its kernel candidates from the activation/weight dtype pair
     and rejects some combinations the serving path happily runs. Measured on
@@ -2811,23 +2896,150 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
     ``AITER_MXFP4_BF16`` backend) benchmarks fine but fails candidate generation
     with ``Unsupported data type combination: b16, fp4x2``, so routing it to
     ``fmoe_ck`` would only trade silent no-op for a hard tuner error.
+
+    A single checkpoint can dispatch several dtype pairs at once, so this asks
+    whether *any* of them is tunable; per-problem filtering happens where the
+    tuning input is written.
     """
     if not server_log:
         return False
-    try:
-        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    combos = {
-        (q_a.replace("torch.", ""), q_w.replace("torch.", ""))
-        for q_a, q_w in _AITER_FUSED_MOE_TUPLE_RE.findall(text)
-    }
-    if not combos:
+    keys = _aiter_fused_moe_dispatch_keys(server_log)
+    if not keys:
         # MoE evidence without a parseable problem tuple: let Forge decide.
         return True
-    return not any(
-        act.startswith("bfloat") and weight.startswith("float4") for act, weight in combos
+    return any(
+        _aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"])
+        for key in keys
     )
+
+
+#: Header aiter's MoE tuner expects for its untuned input CSV.
+_FMOE_UNTUNED_CSV_HEADER = (
+    "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+    "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
+)
+
+#: forge wordings that carry nothing deployable, each distinct from an honest
+#: ``no_improvement``. ``build_report`` checks ``has_candidate`` first, so a run
+#: holding a usable env reports ``candidate`` even when a sibling crashed --
+#: these arrive only with nothing to deploy.
+_FORGE_BARREN_MICRO_DECISIONS = (
+    "failed",
+    "empty_output",
+    "partial_failure",
+    "partial_output",
+)
+
+
+def _fmoe_token_list(tokens: Any) -> list[int]:
+    """Positive token counts to sweep, keyed off whatever the caller sends.
+
+    Accepts forge's comma-separated string (what :func:`_normalize_tokens`
+    produces) or a sequence. Unparseable and non-positive entries are dropped
+    rather than raising -- one bad entry is not worth the run -- and ``[1]`` is
+    the floor so there is always a token to key on.
+    """
+    if isinstance(tokens, str):
+        raw: list[str] = [part.strip() for part in tokens.split(",")]
+    elif isinstance(tokens, (list, tuple, set, frozenset)):
+        raw = [str(item).strip() for item in tokens]
+    elif tokens is None:
+        raw = []
+    else:
+        raw = [str(tokens).strip()]
+
+    out: set[int] = set()
+    for item in raw:
+        if not item:
+            continue
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            out.add(value)
+    return sorted(out) or [1]
+
+
+def _write_fmoe_untuned_csv_from_log(
+    server_log: str,
+    tokens: Any,
+    workspace: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
+
+    Returns ``(csv_path, report)``; ``csv_path`` is "" when nothing tunable was
+    observed. Writing the observed tuple verbatim is the whole point: the
+    quantisation pair, the per-partition ``inter_dim`` and the EP-inflated
+    expert/topk counts are all properties of what the serving framework chose,
+    and every attempt to re-derive them from the model config is a guess that has
+    already produced tables no runtime lookup could reach.
+
+    Problems whose dtype pair aiter's codegen rejects are dropped rather than
+    passed through, because one unsupported row aborts the whole tuner run.
+    """
+    report: dict[str, Any] = {
+        "observed": 0,
+        "tunable": 0,
+        "dropped_unsupported": [],
+        "keys": [],
+    }
+    keys = _aiter_fused_moe_dispatch_keys(server_log)
+    report["observed"] = len(keys)
+    if not keys:
+        return "", report
+
+    tunable: list[dict[str, str]] = []
+    for key in keys:
+        pair = (key["q_dtype_a"], key["q_dtype_w"])
+        if _aiter_moe_dtype_pair_supported(*pair):
+            tunable.append(key)
+            report["keys"].append(
+                {name: key[name] for name in _FMOE_SHAPE_FIELDS}
+            )
+        else:
+            combo = f"{pair[0]}/{pair[1]}"
+            if combo not in report["dropped_unsupported"]:
+                report["dropped_unsupported"].append(combo)
+    report["tunable"] = len(tunable)
+    if not tunable:
+        return "", report
+
+    token_list = _fmoe_token_list(tokens)
+    lines = [_FMOE_UNTUNED_CSV_HEADER]
+    for key in tunable:
+        for token in token_list:
+            lines.append(
+                f"{token},{key['model_dim']},{key['inter_dim']},"
+                f"{key['expert']},{key['topk']},{key['act_type']},{key['dtype']},"
+                f"{key['q_dtype_a']},{key['q_dtype_w']},{key['q_type']},"
+                f"{1 if key['use_g1u1'] == 'True' else 0},"
+                f"{1 if key['doweight_stage1'] == 'True' else 0}"
+            )
+
+    csv_path = workspace / "untuned_fmoe_from_runtime.csv"
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # A full disk or a read-only workspace must cost the MoE tuner its input,
+        # not the whole tuning run: the dense tuners take their shapes from
+        # elsewhere and can still produce something useful.
+        report["write_error"] = f"{type(exc).__name__}: {exc}"
+        log.warning("Forge GEMM shapes: cannot write %s: %s", csv_path, exc)
+        return "", report
+    log.info(
+        "Forge GEMM shapes: derived %d MoE problem(s) x %d token(s) from %s%s",
+        len(tunable),
+        len(token_list),
+        server_log,
+        (
+            f"; dropped {report['dropped_unsupported']} as untunable by aiter"
+            if report["dropped_unsupported"]
+            else ""
+        ),
+    )
+    return str(csv_path), report
 
 
 def _aiter_serving_evidence(server_log: str) -> set[str]:
@@ -3016,7 +3228,10 @@ def _extract_vllm_block_fp8_profile_shapes(
     import gzip
 
     def _is_capture_sidecar(path: Path) -> bool:
-        return "capture_traces" in path.parts
+        # Shared classifier, so a layout the kernel-agent routes demote is also
+        # kept out of the shape harvest here; the exact-``capture_traces`` test
+        # this replaced missed ``graph_capture_profile/``.
+        return _shared_is_capture_fragment(path, trace_input if trace_input.is_dir() else trace_input.parent)
 
     shapes: set[tuple[int, int, int]] = set()
     # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the
@@ -3524,7 +3739,8 @@ async def _run_forge_gemm_tuning(
     Forge receives a validated local directory, while result provenance and
     durable artifact names retain the original logical model identifier.
     Missing inputs return ``model_path_missing``; inputs that cannot resolve to
-    a local directory return ``model_path_unavailable``.
+    a local directory return ``model_path_unavailable`` as a ``skipped`` result,
+    because forge never ran and so has no verdict to report.
     """
     from ..state.shared_state import SharedState
 
@@ -3558,16 +3774,26 @@ async def _run_forge_gemm_tuning(
     ).strip()
     if not raw_model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
+    from hyperloom.common.model_paths import resolve_serving_model_path
     from hyperloom.inference_optimizer.model_config_utils import (
         resolve_local_model_dir,
     )
 
-    resolved_model_dir = resolve_local_model_dir(raw_model_path)
+    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
+    # serve; probing only the hub cache here would reject a repo id that the
+    # running server resolved fine.
+    resolved_model_dir = resolve_local_model_dir(
+        resolve_serving_model_path(raw_model_path) or raw_model_path
+    )
     if resolved_model_dir is None:
+        # Forge needs the config on disk to derive shapes, so it cannot run --
+        # but not running one tuning backend is a skip, not a session failure.
+        # Reporting it as failed spends a REVERT verdict on an experiment that
+        # never started, which is the misattribution this change set removes.
         return {
-            "status": "failed",
+            "status": "skipped",
             "error_class": "model_path_unavailable",
-            "error": (
+            "skip_reason": (
                 f"Model path {raw_model_path!r} is neither an existing local "
                 "directory nor an available Hugging Face cache snapshot"
             ),
@@ -3614,6 +3840,20 @@ async def _run_forge_gemm_tuning(
                 quant_type,
                 resolved_model_path,
             )
+
+    # MoE shapes come from the runtime, never from inference. The dispatch tuple
+    # in the server log states the quantisation pair, the per-partition inter_dim
+    # and the EP-inflated expert/topk counts; none of the three is recoverable
+    # from the model config, and guessing them is what produced tuned tables no
+    # runtime lookup could reach.
+    moe_untuned_csv = str(payload.get("moe_untuned_csv") or "").strip()
+    if moe_untuned_csv and not _path_is_existing_file(moe_untuned_csv):
+        moe_untuned_csv = ""
+    moe_key_report: dict[str, Any] = {}
+    if not moe_untuned_csv:
+        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(
+            kernel_sig_log, tokens, workspace
+        )
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
     forge_framework = _forge_framework_for_vllm(
@@ -3735,6 +3975,7 @@ async def _run_forge_gemm_tuning(
         "skip_gpu_check": True,
         "tokens": tokens,
         "untuned_csv": untuned_csv,
+        "moe_untuned_csv": moe_untuned_csv,
         "shapes_json": shapes_json,
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
@@ -3776,6 +4017,11 @@ async def _run_forge_gemm_tuning(
     result.setdefault("framework", framework)
     result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", raw_model_path)
+    if moe_key_report:
+        # Kept even when nothing was tunable: "no MoE problem was observed" and
+        # "the observed pair is one aiter cannot tune" lead to different actions,
+        # and neither is visible from the tuner's own status.
+        result.setdefault("moe_key_source", moe_key_report)
     if shape_alignment is not None:
         result.setdefault("shape_alignment", shape_alignment)
     if shape_capture is not None:
@@ -3802,6 +4048,24 @@ async def _run_forge_gemm_tuning(
         reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
         if reason:
             result["skip_reason"] = reason
+
+    # The breakdown and the stack read the envelope, not the jsonl audit row, so
+    # a tuner's own error class has to surface here too. Lifted before the bridge
+    # so a specific class outranks the generic wording. ``tuners_run`` is forge's
+    # JSON and may be any shape; this is bookkeeping and must not raise.
+    _tuner_rows = result.get("tuners_run")
+    if not isinstance(_tuner_rows, list):
+        _tuner_rows = []
+    if not result.get("error_class"):
+        for _t in _tuner_rows:
+            if isinstance(_t, dict) and _t.get("error_class"):
+                result["error_class"] = str(_t["error_class"])
+                break
+    if not result.get("error"):
+        for _t in _tuner_rows:
+            if isinstance(_t, dict) and _t.get("error"):
+                result["error"] = str(_t["error"])
+                break
 
     # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
     # recommended_env becomes decision="KEEP" + extra_envs.
@@ -3835,60 +4099,108 @@ async def _run_forge_gemm_tuning(
         # Micro-only result: E2E validation still needed.
         result.setdefault("requires_e2e_validation", True)
     elif micro in ("no_improvement", "skipped"):
+        # Left unadorned on purpose: the wordings below are only legible against it.
         result.setdefault("decision", "REVERT")
-    elif micro == "failed":
+    elif micro in _FORGE_BARREN_MICRO_DECISIONS:
         result.setdefault("decision", "REVERT")
-        result.setdefault("status", "failed")
+        if micro == "failed":
+            result.setdefault("status", "failed")
+        result.setdefault("error_class", f"forge_{micro}")
 
     return result
 
 
 def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, session_dir: Path) -> tuple[dict, str]:
-    """Make a forge GEMM tuned CSV durable + recipe-portable.
+    """Make forge GEMM tuned CSVs durable + recipe-portable.
 
-    Stages the CSV under ``<session_dir>/optimization_stack/src/``, outside the
-    ``runs/`` tree the disk-pressure pruner trims, repoints the env at that copy
-    and snapshots it so it travels with the recipe.
+    The forge KEEP references tuned CSVs by their ephemeral tuner-workspace paths,
+    so a recipe replayed after the workspace is gone (or on another box) loses the
+    tuning and aiter falls back to its default config. Mirror integrate_patch's
+    durability: copy each CSV into the serving aiter config tree, repoint the env
+    there, and snapshot the realized files via :func:`snapshot_source_layer` so
+    they travel with the recipe.
+
+    The copy lands one level below ``configs/model_configs/`` on purpose. aiter
+    merges every ``model_configs/*{table}*.csv`` it can glob whenever the env var
+    is unset, and that glob is not recursive. Writing directly into that
+    directory would hand the table to every later server start -- including after
+    E2E rejected the candidate, and including servers for other models, since the
+    scan does not discriminate by model. Replay does not need the scan: it
+    restores the env var explicitly (see ``prelude._warm_kernel_extra_envs``) and
+    defers a GEMM column that has no env at all.
+
+    The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
+    durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
+    ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
+    defeat the cross-environment recipe-portability this exists for.
 
     Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
     Returns ``(extra_envs, source_snapshot_dir)``.
     """
-    env_key = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
-    src_csv = str(extra_envs.get(env_key) or "").strip()
-    if not src_csv or not Path(src_csv).is_file():
-        return extra_envs, ""
-
+    # Below model_configs/, out of reach of aiter's non-recursive auto-merge glob.
+    _FORGE_DURABLE_SUBDIR = "hyperloom"
+    _forge_durable_env_stems = {
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm",
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm",
+        "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm",
+        "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm",
+        "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm",
+        "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm",
+        "AITER_CONFIG_FMOE": "tuned_fmoe",
+    }
     slug = (
         "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name).strip("_").lower()
         or "model"
     )
-    rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
-    snapshot_dir = Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}"
-    # Mirrors aiter's relative layout so the snapshot manifest keeps its shape.
-    staged_root = snapshot_dir / "staged"
 
+    pending: list[tuple[str, str, Path]] = []
+    for env_key, stem in _forge_durable_env_stems.items():
+        src_csv = str(extra_envs.get(env_key) or "").strip()
+        if not src_csv or not Path(src_csv).is_file():
+            continue
+        rel = f"configs/model_configs/{_FORGE_DURABLE_SUBDIR}/{stem}_{slug}.csv"
+        pending.append((env_key, rel, Path(src_csv)))
+    if not pending:
+        return extra_envs, ""
+
+    # Step 1 -- commit durable copies + env repoints. This is what makes the
+    # KEEP survive: each CSV lands in aiter's config dir and the env points
+    # there instead of the ephemeral tuner workspace.
     try:
-        dst = staged_root / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_csv, dst)
+        import importlib.util
+
+        spec = importlib.util.find_spec("aiter")
+        if spec is None or not spec.origin:
+            return extra_envs, ""
+        aiter_pkg = Path(spec.origin).resolve().parent
         updated = dict(extra_envs)
-        updated[env_key] = str(dst)
+        rel_paths: list[str] = []
+        for env_key, rel, src_path in pending:
+            dst = aiter_pkg / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dst)
+            updated[env_key] = str(dst)
+            rel_paths.append(rel)
     except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
-    # A snapshot failure must not discard the copy and repoint already committed.
+    # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
+    # snapshot failure must NOT discard the copy + repoint committed above.
     snap_dir = ""
     try:
         from ..source_snapshot import snapshot_source_layer
 
         snap = snapshot_source_layer(
-            framework_root=staged_root,
+            framework_root=aiter_pkg,
             base_sha=None,
-            rel_paths=[rel],
-            dest_dir=snapshot_dir,
+            rel_paths=rel_paths,
+            dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="forge_gemm_tune",
-            extra={"env_key": env_key, "model": slug},
+            extra={
+                "env_keys": [env_key for env_key, _, _ in pending],
+                "model": slug,
+            },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
     except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands

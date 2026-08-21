@@ -1326,10 +1326,15 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, dict):
             continue
         engine = _resolve_gemm_engine(raw)
+        e2e_gain_pct = _to_float(raw.get("e2e_gain_pct"))
         speedup = _to_float(raw.get("best_speedup"))
         gain_pct: float | None = None
         tuned_tput: float | None = None
-        if speedup is not None:
+        if e2e_gain_pct is not None:
+            gain_pct = e2e_gain_pct
+            if baseline_tput is not None:
+                tuned_tput = baseline_tput * (1.0 + e2e_gain_pct / 100.0)
+        elif speedup is not None:
             gain_pct = (speedup - 1.0) * 100.0
             if baseline_tput is not None:
                 tuned_tput = baseline_tput * speedup
@@ -1360,6 +1365,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
             "gpu_type": str(raw.get("gpu_type") or gpu_type),
             "baseline_tput": baseline_tput,
             "best_speedup": speedup,
+            "e2e_gain_pct": e2e_gain_pct,
             "gain_pct": gain_pct,
             "tuned_tput": tuned_tput,
             "tuned_file": tuned_file,

@@ -79,7 +79,6 @@ _KERNEL_DESCRIPTOR_RE = re.compile(
     r"kernelName1='(?P<kn1>[^']*)'.*?kernelName2='(?P<kn2>[^']*)'"
 )
 
-
 def aiter_padded_m_fine(m: int) -> int:
     """Return aiter's ``gl=0`` padded M (fine-grained lookup key)."""
     if m <= 256:

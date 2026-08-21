@@ -816,6 +816,38 @@ def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
     assert len(shards) == 2
 
 
+def test_discover_capture_shards_dedups_a_runner_prefixed_batch(tmp_path):
+    # An SGLang without the profiler patch prefixes the runner name:
+    # DecodeCudaGraphRunner_bs_104_rank0. The batch token is still what
+    # identifies the variant, so the ranks must collapse the same way — an
+    # anchored read finds nothing here and falls back to the per-rank stem,
+    # which silently turns one variant into one-per-rank.
+    d = tmp_path / "graph_capture_profile"
+    d.mkdir()
+    for f in (
+        "DecodeCudaGraphRunner_bs_104_rank0.json",
+        "DecodeCudaGraphRunner_bs_104_rank1.json",
+        "DecodeCudaGraphRunner_bs_8_rank0.json",
+    ):
+        (d / f).write_text("{}", encoding="utf-8")
+    shards = bta._discover_capture_shards(str(d), str(d))
+    assert sorted(lbl for _p, lbl, _m in shards) == ["bs_104", "bs_8"]
+
+
+def test_discover_capture_shards_skips_a_whole_capture_per_rank_file(tmp_path):
+    # ``cuda_graph_capture-<runner>-TP-<n>`` is one file per rank holding every
+    # batch size at once, so it carries no variant identity. Indexing it mints a
+    # bogus variant per rank (TP=8 -> eight shape-identical entries) because the
+    # label falls back to the stem, which differs per rank. It is a capture
+    # sidecar — the shared classifier is right to demote it from analysis — but
+    # that is a wider question than "does this shard name a variant".
+    d = tmp_path / "graph_capture_profile"
+    d.mkdir()
+    for rank in range(3):
+        (d / f"cuda_graph_capture-DecodeCudaGraphRunner-TP-{rank}.json").write_text("{}", encoding="utf-8")
+    assert bta._discover_capture_shards(str(d), str(d)) == []
+
+
 # ── CUDA/HIP graph-mode under-recording ──────────────────────────────────────
 
 

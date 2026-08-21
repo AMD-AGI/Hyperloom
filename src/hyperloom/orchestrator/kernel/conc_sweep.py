@@ -21,6 +21,7 @@ from typing import Any, Mapping
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
@@ -1210,7 +1211,10 @@ async def run_conc_sweep(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
-    resolved_model = str(getattr(state, "model_path", "") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+    resolved_model = resolve_session_model_path(
+        state_model_path=str(getattr(state, "model_path", "") or ""),
+        for_serving=True,
+    )
     # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py
     # canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then
     # canonicalize through _gpu_runner_type so the selected Magpie script is a

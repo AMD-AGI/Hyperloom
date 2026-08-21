@@ -81,6 +81,46 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
+def _safe_mtime(path: Path) -> float:
+    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+
+    Sorting server logs by mtime races the round that is still writing them, and
+    an ``exists()`` guard does not close the window. Ordering is a heuristic for
+    picking the newest log, so a vanished file is worth sorting last rather than
+    aborting the check that owns it.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _candidate_tuned_file(env: Any, env_var: str) -> str:
+    """Return the tuned artifact a candidate's env points at.
+
+    One KEEP is described by three different path strings -- the durable copy in
+    aiter's config tree, the tuner-workspace original, and the E2E merge product
+    -- so an attempt row cannot re-derive the one the stack ends up holding, and
+    reconstructing it matched none of them: every forge KEEP read as unadopted.
+
+    Reading the newest stack entry back is not the way out either. The stack
+    append is skipped when ``(action, variant_name)`` already matches, and a GEMM
+    variant is named ``<backend>_<tuner>`` -- so a second macro cycle re-tuning
+    the same tuner finds its entry present, appends nothing, and the newest entry
+    is the previous round's. The attempt would then claim that round's artifact
+    along with its gain: the same misreport as before, inverted.
+
+    Both the stack entry and the attempt row take the value from here, which
+    makes them the same string by construction rather than by lookup.
+    """
+    if not isinstance(env, dict):
+        return ""
+    value = env.get(env_var)
+    if value in (None, ""):
+        value = next((v for v in env.values() if v not in (None, "")), "")
+    return str(value or "")
+
+
 def _paired_measurement_basis(verdict: Any) -> str:
     """How the promoted gain was measured, so the ledger cannot overstate it.
 
@@ -881,6 +921,47 @@ class KernelPhase(PhaseHandler):
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
+        async def _replay_succeeded_rebench(task_id: str) -> bool:
+            """Replay a persisted delegated result lost before state writeback."""
+            try:
+                settled_task = await self.tasks.get(task_id)
+                for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                    payload = msg.payload if isinstance(msg.payload, dict) else {}
+                    if str(payload.get("task_id") or "") != task_id:
+                        continue
+                    if str(payload.get("kind") or "") != "explore":
+                        continue
+                    if str(payload.get("state") or "").lower() != "succeeded":
+                        continue
+                    result = payload.get("result")
+                    if not isinstance(result, dict) or not self._is_promotable_result(
+                        "explore", result
+                    ):
+                        return False
+
+                    replay_pending = (
+                        dict(state.geak_pending)
+                        if isinstance(state.geak_pending, dict)
+                        else {}
+                    )
+                    replay_pending["status"] = "awaiting_rebench"
+                    replay_pending["revalidation_task_id"] = task_id
+                    replay_pending.pop("revalidation_error", None)
+                    state.geak_pending = replay_pending
+                    state.save(self.session_dir)
+                    await self._promote_to_shared_state(
+                        "explore",
+                        result,
+                        task=settled_task,
+                    )
+                    return True
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                log.exception(
+                    "geak: failed to replay delegated result for succeeded rebench %s",
+                    task_id,
+                )
+            return False
+
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
             # Reserve the pending slot BEFORE the task exists. The rebench runs
@@ -948,6 +1029,7 @@ class KernelPhase(PhaseHandler):
 
             task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
             task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
+            existing = bool(isinstance(summary, dict) and summary.get("existing"))
             pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             if task_id and task_state in {"queued", "running"}:
                 pending["status"] = "awaiting_rebench"
@@ -956,13 +1038,50 @@ class KernelPhase(PhaseHandler):
                 state.save(self.session_dir)
                 return True
 
+            if task_id and existing and task_state == "succeeded":
+                # create_or_return_existing returned a task that already ran
+                # under this cycle's idempotency key (#1240). Reconcile the
+                # reservation from the persisted verdict rather than replacing
+                # it with the misleading "settled before dispatch" status.
+                prior_geak_result = (
+                    state.geak_result
+                    if isinstance(getattr(state, "geak_result", None), dict)
+                    else {}
+                )
+                settled_status = str(prior_geak_result.get("revalidation_status") or "")
+                if settled_status in {"no_material", "no_promote"} or self._geak_win_already_recorded():
+                    state.geak_pending = {}
+                    state.save(self.session_dir)
+                    return True
+                if await _replay_succeeded_rebench(task_id):
+                    log.info(
+                        "geak: replayed persisted result for already-succeeded rebench %s",
+                        task_id,
+                    )
+                    return True
+                pending["status"] = "rebench_unavailable"
+                if pending.get("revalidation_task_id") in placeholder_keys:
+                    pending.pop("revalidation_task_id", None)
+                pending["revalidation_error"] = (
+                    f"rebench task {task_id} already succeeded but its verdict could not be reconciled"
+                )[:500]
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                log.warning(
+                    "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
+                    pending["revalidation_error"],
+                )
+                return False
+
             pending["status"] = "rebench_unavailable"
             # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
             if pending.get("revalidation_task_id") in placeholder_keys:
                 pending.pop("revalidation_task_id", None)
-            pending["revalidation_error"] = str(
-                (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
-            )[:500]
+            if task_state == "cancelled":
+                default_reason = f"rebench cancelled before completion ({task_id or 'unknown'})"
+            else:
+                default_reason = f"rebench task settled without a usable result (state={task_state or 'unknown'})"
+            pending["revalidation_error"] = str((summary or {}).get("reason") or default_reason)[:500]
             state.geak_pending = pending
             state.save(self.session_dir)
             log.warning(
@@ -976,16 +1095,18 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        # Tombstone: a result already dropped by 2b as no-material must not be
-        # re-recovered from the stale (still status=ok) result.json, else each
-        # KERNEL entry re-enqueues a wasted rebench in a loop.
+        # Tombstone a result already adjudicated by 2b so stale result.json
+        # cannot re-enqueue a settled candidate on a later KERNEL entry.
         prev_geak = (
             self.shared_state.geak_result
             if isinstance(getattr(self.shared_state, "geak_result", None), dict)
             else {}
         )
-        dropped_no_material = str(prev_geak.get("revalidation_status") or "") == "no_material"
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not dropped_no_material:
+        already_adjudicated = str(prev_geak.get("revalidation_status") or "") in {
+            "no_material",
+            "no_promote",
+        }
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not already_adjudicated:
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -1659,7 +1780,7 @@ class KernelPhase(PhaseHandler):
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
                     tool="geak",
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey discovery replay failed", exc_info=True)
@@ -1679,14 +1800,14 @@ class KernelPhase(PhaseHandler):
                     skip_reason=str(disp.get("skip_reason") or ""),
                     orchestration_commit=commit,
                     task_group=disp.get("task_group"),
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
                 br = k.get("backend_result")
                 if isinstance(br, dict):
                     instrument.record_kernel_backend_result(
                         sdir,
                         br,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                     )
                 e2e = k.get("e2e")
                 if isinstance(e2e, dict):
@@ -1701,7 +1822,7 @@ class KernelPhase(PhaseHandler):
                         target_file=e2e.get("target_file"),
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                         # Replaying must land on the reading it originally
                         # recorded, not count itself as a fresh one.
                         occurrence=e2e.get("occurrence"),
@@ -1778,13 +1899,17 @@ class KernelPhase(PhaseHandler):
                     e2e_gain_pct=None,
                     validated=False,
                     decision="REVERT",
+                    # Same route as the KEEP that this withdraws. Leaving it on the default
+                    # re-parented the kernel under a synthetic Forge route at the moment it was
+                    # revoked, so a withdrawn GEAK kernel ended up filed under an optimizer that
+                    # never touched it.
+                    route_strategy="geak",
                     patch_path=e2e.get("patch_path"),
                     target_file=e2e.get("target_file"),
                     extra_server_args=str(
                         e2e.get("extra_server_args") or ""
                     ),
                     result=evidence,
-                    route_strategy="legacy_only",
                     # This is a second look at a kernel that was already kept,
                     # and ``evidence`` still carries the original integrate's
                     # identity. Without a namespace of its own, the reading
@@ -1834,6 +1959,27 @@ class KernelPhase(PhaseHandler):
         the real cause -- an artifact the runtime never applied -- stays invisible.
         Replaying the lookup against the round's ``server.log`` separates the two.
 
+        Its result can block a KEEP, so an unexpected failure must not: it would
+        turn a diagnostic into the very false REVERT this replaces. Any
+        exception degrades to "undetermined", matching ``_gemm_apply_verdict``.
+        """
+        try:
+            return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "tuned-config coverage failed for %s; treating it as undetermined",
+                tuner_name,
+                exc_info=True,
+            )
+            return None
+
+    def _gemm_tuned_config_coverage_impl(
+        self,
+        tuner_name: str,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Replay aiter's lookup against the round's log (see the caller).
+
         For ``fmoe_ck``, delegates to ``_fmoe_tuned_config_coverage``, which
         matches fused-MoE dispatch lines against ``candidate_fmoe.csv`` rather
         than dense ``(M, N, K)`` GEMM lookups.
@@ -1851,13 +1997,30 @@ class KernelPhase(PhaseHandler):
         if not csv_paths:
             return None
         run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
         if not logs:
             return None
         try:
             log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
+
+        def _unreadable(kind: str) -> None:
+            """Log that the artifact could not be read, so the caller stays out of it.
+
+            A CSV we cannot parse is an absence of evidence, not evidence the
+            runtime ignored the table. Returning a 0% report would let that
+            absence block a KEEP whose throughput genuinely improved -- the
+            same conflation this change set exists to remove.
+            """
+            log.warning(
+                "gemm E2E: tuner=%s %s tuned CSV yielded no keys from %s; "
+                "coverage is undetermined and will not block the KEEP",
+                tuner_name,
+                kind,
+                csv_paths,
+            )
+
         missed, hit = parse_aiter_shape_lookups(log_text)
         requested = missed | hit
         if not requested:
@@ -1865,6 +2028,9 @@ class KernelPhase(PhaseHandler):
         tuned: set[tuple[int, int, int]] = set()
         for path in csv_paths:
             tuned |= tuned_csv_shapes(path)
+        if not tuned:
+            _unreadable("dense")
+            return None
         report = tuned_config_coverage(tuned, requested)
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
@@ -2059,10 +2225,7 @@ class KernelPhase(PhaseHandler):
         if not csv_paths:
             return None
         run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(
-            run_dir.rglob("server.log"),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0,
-        )
+        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
         if not logs:
             # Say so. This whole change exists to stop checks from failing
             # quietly, and a missing log is the one way this one can.
@@ -2640,7 +2803,38 @@ class KernelPhase(PhaseHandler):
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
-        await self._validate_gemm_tuning_e2e(result)
+        try:
+            await self._validate_gemm_tuning_e2e(result)
+        except Exception as exc:  # noqa: BLE001
+            # Validation spans server restarts, log parsing and CSV merges, and
+            # is reached from two entrypoints that only guard the tuning call
+            # itself. An unexpected failure here has to read as "this candidate
+            # was never measured", not take the KERNEL phase down with it --
+            # tuning that produced nothing measurable is the outcome this whole
+            # change exists to record honestly.
+            log.exception("gemm E2E validation raised; recording it as a fault")
+            e2e = result.setdefault("e2e_results", {})
+            if isinstance(e2e, dict):
+                faults = e2e.setdefault("faults", [])
+                if isinstance(faults, list):
+                    faults.append(
+                        {
+                            "tuner": "*",
+                            "error_class": "e2e_validation_exception",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+            # The bridge stamped KEEP + the raw combined env on the micro result;
+            # the normal exit rewrites both so Orchestration never bundles an
+            # integrate against an unmeasured candidate. This arm was not
+            # measured, so it reads as REVERT.
+            result["decision"] = "REVERT"
+            result["requires_e2e_validation"] = False
+            result["e2e_validated"] = False
+            result["micro_decision"] = "e2e_validation_exception"
+            for stale in ("recommended_env", "extra_envs"):
+                if result.get(stale):
+                    result[stale] = {}
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2832,6 +3026,7 @@ class KernelPhase(PhaseHandler):
         A round the run stopped ends the sweep with its tuners unrecorded.
         """
         from ..kernel.request_handlers import integrate_handler
+        from hyperloom.common.model_paths import resolve_session_model_path
 
         backend = str(result.get("backend") or "geak").strip().lower()
         candidates = self._gemm_e2e_candidates(result)
@@ -2844,6 +3039,9 @@ class KernelPhase(PhaseHandler):
         stacked_envs: dict[str, str] = {}
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
+        faults: list[dict[str, Any]] = []
+        # Set by the last KEEP; the attempt row claims this exact string.
+        adopted_tuned_file = ""
         try:
             from ..actions.executors.explore import _compute_explore_variant_timeout
 
@@ -2947,42 +3145,111 @@ class KernelPhase(PhaseHandler):
                 running_tput,
             )
 
-            try:
-                integrate_result = await integrate_handler(
-                    {
-                        "task_id": f"gemm_tune_e2e_{tuner_name}",
-                        "kernel_id": f"gemm_tune_{tuner_name}",
-                        "source": "forge_gemm_tuning",
-                        "base_tput": running_tput,
-                        "extra_server_args": extra_server_args,
-                        "extra_envs": test_envs,
-                        "keep_threshold_pct": 3.0,
-                        "budget_minutes": per_tuner_budget_minutes,
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "gemm E2E: integrate failed for %s: %s",
-                    tuner_name,
-                    exc,
-                )
-                reverted.append({**cand, "reason": repr(exc)})
-                continue
+            from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
-            stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
-            if stopped is not None:
-                # Recording the rest would report a clock as a verdict on them.
-                log.info(
-                    "gemm E2E: %s left unmeasured — %s",
-                    tuner_name,
-                    stopped.interrupted,
-                )
+            integrate_verdict: dict[str, Any] | None = None
+            run_stopped = False
+            integrate_payload = {
+                "task_id": f"gemm_tune_e2e_{tuner_name}",
+                "kernel_id": f"gemm_tune_{tuner_name}",
+                "source": "forge_gemm_tuning",
+                "base_tput": running_tput,
+                "model_path": resolve_session_model_path(
+                    state_model_path=str(getattr(self.shared_state, "model_path", "") or ""),
+                    for_serving=True,
+                ),
+                "extra_server_args": extra_server_args,
+                "extra_envs": test_envs,
+                "keep_threshold_pct": 3.0,
+                "budget_minutes": per_tuner_budget_minutes,
+            }
+            for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
+                try:
+                    integrate_result = await integrate_handler(
+                        integrate_payload,
+                        session_dir=self.session_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
+                        log.warning(
+                            "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
+                            tuner_name,
+                            fault_attempt,
+                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                            exc,
+                        )
+                        continue
+                    log.warning(
+                        "gemm E2E: integrate raised for %s: %s",
+                        tuner_name,
+                        exc,
+                    )
+                    faults.append(
+                        {
+                            **cand,
+                            "reason": "integrate_fault:handler_exception",
+                            "fault": True,
+                            "error_class": "handler_exception",
+                            "error": repr(exc),
+                            "fault_attempts": fault_attempt,
+                        }
+                    )
+                    break
+
+                stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
+                if stopped is not None:
+                    log.info(
+                        "gemm E2E: %s left unmeasured — %s",
+                        tuner_name,
+                        stopped.interrupted,
+                    )
+                    run_stopped = True
+                    break
+
+                if self.shared_state._is_integrate_fault(integrate_result):
+                    error_class = str(
+                        integrate_result.get("error_class") or "integrate_fault"
+                    ).strip()
+                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
+                        log.warning(
+                            "gemm E2E: retrying tuner=%s after integrate fault %s "
+                            "(attempt %d/%d)",
+                            tuner_name,
+                            error_class,
+                            fault_attempt,
+                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                        )
+                        continue
+                    log.warning(
+                        "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, "
+                        "not a REVERT verdict",
+                        tuner_name,
+                        error_class,
+                    )
+                    faults.append(
+                        {
+                            **cand,
+                            "reason": f"integrate_fault:{error_class}",
+                            "fault": True,
+                            "error_class": error_class,
+                            "integrate_status": integrate_result.get("status"),
+                            "error": integrate_result.get("error"),
+                            "fault_attempts": fault_attempt,
+                        }
+                    )
+                    break
+
+                integrate_verdict = integrate_result
                 break
 
-            decision = str(integrate_result.get("decision") or "").upper()
-            new_tput = float(integrate_result.get("new_tput") or 0.0)
-            gain_pct = float(integrate_result.get("gain_pct") or 0.0)
+            if run_stopped:
+                break
+            if integrate_verdict is None:
+                continue
+
+            decision = str(integrate_verdict.get("decision") or "").upper()
+            new_tput = float(integrate_verdict.get("new_tput") or 0.0)
+            gain_pct = float(integrate_verdict.get("gain_pct") or 0.0)
 
             log.info(
                 "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
@@ -3064,6 +3331,11 @@ class KernelPhase(PhaseHandler):
                         "gain_pct": gain_pct,
                     }
                 )
+                # The one place this path names its artifact. The stack entry
+                # below and the attempt row further down both read it, so the
+                # breakdown's string match cannot be defeated by a stack append
+                # that was skipped as already-applied.
+                adopted_tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
 
                 lifted = self._lift_to_current_best(
                     "gemm_tuning",
@@ -3076,10 +3348,7 @@ class KernelPhase(PhaseHandler):
                         "workspace": result.get("workspace"),
                     },
                     entry_extra={
-                        "tuned_file": (
-                            env.get(cand["env_var"])
-                            or next(iter(env.values()), "")
-                        ),
+                        "tuned_file": adopted_tuned_file,
                         "gain_pct": gain_pct,
                         "backend": backend,
                         "source": "kernel_entry_auto",
@@ -3127,11 +3396,25 @@ class KernelPhase(PhaseHandler):
                     source="forge_gemm_tuning_e2e",
                     measurement_basis=_paired_measurement_basis(paired),
                 )
+            # Name the artifact this run adopted, so the breakdown can tell it
+            # was. Forge never set ``tuned_file`` (it reports per-tuner envs
+            # instead), which left the history row's path empty and the adoption
+            # lookup matching on "". The value is the one the stack entry above
+            # carries, taken from the same call rather than looked up.
+            if adopted_tuned_file:
+                result["tuned_file"] = adopted_tuned_file
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
                 total_gain,
                 len(reverted),
+            )
+        elif faults:
+            stacked_envs = {}
+            total_gain = 0.0
+            log.info(
+                "gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict",
+                len(faults),
             )
         else:
             stacked_envs = {}
@@ -3143,17 +3426,28 @@ class KernelPhase(PhaseHandler):
 
         # Rewrite the stored result to the E2E-validated outcome so Orchestration
         # never sees the raw combined recommended_env and issues a bundled integrate.
-        result["e2e_results"] = {"kept": kept, "reverted": reverted}
+        result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
         result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
         result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
         result["recommended_env"] = dict(stacked_envs)
         result["extra_envs"] = dict(stacked_envs)
-        result["e2e_gain_pct"] = round(float(total_gain), 4)
+        if faults and not kept and not reverted:
+            result["e2e_gain_pct"] = None
+        else:
+            result["e2e_gain_pct"] = round(float(total_gain), 4)
         result["e2e_validated"] = True
         result["requires_e2e_validation"] = False
         if kept:
             result["status"] = "complete"
             result["decision"] = "KEEP"
+        elif reverted:
+            result["status"] = "complete"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "candidate_no_e2e_gain"
+        elif faults:
+            result["status"] = "failed"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "integrate_fault"
         else:
             result["status"] = "complete"
             result["decision"] = "REVERT"
@@ -3708,13 +4002,16 @@ class KernelPhase(PhaseHandler):
 
         if decision == "KEEP":
             finalize_result = integ.get("finalize_result")
-            if not _collective_recovery.patch_lifecycle_complete(finalize_result):
+            # ``finalize_settled`` rather than ``lifecycle_complete``: a resumed
+            # apply whose manifest is already finalized must not be finalized a
+            # second time, even when that finalize only got part of the backups.
+            if not _collective_recovery.patch_finalize_settled(finalize_result):
                 finalize_result = await asyncio.to_thread(
                     _maybe_finalize_kernel_patch,
                     apply_result,
                 )
                 integ["finalize_result"] = finalize_result
-            finalize_complete = _collective_recovery.patch_lifecycle_complete(
+            finalize_complete = _collective_recovery.patch_finalize_settled(
                 finalize_result
             )
             finalize_action = "" if finalize_complete else "finalize"

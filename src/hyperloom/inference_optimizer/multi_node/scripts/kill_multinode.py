@@ -543,8 +543,9 @@ def main() -> int:
     as JSON to stdout.
 
     Returns:
-        int: Process exit code; ``0`` on success even when some nodes had
-        nothing to kill.
+        int: ``0`` when every node finished its kill cleanly (having nothing to
+        kill counts as clean); ``1`` when any node errored, left a signalled pid
+        alive, or left a rendezvous/serving port bound.
     """
     p = argparse.ArgumentParser(
         prog="kill_multinode.py",
@@ -633,6 +634,20 @@ def main() -> int:
 
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
     sys.stdout.flush()
+
+    # The caller sequences LAUNCH directly after this, so an incomplete kill has
+    # to be reported as a failure: a surviving pid or a bound rendezvous/serving
+    # port leaves the next rank 0 racing a dying server for the TCPStore / :8888.
+    #
+    # gpu_busy is advisory only. Its fallback reclaim wait is a coarse per-card
+    # threshold that an unrelated co-tenant's VRAM can trip, and _wait_gpu_free
+    # is time-boxed so it cannot stall teardown.
+    blocking = ("error", "still_alive", "ports_busy")
+    bad = {node: {k: summary[k] for k in blocking if summary.get(k)} for node, summary in out.items()}
+    bad = {node: reasons for node, reasons in bad.items() if reasons}
+    if bad:
+        _log(f"FAILED kill incomplete on {len(bad)} node(s): {json.dumps(bad, sort_keys=True)}")
+        return 1
     _log("done")
     return 0
 
