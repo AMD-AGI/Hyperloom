@@ -1833,6 +1833,10 @@ class KernelPhase(PhaseHandler):
         still boots and benchmarks fine, so the gate sees an honest "no gain" and
         the real cause -- an artifact the runtime never applied -- stays invisible.
         Replaying the lookup against the round's ``server.log`` separates the two.
+
+        For ``fmoe_ck``, delegates to ``_fmoe_tuned_config_coverage``, which
+        matches fused-MoE dispatch lines against ``candidate_fmoe.csv`` rather
+        than dense ``(M, N, K)`` GEMM lookups.
         """
         if tuner_name == "fmoe_ck":
             return self._fmoe_tuned_config_coverage(envs)
@@ -1890,8 +1894,11 @@ class KernelPhase(PhaseHandler):
         ``artifact_table_not_consulted`` blockers on MoE models.
         """
         from ..kernel.gemm_shape_coverage import (
+            aiter_log_tuned_config_enabled,
             fmoe_tuned_config_coverage,
+            log_has_fused_moe_activity,
             parse_aiter_fused_moe_dispatches,
+            read_latest_integrate_server_log,
             resolve_fmoe_candidate_csv,
             tuned_fmoe_csv_rows,
         )
@@ -1899,23 +1906,30 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
+        loaded = read_latest_integrate_server_log(self.session_dir)
+        if loaded is None:
+            return None
+        log_path, log_text = loaded
         candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
-        run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
-        logs = sorted(run_dir.rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
-        if not logs:
-            return None
-        try:
-            log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
         dispatches = parse_aiter_fused_moe_dispatches(log_text)
+        hit_logging = aiter_log_tuned_config_enabled(envs)
         report: dict[str, Any] = {
-            "server_log": str(logs[-1]),
+            "server_log": str(log_path),
             "requested": len(dispatches),
         }
         if not dispatches:
-            report["artifact_applied"] = False
-            report["not_applied_reason"] = "no_fused_moe_dispatch"
+            if log_has_fused_moe_activity(log_text):
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "fused_moe_parse_inconclusive"
+                report["conclusive"] = False
+            elif not hit_logging:
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "fused_moe_logging_disabled"
+                report["conclusive"] = False
+            else:
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "no_fused_moe_dispatch"
+                report["conclusive"] = True
             report["runtime_lookup_miss"] = 0
             report["runtime_lookup_hit"] = 0
             return report
@@ -1930,6 +1944,7 @@ class KernelPhase(PhaseHandler):
         report["candidate_csv"] = str(candidate_path)
         report.update(fmoe_tuned_config_coverage(candidate_rows, dispatches))
         report["artifact_applied"] = bool(report.get("covered"))
+        report["conclusive"] = True
         report["runtime_lookup_miss"] = report.get("requested", 0) - report.get("covered", 0)
         report["runtime_lookup_hit"] = report.get("covered", 0)
         if not report["artifact_applied"]:
@@ -2031,6 +2046,10 @@ class KernelPhase(PhaseHandler):
         served the requests"; it cannot see the case where the table never
         arrived and the server loaded its bundled default instead, because the
         CSV on our disk still contains the right rows either way.
+
+        For ``fmoe_ck``, delegates to ``_fmoe_apply_verdict``, which attributes
+        fused-MoE kernel pairs from dispatch lines instead of dense merge/hit
+        logging.
         """
         if tuner_name == "fmoe_ck":
             return self._fmoe_apply_verdict(envs)
@@ -2087,8 +2106,11 @@ class KernelPhase(PhaseHandler):
         not drive ``not_merged`` for a tuner that only deploys ``tuned_fmoe.csv``.
         """
         from ..kernel.gemm_shape_coverage import (
+            aiter_log_tuned_config_enabled,
             fmoe_tuned_config_coverage,
+            log_has_fused_moe_activity,
             parse_aiter_fused_moe_dispatches,
+            read_latest_integrate_server_log,
             resolve_fmoe_candidate_csv,
             tuned_fmoe_csv_rows,
         )
@@ -2096,25 +2118,47 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
-        run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
-        logs = sorted(
-            run_dir.rglob("server.log"),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0,
-        )
-        if not logs:
+        loaded = read_latest_integrate_server_log(self.session_dir)
+        if loaded is None:
+            run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
             log.warning(
                 "forge gemm E2E: no server.log under %s; apply verification "
                 "cannot run for fmoe_ck", run_dir,
             )
             return None
-        try:
-            log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
-
+        log_path, log_text = loaded
+        hit_logging = aiter_log_tuned_config_enabled(envs)
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
         dispatches = parse_aiter_fused_moe_dispatches(log_text)
         if not dispatches:
+            if log_has_fused_moe_activity(log_text):
+                return {
+                    "verdict": "fused_moe_parse_inconclusive",
+                    "hits": 0,
+                    "misses": 0,
+                    "blocks_keep": False,
+                    "conclusive": False,
+                    "merged_tables": [],
+                    "unmerged_artifacts": list(csv_paths),
+                    "detail": (
+                        "server.log contains fused-MoE activity but no dispatch "
+                        "lines could be parsed"
+                    ),
+                }
+            if not hit_logging:
+                return {
+                    "verdict": "fused_moe_logging_disabled",
+                    "hits": 0,
+                    "misses": 0,
+                    "blocks_keep": False,
+                    "conclusive": False,
+                    "merged_tables": [],
+                    "unmerged_artifacts": list(csv_paths),
+                    "detail": (
+                        "AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch "
+                        "attribution cannot run"
+                    ),
+                }
             return {
                 "verdict": "no_fused_moe_dispatch",
                 "hits": 0,
@@ -2134,13 +2178,13 @@ class KernelPhase(PhaseHandler):
                 "verdict": "candidate_csv_missing",
                 "hits": 0,
                 "misses": len(dispatches),
-                "blocks_keep": True,
+                "blocks_keep": False,
                 "conclusive": False,
                 "merged_tables": [],
                 "unmerged_artifacts": list(csv_paths),
                 "detail": (
-                    "env points at merged_candidate_fmoe.csv but sibling "
-                    "candidate_fmoe.csv is absent; cannot attribute runtime "
+                    "env points at a merged fmoe CSV but the sibling bare "
+                    "candidate file is absent; cannot attribute runtime "
                     "kernel names to the tuner candidate"
                 ),
             }
@@ -2960,7 +3004,7 @@ class KernelPhase(PhaseHandler):
             coverage = self._gemm_tuned_config_coverage(tuner_name, env)
             if coverage is not None:
                 cand = {**cand, "tuned_config_coverage": coverage}
-                if not coverage.get("artifact_applied"):
+                if not coverage.get("artifact_applied") and coverage.get("conclusive", True):
                     apply_blockers.append(
                         str(coverage.get("not_applied_reason") or "no_shape_key_matched")
                     )
@@ -2971,6 +3015,12 @@ class KernelPhase(PhaseHandler):
                         tuner_name,
                         coverage.get("requested") or 0,
                         gain_pct,
+                    )
+                elif not coverage.get("artifact_applied"):
+                    log.info(
+                        "gemm E2E: tuner=%s tuned-config coverage inconclusive — %s",
+                        tuner_name,
+                        coverage.get("not_applied_reason"),
                     )
                 else:
                     log.info(

@@ -92,23 +92,10 @@ _MINIMAX_SHAPE_ROW = (
     "bundled_kernel1,bundled_kernel2\n"
 )
 
-MINIMAX_SESSION_LOG = Path(
-    "/shared_nfs/hyperloom-claw/MiniMax-M3-MXFP4/20260818T071552Z/runs/integrate/"
-    "integrate-gemm_tune_fmoe_ck/warmup_round/benchmark_sglang_20260818_181234/"
-    "server.log"
-)
-MINIMAX_CANDIDATE = Path(
-    "/shared_nfs/hyperloom-claw/MiniMax-M3-MXFP4/20260818T071552Z/runs/gemm_tuning/"
-    "kernel_entry_gemm_tuning/tuners/fmoe_ck/candidate_fmoe.csv"
-)
-GLM_SESSION_LOG = Path(
-    "/shared_nfs/hyperloom-claw/GLM-5.2-MXFP4/20260818T062821Z/runs/integrate/"
-    "integrate-gemm_tune_fmoe_ck/warmup_round/benchmark_sglang_20260818_153638/"
-    "server.log"
-)
-GLM_CANDIDATE = Path(
-    "/shared_nfs/hyperloom-claw/GLM-5.2-MXFP4/20260818T062821Z/runs/gemm_tuning/"
-    "kernel_entry_gemm_tuning/tuners/fmoe_ck/candidate_fmoe.csv"
+# Malformed fused-MoE line: marker present but tuple does not parse.
+UNPARSEABLE_FMOE_MARKER = (
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+    "(kernelName1='broken') for (incomplete tuple"
 )
 
 
@@ -283,6 +270,52 @@ class TestFmoeCoverageGate:
         assert report["not_applied_reason"] == "candidate_csv_missing"
         assert report.get("conclusive") is False
 
+    def test_merged_tuned_fmoe_resolves_bare_sibling(self, tmp_path):
+        _integrate_log(tmp_path, SYNTHETIC_SERVED)
+        bare = tmp_path / "tuned_fmoe.csv"
+        bare.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
+        merged = tmp_path / "merged_tuned_fmoe.csv"
+        merged.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage(
+            "fmoe_ck",
+            {"AITER_CONFIG_FMOE": str(merged), "AITER_LOG_TUNED_CONFIG": "1"},
+        )
+
+        assert report is not None
+        assert report["artifact_applied"] is True
+        assert report["candidate_csv"] == str(bare)
+
+    def test_fused_moe_marker_without_parse_is_inconclusive(self, tmp_path):
+        _integrate_log(tmp_path, UNPARSEABLE_FMOE_MARKER)
+        csv_path = _candidate_csv(tmp_path)
+        phase = _phase(tmp_path)
+
+        report = phase._gemm_tuned_config_coverage("fmoe_ck", _envs(csv_path))
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["not_applied_reason"] == "fused_moe_parse_inconclusive"
+        assert report.get("conclusive") is False
+
+    def test_minimax_default_embedded_replay_blocks(self, tmp_path):
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
+            fmoe_tuned_config_coverage,
+            parse_aiter_fused_moe_dispatches,
+            tuned_fmoe_csv_rows,
+        )
+
+        candidate = tmp_path / "candidate_fmoe.csv"
+        candidate.write_text(_FMOE_HEADER + _MINIMAX_SHAPE_ROW, encoding="utf-8")
+        dispatches = parse_aiter_fused_moe_dispatches(MINIMAX_DEFAULT)
+        assert dispatches
+        assert all(d["descriptor"] == "default" for d in dispatches)
+
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(candidate), dispatches)
+        assert report["covered"] == 0
+        assert report["runtime_default"] >= 1
+
 
 class TestFmoeApplyVerdict:
     def test_dense_consulted_tables_do_not_block_fmoe(self, tmp_path, stub_forge_parser):
@@ -318,7 +351,7 @@ class TestFmoeApplyVerdict:
         assert verdict.get("blocks_keep") is True
         assert verdict.get("verdict") == "no_fused_moe_dispatch"
 
-    def test_merged_without_bare_candidate_blocks_inconclusively(self, tmp_path):
+    def test_merged_without_bare_candidate_does_not_block_keep(self, tmp_path):
         _integrate_log(tmp_path, SYNTHETIC_SERVED)
         merged = tmp_path / "merged_candidate_fmoe.csv"
         merged.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
@@ -330,49 +363,51 @@ class TestFmoeApplyVerdict:
         )
 
         assert verdict is not None
-        assert verdict.get("blocks_keep") is True
+        assert verdict.get("blocks_keep") is False
         assert verdict.get("conclusive") is False
         assert verdict.get("verdict") == "candidate_csv_missing"
 
+    def test_fused_moe_marker_without_parse_does_not_block_keep(self, tmp_path):
+        _integrate_log(tmp_path, UNPARSEABLE_FMOE_MARKER)
+        csv_path = _candidate_csv(tmp_path)
+        phase = _phase(tmp_path)
 
-class TestSessionLogReplay:
-    def test_minimax_session_log_replay_blocks_on_default(self):
-        if not MINIMAX_SESSION_LOG.is_file() or not MINIMAX_CANDIDATE.is_file():
-            pytest.skip("MiniMax session artifacts not mounted")
+        verdict = phase._gemm_apply_verdict("fmoe_ck", _envs(csv_path))
+
+        assert verdict is not None
+        assert verdict.get("blocks_keep") is False
+        assert verdict.get("conclusive") is False
+        assert verdict.get("verdict") == "fused_moe_parse_inconclusive"
+
+    def test_logging_disabled_without_dispatch_is_inconclusive(self, tmp_path):
+        _integrate_log(tmp_path, AITER_BF16_MISS)
+        csv_path = _candidate_csv(tmp_path)
+        phase = _phase(tmp_path)
+
+        verdict = phase._gemm_apply_verdict(
+            "fmoe_ck",
+            {"AITER_CONFIG_FMOE": str(csv_path), "AITER_LOG_TUNED_CONFIG": "0"},
+        )
+
+        assert verdict is not None
+        assert verdict.get("blocks_keep") is False
+        assert verdict.get("conclusive") is False
+        assert verdict.get("verdict") == "fused_moe_logging_disabled"
+
+
+class TestFmoeEmbeddedReplay:
+    def test_glm_descriptor_embedded_replay_does_not_hit_candidate(self, tmp_path):
         from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
             fmoe_tuned_config_coverage,
             parse_aiter_fused_moe_dispatches,
             tuned_fmoe_csv_rows,
         )
 
-        text = MINIMAX_SESSION_LOG.read_text(encoding="utf-8", errors="replace")
-        dispatches = parse_aiter_fused_moe_dispatches(text)
-        assert dispatches, "expected fused-MoE dispatch lines in session log"
-        assert all(d["descriptor"] == "default" for d in dispatches)
-        assert all(d["gfx"] == "gfx950" for d in dispatches)
-
-        report = fmoe_tuned_config_coverage(
-            tuned_fmoe_csv_rows(MINIMAX_CANDIDATE), dispatches
-        )
-        assert report["covered"] == 0
-        assert report["runtime_default"] >= 1
-
-    def test_glm_session_log_replay_does_not_attribute_bundled_hit_to_candidate(self):
-        if not GLM_SESSION_LOG.is_file() or not GLM_CANDIDATE.is_file():
-            pytest.skip("GLM session artifacts not mounted")
-        from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
-            fmoe_tuned_config_coverage,
-            parse_aiter_fused_moe_dispatches,
-            tuned_fmoe_csv_rows,
-        )
-
-        text = GLM_SESSION_LOG.read_text(encoding="utf-8", errors="replace")
-        dispatches = parse_aiter_fused_moe_dispatches(text)
-        assert dispatches, "expected parenthesised fused-MoE descriptors"
+        candidate = tmp_path / "candidate_fmoe.csv"
+        candidate.write_text(_FMOE_HEADER + _CANDIDATE_ROW, encoding="utf-8")
+        dispatches = parse_aiter_fused_moe_dispatches(GLM_KERNEL_DESCRIPTOR)
+        assert dispatches
         assert all(d["descriptor"] != "default" for d in dispatches)
-        assert all(d["gfx"] == "gfx950" for d in dispatches)
 
-        report = fmoe_tuned_config_coverage(
-            tuned_fmoe_csv_rows(GLM_CANDIDATE), dispatches
-        )
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(candidate), dispatches)
         assert report["covered"] == 0
