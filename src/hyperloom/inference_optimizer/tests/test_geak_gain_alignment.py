@@ -479,6 +479,7 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.resume_pending_revalidation is False
     assert not ss.geak_pending
+    assert ss.geak_result["revalidation_status"] == "no_promote"
 
 
 # ── Rebench-first: candidate recorded, headline deferred to measured rebench ──

@@ -3731,6 +3731,12 @@ class WritebackCollaborator:
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak no_promote: observation emit failed")
+                    # Persist the closed verdict so a later KERNEL entry does
+                    # not recover stale result.json and re-enqueue this already
+                    # adjudicated candidate (#1240).
+                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
+                    ps_stamped["revalidation_status"] = "no_promote"
+                    self.shared_state.geak_result = ps_stamped
                     self.shared_state.geak_pending = {}
                     self.shared_state.resume_pending_revalidation = False
                 else:
@@ -5181,7 +5187,6 @@ class WritebackCollaborator:
                     # Revalidation reproduces the whole stack, so its gain is
                     # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-                    "enable_stack_rebench": False,
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
