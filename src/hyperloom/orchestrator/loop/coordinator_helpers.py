@@ -1388,8 +1388,15 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
             index[twin] = len(out)
             out.append(k)
             continue
-        if _GEAK_CAND_TAG_RE.match(_geak_spec_name(out[pos])) and not _GEAK_CAND_TAG_RE.match(name):
+        existing_name = _geak_spec_name(out[pos])
+        if _GEAK_CAND_TAG_RE.match(existing_name) and not _GEAK_CAND_TAG_RE.match(name):
             out[pos] = k
+            continue
+        if _GEAK_CAND_TAG_RE.match(name) and not _GEAK_CAND_TAG_RE.match(existing_name):
+            continue
+        if name == existing_name:
+            continue
+        out.append(k)
     return out
 
 

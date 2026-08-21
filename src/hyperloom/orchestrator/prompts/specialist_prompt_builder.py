@@ -2114,12 +2114,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
             "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
             "  description}``: ``source`` is a path inside your worktree, ``target``",
-            "  is the install path — PREFER a framework-relative path (e.g.",
-            "  ``configs/model_configs/foo.csv``); an absolute path is accepted only",
-            "  if it resolves inside an allowlisted framework root. ``integrate_patch``",
-            "  backs up the target, installs the artifact, runs the same E2E gate, and",
-            "  restores the backup on REVERT. A non-diff tuned artifact is a FULL",
-            "  result — set ``empty=false`` when ``artifacts_written`` is non-empty.",
+            "  is the install path — PREFER a framework-relative path; an absolute",
+            "  path is accepted only if it resolves inside an allowlisted framework",
+            "  root. ``integrate_patch`` backs up the target, installs the artifact,",
+            "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
+            "  tuned artifact is a FULL result — set ``empty=false`` when",
+            "  ``artifacts_written`` is non-empty.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:

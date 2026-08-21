@@ -1180,6 +1180,92 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] == "failed"
         assert result["error_class"] == "subprocess_timeout"
         assert result["backend"] == "forge"
+        assert result["kept"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_passes_session_serve_args(self, tmp_path, monkeypatch):
+        model = tmp_path / "MiniMax-M3-MXFP4"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"sparse_attention_config": {"sparse_block_size": 128}}),
+            encoding="utf-8",
+        )
+        trace = tmp_path / "trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="vllm",
+            model_path=str(model),
+            last_profile_trace=str(trace),
+            tp=8,
+            max_model_len=13312,
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", Path)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n" + json.dumps(result) + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert input_payload["tp"] == 8
+        assert input_payload["block_size"] == 128
+        assert input_payload["max_model_len"] == 13312
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_timeout_salvages_keep(self, tmp_path, monkeypatch):
+        trace = tmp_path / "trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", Path)
+
+        async def _timeout(cmd, *, timeout_sec):
+            workspace = tmp_path / "runs" / "fusion" / "kernel_entry_fusion"
+            (workspace / "kernel_keep_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "kept": True,
+                        "kernel_speedup": 2.69,
+                        "env_flag": "QWEN_FUSED",
+                        "source_file": "/fw/model.py",
+                        "repo_root": "/fw",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "fusion.patch").write_text(
+                "diff --git a/model.py b/model.py\n",
+                encoding="utf-8",
+            )
+            raise subprocess.TimeoutExpired(cmd, timeout_sec)
+
+        monkeypatch.setattr(krh, "_run_subprocess", _timeout)
+
+        result = await krh._run_forge_fusion({"timeout": 60}, session_dir=tmp_path)
+
+        assert result["kept"] is True
+        assert result["decision"] == "KEEP"
+        assert result["requires_e2e_validation"] is True
+        assert result["salvaged"] is True
+        assert result["error_class"] == "subprocess_timeout"
+        assert result["kernel_speedup"] == 2.69
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_requires_model_path(self, tmp_path, monkeypatch):

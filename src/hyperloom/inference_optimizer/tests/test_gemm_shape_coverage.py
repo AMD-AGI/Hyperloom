@@ -19,15 +19,17 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_padded_m_coarse,
     aiter_padded_m_fine,
     align_shapes_to_aiter_keys,
-    fmoe_dispatch_key,
     fmoe_tuned_config_coverage,
     load_shapes_json,
     parse_aiter_consulted_tables,
+    parse_aiter_fused_moe_dispatches,
     parse_aiter_shape_lookups,
+    resolve_fmoe_candidate_csv,
     tuned_config_coverage,
     tuned_csv_shapes,
-    tuned_fmoe_csv_keys,
+    tuned_fmoe_csv_rows,
     write_shapes_json,
+    _normalize_fmoe_q_dtype,
 )
 
 
@@ -160,6 +162,120 @@ class TestServerLogParsing:
         assert parse_aiter_consulted_tables("") == set()
 
 
+class TestFmoeDispatchParsing:
+    _DISPATCH = (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
+        "(kernelName1='ck_moe_stage1_tuned', kernelName2='ck_moe_stage2_tuned') "
+        "for ('gfx950', 256, 64, 7168, 2048, 128, 8, 'ActivationType.Swiglu', "
+        "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float8_e4m3fn', "
+        "'QuantType.per_1x128', True, False)"
+    )
+    _DEFAULT = (
+        "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage default for "
+        "('gfx950', 256, 512, 6144, 512, 128, 4, 'ActivationType.Swiglu', "
+        "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
+        "'QuantType.per_1x32', True, False)"
+    )
+
+    def test_parses_fourteen_column_tuple_with_gfx_first(self):
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        assert record["gfx"] == "gfx950"
+        assert record["cu_num"] == "256"
+        assert record["token"] == "64"
+        assert record["kernelName1"] == "ck_moe_stage1_tuned"
+        assert record["kernelName2"] == "ck_moe_stage2_tuned"
+        assert record["descriptor"] != "default"
+
+    def test_parses_default_descriptor(self):
+        (record,) = parse_aiter_fused_moe_dispatches(self._DEFAULT)
+        assert record["descriptor"] == "default"
+        assert record["kernelName1"] == ""
+        assert record["gfx"] == "gfx950"
+
+    def test_exact_candidate_kernel_hit(self, tmp_path):
+        path = tmp_path / "candidate_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+            "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n",
+            encoding="utf-8",
+        )
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        rows = tuned_fmoe_csv_rows(path)
+        report = fmoe_tuned_config_coverage(rows, [record])
+        assert report["coverage_pct"] == 100.0
+
+    def test_shape_overlap_without_kernel_match_is_not_served(self, tmp_path):
+        path = tmp_path / "candidate_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+            "other_stage1,other_stage2\n",
+            encoding="utf-8",
+        )
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), [record])
+        assert report["covered"] == 0
+        assert report["kernel_name_mismatch"] == 1
+
+    def test_csv_key_rejects_different_gfx(self, tmp_path):
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx942,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,1,10.0,"
+            "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n",
+            encoding="utf-8",
+        )
+        (record,) = parse_aiter_fused_moe_dispatches(self._DISPATCH)
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), [record])
+        assert report["covered"] == 0
+
+    def test_resolve_merged_candidate_fmoe_csv(self, tmp_path):
+        bare = tmp_path / "candidate_fmoe.csv"
+        bare.write_text("gfx\n", encoding="utf-8")
+        merged = tmp_path / "merged_candidate_fmoe.csv"
+        merged.write_text("gfx\n", encoding="utf-8")
+        assert resolve_fmoe_candidate_csv(merged) == bare
+
+    def test_resolve_merged_tuned_fmoe_csv(self, tmp_path):
+        bare = tmp_path / "tuned_fmoe.csv"
+        bare.write_text("gfx\n", encoding="utf-8")
+        merged = tmp_path / "merged_tuned_fmoe.csv"
+        merged.write_text("gfx\n", encoding="utf-8")
+        assert resolve_fmoe_candidate_csv(merged) == bare
+
+    def test_q_dtype_aliases_normalize_known_forms_only(self, tmp_path):
+        assert _normalize_fmoe_q_dtype("torch.float8_e4m3fn") == "torch.float8_e4m3fn"
+        assert _normalize_fmoe_q_dtype("torch.float8_e5m2") == "torch.float8_e5m2"
+        assert _normalize_fmoe_q_dtype("torch.float8_e4m3fnuz") == "torch.float8_e4m3fnuz"
+        assert _normalize_fmoe_q_dtype("torch.float4_e2m1fn_x2") == "torch.float4_e2m1fn_x2"
+        assert _normalize_fmoe_q_dtype("fp4") == "torch.float4_e2m1fn_x2"
+        assert _normalize_fmoe_q_dtype("torch.float8_e5m2fn") == "torch.float8_e5m2fn"
+
+        path = tmp_path / "candidate_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,64,7168,2048,128,8,Swiglu,bf16,"
+            "fp4,fp4,QuantType.per_1x128,1,0,1,10.0,"
+            "ck_moe_stage1_tuned,ck_moe_stage2_tuned\n",
+            encoding="utf-8",
+        )
+        rows = tuned_fmoe_csv_rows(path)
+        assert rows[0]["q_dtype_a"] == "torch.float4_e2m1fn_x2"
+        assert rows[0]["q_dtype_w"] == "torch.float4_e2m1fn_x2"
+
+
 class TestTunedCsvCoverage:
     HEADER = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
 
@@ -175,6 +291,19 @@ class TestTunedCsvCoverage:
 
     def test_missing_file_is_empty(self, tmp_path):
         assert tuned_csv_shapes(tmp_path / "nope.csv") == set()
+
+    def test_an_fmoe_csv_yields_no_dense_shapes(self, tmp_path):
+        """An MoE table has no M,N,K columns; reading one as dense would invent
+        shapes and report coverage against a schema it never described."""
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelName\n"
+            "256,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
+            "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,kernel_a\n",
+            encoding="utf-8",
+        )
+        assert tuned_csv_shapes(path) == set()
 
     def test_coverage_flags_an_unreachable_artifact(self, tmp_path):
         """Reproduces the observed failure: raw-M rows, drifted runtime M."""
@@ -203,103 +332,6 @@ class TestTunedCsvCoverage:
         assert report["coverage_pct"] is None
 
 
-class TestFmoeCoverage:
-    HEADER = (
-        "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
-        "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelName"
-    )
-    DISPATCH = {
-        "token": "256",
-        "model_dim": "4096",
-        "inter_dim": "512",
-        "expert": "256",
-        "topk": "6",
-        "act_type": "ActivationType.Silu",
-        "dtype": "torch.bfloat16",
-        "q_dtype_a": "torch.float8_e4m3fn",
-        "q_dtype_w": "torch.float4_e2m1fn_x2",
-        "q_type": "QuantType.per_1x32",
-        "use_g1u1": "True",
-        "doweight_stage1": "False",
-    }
-
-    def _csv(self, tmp_path, rows):
-        path = tmp_path / "tuned_fmoe.csv"
-        body = []
-        for row in rows:
-            fields = {**self.DISPATCH, **row}
-            body.append(
-                ",".join(
-                    fields[name]
-                    for name in (
-                        "token",
-                        "model_dim",
-                        "inter_dim",
-                        "expert",
-                        "topk",
-                        "act_type",
-                        "dtype",
-                        "q_dtype_a",
-                        "q_dtype_w",
-                        "q_type",
-                        "use_g1u1",
-                        "doweight_stage1",
-                    )
-                )
-                + ",kernel_a"
-            )
-        path.write_text(f"{self.HEADER}\n" + "\n".join(body) + "\n", encoding="utf-8")
-        return path
-
-    def test_reads_fmoe_dispatch_keys_with_boolean_normalization(self, tmp_path):
-        path = self._csv(tmp_path, [{"use_g1u1": "1", "doweight_stage1": "0"}])
-        keys = tuned_fmoe_csv_keys(path)
-        assert keys == {fmoe_dispatch_key(self.DISPATCH)}
-
-    def test_dense_reader_does_not_parse_fmoe_csv(self, tmp_path):
-        path = self._csv(tmp_path, [{}])
-        assert tuned_csv_shapes(path) == set()
-
-    def test_fmoe_coverage_flags_missing_dispatch_rows(self, tmp_path):
-        path = self._csv(tmp_path, [{"inter_dim": "999"}])
-        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [self.DISPATCH])
-        assert report["covered"] == 0
-        assert report["coverage_pct"] == 0.0
-
-    def test_a_different_swept_token_still_covers_the_problem(self, tmp_path):
-        """The token count is not part of a problem's identity: the tuner sweeps
-        it, the runtime asks for whatever it is running. Zero coverage here goes
-        into ``apply_blockers`` and vetoes a KEEP that really did improve."""
-        path = self._csv(
-            tmp_path,
-            [{"token": "1"}, {"token": "32"}, {"token": "64"}],
-        )
-
-        report = fmoe_tuned_config_coverage(
-            tuned_fmoe_csv_keys(path), [self.DISPATCH]  # runtime asked for token=256
-        )
-
-        assert report["covered"] == 1
-        assert report["coverage_pct"] == 100.0
-
-    def test_a_real_key_difference_is_still_reported(self, tmp_path):
-        """Ignoring token must not blunt the check it exists for."""
-        path = self._csv(tmp_path, [{"token": "1", "q_dtype_w": "torch.bfloat16"}])
-
-        report = fmoe_tuned_config_coverage(
-            tuned_fmoe_csv_keys(path), [self.DISPATCH]
-        )
-
-        assert report["covered"] == 0
-        assert report["uncovered_sample"], "an uncovered problem has to be named"
-        assert "token" not in report["uncovered_sample"][0]
-
-    def test_fmoe_coverage_matches_runtime_dispatch(self, tmp_path):
-        path = self._csv(tmp_path, [{}])
-        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_keys(path), [self.DISPATCH])
-        assert report["coverage_pct"] == 100.0
-
-
 class TestCoverageGateDoesNotBlockOnMissingEvidence:
     """The coverage report can block a KEEP, so it must never guess.
 
@@ -310,20 +342,19 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
     conflation this change set exists to remove.
     """
 
-    ENVS = {"AITER_CONFIG_FMOE": ""}
-    MOE_LINE = (
-        "[aiter] [fused_moe] using 2stage default for "
-        "('gfx950', 256, 256, 4096, 512, 256, 6, 'ActivationType.Silu', "
-        "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', "
-        "'QuantType.per_1x32', True, False)"
+    ENVS = {"AITER_CONFIG_GEMM": ""}
+    LOOKUP_LINE = (
+        "[aiter] shape is M:1082, N:5120, K:17408, not found tuned config in "
+        "/x/candidate.csv, will use default config!"
     )
+    HEADER = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
 
     def _phase(self, tmp_path):
         from types import SimpleNamespace
 
-        run_dir = tmp_path / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
+        run_dir = tmp_path / "runs" / "integrate" / "integrate-gemm_tune_aiter_dense"
         run_dir.mkdir(parents=True)
-        (run_dir / "server.log").write_text(self.MOE_LINE + "\n", encoding="utf-8")
+        (run_dir / "server.log").write_text(self.LOOKUP_LINE + "\n", encoding="utf-8")
         return SimpleNamespace(session_dir=tmp_path)
 
     def _call(self, phase, csv_path):
@@ -331,12 +362,12 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         return KernelPhase._gemm_tuned_config_coverage_impl(
-            phase, "fmoe_ck", {"AITER_CONFIG_FMOE": str(csv_path)}
+            phase, "aiter_dense", {"AITER_CONFIG_GEMM": str(csv_path)}
         )
 
     def test_unreadable_csv_is_undetermined_not_zero_coverage(self, tmp_path):
         phase = self._phase(tmp_path)
-        empty = tmp_path / "tuned_fmoe.csv"
+        empty = tmp_path / "candidate.csv"
         empty.write_text("", encoding="utf-8")
 
         assert self._call(phase, empty) is None
@@ -346,9 +377,9 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
 
         assert self._call(phase, tmp_path / "absent.csv") is None
 
-    def test_csv_without_dispatch_columns_is_undetermined(self, tmp_path):
+    def test_csv_without_shape_columns_is_undetermined(self, tmp_path):
         phase = self._phase(tmp_path)
-        odd = tmp_path / "tuned_fmoe.csv"
+        odd = tmp_path / "candidate.csv"
         odd.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
         assert self._call(phase, odd) is None
@@ -356,29 +387,22 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
     def test_readable_csv_with_wrong_keys_still_reports_zero(self, tmp_path):
         """Fail-open on unreadable input must not weaken the real check."""
         phase = self._phase(tmp_path)
-        wrong = tmp_path / "tuned_fmoe.csv"
+        wrong = tmp_path / "candidate.csv"
         wrong.write_text(
-            "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,"
-            "q_dtype_w,q_type,use_g1u1,doweight_stage1\n"
-            # inter_dim 2048 is the pre-fix guess: config width, no tp split.
-            "256,4096,2048,256,6,ActivationType.Silu,torch.bfloat16,"
-            "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0\n",
+            f"{self.HEADER}\ngfx950,256,4096,5120,5120,ck,0,0,1.0,name,1,1,0\n",
             encoding="utf-8",
         )
 
         report = self._call(phase, wrong)
         assert report is not None
         assert report["artifact_applied"] is False
-        assert report["not_applied_reason"] == "no_fmoe_dispatch_key_matched"
+        assert report["coverage_pct"] == 0.0
 
     def test_matching_csv_reports_applied(self, tmp_path):
         phase = self._phase(tmp_path)
-        good = tmp_path / "tuned_fmoe.csv"
+        good = tmp_path / "candidate.csv"
         good.write_text(
-            "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,"
-            "q_dtype_w,q_type,use_g1u1,doweight_stage1\n"
-            "256,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
-            "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0\n",
+            f"{self.HEADER}\ngfx950,256,1088,5120,17408,ck,0,0,1.0,name,1,1,0\n",
             encoding="utf-8",
         )
 
