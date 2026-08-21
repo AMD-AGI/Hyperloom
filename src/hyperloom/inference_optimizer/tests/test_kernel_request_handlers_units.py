@@ -1524,6 +1524,92 @@ class TestForgeGemmHelperCoverage:
         assert "Unsupported data type" in str(result.get("error") or "")
 
     @pytest.mark.asyncio
+    async def test_a_delivering_partial_run_keeps_both_the_env_and_the_reason(
+        self, tmp_path, monkeypatch
+    ):
+        """One tuner crashed, another delivered: both facts have to survive.
+
+        The env must still be measured, and the crash must still be named. An
+        error_class alongside a KEEP is the accurate description of
+        ``partial_failure``, and nothing downstream may read it as a failure --
+        promotability is decided on ``status``.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
+        )
+        sentinel = (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps(
+                {
+                    "status": "ok",
+                    "micro_decision": "partial_failure",
+                    "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+                    "tuners_run": [
+                        {"tuner": "a8w8", "status": "failed", "error_class": "codegen_crash"},
+                        {"tuner": "fmoe_ck", "status": "ok"},
+                    ],
+                }
+            )
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, sentinel, ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_gemm_tuning({}, session_dir=tmp_path)
+
+        assert result["decision"] == "KEEP"
+        assert result["requires_e2e_validation"] is True
+        assert result["error_class"] == "codegen_crash"
+        # status decides promotability; a named crash must not demote the run.
+        assert result["status"] != "failed"
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_tuners_run_does_not_break_the_run(
+        self, tmp_path, monkeypatch
+    ):
+        """``tuners_run`` is forge's JSON, so it can be any shape.
+
+        Lifting a reason out of it is bookkeeping; bookkeeping that raises would
+        turn a tuning run that actually happened into a reported failure with a
+        Python exception name for a cause -- the misattribution this whole lane
+        exists to remove.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+
+        for malformed in (5, "not-a-list", {"tuner": "fmoe_ck"}, [None, 7]):
+            sentinel = (
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "no_improvement",
+                        "tuners_run": malformed,
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+            )
+
+            async def _fake_subprocess(cmd, *, timeout_sec, _s=sentinel):
+                return 0, _s, ""
+
+            monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+            result = await krh._run_forge_gemm_tuning(
+                {"task_id": f"malformed-{type(malformed).__name__}"},
+                session_dir=tmp_path,
+            )
+
+            # The verdict still lands, and no exception class leaks in as a cause.
+            assert result["decision"] == "REVERT", malformed
+            assert result.get("error_class") != "TypeError", malformed
+
+    @pytest.mark.asyncio
     async def test_an_absent_micro_decision_is_left_alone(self, tmp_path, monkeypatch):
         """No wording at all is not a verdict; the bridge must not invent one."""
         self._moe_state(tmp_path)

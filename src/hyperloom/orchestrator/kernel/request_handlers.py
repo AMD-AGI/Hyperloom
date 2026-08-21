@@ -3997,13 +3997,20 @@ async def _run_forge_gemm_tuning(
     # read the envelope, so a run where every tuner crashed reached them as
     # ``status="failed"`` with two empty strings and no reason at all. Lifted
     # before the bridge below so a specific class outranks the generic wording.
+    # ``tuners_run`` is forge's own JSON, so its shape is not guaranteed. Reading
+    # a reason out of it is bookkeeping, and bookkeeping that raises would turn a
+    # run that actually happened into a reported failure whose cause is a Python
+    # exception name -- the misattribution this lane exists to remove.
+    _tuner_rows = result.get("tuners_run")
+    if not isinstance(_tuner_rows, list):
+        _tuner_rows = []
     if not result.get("error_class"):
-        for _t in result.get("tuners_run") or []:
+        for _t in _tuner_rows:
             if isinstance(_t, dict) and _t.get("error_class"):
                 result["error_class"] = str(_t["error_class"])
                 break
     if not result.get("error"):
-        for _t in result.get("tuners_run") or []:
+        for _t in _tuner_rows:
             if isinstance(_t, dict) and _t.get("error"):
                 result["error"] = str(_t["error"])
                 break
