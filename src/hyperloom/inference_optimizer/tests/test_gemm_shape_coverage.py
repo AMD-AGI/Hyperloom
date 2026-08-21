@@ -267,15 +267,9 @@ class TestFmoeCoverage:
         assert report["coverage_pct"] == 0.0
 
     def test_a_different_swept_token_still_covers_the_problem(self, tmp_path):
-        """The token count is not part of a problem's identity.
-
-        The tuner sweeps token and emits one row per batch size it chose; the
-        runtime asks for whichever batch size it happens to be running. Treating
-        token as part of the key made a table that does serve the problem report
-        zero coverage, which then lands in ``apply_blockers`` and vetoes a KEEP
-        whose throughput really did improve -- the misjudgement this module was
-        added to prevent, reproduced on the MoE path.
-        """
+        """The token count is not part of a problem's identity: the tuner sweeps
+        it, the runtime asks for whatever it is running. Zero coverage here goes
+        into ``apply_blockers`` and vetoes a KEEP that really did improve."""
         path = self._csv(
             tmp_path,
             [{"token": "1"}, {"token": "32"}, {"token": "64"}],
@@ -473,12 +467,8 @@ class TestE2EValidationFailsOpen:
     async def test_the_unmeasured_envelope_is_neutralised(self, tmp_path):
         """An arm that raised was never measured, so it must not read as a KEEP.
 
-        The forge bridge stamps ``decision="KEEP"``, ``requires_e2e_validation``
-        and the raw combined ``recommended_env`` on the micro result alone; the
-        normal exit of validation rewrites all three so Orchestration never sees
-        an unmeasured candidate and issues a bundled integrate against it.
-        Recording the fault while leaving that envelope in place is worse than
-        the exception itself.
+        Recording the fault while leaving the bridge's KEEP envelope in place
+        would let Orchestration bundle an integrate against it.
         """
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 

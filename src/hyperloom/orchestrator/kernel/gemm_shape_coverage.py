@@ -43,9 +43,9 @@ _AITER_SHAPE_HIT_RE = re.compile(
 
 Shape = tuple[int, int, int]
 
-#: Columns present in an aiter MoE CSV row (matches its untuned CSV and the
-#: runtime tuple after gfx/cu_num). Used to locate and validate the fields of a
-#: row; the identity of a *problem* is the narrower :data:`_FMOE_PROBLEM_COLUMNS`.
+#: Columns present in an aiter MoE CSV row (its untuned CSV and the runtime
+#: tuple after gfx/cu_num). Locates and validates a row's fields; a *problem's*
+#: identity is the narrower :data:`_FMOE_PROBLEM_COLUMNS`.
 _FMOE_DISPATCH_COLUMNS = (
     "token",
     "model_dim",
@@ -252,13 +252,10 @@ def _normalize_fmoe_field(name: str, value: str) -> str:
     return text
 
 
-#: Identity of one fused-MoE problem. ``token`` is excluded on purpose: the
-#: tuner sweeps it and emits a row per batch size it chose, while the runtime
-#: asks for whichever batch size it is running. Keying identity on it made a
-#: table that does serve the problem report zero coverage, and a zero there
-#: lands in ``apply_blockers`` and vetoes a KEEP whose throughput really
-#: improved -- the misjudgement this module exists to prevent. Matches the
-#: ``_FMOE_SHAPE_FIELDS`` the CSV writer dedupes on, which already omitted it.
+#: Identity of one fused-MoE problem. ``token`` is excluded because the tuner
+#: sweeps it while the runtime asks for whichever batch size it is running;
+#: requiring them equal reported zero coverage for a table that does serve the
+#: problem. Matches ``_FMOE_SHAPE_FIELDS``, which already omitted it.
 _FMOE_PROBLEM_COLUMNS = tuple(
     name for name in _FMOE_DISPATCH_COLUMNS if name != "token"
 )

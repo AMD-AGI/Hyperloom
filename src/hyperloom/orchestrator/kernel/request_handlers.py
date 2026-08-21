@@ -2887,17 +2887,10 @@ _FMOE_UNTUNED_CSV_HEADER = (
     "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
 )
 
-#: forge wordings that carry nothing deployable. Each is a distinct outcome --
-#: a crash, a tuner that wrote zero rows, a partial run whose surviving tuners
-#: produced no env -- and none of them is the same event as an honest
-#: ``no_improvement``, which is why they reach the envelope as an error_class.
-#:
-#: forge reaches these only when it has nothing to deploy: ``build_report``
-#: checks ``has_candidate`` ahead of all three, so a run that produced a usable
-#: env reports ``candidate`` whatever else went wrong alongside it. Verified
-#: against the real ``build_report`` across seven scenarios, including "one tuner
-#: crashed while another delivered" -- which reports ``candidate``, not
-#: ``partial_failure``.
+#: forge wordings that carry nothing deployable, each distinct from an honest
+#: ``no_improvement``. ``build_report`` checks ``has_candidate`` first, so a run
+#: holding a usable env reports ``candidate`` even when a sibling crashed --
+#: these arrive only with nothing to deploy.
 _FORGE_BARREN_MICRO_DECISIONS = (
     "failed",
     "empty_output",
@@ -2907,18 +2900,12 @@ _FORGE_BARREN_MICRO_DECISIONS = (
 
 
 def _fmoe_token_list(tokens: Any) -> list[int]:
-    """Return the positive token counts to sweep, from either shape of input.
+    """Positive token counts to sweep, keyed off whatever the caller sends.
 
-    The only production caller builds this with :func:`_normalize_tokens`, which
-    returns forge's comma-separated string; the annotation here used to say
-    ``list[int]`` and the body iterated it directly. A real multi-token workload
-    therefore reached ``int(',')`` and lost the whole MoE tuning to a ValueError
-    the envelope reported as a forge crash, while a single-token one silently
-    wrote each digit as its own token -- rows no runtime lookup can reach.
-
-    Unparseable and non-positive entries are dropped rather than raising: this
-    is the token sweep for a tuning input, and one bad entry is not worth the
-    run. Falls back to ``[1]`` so the caller always has a token to key on.
+    Accepts forge's comma-separated string (what :func:`_normalize_tokens`
+    produces) or a sequence. Unparseable and non-positive entries are dropped
+    rather than raising -- one bad entry is not worth the run -- and ``[1]`` is
+    the floor so there is always a token to key on.
     """
     if isinstance(tokens, str):
         raw: list[str] = [part.strip() for part in tokens.split(",")]
@@ -4027,15 +4014,10 @@ async def _run_forge_gemm_tuning(
         if reason:
             result["skip_reason"] = reason
 
-    # A tuner that named its failure must be legible at the top level. The jsonl
-    # audit row already lifts this, but the breakdown and the optimization stack
-    # read the envelope, so a run where every tuner crashed reached them as
-    # ``status="failed"`` with two empty strings and no reason at all. Lifted
-    # before the bridge below so a specific class outranks the generic wording.
-    # ``tuners_run`` is forge's own JSON, so its shape is not guaranteed. Reading
-    # a reason out of it is bookkeeping, and bookkeeping that raises would turn a
-    # run that actually happened into a reported failure whose cause is a Python
-    # exception name -- the misattribution this lane exists to remove.
+    # The breakdown and the stack read the envelope, not the jsonl audit row, so
+    # a tuner's own error class has to surface here too. Lifted before the bridge
+    # so a specific class outranks the generic wording. ``tuners_run`` is forge's
+    # JSON and may be any shape; this is bookkeeping and must not raise.
     _tuner_rows = result.get("tuners_run")
     if not isinstance(_tuner_rows, list):
         _tuner_rows = []
@@ -4082,16 +4064,12 @@ async def _run_forge_gemm_tuning(
         # Micro-only result: E2E validation still needed.
         result.setdefault("requires_e2e_validation", True)
     elif micro in ("no_improvement", "skipped"):
-        # Ran, reached a verdict, found nothing. Deliberately left unadorned:
-        # the wordings below are only legible because this one is not.
+        # Left unadorned on purpose: the wordings below are only legible against it.
         result.setdefault("decision", "REVERT")
     elif micro in _FORGE_BARREN_MICRO_DECISIONS:
         result.setdefault("decision", "REVERT")
         if micro == "failed":
             result.setdefault("status", "failed")
-        # Without this the breakdown reads a crashed tuner, a run that wrote
-        # nothing, and a run that honestly found nothing as the same event --
-        # and forge coined these wordings precisely to separate them.
         result.setdefault("error_class", f"forge_{micro}")
 
     return result
