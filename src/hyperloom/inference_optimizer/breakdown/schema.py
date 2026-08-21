@@ -2060,7 +2060,7 @@ class CollectiveAttempt(TypedDict, total=False):
     error: str
     integration_id: str
     integration_decision: str
-    integration_status: str
+    patch_cleanup_status: str
     integration_result_status: str
     integration_revert_status: str
     integration_finalize_status: str

@@ -2638,7 +2638,7 @@ class KernelPhase(PhaseHandler):
                 _derive_collective_attempt_id(recorded)
             )
         if kept:
-            recorded["integration_status"] = "pending"
+            recorded["patch_cleanup_status"] = "pending"
             if not str(recorded.get("integration_id") or "").strip():
                 seed = (
                     recorded["collective_attempt_id"]
@@ -2840,12 +2840,10 @@ class KernelPhase(PhaseHandler):
             integ.get("revert_result")
         )
         integration_complete = revert_complete and not recovery_uncertain
-        integ["integration_status"] = (
+        integ["patch_cleanup_status"] = (
             "complete" if integration_complete else "recovery_required"
         )
-        integ["integration_recovery_action"] = (
-            "" if integration_complete else "revert"
-        )
+        integ["patch_cleanup_action"] = "" if integration_complete else "revert"
         return decision
 
     async def _integrate_collective(self, result: dict) -> None:
@@ -2930,6 +2928,7 @@ class KernelPhase(PhaseHandler):
                 revert_complete = _collective_recovery.patch_lifecycle_complete(
                     revert_result
                 )
+                revert_action = "" if revert_complete else "revert"
                 integ.update(
                     {
                         "status": "failed",
@@ -2937,14 +2936,12 @@ class KernelPhase(PhaseHandler):
                         "error_class": "collective_promotion_invalid",
                         "error": repr(exc),
                         "revert_result": revert_result,
-                        "integration_status": (
+                        "patch_cleanup_status": (
                             "complete"
                             if revert_complete
                             else "recovery_required"
                         ),
-                        "integration_recovery_action": (
-                            "" if revert_complete else "revert"
-                        ),
+                        "patch_cleanup_action": revert_action,
                     }
                 )
                 decision = "REVERT"
@@ -2956,8 +2953,8 @@ class KernelPhase(PhaseHandler):
             gain,
         )
         if decision == "KEEP":
-            integ["integration_status"] = "recovery_required"
-            integ["integration_recovery_action"] = "finalize"
+            integ["patch_cleanup_status"] = "recovery_required"
+            integ["patch_cleanup_action"] = "finalize"
         try:
             self.shared_state.record_collective_integration(
                 integ,
@@ -2981,19 +2978,18 @@ class KernelPhase(PhaseHandler):
             finalize_complete = _collective_recovery.patch_lifecycle_complete(
                 finalize_result
             )
-            integ["integration_status"] = (
+            finalize_action = "" if finalize_complete else "finalize"
+            integ["patch_cleanup_status"] = (
                 "complete" if finalize_complete else "recovery_required"
             )
-            integ["integration_recovery_action"] = (
-                "" if finalize_complete else "finalize"
-            )
+            integ["patch_cleanup_action"] = finalize_action
             self.shared_state.record_collective_integration(
                 integ,
                 self.session_dir,
                 integration_id=integration_id,
             )
 
-        if integ["integration_status"] == "complete":
+        if integ["patch_cleanup_status"] == "complete":
             apply_checkpoint.unlink(missing_ok=True)
         try:
             await self.bus.append_and_seq(

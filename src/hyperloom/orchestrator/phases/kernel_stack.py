@@ -17,13 +17,6 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
-def _stack_revert_status(stack_reverts: list[dict[str, Any]]) -> str:
-    """Aggregate stack revert status without hiding a partial inner revert."""
-    if any(isinstance(r, dict) and r.get("status") == "partial" for r in stack_reverts):
-        return "partial"
-    return "ok"
-
-
 class KernelStackPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -313,7 +306,13 @@ class KernelStackPhase(PhaseHandler):
 
         if partial_applies:
             for applied in reversed(partial_applies):
-                _maybe_revert_kernel_patch(applied)
+                revert_r = _maybe_revert_kernel_patch(applied)
+                if str(revert_r.get("status") or "") not in {"ok", "skipped"}:
+                    log.warning(
+                        "stack recovery: revert of partial apply %s returned %s",
+                        applied.get("manifest_path"),
+                        revert_r.get("status"),
+                    )
         if in_progress:
             self._clear_stack_validation_in_progress(in_progress)
         self._clear_pending_stack_validation_checkpoints()
@@ -430,9 +429,12 @@ class KernelStackPhase(PhaseHandler):
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
+        from ..kernel.patch_lifecycle import cleanup_complete, cleanup_verdict
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
+            _grade_integrate_accuracy,
             _maybe_apply_kernel_patch,
+            _maybe_finalize_kernel_patch,
             _maybe_revert_kernel_patch,
         )
         from ..loop.sub_agent_runner import RunnerContext
@@ -506,9 +508,56 @@ class KernelStackPhase(PhaseHandler):
                 incremental_gain_pct = (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0
                 decision = "KEEP" if incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT else "REVERT"
 
+            # bench_result already carries accuracy (RUN_EVAL defaults true here).
+            if decision == "KEEP" and isinstance(bench_result, dict):
+                try:
+                    accuracy_gate = _grade_integrate_accuracy(
+                        bench_result,
+                        session_dir=self.session_dir,
+                        workspace=workspace,
+                    )
+                    if accuracy_gate.get("blocked"):
+                        decision = "NEEDS_REVIEW"
+                        log.info(
+                            "stack-validate: accuracy gate blocked KEEP for %s: %s",
+                            stack_id,
+                            accuracy_gate.get("reason"),
+                        )
+                except Exception:  # noqa: BLE001
+                    log.debug("stack-validate: accuracy gate failed", exc_info=True)
+
+            finalize_results: list[dict[str, Any]] = []
+            stack_reverts: list[dict[str, Any]] = []
+            if decision == "KEEP":
+                for applied in apply_results:
+                    finalize_results.append(_maybe_finalize_kernel_patch(applied))
+                all_finalized = all(cleanup_complete(fr) for fr in finalize_results)
+                cs = "complete" if all_finalized else "recovery_required"
+                ca = "" if all_finalized else "finalize"
+                revert_result: dict[str, Any] = {"status": "skipped", "reason": "KEEP decision"}
+                top_status = "ok"
+            else:
+                stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
+                all_reverted = all(
+                    str(r.get("status") or "") in {"ok", "skipped"}
+                    for r in stack_reverts
+                )
+                top_status, cs, ca = cleanup_verdict(
+                    decision=decision,
+                    revert_result={"status": "ok" if all_reverted else "failed"},
+                    finalize_result={"status": "skipped"},
+                    revert_required=bool(apply_results),
+                )
+                revert_result = {
+                    "status": "ok" if all_reverted else "failed",
+                    "stack_reverts": stack_reverts,
+                }
+
             result = {
-                "status": "ok",
+                "status": top_status,
                 "decision": decision,
+                "patch_cleanup_status": cs,
+                "patch_cleanup_action": ca,
                 "kernel_id": stack_id,
                 "patch_path": "+".join(str(e.get("patch_path") or "") for e in entries),
                 "target_file": "+".join(str(e.get("target_file") or "") for e in entries),
@@ -520,30 +569,34 @@ class KernelStackPhase(PhaseHandler):
                 "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
                 "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
                 "apply_result": {"status": "ok", "stack_apply_results": apply_results},
+                "revert_result": revert_result,
+                "finalize_results": finalize_results,
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
             }
+            if top_status == "failed":
+                result["error_class"] = "patch_revert_incomplete"
+                result["error"] = "Stack patch revert did not fully complete"
             for metric in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms"):
                 if isinstance(bench_result, dict) and metric in bench_result:
                     result[metric] = bench_result.get(metric)
-            if decision != "KEEP":
-                stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-                result["revert_result"] = {
-                    "status": _stack_revert_status(stack_reverts),
-                    "stack_reverts": stack_reverts,
-                }
-            else:
-                result["revert_result"] = {"status": "skipped", "reason": "KEEP decision"}
             return result
         except Exception as exc:  # noqa: BLE001
             reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
+            any_failed = any(
+                str(r.get("status") or "") not in {"ok", "skipped"}
+                for r in reverts
+            )
+            revert_status = "failed" if any_failed else "ok"
             return {
                 "status": "failed",
                 "decision": "REVERT",
+                "patch_cleanup_status": "recovery_required" if any_failed else "complete",
+                "patch_cleanup_action": "revert" if any_failed else "",
                 "kernel_id": stack_id,
                 "error": repr(exc),
                 "apply_result": {"status": "failed", "stack_apply_results": apply_results},
-                "revert_result": {"status": _stack_revert_status(reverts), "stack_reverts": reverts},
+                "revert_result": {"status": revert_status, "stack_reverts": reverts},
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
             }
