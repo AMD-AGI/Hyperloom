@@ -1743,6 +1743,14 @@ def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[
     it resume the previous launch and benchmark the previous topology under
     this round's config.
 
+    ``--pd-prefill-ep`` / ``--pd-decode-ep`` and the per-role extra-args are
+    deliberately absent: ``_build_multinode_launch_entrypoint`` does not
+    forward them, so on this backend they change nothing that gets spawned.
+    Infera compares them (``_infera_restart_config_matches``) because its
+    launch path does serve them. Forwarding any of them here means adding it
+    to this record in the same change, or a round that changed only that flag
+    resumes the previous launch again.
+
     Args:
         args (argparse.Namespace): Parsed ``restart-server`` arguments.
         nnodes (int): Node count this launch targets.

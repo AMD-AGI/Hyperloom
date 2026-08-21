@@ -633,6 +633,62 @@ def test_launch_entrypoint_quotes_state_derived_paths(monkeypatch: pytest.Monkey
     assert "--log-dir '/tmp/my logs'" in entrypoint
 
 
+_PD_FINGERPRINT_ARGS = {
+    "framework": "sglang",
+    "model": "/models/test",
+    "tp": 8,
+    "ep": 1,
+    "pd_mode": "disaggregated",
+    "extra_args": "",
+    "pd_prefill_nodes": 1,
+    "pd_decode_nodes": 1,
+    "pd_prefill_tp": 8,
+    "pd_decode_tp": 8,
+    "pd_transfer_backend": "mooncake",
+    "pd_ib_device": "mlx5_0",
+    "pd_bootstrap_port": 8998,
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("pd_prefill_nodes", 3),
+        ("pd_decode_nodes", 3),
+        ("pd_prefill_tp", 4),
+        ("pd_decode_tp", 4),
+        ("pd_transfer_backend", "nixl"),
+        ("pd_ib_device", "mlx5_1"),
+        ("pd_bootstrap_port", 9999),
+    ],
+)
+def test_a_changed_pd_flag_the_launcher_serves_blocks_a_resume(field: str, changed: object) -> None:
+    """Every PD flag the launch entrypoint forwards must keep a resume from matching.
+
+    The fast path compares this record as a whole, so a forwarded flag left
+    out of it lets a round that changed the topology reuse the previous launch
+    and benchmark the previous topology under this round's config -- a plausible
+    number rather than a visible failure. This is the list that says which
+    changes are allowed to resume, so widening it is a behaviour change and
+    should break here first.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    reference = mncli._rayjob_topology_fingerprint(argparse.Namespace(**_PD_FINGERPRINT_ARGS), 2)
+    changed_args = argparse.Namespace(**{**_PD_FINGERPRINT_ARGS, field: changed})
+
+    assert mncli._rayjob_topology_fingerprint(changed_args, 2) != reference
+
+
+def test_a_changed_node_count_blocks_a_resume() -> None:
+    """--nnodes reaches the launcher as well, and no per-field check ever compared it."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    args = argparse.Namespace(**_PD_FINGERPRINT_ARGS)
+
+    assert mncli._rayjob_topology_fingerprint(args, 2) != mncli._rayjob_topology_fingerprint(args, 4)
+
+
 _AGGREGATED_STATE = {"service_url": "http://frontend:8000"}
 _PD_STATE = {
     "service_url": "http://frontend:8000",
