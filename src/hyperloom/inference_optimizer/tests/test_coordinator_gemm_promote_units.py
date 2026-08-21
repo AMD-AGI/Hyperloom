@@ -745,8 +745,8 @@ class TestCollectiveIntegratePromotion:
         await phase._handle_collective_result(result)
 
         assert coord.shared_state.last_collective["status"] == "ok"
-        assert coord.shared_state.last_collective["integration_status"] == "pending"
-        assert integrated[0]["integration_status"] == "pending"
+        assert coord.shared_state.last_collective["patch_cleanup_status"] == "pending"
+        assert integrated[0]["patch_cleanup_status"] == "pending"
         assert (
             coord.shared_state.last_collective[
                 "collective_attempt_id"
@@ -833,7 +833,7 @@ class TestCollectiveIntegratePromotion:
             "/apply_checkpoint.json"
         )
         assert coord.shared_state.last_collective["integration_decision"] == "KEEP"
-        assert coord.shared_state.last_collective["integration_status"] == "complete"
+        assert coord.shared_state.last_collective["patch_cleanup_status"] == "complete"
         assert coord.shared_state.current_best["action"] == "collective"
         assert coord.bus.messages[-1].payload["kind"] == "collective_integrate_done"
 
@@ -984,7 +984,7 @@ class TestCollectiveIntegratePromotion:
         await phase._integrate_collective(campaign)
 
         assert (
-            coord.shared_state.last_collective["integration_status"]
+            coord.shared_state.last_collective["patch_cleanup_status"]
             == "complete"
         )
         assert (
@@ -1185,8 +1185,8 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "NEEDS_REVIEW"
-        assert last["integration_status"] == "recovery_required"
-        assert last["integration_recovery_action"] == "revert"
+        assert last["patch_cleanup_status"] == "recovery_required"
+        assert last["patch_cleanup_action"] == "revert"
         assert (
             last["integration_error_class"]
             == "collective_apply_checkpoint_invalid"
@@ -1223,7 +1223,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "NEEDS_REVIEW"
-        assert last["integration_status"] == "recovery_required"
+        assert last["patch_cleanup_status"] == "recovery_required"
         assert (
             last["integration_error_class"]
             == "collective_apply_manifest_ambiguous"
@@ -1279,7 +1279,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "REVERT"
-        assert last["integration_status"] == "complete"
+        assert last["patch_cleanup_status"] == "complete"
         assert last["integration_error_class"] == expected_error
         assert len(reverts) == expected_reverts
 
@@ -1312,8 +1312,8 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "NEEDS_REVIEW"
-        assert last["integration_status"] == "recovery_required"
-        assert last["integration_recovery_action"] == "revert"
+        assert last["patch_cleanup_status"] == "recovery_required"
+        assert last["patch_cleanup_action"] == "revert"
         assert (
             last["integration_error_class"]
             == "collective_apply_not_resumable"
@@ -1372,7 +1372,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "KEEP"
-        assert last["integration_status"] == "complete"
+        assert last["patch_cleanup_status"] == "complete"
         assert last["integration_finalize_status"] == finalize_status
         assert coord.shared_state.current_best["tput"] == 125.0
 
@@ -1395,7 +1395,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "REVERT"
-        assert last["integration_status"] == "complete"
+        assert last["patch_cleanup_status"] == "complete"
         assert last["integration_error_class"] == "collective_patch_missing"
 
     @pytest.mark.asyncio
@@ -1459,7 +1459,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "REVERT"
-        assert last["integration_status"] == "complete"
+        assert last["patch_cleanup_status"] == "complete"
         assert last["integration_error_class"] == "ValueError"
 
     @pytest.mark.asyncio
@@ -1490,7 +1490,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "REVERT"
-        assert last["integration_status"] == "complete"
+        assert last["patch_cleanup_status"] == "complete"
         assert last["integration_error_class"] == "TypeError"
 
     @pytest.mark.asyncio
@@ -1521,7 +1521,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "NEEDS_REVIEW"
-        assert last["integration_status"] == "recovery_required"
+        assert last["patch_cleanup_status"] == "recovery_required"
         assert (
             last["integration_error_class"]
             == "collective_integration_decision_invalid"
@@ -1569,8 +1569,8 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "REVERT"
-        assert last["integration_status"] == "recovery_required"
-        assert last["integration_recovery_action"] == "revert"
+        assert last["patch_cleanup_status"] == "recovery_required"
+        assert last["patch_cleanup_action"] == "revert"
         assert last["integration_revert_status"] == "failed"
 
     @pytest.mark.asyncio
@@ -1625,7 +1625,7 @@ class TestCollectiveIntegratePromotion:
 
         last = coord.shared_state.last_collective
         assert last["integration_decision"] == "REVERT"
-        assert last["integration_status"] == "complete"
+        assert last["patch_cleanup_status"] == "complete"
         assert (
             last["integration_error_class"]
             == "collective_promotion_invalid"
@@ -1658,7 +1658,7 @@ class TestCollectiveIntegratePromotion:
         await phase._integrate_collective(campaign)
 
         assert (
-            coord.shared_state.last_collective["integration_status"]
+            coord.shared_state.last_collective["patch_cleanup_status"]
             == "complete"
         )
         assert (
