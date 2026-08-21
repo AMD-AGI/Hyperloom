@@ -9,7 +9,7 @@ Hyperloom documentation
 ROCm Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
 on AMD GPUs. It uses advanced AI agents and profiling tools to analyze a workload, identify performance
 bottlenecks, implement targeted optimizations, and validate the performance and correctness of the
-optimizations - all without requiring manual intervention.
+optimizations -- all without requiring manual intervention.
  
 The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyperloom <https://github.com/AMD-AGI/Hyperloom>`_.
 
@@ -25,17 +25,16 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
     * :doc:`Components </components/index>`
     * :doc:`Hyperloom optimization loop </conceptual/optimization-loop>`
-    * :doc:`Kernel optimization execution path </conceptual/kernel-execution-path>`
 
   .. grid-item-card:: How to
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
     * :doc:`Optimize your own workload </how-to/optimize-custom-workload>`
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
-    * :doc:`Multi-node inference optimization demo </how-to/multi-node/hyperloom-remote-demo>`
 
   .. grid-item-card:: Reference
 
+    * :doc:`Kernel optimization execution path </reference/kernel-execution-path>`
     * :doc:`API reference </reference/api-reference>`
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
@@ -44,6 +43,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Session output schema </reference/session-breakdown>`
     * :doc:`Knowledge base integration </reference/integrate-kb>`
     * :doc:`Operator scripts </reference/operator-scripts>`
+    * :doc:`Multi-node inference optimization </reference/multi-node>`
     * :doc:`Troubleshooting </reference/troubleshooting>`
 
 To contribute to the documentation, see `Contributing to Hyperloom <https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md>`_.

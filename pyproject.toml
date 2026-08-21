@@ -193,7 +193,7 @@ hyperloom = [
     "README.md",
 ]
 # No top-level SKILL.md: kernel work is dispatched programmatically, so the
-# former agent skill file was replaced by docs/conceptual/kernel-execution-path.md.
+# former agent skill file was replaced by docs/reference/kernel-execution-path.md.
 "hyperloom.agents.kernel" = [
     "scripts/*.sh",
 ]
