@@ -2344,6 +2344,213 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
     assert str(first) in [str(p) for p in splitter]
 
 
+def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
+    """Write a CUDA-graph capture sidecar in its production shape.
+
+    ``kernels`` defaults to 2 on purpose. A capture records the graph being
+    built, so a couple of launches still reach the device while the rest of the
+    file is host-side call tree — the run this guards against had 2 kernels in
+    1.49M events. A sidecar with *zero* kernels would already be stopped by the
+    CPU-only preflight; two is the count that gets through it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return _rank_trace(path, kernels=kernels, cpu_events=200)
+
+
+def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
+    """A directory holding nothing but graph-capture sidecars must not analyse.
+
+    The sidecars carry kernels, so the CPU-only preflight passes them and the
+    splitter is handed a file with no iteration loop in it. It then reports
+    ``trace_split_no_steady_state``, which reads as "the profiled window was too
+    short" and sends the next person to lengthen a capture that was never a
+    workload timeline. The rejection has to name the real cause instead.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    capture = trace_dir / "capture_traces"
+    for bs in (2, 4, 8):
+        for rank in (0, 1):
+            _capture_sidecar(capture / f"bs_{bs}_rank{rank}.json.gz")
+
+    # Precondition: this is exactly the shape the old check waved through.
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert len(traces) == 6
+    assert tla._count_kernels_if_readable(traces[0])[1] > 0
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    assert _find_splitter_cmd(captured) is None, "the splitter must never be invoked"
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert "trace_input_capture_only" in result["error"]
+    # The message has to point at the profile, not at the splitter or the window.
+    assert "re-profile" in result["error"]
+
+
+def test_capture_sidecars_beside_a_real_trace_still_analyse(tmp_path):
+    """The healthy layout must be unaffected.
+
+    A normal profile writes its annotated trace *beside* the capture sidecars,
+    which is why the rejection tests ``all`` and not ``any``. Getting this
+    backwards would disable roofline for every well-formed profile.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    _capture_sidecar(trace_dir / "capture_traces" / "bs_2_rank0.json.gz")
+
+    captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    splitter = _find_splitter_cmd(captured)
+    assert splitter is not None, "a real trace beside sidecars must still analyse"
+    assert str(real) in [str(p) for p in splitter]
+
+
+def test_lone_capture_sidecar_file_is_rejected_by_name(tmp_path, capsys):
+    """``--trace-input`` pointed straight at one sidecar is the same mistake."""
+    sidecar = _capture_sidecar(tmp_path / "torch_trace" / "bs_16_rank3.json.gz")
+
+    captured = _drive_main_over_capture_dir(tmp_path, sidecar)
+
+    assert _find_splitter_cmd(captured) is None
+    assert "trace_input_capture_only" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
+    """An ancestor named ``capture_traces`` must not condemn a real trace.
+
+    Paths arrive absolute, so an unbounded component test would reject every
+    candidate whenever the session happened to live under a directory of that
+    name — pointing ``--trace-input`` inside a previous capture, say.
+    """
+    root = tmp_path / "capture_traces" / "torch_trace"
+    root.mkdir(parents=True)
+    real = _rank_trace(root / "rank_0.trace.json.gz", kernels=7)
+
+    assert not tla._is_capture_fragment(real, tla._capture_classification_root(root))
+    # A genuine sidecar below the root is still caught.
+    nested = _capture_sidecar(root / "capture_traces" / "bs_2_rank0.json.gz")
+    assert tla._is_capture_fragment(nested, tla._capture_classification_root(root))
+
+
+def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
+    """``bs_`` without a batch number must not classify as a sidecar.
+
+    The classifier decides whether an input is rejected outright, not just how
+    it sorts, so matching three characters of a filename is too cheap a reason
+    to throw a real trace away. The sidecar shapes carry a batch number.
+    """
+    root = tmp_path / "torch_trace"
+    root.mkdir()
+    classify_root = tla._capture_classification_root(root)
+
+    assert tla._is_capture_fragment(root / "bs_2_rank0.json.gz", classify_root)
+    assert tla._is_capture_fragment(root / "bs_512.json.gz", classify_root)
+    assert tla._is_capture_fragment(root / "graph_capture_rank_0.pt.trace.json.gz", classify_root)
+    assert not tla._is_capture_fragment(root / "bs_baseline.trace.json.gz", classify_root)
+    assert not tla._is_capture_fragment(root / "rank_0.trace.json.gz", classify_root)
+
+
+def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
+    """Discovery ordering must keep sidecars behind the annotated trace.
+
+    The sort key and the preflight now share one classifier, so this pins the
+    ordering half: a sidecar that is *larger* than the real trace still sorts
+    behind it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+    big_sidecar = _capture_sidecar(trace_dir / "capture_traces" / "bs_2_rank0.json.gz", kernels=2)
+    assert big_sidecar.stat().st_size > real.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert traces[0] == real
+
+
+@pytest.mark.parametrize(
+    "relpath, expected",
+    [
+        # Hyperloom-patched SGLang.
+        ("capture_traces/bs_2_rank0.json.gz", True),
+        ("capture_traces/bs_64_rank7.json.gz", True),
+        # Unpatched SGLang: neither the directory nor the filename matches the
+        # patched shape, and the ``cuda_`` prefix defeats a start-anchored test.
+        ("graph_capture_profile/cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz", True),
+        # vLLM.
+        ("graph_capture_rank0.json.gz", True),
+        # Workload traces must survive all of the above.
+        ("1786734684.9990146-TP-0.trace.json.gz", False),
+        ("rank_0.trace.json.gz", False),
+        ("merged-annotated.trace.json.gz", False),
+    ],
+)
+def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpath, expected):
+    """The classifier keys on shape, so a new layout does not slip through.
+
+    Each entry is a layout a production profile actually wrote. An exact-name
+    whitelist passed the first two and missed the SGLang-without-patch one.
+    """
+    path = tmp_path / relpath
+    assert tla._is_capture_fragment(path, tmp_path) is expected
+
+
+def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
+    """``graph_capture`` anchors in a directory name, unlike in a filename.
+
+    A directory is named for what it holds, so an unanchored token would also
+    condemn ``torch_profiler_with_graph_capture/`` -- and the capture-only
+    preflight is an ``all(...)``, so one false positive rejects the whole input.
+    """
+    safe = tmp_path / "torch_profiler_with_graph_capture" / "rank_0.trace.json.gz"
+    assert tla._is_capture_fragment(safe, tmp_path) is False
+    for capture_dir in ("graph_capture", "graph_capture_profile", "capture_traces"):
+        assert tla._is_capture_fragment(tmp_path / capture_dir / "rank_0.trace.json.gz", tmp_path) is True
+
+
+def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
+    """The capture folder must be locatable, not merely demoted during ranking.
+
+    Ranking keeps the sidecars out of the analysis input; discovery is what
+    hands them to TraceLens as ``--capture_folder``. Two hard-coded names meant
+    a run could pick the right workload trace and still lose its graph-capture
+    input.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    (trace_dir / "graph_capture_profile").mkdir(parents=True)
+    real = _rank_trace(trace_dir / "1786735404.4274018-TP-0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
+
+
+def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    (trace_dir / "torch_profiler_with_graph_capture").mkdir(parents=True)
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+    assert tlr.discover_capture_folder(trace_dir, [real]) is None
+
+
+def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
+    """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace.
+
+    ``graph_capture_profile/`` matched no known capture shape, so its files
+    shared the default bucket with the workload traces, where the tie-break is
+    descending size. The capture is the larger file, so it led discovery, the
+    probe stopped on it, and the splitter cut a bs=1/conc=1 graph-capture window
+    that carried zero GPU events. The whole kernel phase was lost to it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    real = _rank_trace(trace_dir / "1786734684.9990146-TP-0.trace.json.gz", kernels=8)
+    big_capture = _capture_sidecar(
+        trace_dir / "graph_capture_profile" / "cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz",
+        kernels=2,
+    )
+    assert big_capture.stat().st_size > real.stat().st_size
+
+    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    assert traces[0] == real
+
+
 def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     """The promotion must hold on the route xDiT actually takes.
 
@@ -4902,6 +5109,141 @@ def test_extract_total_time_us_from_gpu_timeline(tmp_path):
 
 def test_extract_total_time_us_returns_none_when_missing(tmp_path):
     assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Low-compute gate: gpu_timeline readers + gate evaluation
+# ---------------------------------------------------------------------------
+
+
+def _write_gpu_timeline(tmp_path, body: str):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir(exist_ok=True)
+    (csv_dir / "gpu_timeline.csv").write_text(body, encoding="utf-8")
+
+
+def test_extract_compute_pct_accepts_schema_spellings(tmp_path):
+    for label in ("computation_time", "compute_time", "computation", "compute"):
+        _write_gpu_timeline(
+            tmp_path,
+            f"type,time ms,percent\n{label},725.85,3.99\ntotal_time,18186.6,100.0\n",
+        )
+        assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) == 3.99
+
+
+def test_extract_exposed_comm_pct_accepts_schema_spellings(tmp_path):
+    for label in ("exposed_comm_time", "exposed_communication_time", "exposed_communication"):
+        _write_gpu_timeline(
+            tmp_path,
+            f"type,time ms,percent\n{label},17456.98,95.99\ntotal_time,18186.6,100.0\n",
+        )
+        assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) == 95.99
+
+
+def test_extract_compute_pct_returns_none_when_absent(tmp_path):
+    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,1000.0,100.0\n")
+    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
+    assert tla._extract_exposed_comm_pct_from_gpu_timeline(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Share column renamed beyond the known aliases: the row is found, the
+        # number is not. Column drift is not hypothetical -- the row *labels*
+        # already needed multi-spelling tolerance.
+        "type,time ms,share_of_total\ncomputation_time,725.85,3.99\n",
+        # Row truncated: DictReader yields None for the missing cell, and
+        # float(None) raises TypeError rather than ValueError.
+        "type,time ms,percent\ncomputation_time,725.85\n",
+        # Present but blank.
+        "type,time ms,percent\ncomputation_time,725.85,\n",
+        # Present but not a number.
+        "type,time ms,percent\ncomputation_time,725.85,n/a\n",
+    ],
+)
+def test_unreadable_compute_cell_is_none_not_zero(tmp_path, body):
+    """An unreadable share must fail open, never read as ``0%``.
+
+    The low-compute gate fires *below* its threshold, so defaulting a missing
+    or unparseable cell to 0 would suppress the hot-kernel list on every trace,
+    silently, with ``status`` still ``ok`` -- the exact opposite of the idle
+    gate, where a 0 default is harmless.
+    """
+    _write_gpu_timeline(tmp_path, body)
+    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) is None
+    _, warning = tla._evaluate_low_compute_gate(
+        tla._extract_compute_pct_from_gpu_timeline(tmp_path),
+        None,
+        tmp_path / "analysis.md",
+    )
+    assert warning is None, "an unknown compute share must not suppress candidates"
+
+
+@pytest.mark.parametrize("column", ["percent", "percentage", "Percentage (%)", "pct"])
+def test_known_percent_column_spellings_are_read(tmp_path, column):
+    """Known alias spellings are read rather than discarded as unknown."""
+    _write_gpu_timeline(tmp_path, f"type,time ms,{column}\ncomputation_time,725.85,3.99\n")
+    assert tla._extract_compute_pct_from_gpu_timeline(tmp_path) == 3.99
+
+
+def test_total_time_is_none_when_its_cell_is_unreadable(tmp_path):
+    """Same fail-open contract for the window total the gpu_pct basis needs."""
+    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,,100.0\n")
+    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
+
+
+def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
+    """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy.
+
+    A collective that spin-waits on peer ranks is charged as GPU-busy, so the
+    idle gate sees 0.02% and lets the window through. The compute share is what
+    exposes it.
+    """
+    monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    threshold, warning = tla._evaluate_low_compute_gate(3.99, 95.99, tmp_path / "analysis.md")
+    assert threshold == 10.0
+    assert warning is not None
+    assert warning["code"] == "low_gpu_compute_pct"
+    assert warning["compute_pct"] == 3.99
+    assert warning["exposed_comm_pct"] == 95.99
+
+
+def test_low_compute_gate_passes_healthy_window(monkeypatch, tmp_path):
+    monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    _, warning = tla._evaluate_low_compute_gate(99.3, 0.42, tmp_path / "analysis.md")
+    assert warning is None
+
+
+def test_low_compute_gate_skipped_when_pct_unknown(monkeypatch, tmp_path):
+    """No compute row in the report: fail open rather than suppress candidates."""
+    monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
+    _, warning = tla._evaluate_low_compute_gate(None, None, tmp_path / "analysis.md")
+    assert warning is None
+
+
+def test_extract_compute_and_comm_pct_from_analysis_md(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text(
+        "# Analysis\n\n"
+        "| Metric | Value |\n"
+        "|--------|-------|\n"
+        "| Total Time | 18186.60 ms |\n"
+        "| Compute % | 3.99% |\n"
+        "| Idle % | 0.02% |\n"
+        "| Exposed Communication % | 95.99% |\n",
+        encoding="utf-8",
+    )
+    assert tlr.extract_compute_pct_from_analysis_md(md) == 3.99
+    assert tlr.extract_exposed_comm_pct_from_analysis_md(md) == 95.99
+    assert tlr.extract_idle_pct_from_analysis_md(md) == 0.02
+
+
+def test_extract_compute_pct_from_analysis_md_missing_row(tmp_path):
+    md = tmp_path / "analysis.md"
+    md.write_text("# Analysis\n\n| Idle % | 1.0% |\n", encoding="utf-8")
+    assert tlr.extract_compute_pct_from_analysis_md(md) is None
+    assert tlr.extract_exposed_comm_pct_from_analysis_md(md) is None
 
 
 # ---------------------------------------------------------------------------

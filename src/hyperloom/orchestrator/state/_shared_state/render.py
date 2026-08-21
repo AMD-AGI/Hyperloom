@@ -29,6 +29,21 @@ _FAILURE_EXCERPT_CHARS = 600
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
 
+# Numeric fields a ``trace_health_warnings[]`` entry may carry, as
+# ``(key, label, suffix)`` in render order. The compact warning line is the part
+# of the blob an LLM reads first, so a gate's numbers have to reach it: a router
+# tells a comm-bound window from a host-bound one by comparing these, not by the
+# code alone. Table-driven because the previous per-field ``if`` chain silently
+# dropped every number a newly added gate carried -- a gate now registers its
+# field here rather than growing another branch.
+_WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("idle_pct", "idle", "%"),
+    ("compute_pct", "compute", "%"),
+    ("exposed_comm_pct", "exposed_comm", "%"),
+    ("threshold_pct", "threshold", "%"),
+    ("returncode", "rc", ""),
+)
+
 
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
@@ -1118,12 +1133,9 @@ class _RenderMixin:
             if not isinstance(w, dict):
                 continue
             code = str(w.get("code") or "unknown")
-            extras: list[str] = []
-            if "idle_pct" in w and "threshold_pct" in w:
-                extras.append(f"idle={w['idle_pct']}%")
-                extras.append(f"threshold={w['threshold_pct']}%")
-            if "returncode" in w:
-                extras.append(f"rc={w['returncode']}")
+            extras: list[str] = [
+                f"{label}={w[key]}{suffix}" for key, label, suffix in _WARNING_EXTRA_FIELDS if key in w
+            ]
             if extras:
                 rendered.append(f"{code}({','.join(extras)})")
             else:
