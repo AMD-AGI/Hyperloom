@@ -44,6 +44,13 @@ except ImportError:
     _resolve_flydsl_source_roots = None
 
 try:
+    from hyperloom.orchestrator.framework.paths import (
+        resolve_kernel_search_roots as _resolve_kernel_search_roots,
+    )
+except ImportError:
+    _resolve_kernel_search_roots = None
+
+try:
     from apply_kernel_patch import known_target_roots as _known_target_roots
 except ImportError:
     _known_target_roots = None
@@ -1720,15 +1727,102 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
     return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
 
 
-KNOWN_SEARCH_ROOTS = (
+#: Packages whose trees hold rewritable kernel source. Located at runtime so a
+#: wheel install, an editable checkout and a serving image all resolve, rather
+#: than only the one layout a literal happens to name.
+_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
+    "aiter",
+    "aiter_meta",
+    "sglang",
+    "sgl_kernel",
+    "vllm",
+)
+
+#: Last-resort checkout layouts for a host where nothing above is importable.
+#: Kept small on purpose: a pinned path cannot follow a package across
+#: container images or Python versions, and a list of them going stale in
+#: silence is what emptied this tier and stalled kernel-opt entirely.
+_FALLBACK_SEARCH_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter",
     "/sgl-workspace/sglang/sgl-kernel",
     "/sgl-workspace/sglang/python/sglang",
     "/sgl-workspace/vllm",
-    "/opt/venv/lib/python3.10/site-packages/sglang",
-    "/opt/venv/lib/python3.10/site-packages/aiter",
-    "/opt/venv/lib/python3.10/site-packages/vllm",
 )
+
+
+def _installed_package_dir(package: str) -> str:
+    """Locate a package's directory without importing it.
+
+    Args:
+        package (str): Importable package name.
+
+    Returns:
+        str: The package directory, or ``""`` when it is not on this
+            interpreter's path.
+    """
+    if not package or not package.isidentifier():
+        return ""
+    try:
+        spec = importlib.util.find_spec(package)
+    except (AttributeError, ImportError, ValueError):
+        return ""
+    if spec is None:
+        return ""
+    for location in list(getattr(spec, "submodule_search_locations", None) or []):
+        candidate = str(location).rstrip("/")
+        if candidate:
+            return candidate
+    origin = str(getattr(spec, "origin", "") or "")
+    return os.path.dirname(origin) if origin else ""
+
+
+@lru_cache(maxsize=1)
+def _discover_kernel_search_roots() -> tuple[str, ...]:
+    """Resolve the framework trees to grep for kernel source, at runtime.
+
+    Prefers the orchestrator's centralised resolver so this tool agrees with
+    PolicyGate and patch application on where framework source lives. When that
+    package is not importable (standalone CLI use) it falls back to locating
+    each known package itself, then to the pinned checkout layouts.
+
+    Non-existent roots are dropped: grepping them returns nothing and is
+    indistinguishable from a kernel that genuinely has no source here.
+
+    Returns:
+        tuple[str, ...]: Existing roots without trailing separators,
+            de-duplicated in discovery order.
+    """
+    discovered: list[str] = []
+    if _resolve_kernel_search_roots is not None:
+        discovered.extend(_resolve_kernel_search_roots())
+    else:
+        discovered.extend(
+            location
+            for location in (
+                _installed_package_dir(package) for package in _KERNEL_SOURCE_PACKAGES
+            )
+            if location
+        )
+        discovered.extend(_FALLBACK_SEARCH_ROOTS)
+    roots: list[str] = []
+    seen: set[str] = set()
+    for root in discovered:
+        normalized = str(root or "").rstrip("/")
+        if not normalized or normalized in seen or not os.path.isdir(normalized):
+            continue
+        seen.add(normalized)
+        roots.append(normalized)
+    if not roots:
+        log.warning(
+            "no framework source root exists on this host (looked for %s); "
+            "kernel source resolution will find nothing and every hot kernel "
+            "will be reported as non-routable",
+            ", ".join(_KERNEL_SOURCE_PACKAGES),
+        )
+    return tuple(roots)
+
+
+KNOWN_SEARCH_ROOTS = _discover_kernel_search_roots()
 # Extensions a grep hit may be admitted under. Deliberately narrow, and kept in
 # lockstep with source_type_for(): a suffix admitted here but unclassified there
 # lands as source_type="unknown", which classify_patchability rejects. Worse, it
@@ -2560,112 +2654,183 @@ def find_repo_root(source_file: str) -> str:
 _BENCHMARK_DIRS = ("op_tests", "tests", "benchmarks", "benchmark", "test", "perf")
 
 
+#: Curated harness lookups, keyed by marker substrings in a kernel's name or
+#: source path. Paths are *checkout-relative* on purpose: the same harness sits
+#: at ``/sgl-workspace/aiter/op_tests/...`` in a serving image and is absent from
+#: a wheel install, so a pinned absolute path is either right on one host or a
+#: fabrication on every other.
 _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     # --- Normalization ---
     (
-        ("rmsnorm_quant", "add_rmsnorm_quant", "rmsnorm", "add_rmsnorm"),
         (
-            "/sgl-workspace/aiter/op_tests/test_rmsnorm2dFusedAddQuant.py",
-            "/sgl-workspace/aiter/op_tests/test_rmsnorm2d.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_rmsnorm.py",
-            "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_rmsnorm.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/normalization/test_rmsnorm.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/normalization/test_fused_add_rmsnorm_pad.py",
+            "rmsnorm_quant",
+            "add_rmsnorm_quant",
+            "rmsnorm",
+            "add_rmsnorm",
+        ),
+        (
+            "aiter/op_tests/test_rmsnorm2dFusedAddQuant.py",
+            "aiter/op_tests/test_rmsnorm2d.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_rmsnorm.py",
+            "sglang/sgl-kernel/benchmark/bench_rmsnorm.py",
+            "aiter/op_tests/triton_tests/normalization/test_rmsnorm.py",
+            "aiter/op_tests/triton_tests/normalization/test_fused_add_rmsnorm_pad.py",
         ),
     ),
     # --- Activation ---
     (
-        ("activation", "act_and_mul", "silu"),
         (
-            "/sgl-workspace/aiter/op_tests/test_activation.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_ff_a16w16_fused.py",
-            "/sgl-workspace/sglang/sgl-kernel/tests/test_activation.py",
-            "/sgl-workspace/sglang/sgl-kernel/benchmark/bench_activation.py",
-            "/sgl-workspace/sglang/python/sglang/jit_kernel/tests/test_activation.py",
-            "/sgl-workspace/sglang/python/sglang/jit_kernel/benchmark/bench_activation.py",
+            "activation",
+            "act_and_mul",
+            "silu",
+        ),
+        (
+            "aiter/op_tests/test_activation.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_ff_a16w16_fused.py",
+            "sglang/sgl-kernel/tests/test_activation.py",
+            "sglang/sgl-kernel/benchmark/bench_activation.py",
+            "sglang/python/sglang/jit_kernel/tests/test_activation.py",
+            "sglang/python/sglang/jit_kernel/benchmark/bench_activation.py",
         ),
     ),
     # --- Attention ---
     (
-        ("paged_attention", "fmha", "attention"),
         (
-            "/sgl-workspace/aiter/op_tests/test_pa.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_decode.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_pa_prefill.py",
+            "paged_attention",
+            "fmha",
+            "attention",
+        ),
+        (
+            "aiter/op_tests/test_pa.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_pa_decode.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_pa_prefill.py",
         ),
     ),
     # --- MLA decode ---
     (
-        ("mla_decode", "pseudo_mla", "mla_persistent"),
         (
-            "/sgl-workspace/aiter/op_tests/test_mla.py",
-            "/sgl-workspace/aiter/op_tests/test_mla_persistent.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_mla_decode.py",
+            "mla_decode",
+            "pseudo_mla",
+            "mla_persistent",
+        ),
+        (
+            "aiter/op_tests/test_mla.py",
+            "aiter/op_tests/test_mla_persistent.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_mla_decode.py",
         ),
     ),
     # --- MoE CK two-stage ---
     (
-        ("ck_moe_stage", "moe_2stage", "moe_stage1", "moe_stage2"),
         (
-            "/sgl-workspace/aiter/op_tests/test_moe_2stage.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_moe.py",
+            "ck_moe_stage",
+            "moe_2stage",
+            "moe_stage1",
+            "moe_stage2",
+        ),
+        (
+            "aiter/op_tests/test_moe_2stage.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_moe.py",
         ),
     ),
     # --- MoE FP8 blockscale (ASM) ---
     (
-        ("fmoe_fp8_blockscale", "moe_blockscale"),
         (
-            "/sgl-workspace/aiter/op_tests/test_moe_blockscale.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/moe/test_moe_gemm_a8w8_blockscale.py",
+            "fmoe_fp8_blockscale",
+            "moe_blockscale",
+        ),
+        (
+            "aiter/op_tests/test_moe_blockscale.py",
+            "aiter/op_tests/triton_tests/moe/test_moe_gemm_a8w8_blockscale.py",
         ),
     ),
     # --- GEMM A8W8 blockscale ---
     (
-        ("gemm_a8w8_blockscale",),
         (
-            "/sgl-workspace/aiter/op_tests/test_gemm_a8w8_blockscale.py",
-            "/sgl-workspace/aiter/op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py",
+            "gemm_a8w8_blockscale",
+        ),
+        (
+            "aiter/op_tests/test_gemm_a8w8_blockscale.py",
+            "aiter/op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py",
         ),
     ),
     # --- Quantization ---
     (
-        ("dynamic_per_token_scaled_quant", "per_token_quant"),
         (
-            "/sgl-workspace/aiter/op_tests/test_quant.py",
-            "/sgl-workspace/aiter/op_tests/triton_tests/quant/test_quant.py",
+            "dynamic_per_token_scaled_quant",
+            "per_token_quant",
+        ),
+        (
+            "aiter/op_tests/test_quant.py",
+            "aiter/op_tests/triton_tests/quant/test_quant.py",
         ),
     ),
     # --- Batch-invariant addmm (Triton) ---
     (
-        ("batch_invariant", "addmm"),
-        ("/sgl-workspace/sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",),
+        (
+            "batch_invariant",
+            "addmm",
+        ),
+        (
+            "sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",
+        ),
     ),
 )
 
 
-def _known_harness_files(name: str, source_file: str, *, require_exists: bool = True) -> list[Path]:
+@lru_cache(maxsize=1)
+def _harness_search_bases() -> tuple[str, ...]:
+    """Directories a checkout-relative harness path may be joined onto.
+
+    A hint reads ``aiter/op_tests/...``, so the base is whatever holds the
+    ``aiter`` checkout. Each resolved search root contributes both itself and
+    its parent, because a root is the package directory on a wheel install
+    (``.../dist-packages/aiter``) and the checkout itself in a serving image
+    (``/sgl-workspace/aiter``); one join is the right one and the other simply
+    does not exist.
+
+    Returns:
+        tuple[str, ...]: Existing base directories, de-duplicated.
+    """
+    bases: list[str] = []
+    seen: set[str] = set()
+    for root in KNOWN_SEARCH_ROOTS:
+        trimmed = root.rstrip("/")
+        for base in (os.path.dirname(trimmed), trimmed):
+            if base and base not in seen and os.path.isdir(base):
+                seen.add(base)
+                bases.append(base)
+    return tuple(bases)
+
+
+def _known_harness_files(name: str, source_file: str) -> list[Path]:
     """Return curated benchmark/test harnesses matching a kernel.
 
-    Looks up :data:`_KNOWN_HARNESS_HINTS` by marker substrings found in the
-    kernel name / source path. By default it returns only hinted harnesses that
-    exist on disk; callers without a repo root can request the curated hint list
-    itself so tests and downstream prompts remain stable in minimal containers
-    where ``/sgl-workspace`` is absent.
+    Resolves each checkout-relative hint against the bases that exist here and
+    keeps only files actually present. A list naming paths that cannot be
+    opened is worse than an empty one, because every reader downstream -- the
+    dispatch prompt included -- treats a non-empty list as a harness it can run.
 
     Args:
         name (str): Kernel symbol/name.
         source_file (str): Resolved source-file path (may be empty).
-        require_exists (bool): When True, only paths present on disk are
-            returned. When False, matching curated hints are returned as-is.
 
     Returns:
-        list[Path]: Curated harness files, possibly empty.
+        list[Path]: Existing curated harness files, possibly empty.
     """
     blob = f"{name} {source_file}".lower()
     out: list[Path] = []
-    for markers, paths in _KNOWN_HARNESS_HINTS:
-        if any(marker in blob for marker in markers):
-            out.extend(Path(p) for p in paths if (not require_exists or Path(p).exists()))
+    seen: set[str] = set()
+    bases = _harness_search_bases()
+    for markers, relatives in _KNOWN_HARNESS_HINTS:
+        if not any(marker in blob for marker in markers):
+            continue
+        for relative in relatives:
+            for base in bases:
+                candidate = os.path.join(base, relative)
+                if candidate not in seen and os.path.isfile(candidate):
+                    seen.add(candidate)
+                    out.append(Path(candidate))
+                    break
     return out
 
 
@@ -2699,10 +2864,9 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
     Returns:
         Up to ten matching harness paths, with multi-GPU tests demoted.
     """
-    if not repo_root:
-        known = _known_harness_files(name, source_file, require_exists=False)
-        return [str(p) for p in known[:10]]
     known = _known_harness_files(name, source_file)
+    if not repo_root:
+        return [str(p) for p in known[:10]]
     keywords = _candidate_keywords(name)
     # Add the source stem (and no-underscore variant) for repos that name tests differently.
     if source_file:
@@ -3108,8 +3272,6 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
 def analyze_trace_files(
     trace_files: list[Path],
     top_k: int,
-    *,
-    allow_model_tiers: bool = True,
 ) -> list[dict[str, Any]]:
     """Aggregate GPU kernels across raw trace files into top-K candidates.
 
@@ -3120,9 +3282,6 @@ def analyze_trace_files(
     Args:
         trace_files (list[Path]): Trace files (optionally gzipped) to scan.
         top_k (int): Number of hottest kernels to keep.
-        allow_model_tiers (bool): Whether source resolution may call a model.
-            The deterministic route sets this to false, so the "no model calls"
-            promise holds on this path too.
 
     Returns:
         list[dict[str, Any]]: Finalized hot-kernel candidate dicts.
@@ -3177,7 +3336,6 @@ def analyze_trace_files(
         top,
         total_dur=total_dur,
         trace_files=trace_files,
-        allow_model_tiers=allow_model_tiers,
     )
 
 
@@ -4252,8 +4410,14 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         # playbook candidate has no rewritable device source, so point that
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").
-        if not str(item.get("source_file") or "").strip():
-            item["source_file"] = resolve_kernel_anchor_path(playbook)
+        #
+        # The anchor also overrides whatever the grep tier guessed. A registry
+        # match is a curated statement that this operator is tuned through a
+        # task bundle, whereas the guess can be a same-word collision --
+        # ``mori::EpDispatchCombineOp::dispatch`` reduces to the keyword
+        # "dispatch" and lands on an unrelated vendor header. Handing that path
+        # to a backend would rewrite the wrong file.
+        item["source_file"] = resolve_kernel_anchor_path(playbook)
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
@@ -4267,10 +4431,6 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
             item["tracelens_category"] = csv_cat
     item["kernel_category"] = derive_kernel_category(item)
     item.setdefault("source_path", item.get("source_file", ""))
-
-
-#: A candidate below this GPU share is not worth an LLM round-trip.
-_LLM_FALLBACK_MIN_GPU_PCT = 5.0
 
 
 #: Populated once per run from the CLI args so both model tiers see the same
@@ -4356,93 +4516,6 @@ def _append_resolution_reason(item: dict[str, Any], reason: str) -> None:
         item["source_resolution_reason"] = reason
     elif reason not in current:
         item["source_resolution_reason"] = f"{current}; {reason}"
-
-
-def _apply_llm_source_fallback(item: dict[str, Any]) -> None:
-    """Last-resort LLM pick for a candidate every deterministic tier missed.
-
-    No-op unless the operator enabled the tier and the candidate is hot enough to
-    justify the call. Mutates ``item`` in place only on an accepted answer.
-    """
-    name = str(item.get("name") or "")
-    try:
-        from _llm_source_fallback import (  # noqa: PLC0415
-            llm_source_audit,
-            llm_source_provider_configured,
-            select_source_via_llm,
-        )
-
-        try:
-            gpu_pct = float(item.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            gpu_pct = 0.0
-        if gpu_pct < _LLM_FALLBACK_MIN_GPU_PCT:
-            _append_resolution_reason(
-                item,
-                f"llm_fallback_skipped: gpu_pct {gpu_pct:.2f} < {_LLM_FALLBACK_MIN_GPU_PCT}",
-            )
-            return
-        # Settle the provider before gathering the shortlist. That grep walks
-        # every framework root once per keyword, and on a deployment that never
-        # configured a provider the tier would pay for it on every hot kernel
-        # only to decline the call.
-        if not llm_source_provider_configured():
-            audit = llm_source_audit()
-            audit["outcome"] = "configuration_error"
-            item["source_resolution_llm_audit"] = audit
-            _append_resolution_reason(item, "llm_fallback_skipped: no provider configured")
-            return
-        shortlist = collect_source_candidates_via_grep(name)
-        if not shortlist:
-            _append_resolution_reason(item, "llm_fallback_no_shortlist")
-            log.info("LLM source fallback: no grep shortlist for %r", name)
-            return
-        audit = llm_source_audit()
-        audit["outcome"] = "requested"
-        item["source_resolution_llm_audit"] = audit
-        call_errors: list[str] = []
-        picked, confidence, reason = select_source_via_llm(
-            name,
-            shortlist,
-            framework_roots=tuple(KNOWN_SEARCH_ROOTS),
-            context_block=_source_context_block(),
-            log=_forward_to_log,
-            errors=call_errors,
-        )
-        if picked:
-            audit["outcome"] = "accepted"
-            item["source_file"] = picked
-            item["source_resolution_method"] = "llm_fallback"
-            item["source_resolution_confidence"] = confidence
-            item["source_resolution_reason"] = reason
-            return
-        if call_errors:
-            audit["outcome"] = "error"
-            failure = f"llm_fallback_error: {call_errors[0]}"
-            _append_resolution_reason(item, failure)
-            log.warning("LLM source fallback failed for %r (%s)", name, failure)
-            return
-        # Answered but not accepted: invented path, low confidence, or refusal.
-        audit["outcome"] = "declined"
-        _append_resolution_reason(
-            item, f"llm_fallback_declined: {reason or 'no candidate accepted'}"
-        )
-        log.info(
-            "LLM source fallback declined for %r over %d shortlist entr(ies): %s",
-            name,
-            len(shortlist),
-            reason or "no candidate accepted",
-        )
-    except Exception as exc:  # noqa: BLE001 - advisory tier, never breaks finalization
-        # Import errors, gateway 401s and timeouts all land here; without a
-        # trail they look identical to the tier being switched off.
-        reason = f"llm_fallback_error: {type(exc).__name__}: {exc}"
-        audit = item.get("source_resolution_llm_audit")
-        if isinstance(audit, dict):
-            audit["outcome"] = "error"
-        log.warning("LLM source fallback failed for %r (%s)", name, reason)
-        _append_resolution_reason(item, reason)
-        return
 
 
 @functools.lru_cache(maxsize=64)
@@ -4602,7 +4675,6 @@ def _finalize_candidates(
     trace_files: list[Path] | None = None,
     log_path: Path | str | None = None,
     source_resolution_out: Path | str | None = None,
-    allow_model_tiers: bool = True,
     model_name: str = "",
 ) -> list[dict[str, Any]]:
     """Apply shared post-processing to parsed candidate rows.
@@ -4624,8 +4696,6 @@ def _finalize_candidates(
         trace_files: Optional raw trace files. When given, Python launcher
             frames are retained as evidence and accepted as source only when
             name grep independently resolves the same file.
-        allow_model_tiers: Whether fallback and artifact review may call an LLM.
-            The deterministic CLI route sets this to false.
         model_name: Runtime model identity recorded in the resolution artifact.
 
     Returns:
@@ -4777,14 +4847,10 @@ def _finalize_candidates(
                         item,
                         f"trace launcher unconfirmed by name grep: {trace_source}",
                     )
-            if not item.get("source_file"):
-                if allow_model_tiers:
-                    _apply_llm_source_fallback(item)
-                else:
-                    _append_resolution_reason(
-                        item,
-                        "llm_fallback_skipped: deterministic route",
-                    )
+            # An unresolved candidate stops here. The agent review pass runs
+            # once over the finished table rather than per kernel, so it can
+            # weigh a blank against the rest of the evidence instead of
+            # guessing from a symbol alone.
             # Promote a tiny pybind shim TU to the real device code.
             item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
             item["source_file"] = upgrade_pybind_shim_source(
@@ -4823,8 +4889,6 @@ def _finalize_candidates(
             framework=framework or "",
             model_name=model_name,
             log_path=log_path,
-            op_cat_map=op_cat_map,
-            allow_review=allow_model_tiers,
         )
     return top
 
@@ -4986,101 +5050,6 @@ def _is_curated_resolution(item: dict[str, Any]) -> bool:
     }
 
 
-def apply_resolution_entries_to_candidates(
-    entries: list[dict[str, Any]],
-    candidates: list[dict[str, Any]],
-    op_cat_map: dict[str, str] | None = None,
-) -> int:
-    """Fold reviewed entries back onto the candidates, and re-classify.
-
-    Without this the review tier is inert: it revises the audit artifact while
-    every downstream stage keeps reading ``kernel_candidates.json``. Re-running
-    ``_stamp_candidate_metadata`` matters as much as copying the path -- a
-    rewrite changes ``source_type``, which decides ``reusable_native_kernel``
-    and therefore whether the kernel is dispatched at all.
-
-    Two invariants keep a rewritten candidate internally consistent:
-
-    * A curated resolution is never overwritten (see
-      :func:`_is_curated_resolution`).
-    * Otherwise every field derived from the previous path is cleared before the
-      new one is stamped, so no downstream reader can pick up metadata that
-      describes the source the candidate no longer points at.
-
-    Returns:
-        The number of candidates actually changed.
-    """
-    by_id = {str(c.get("kernel_id")): c for c in candidates if isinstance(c, dict)}
-    changed = 0
-    for entry in entries:
-        if not isinstance(entry, dict) or "previous_source_file" not in entry:
-            continue
-        item = by_id.get(str(entry.get("kernel_id") or ""))
-        if item is None:
-            continue
-        new_source = str(entry.get("source_file") or "")
-        if new_source == str(item.get("source_file") or ""):
-            continue
-        if _is_curated_resolution(item):
-            entry["review_rejected"] = "curated_resolution_not_overridable"
-            entry["source_file"] = str(item.get("source_file") or "")
-            entry["source_line"] = item.get("source_line")
-            entry["source_function"] = str(item.get("source_function") or "")
-            entry["method"] = _candidate_resolution_method(item)
-            entry["reason"] = str(item.get("source_resolution_reason") or "")
-            continue
-        for key in _SOURCE_DERIVED_METADATA:
-            item.pop(key, None)
-        item["source_file"] = new_source
-        item["source_path"] = new_source
-        item["source_line"] = entry.get("source_line")
-        item["source_function"] = str(entry.get("source_function") or "")
-        item["source_resolution_method"] = str(entry.get("method") or "")
-        item["source_resolution_reason"] = str(entry.get("reason") or "")
-        item["source_resolution_previous_file"] = str(entry.get("previous_source_file") or "")
-        item["source_resolution_previous_method"] = str(entry.get("previous_method") or "")
-        item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
-        item["source_type"] = source_type_for(item.get("name", ""), new_source)
-        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
-            item.get("name", ""), new_source
-        ):
-            item["source_type"] = "vendor_binary"
-            item["vendor_dispatch_wrapper"] = True
-        item["runtime_generated_kernel"] = is_runtime_generated_kernel(
-            item.get("name", ""), new_source
-        )
-        _stamp_candidate_metadata(item, op_cat_map)
-        changed += 1
-    return changed
-
-
-def _review_source_resolution(doc: dict[str, Any], *, log_path: Path | str | None) -> None:
-    """Let the opt-in review tier revise the table before it is written.
-
-    Runs on the whole table rather than only the blanks: the deterministic
-    tiers' failure mode is a confidently wrong path, which a blanks-only tier
-    can never reach. Revisions carry their own guard rails (see the module) and
-    are applied in place; any failure leaves the deterministic result standing.
-    """
-    try:
-        from _llm_source_review import review_resolution_document  # noqa: PLC0415
-
-        _, notes = review_resolution_document(
-            doc,
-            framework_roots=tuple(KNOWN_SEARCH_ROOTS),
-            context_block=_source_context_block(),
-            log=_forward_to_log,
-        )
-        summary = f"source-resolution review: {len(notes)} change(s)"
-        log.info("%s", summary)
-        if log_path:
-            append_log(log_path, summary)
-            for note in notes:
-                append_log(log_path, f"  review: {note}")
-    except Exception as exc:  # noqa: BLE001 - advisory tier, never fatal
-        log.warning("source-resolution review failed (%r); keeping deterministic result", exc)
-
-
 def write_source_resolution_artifact(
     candidates: list[dict[str, Any]],
     out_path: Path | str,
@@ -5088,8 +5057,6 @@ def write_source_resolution_artifact(
     framework: str = "",
     model_name: str = "",
     log_path: Path | str | None = None,
-    op_cat_map: dict[str, str] | None = None,
-    allow_review: bool = True,
 ) -> Path | None:
     """Write the source-resolution artifact next to the candidate report.
 
@@ -5106,37 +5073,6 @@ def write_source_resolution_artifact(
             model_name=model_name,
             framework=framework,
         )
-        if allow_review:
-            _review_source_resolution(doc, log_path=log_path)
-        # Fold any revision back onto the candidates: they, not this file, are
-        # what the dispatch stage reads.
-        reviewed_entries = [
-            entry for entry in (doc.get("entries") or []) if isinstance(entry, dict)
-        ]
-        applied = apply_resolution_entries_to_candidates(
-            reviewed_entries, candidates, op_cat_map
-        )
-        if applied:
-            review_metadata = {
-                str(entry.get("kernel_id") or ""): {
-                    key: entry[key]
-                    for key in (
-                        "previous_source_file",
-                        "previous_method",
-                        "review_rejected",
-                    )
-                    if key in entry
-                }
-                for entry in reviewed_entries
-            }
-            rebuilt = build_source_resolution_entries(candidates)
-            for entry in rebuilt:
-                entry.update(review_metadata.get(str(entry.get("kernel_id") or ""), {}))
-            doc["entries"] = rebuilt
-            note = f"source-resolution review applied to {applied} candidate(s)"
-            log.info("%s", note)
-            if log_path:
-                append_log(log_path, note)
         problems = _KSC.validate_document(doc)
         if problems:
             log.warning(
@@ -6947,6 +6883,262 @@ def build_audit_summary(
     }
 
 
+def run_candidate_review_stage(
+    run_dir: Path,
+    *,
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    log_path: Path | str | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Run the review stage, converting any unexpected fault into a warning.
+
+    The stage is advisory by construction, and it sits at the end of an
+    analysis that a multi-hour benchmark paid for. An unforeseen fault in it
+    must cost the audit, not the run, so nothing escapes this boundary.
+    """
+    try:
+        return _run_candidate_review_stage(
+            run_dir,
+            candidates=candidates,
+            args=args,
+            log_path=log_path,
+            trace_health_warnings=trace_health_warnings,
+        )
+    except Exception as exc:  # noqa: BLE001 - never let the audit fail the run
+        log.warning("candidate review stage failed (%r); keeping the deterministic table", exc)
+        if trace_health_warnings is not None:
+            trace_health_warnings.append(
+                {
+                    "code": "candidate_review_failed",
+                    "severity": "error",
+                    "status": "internal_error",
+                    "detail": type(exc).__name__,
+                    "message": (
+                        "The candidate review stage raised "
+                        f"{type(exc).__name__}; kernel_candidates.json is the "
+                        "unreviewed deterministic result."
+                    ),
+                }
+            )
+        return {}
+
+
+def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
+    """Recompute everything that follows from ``source_file`` after a revision.
+
+    The review returns a location, not a verdict. Re-running the deterministic
+    stamping keeps :func:`classify_patchability` the only gate that decides
+    routability, so the vendor-binary, dispatch-wrapper and runtime-generated
+    rejections still apply to a path the model supplied.
+    """
+    new_source = str(item.get("source_file") or "")
+    for key in _SOURCE_DERIVED_METADATA:
+        item.pop(key, None)
+    item["source_path"] = new_source
+    item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
+    item["source_type"] = source_type_for(item.get("name", ""), new_source)
+    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
+        item.get("name", ""), new_source
+    ):
+        item["source_type"] = "vendor_binary"
+        item["vendor_dispatch_wrapper"] = True
+    item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
+    _stamp_candidate_metadata(item, op_cat_map)
+    # Stamping recomputes benchmark_files from the curated marker table, which
+    # is coarser than a session that went and looked. Its verified answer wins.
+    reviewed_harnesses = item.get("review_benchmark_files")
+    if isinstance(reviewed_harnesses, list):
+        item["benchmark_files"] = list(reviewed_harnesses)
+    # A restrictive hint is honoured, a permissive one is not. The reviewer can
+    # veto a kernel it knows is not worth a tuning session, but it cannot talk
+    # the gate into dispatching something the deterministic rules rejected.
+    if item.get("review_reusable_hint") is False and item.get("reusable_native_kernel"):
+        item["reusable_native_kernel"] = False
+        item["skip_reason"] = (
+            str(item.get("review_skip_reason") or "").strip()
+            or f"review: {item.get('review_reason') or 'not worth a tuning session'}"
+        )
+
+
+def _run_candidate_review_stage(
+    run_dir: Path,
+    *,
+    candidates: list[dict[str, Any]],
+    args: argparse.Namespace,
+    log_path: Path | str | None = None,
+    trace_health_warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Audit the deterministic candidate table with one agent session.
+
+    The deterministic tiers resolve a kernel from its symbol alone; they cannot
+    tell a file that defines a kernel from one that merely launches it, and they
+    have no view of the model or how it is being served. This hands that table
+    to an agent together with the paths of everything the run already produced,
+    and folds back the revisions it can verify.
+
+    Mandatory on the agent route, but never fatal: a definitive failure records
+    an ``error``-severity trace-health warning and leaves the deterministic
+    table standing. Losing the audit costs some candidates; failing the run
+    would cost the hours of benchmarking that produced the trace.
+
+    Args:
+        run_dir: The per-run output directory.
+        candidates: The finalized candidate rows, revised in place.
+        args: Parsed CLI args (model name, framework, source root).
+        log_path: Optional log file for diagnostics.
+        trace_health_warnings: Warning sink surfaced to the Coordinator.
+
+    Returns:
+        dict[str, str]: Artifact paths produced by this stage.
+    """
+    artifacts: dict[str, str] = {}
+    warnings = trace_health_warnings if trace_health_warnings is not None else []
+
+    def _note(message: str) -> None:
+        log.info("%s", message)
+        if log_path:
+            append_log(log_path, message)
+
+    try:
+        from _candidate_review_agent import (  # noqa: PLC0415
+            RAW_CANDIDATES_FILENAME,
+            REVISIONS_FILENAME,
+            apply_revisions,
+            fingerprint_drift,
+            run_candidate_review,
+            source_fingerprint,
+        )
+    except ImportError as exc:  # pragma: no cover - packaging fault
+        warnings.append(
+            {
+                "code": "candidate_review_unavailable",
+                "severity": "error",
+                "message": (
+                    "The candidate review agent could not be imported "
+                    f"({type(exc).__name__}); the candidate table is the "
+                    "unreviewed deterministic result."
+                ),
+            }
+        )
+        return artifacts
+
+    tracelens_dir = run_dir / "tracelens"
+    raw_path = run_dir / RAW_CANDIDATES_FILENAME
+    routable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
+    atomic_write_json(
+        raw_path,
+        {
+            "model_name": args.model_name,
+            "framework": args.framework,
+            "source": "tracelens_analysis:deterministic",
+            "hot_kernels": candidates,
+            "routable_kernels": routable,
+        },
+    )
+    artifacts["kernel_candidates_raw"] = str(raw_path)
+
+    source_paths = [str(c.get("source_file") or "") for c in candidates if isinstance(c, dict)]
+    before = source_fingerprint(source_paths)
+
+    reference_paths = {
+        "source resolution audit": str(run_dir / _SOURCE_RESOLUTION_NAME),
+        "tracelens report": str(tracelens_dir / "analysis.md"),
+        "per-category metrics": str(tracelens_dir / "category_data"),
+        "priority data": str(tracelens_dir / "priority_data.json"),
+        "trace input manifest": str(run_dir / "trace_input_manifest.json"),
+        "model directory": str(_RUNTIME_CONTEXT.get("model_path") or ""),
+    }
+    outcome = run_candidate_review(
+        run_dir=run_dir,
+        raw_candidates_path=raw_path,
+        reference_paths={k: v for k, v in reference_paths.items() if v},
+        framework_roots=KNOWN_SEARCH_ROOTS,
+        context_block=_source_context_block(),
+        log=_forward_to_log,
+    )
+
+    if not outcome.ok:
+        warnings.append(
+            {
+                "code": "candidate_review_failed",
+                "severity": "error",
+                "status": outcome.status,
+                "detail": outcome.detail,
+                "message": (
+                    f"The mandatory candidate review did not complete "
+                    f"({outcome.status}: {outcome.detail}). kernel_candidates.json "
+                    "is the unreviewed deterministic result; a wrongly resolved "
+                    "kernel will not have been caught."
+                ),
+            }
+        )
+        _note(f"candidate review failed ({outcome.status}): {outcome.detail}")
+        return artifacts
+
+    drifted = fingerprint_drift(before, source_fingerprint(source_paths))
+    if drifted:
+        warnings.append(
+            {
+                "code": "candidate_review_touched_source",
+                "severity": "error",
+                "paths": drifted[:16],
+                "message": (
+                    "The candidate review session modified framework source "
+                    f"({len(drifted)} file(s)); its revisions were discarded. "
+                    "Any benchmark run after this point would measure an "
+                    "unrecorded edit."
+                ),
+            }
+        )
+        _note(f"candidate review discarded: it modified {len(drifted)} source file(s)")
+        return artifacts
+
+    op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")
+    before_state = {
+        str(c.get("kernel_id") or ""): str(c.get("source_file") or "") for c in candidates
+    }
+    protected_ids = {
+        str(c.get("kernel_id") or "")
+        for c in candidates
+        if isinstance(c, dict) and _is_curated_resolution(c)
+    }
+    notes = apply_revisions(
+        candidates,
+        outcome.revisions,
+        framework_roots=KNOWN_SEARCH_ROOTS,
+        protected_ids=protected_ids,
+    )
+    changed = 0
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        kernel_id = str(item.get("kernel_id") or "")
+        if str(item.get("source_file") or "") == before_state.get(kernel_id) and (
+            item.get("review_reusable_hint") is None
+        ):
+            continue
+        _rederive_after_review(item, op_cat_map)
+        changed += 1
+
+    revisions_path = run_dir / REVISIONS_FILENAME
+    atomic_write_json(
+        revisions_path,
+        {
+            "status": outcome.status,
+            "revisions": outcome.revisions,
+            "applied_notes": notes,
+            "candidates_changed": changed,
+            "raw_candidates": str(raw_path),
+        },
+    )
+    artifacts["kernel_candidates_revisions"] = str(revisions_path)
+    _note(f"candidate review applied {changed} change(s) over {len(outcome.revisions)} revision(s)")
+    for line in notes:
+        _note(f"  review: {line}")
+    return artifacts
+
+
 def write_reports(
     run_dir: Path,
     *,
@@ -7486,6 +7678,25 @@ def main() -> int:
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
+    # Without a single searchable root every kernel resolves to "" and the whole
+    # run reports zero routable candidates -- a host misconfiguration that reads
+    # exactly like a trace with nothing worth optimizing. Say so up front.
+    if not KNOWN_SEARCH_ROOTS:
+        trace_health_warnings.append(
+            {
+                "code": "no_framework_source_root",
+                "severity": "error",
+                "packages": list(_KERNEL_SOURCE_PACKAGES),
+                "message": (
+                    "No framework source root exists on this host (looked for "
+                    f"{', '.join(_KERNEL_SOURCE_PACKAGES)}). Source resolution "
+                    "cannot grep anything, so every hot kernel will be reported "
+                    "as non-routable and kernel-opt will have nothing to "
+                    "dispatch. Install the framework in this interpreter's "
+                    "environment or point $FRAMEWORK_REPO_PATH at its checkout."
+                ),
+            }
+        )
 
     try:
         update_status(
@@ -8080,7 +8291,6 @@ def main() -> int:
                             trace_files=trace_files,
                             log_path=log_path,
                             source_resolution_out=(run_dir / _SOURCE_RESOLUTION_NAME),
-                            allow_model_tiers=False,
                             model_name=args.model_name,
                         )
                         append_log(
@@ -8347,11 +8557,7 @@ def main() -> int:
                     log_path,
                     "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
                 )
-                candidates = analyze_trace_files(
-                    trace_files,
-                    args.top_k,
-                    allow_model_tiers=not use_deterministic,
-                )
+                candidates = analyze_trace_files(trace_files, args.top_k)
             else:
                 raise RuntimeError(
                     "No hot-kernel candidates produced by any TraceLens "
@@ -8373,12 +8579,21 @@ def main() -> int:
                     framework=args.framework or "",
                     model_name=args.model_name or "",
                     log_path=log_path,
-                    allow_review=False,
                 )
             if source_resolution_path.is_file():
                 artifacts["kernel_source_resolution"] = str(
                     source_resolution_path
                 )
+        if not use_deterministic:
+            artifacts.update(
+                run_candidate_review_stage(
+                    run_dir,
+                    candidates=candidates,
+                    args=args,
+                    log_path=log_path,
+                    trace_health_warnings=trace_health_warnings,
+                )
+            )
         artifacts.update(
             write_reports(
                 run_dir,

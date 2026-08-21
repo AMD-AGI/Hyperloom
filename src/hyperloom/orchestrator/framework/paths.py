@@ -527,6 +527,34 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
     )
 
 
+def resolve_kernel_search_roots() -> tuple[str, ...]:
+    """Roots to grep when locating the source that defines a GPU kernel.
+
+    Deliberately narrower than :func:`resolve_source_file_allowlist`, which also
+    reports the bare site/dist-packages parents. Those are correct for a "may
+    this file be edited" containment test and wrong for a recursive grep: they
+    pull in every installed package (torch included), which costs seconds per
+    keyword and matches unrelated code.
+
+    Only roots that exist on this host are returned. An empty result therefore
+    means "there is nothing here to search", which a caller must surface as a
+    misconfiguration -- grepping absent directories yields no hits and is
+    indistinguishable from a kernel whose source genuinely is not present.
+
+    Returns:
+        tuple[str, ...]: Existing framework package dirs, editable checkouts and
+            FlyDSL roots, de-duplicated in discovery order.
+    """
+    merged = _merge_roots(
+        _discover_installed_framework_roots(),
+        _discover_scriptable_repo_roots(),
+        _discover_explicit_framework_root(),
+        _DEFAULT_SOURCE_ROOTS,
+        resolve_flydsl_source_roots(),
+    )
+    return tuple(root for root in merged if Path(root.rstrip("/")).is_dir())
+
+
 def probe_framework_source_roots_for_env() -> str:
     """Colon-separated roots for ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
 
@@ -631,6 +659,7 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
 
 __all__ = [
     "probe_framework_source_roots_for_env",
+    "resolve_kernel_search_roots",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
     "resolve_session_framework_root",
