@@ -202,7 +202,7 @@ def _server_unreachable(data: SourceData, cfg: LocalHealthConfig) -> list[Sympto
                 subject={"url": url},
                 source="local",
                 suggestion=(
-                    "delegate(server_lifecycle) to restart the inference server"
+                    "delegate(recover, force_gpu_cleanup=True) to restart the inference server"
                     if severity is SymptomSeverity.HIGH
                     else "monitor; alert orchestration if it persists"
                 ),
@@ -342,7 +342,7 @@ def _log_error_symptoms(data: SourceData) -> list[Symptom]:
                 subject={"pattern": pattern},
                 source="local",
                 suggestion=(
-                    "delegate(server_lifecycle) or escalate strategy"
+                    "delegate(recover, force_gpu_cleanup=True) or escalate strategy"
                     if severity is SymptomSeverity.HIGH
                     else "review log evidence with RCA before further action"
                 ),

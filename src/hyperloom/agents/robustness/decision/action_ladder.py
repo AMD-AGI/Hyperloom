@@ -9,10 +9,11 @@ Three tiers by severity:
 2. **diagnose** (medium) — ``alert(severity="medium")`` carrying evidence.
 3. **recommend** (high) — ``alert(severity="high")`` plus, for some symptoms, a
    symptom-specific remediation intent: ``kill_task`` (stale_lease),
-   ``delegate(recover)`` (gpu_memory_leaked), ``delegate(report)``
-   (``deadline_*`` wind-down and ``recover_unsuccessful`` finalization), or
-   ``prune_branch`` (stuck / no-lever families in ``_PRUNE_SYMPTOMS``). Every
-   other HIGH symptom is strategic: the alert alone, and Orchestration decides.
+   ``delegate(recover)`` (gpu_memory_leaked, local_server_unreachable),
+   ``delegate(report)`` (``deadline_*`` wind-down and ``recover_unsuccessful``
+   finalization), or ``prune_branch`` (stuck / no-lever families in
+   ``_PRUNE_SYMPTOMS``). Every other HIGH symptom is strategic: the alert
+   alone, and Orchestration decides.
 
 Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
 cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
@@ -21,6 +22,7 @@ Findings — one record per intent batch — go to :class:`FindingSink`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
@@ -299,6 +301,38 @@ class ActionLadder:
                         "evidence": evidence,
                     },
                     idempotency_key=(f"recover-gpu-leak-tick-{self._last_tick_index}"),
+                )
+            )
+            return intents
+        # Dead inference server -> ``delegate(recover, force_gpu_cleanup=True)``.
+        # ``recover``'s owner-pattern kill list already covers the atom/Magpie
+        # server process names (Magpie, EngineCore); this is the same remedy
+        # as gpu_memory_leaked, just triggered by an unreachable health check
+        # instead of a VRAM leak. ("server_lifecycle", named in this
+        # symptom's own suggestion text, is an internal warm-reuse config
+        # helper, not a real dispatchable action — PolicyGate would reject it
+        # as unknown_action.)
+        if sym.name == "local_server_unreachable":
+            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
+            # `_server_unreachable` emits one symptom per unreachable probe
+            # target and marks all of them HIGH together, so a tick-only key
+            # would collide across targets: the first delegate creates the
+            # task and the rest come back as duplicate-idempotency
+            # PolicyDenied, which incorrectly books a working recovery as a
+            # repeated policy denial. Disambiguate with the target itself.
+            target = str(sym.subject.get("url") or evidence.get("url") or "unknown")
+            target_key = hashlib.sha1(target.encode("utf-8")).hexdigest()[:8]
+            intents.append(
+                build_delegate(
+                    action_name="recover",
+                    params={
+                        "reason": "local_server_unreachable",
+                        "force_gpu_cleanup": True,
+                        "evidence": evidence,
+                    },
+                    idempotency_key=(
+                        f"recover-server-unreachable-tick-{self._last_tick_index}-{target_key}"
+                    ),
                 )
             )
             return intents
