@@ -18,13 +18,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
-
-import pytest
-
 from hyperloom.inference_optimizer.reference_script import render_reference_script
 from hyperloom.orchestrator.phases._enablement_artifacts import (
-    snapshot_round,
     write_setting_script,
 )
 from hyperloom.orchestrator.specialists import patch_safety as _ps
