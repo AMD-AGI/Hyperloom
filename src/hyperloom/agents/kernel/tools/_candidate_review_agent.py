@@ -249,10 +249,15 @@ def build_review_prompt(
         "    kernel. A file that only calls or dispatches to it does not count.",
         "  - Prefer unresolve over a guess. A wrong path costs an entire",
         "    optimization attempt; an empty one just falls through.",
-        "  - You may revise source_file, reusable_native_kernel, skip_reason and",
-        "    recommended_backends. You may not revise anything the trace",
-        "    measured (gpu_pct, duration_us, call_count, shapes, raw_arg_spec);",
-        "    such fields are ignored if present.",
+        "  - You may revise source_file, reusable_native_kernel, skip_reason,",
+        "    recommended_backends and benchmark_files. You may not revise",
+        "    anything the trace measured (gpu_pct, duration_us, call_count,",
+        "    shapes, raw_arg_spec); such fields are ignored if present.",
+        "  - benchmark_files comes from a curated table keyed by coarse name",
+        "    markers, so it often names a harness for the wrong member of a",
+        "    kernel family. Replace it with harnesses you located and can open,",
+        "    or with an empty list when this kernel has none. Paths that do not",
+        "    exist are dropped.",
         "  - Entries you do not mention are left exactly as they are.",
         "",
         f"Write your answer to {revisions_path} as JSON:",
@@ -400,6 +405,24 @@ def load_revisions(revisions_path: Path) -> tuple[list[dict[str, Any]], str]:
     return [r for r in revisions if isinstance(r, dict)], ""
 
 
+def _verified_harnesses(proposed: Any) -> list[str] | None:
+    """Keep the proposed harness paths that exist, or ``None`` when unset.
+
+    The curated harness table is keyed by coarse name markers, so it offers a
+    plausible file for a whole family of kernels rather than the one that
+    exercises this kernel. The session can look, which is worth more than the
+    marker match -- but only files it can name and that are really there
+    survive, since a non-empty list reads downstream as a runnable harness.
+    """
+    if not isinstance(proposed, list):
+        return None
+    return [
+        str(entry)
+        for entry in proposed
+        if isinstance(entry, str) and entry.strip() and os.path.isfile(entry.strip())
+    ]
+
+
 def _acceptable_path(picked: str, roots: Sequence[str]) -> str:
     """Return the canonical form of ``picked``, or ``""`` when unverifiable."""
     if _KSC is None:
@@ -501,6 +524,10 @@ def apply_revisions(
         proposed_reusable = revision.get("reusable_native_kernel")
         if isinstance(proposed_reusable, bool):
             entry["review_reusable_hint"] = proposed_reusable
+        harnesses = _verified_harnesses(revision.get("benchmark_files"))
+        if harnesses is not None:
+            entry["review_benchmark_files"] = harnesses
+            notes.append(f"{kernel_id}: benchmark_files -> {len(harnesses)} verified path(s)")
     return notes
 
 

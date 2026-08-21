@@ -517,16 +517,16 @@ def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: Shared
             {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
             {
                 "kernel_id": "k003",
-                "gpu_pct": 9.5,
+                "gpu_pct": 4.5,
                 "reusable_native_kernel": True,
                 "source_file": "/p/rmsnorm.py",
-            },  # just BELOW the 10% threshold
+            },  # just BELOW the 5% threshold
             {
                 "kernel_id": "k004",
-                "gpu_pct": 10.5,
+                "gpu_pct": 5.5,
                 "reusable_native_kernel": True,
                 "source_file": "/p/rmsnorm.py",
-            },  # just ABOVE the 10% threshold
+            },  # just ABOVE the 5% threshold
             {
                 "kernel_id": "k006",
                 "gpu_pct": 15.0,
@@ -537,7 +537,7 @@ def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: Shared
     )
     untried = state.untried_hot_reusable_kernels()
     assert set(untried) == {"k001", "k002", "k004"}
-    assert "k003" not in untried  # below _DEFAULT_HOT_KERNEL_MIN_GPU_PCT (10.0)
+    assert "k003" not in untried  # below _DEFAULT_HOT_KERNEL_MIN_GPU_PCT (5.0)
     assert "k006" not in untried  # non-reusable
 
 
@@ -545,9 +545,11 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
     """Replay of a real trace: 2 of its reusable hot kernels report untried.
 
     The gpu_pct values below are verbatim from the recorded session and must NOT
-    be tuned to the gate. Under the 10% ``_DEFAULT_HOT_KERNEL_MIN_GPU_PCT`` only
-    k001 (23.7) and k002 (37.3) clear it; k004 (9.7), k005 (2.8) and k003 (1.3)
-    are below it and k006/k007 are non-reusable.
+    be tuned to the gate. Under the 5% ``_DEFAULT_HOT_KERNEL_MIN_GPU_PCT`` k001
+    (23.7), k002 (37.3) and k004 (9.7) clear it; k005 (2.8) and k003 (1.3) are
+    below it and k006/k007 are non-reusable. k004 is the case the old 10% gate
+    dropped: a real hot kernel that no wrapper-free operator in this trace could
+    have reached.
     """
     _set_trace(
         state,
@@ -587,8 +589,8 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
         ],
     )
     untried = state.untried_hot_reusable_kernels()
-    assert set(untried) == {"k001", "k002"}
-    assert "k004" not in untried  # 9.7% sits below the 10% gate
+    assert set(untried) == {"k001", "k002", "k004"}
+    assert "k003" not in untried  # 1.3% sits below the 5% gate
     assert "k006" not in untried  # non-reusable despite 15.6%
     assert untried[0] == "k002"  # strongest-first
 
