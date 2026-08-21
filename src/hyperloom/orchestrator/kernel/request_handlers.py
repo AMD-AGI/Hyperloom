@@ -30,6 +30,9 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from hyperloom.agents.kernel.tools._capture_shapes import (
+    is_capture_fragment as _shared_is_capture_fragment,
+)
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
@@ -3237,7 +3240,10 @@ def _extract_vllm_block_fp8_profile_shapes(
     import gzip
 
     def _is_capture_sidecar(path: Path) -> bool:
-        return "capture_traces" in path.parts
+        # Shared classifier, so a layout the kernel-agent routes demote is also
+        # kept out of the shape harvest here; the exact-``capture_traces`` test
+        # this replaced missed ``graph_capture_profile/``.
+        return _shared_is_capture_fragment(path, trace_input if trace_input.is_dir() else trace_input.parent)
 
     shapes: set[tuple[int, int, int]] = set()
     # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the

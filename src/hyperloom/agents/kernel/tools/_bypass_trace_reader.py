@@ -34,6 +34,10 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
+# Stdlib-only sibling; keeps this reader independent of TraceLens while sharing
+# one capture-vs-workload rule with the TraceLens route.
+from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+
 # GPU device-side event categories (Kineto ``cat`` values).
 _GPU_KERNEL_CAT = "kernel"
 _GPU_MEMCPY_CATS = ("gpu_memcpy", "gpu_memset")
@@ -131,32 +135,17 @@ def _trace_candidates(root: Path) -> list[Path]:
     return out
 
 
-# sglang CUDA-graph capture shards (``bs_<batch>_rank<n>.json.gz`` under
-# ``capture_traces/``) are rank-tagged but device-kernel sparse and must not be
-# mistaken for the content-rich main profiler trace.
-_CAPTURE_DIR_NAME = "capture_traces"
-_CAPTURE_FRAGMENT_RE = re.compile(r"^bs_\d+_rank\d+", re.IGNORECASE)
-
-
 def _is_capture_fragment(path: str | Path, root: str | Path | None = None) -> bool:
-    """True if ``path`` is a sglang CUDA-graph capture shard, not a main trace.
+    """True if ``path`` is a CUDA-graph capture shard, not a main trace.
 
-    Detected by either the ``bs_<batch>_rank<n>`` capture filename or a
-    ``capture_traces/`` directory *within the trace tree*. The directory check
-    is made relative to ``root`` when given, so an unrelated ancestor named
-    ``capture_traces`` above the search root never trips it, and it is
-    case-insensitive to match the filename regex.
+    Capture shards are device-kernel sparse and must not be mistaken for the
+    content-rich main profiler trace. Delegates to
+    :func:`_capture_shapes.is_capture_fragment` so this route and the TraceLens
+    route classify identically; the local copy this replaced only knew the
+    ``bs_<batch>_rank<n>`` / ``capture_traces/`` shapes and silently accepted a
+    ``graph_capture_profile/cuda_graph_capture-*`` sidecar as a workload trace.
     """
-    p = Path(path)
-    if _CAPTURE_FRAGMENT_RE.match(p.name) is not None:
-        return True
-    parts: tuple[str, ...] = p.parts
-    if root is not None:
-        try:
-            parts = p.relative_to(root).parts
-        except ValueError:
-            parts = p.parts
-    return any(part.lower() == _CAPTURE_DIR_NAME for part in parts)
+    return _shared_is_capture_fragment(path, root)
 
 
 def _main_trace_candidates(candidates: list[Path], root: str | Path | None = None) -> list[Path]:

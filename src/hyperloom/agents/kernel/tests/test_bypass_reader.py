@@ -297,6 +297,23 @@ def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
     assert resolved is not None and resolved.name == main.name
 
 
+def test_unpatched_sglang_capture_dir_is_deprioritized(tmp_path):
+    # Both routes now share one classifier, so the bypass reader also knows the
+    # SGLang-without-profiler-patch layout: a ``graph_capture_profile/`` holding
+    # ``cuda_graph_capture-*``. The reader's own copy of the rule only knew
+    # ``bs_<n>_rank<n>`` / ``capture_traces/`` and took the sidecar as a trace.
+    d = tmp_path / "torch_trace"
+    main = _write_main_tp_trace(d)
+    cap_dir = d / "graph_capture_profile"
+    cap_dir.mkdir(parents=True, exist_ok=True)
+    _write_capture_fragment(cap_dir, 512)
+    (cap_dir / "cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz").write_bytes(
+        (cap_dir / "bs_512_rank0.json.gz").read_bytes()
+    )
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name == main.name
+
+
 def test_capture_traces_detection_is_relative_to_trace_root(tmp_path):
     # An unrelated ancestor dir named ``capture_traces`` above the trace root must
     # not flag the main trace; only a genuine subdir within the root marks shards.
