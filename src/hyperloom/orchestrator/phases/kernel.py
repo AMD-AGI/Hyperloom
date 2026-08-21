@@ -4002,9 +4002,8 @@ class KernelPhase(PhaseHandler):
 
         if decision == "KEEP":
             finalize_result = integ.get("finalize_result")
-            # ``finalize_settled`` rather than ``lifecycle_complete``: a resumed
-            # apply whose manifest is already finalized must not be finalized a
-            # second time, even when that finalize only got part of the backups.
+            # Settled, not complete: an already-finalized manifest must not be
+            # finalized again even when its sweep was partial.
             if not _collective_recovery.patch_finalize_settled(finalize_result):
                 finalize_result = await asyncio.to_thread(
                     _maybe_finalize_kernel_patch,

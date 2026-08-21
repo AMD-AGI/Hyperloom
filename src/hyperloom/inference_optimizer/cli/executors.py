@@ -299,7 +299,7 @@ def _register_executors(
     # cancel_inflight_actions can stop it at shutdown or on a spent budget.
     coordinator.sub.register_executor(
         "targeted_build",
-        TargetedBuildExecutor(session_dir=session_dir),
+        TargetedBuildExecutor(),
     )
 
     if log.isEnabledFor(logging.DEBUG):

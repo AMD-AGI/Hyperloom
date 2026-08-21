@@ -691,9 +691,9 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
 
     The kernel lane also drives this executor through synthetic tasks that
     carry ``kind="baseline"`` literally (integrate re-baseline, stack
-    validation). Those are throughput-only A/B probes
-    against an already-anchored baseline -- they never anchor one -- so they
-    opt out via ``params["quality_ref_exempt"]`` and are treated exactly like
+    validation). Those are throughput-only A/B probes against an
+    already-anchored baseline -- they never anchor one -- so they opt out via
+    ``params["quality_ref_exempt"]`` and are treated exactly like
     ``replay_warm_recipe``: compare, never establish.
 
     Args:
