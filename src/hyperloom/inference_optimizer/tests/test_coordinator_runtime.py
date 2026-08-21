@@ -132,6 +132,28 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
     res = await sub.run_task(task)
     assert res.state == "failed"
     assert "no runner" in res.error
+    assert res.error_class == "no_executor"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
+    """A raised executor exception must not collapse into the generic
+    unknown_error gap bucket -- error_class carries the exception's own class name.
+    """
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    async def exe(ctx):
+        raise TimeoutError("benchmark server never came up")
+
+    sub.register_executor("bench_runner", exe)
+    task = await tr.create(kind="bench_runner", params={}, idempotency_key="k-y")
+    res = await sub.run_task(task)
+    assert res.state == "failed"
+    assert res.error_class == "TimeoutError"
     db.close()
 
 

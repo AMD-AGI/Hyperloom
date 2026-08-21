@@ -206,6 +206,29 @@ def test_a_seen_server_is_recorded_in_the_evidence():
     assert matched and matched[0].evidence["server_process_seen"] is True
 
 
+def test_all_targets_down_suggests_the_real_dispatchable_action():
+    """The HIGH suggestion must not point at ``server_lifecycle`` -- PolicyGate
+    rejects it as unknown_action; action_ladder routes this symptom to a real
+    ``delegate(recover, force_gpu_cleanup=True)``, and the suggestion text
+    reaching the orchestration prompt must say so instead.
+
+    A live server process is included so the idle-server-detection added
+    upstream (a refused port with no server and no benchmark client behind it
+    is treated as an expected idle stretch, not a fault) doesn't suppress the
+    symptom this test exists to check.
+    """
+    data = SourceData(
+        local_processes=_live_server(),
+        local_server_health=[
+            {"url": "http://localhost:30000", "reachable": False, "status": "error"},
+        ],
+    )
+    out = evaluate_local_health_signals(_ctx(), data)
+    matched = next(s for s in out if s.name == "local_server_unreachable")
+    assert "server_lifecycle" not in matched.suggestion
+    assert "delegate(recover" in matched.suggestion
+
+
 def test_no_unreachable_targets_is_silent():
     data = SourceData(
         local_server_health=[
@@ -228,6 +251,14 @@ def test_runtimeerror_pattern_is_medium_severity():
     out = evaluate_local_health_signals(_ctx(), data)
     matched = [s for s in out if s.name == "log_error_pattern"]
     assert matched and matched[0].severity is SymptomSeverity.MEDIUM
+
+
+def test_oom_pattern_suggests_the_real_dispatchable_action():
+    data = SourceData(local_log_errors=[{"pattern": "CUDA out of memory", "line": "torch ... CUDA out of memory ..."}])
+    out = evaluate_local_health_signals(_ctx(), data)
+    matched = next(s for s in out if s.name == "log_error_pattern")
+    assert "server_lifecycle" not in matched.suggestion
+    assert "delegate(recover" in matched.suggestion
 
 
 def test_log_error_groups_samples_by_pattern():
