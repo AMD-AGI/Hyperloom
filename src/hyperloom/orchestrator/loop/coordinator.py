@@ -1676,7 +1676,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached, time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (via the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.

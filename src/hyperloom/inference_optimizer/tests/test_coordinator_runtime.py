@@ -2520,5 +2520,8 @@ async def test_target_reached_routes_through_close_phase(session_dir):
         )
         assert reason == "target_reached"
         assert (c.shared_state.phase or "").upper() == "CLOSE"
+        # The close sequencer actually ran; this is what separates a real close
+        # from the cli safety-net path.
+        assert c.shared_state.close_sequence_done is True
     finally:
         await c.stop()
