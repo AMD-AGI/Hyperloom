@@ -657,6 +657,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
+    # Operator-supplied custom-workload paths. Fresh launch publishes them as
+    # env from ``--framework-path`` / ``--benchmark-scripts-dir``; a resume
+    # that does not re-pass those flags must re-export them from here or the
+    # scriptable runner cannot find the entrypoint (rc=2, no measurement).
+    bypass_scripts_dir: str = ""
+    framework_repo_path: str = ""
+    # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
+    benchmark_backend: str = ""
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1

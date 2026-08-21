@@ -352,6 +352,9 @@ def _seed_shared_state(
         # so a resume re-exports it from here rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
+        bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
+        framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
+        benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
