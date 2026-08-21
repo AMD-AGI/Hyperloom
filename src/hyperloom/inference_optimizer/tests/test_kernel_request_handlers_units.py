@@ -1363,22 +1363,12 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
 
     # ---- forge wording -> coordinator decision ------------------------------
-    #
-    # forge reports seven micro_decision wordings; the bridge handled four. The
-    # three it missed left ``decision`` unset and ``status`` at "ok", which in the
-    # breakdown is indistinguishable from a genuine no_improvement -- the very
-    # distinction those wordings exist to draw.
+    # forge reports seven micro_decision wordings; the bridge handled four, and
+    # the three it missed read in the breakdown like a genuine no_improvement.
 
     @pytest.mark.asyncio
     async def test_a_partial_wording_is_reverted_and_named(self, tmp_path, monkeypatch):
-        """``partial_failure`` reaches the bridge only with nothing to deploy.
-
-        forge checks ``has_candidate`` before this wording, so a run where one
-        tuner crashed and another delivered reports ``candidate`` instead --
-        verified against the real ``build_report``. What arrives here is the case
-        with no env, which is a REVERT that still has to name itself so it is not
-        read as an honest no_improvement.
-        """
+        """A barren ``partial_failure`` is a REVERT that still names itself."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         sentinel = (
@@ -1399,12 +1389,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_an_empty_run_is_reverted_and_says_so(self, tmp_path, monkeypatch):
-        """``empty_output`` must not read as a run that found nothing.
-
-        Writing zero rows and running to a genuine no-improvement verdict are
-        different outcomes; forge added the wording to keep them apart, so the
-        envelope has to carry it where the breakdown looks.
-        """
+        """Writing zero rows is not the same outcome as finding nothing."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         sentinel = (
@@ -1447,12 +1432,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_a_tuner_error_class_reaches_the_envelope(self, tmp_path, monkeypatch):
-        """A crash named by a tuner must be visible at the top level.
-
-        The jsonl audit row already lifted it; the breakdown and the stack read
-        the envelope, so a run where every tuner crashed arrived there as
-        ``status="failed"`` with two empty strings and no reason at all.
-        """
+        """A crash a tuner named must be visible where the breakdown reads."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         sentinel = (
@@ -1488,13 +1468,9 @@ class TestForgeGemmHelperCoverage:
     async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(
         self, tmp_path, monkeypatch
     ):
-        """One tuner crashed, another delivered: both facts have to survive.
-
-        forge reports this as ``candidate`` (``has_candidate`` outranks the
-        partial wordings), so the env is measured while the crash is still named.
-        An error_class alongside a KEEP is accurate here, and nothing downstream
-        may read it as a failure -- promotability is decided on ``status``.
-        """
+        """One tuner crashed, another delivered: forge reports ``candidate``, so
+        the env is measured and the crash is still named. Promotability keys on
+        ``status``, so a named crash must not demote the run."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
@@ -1533,13 +1509,8 @@ class TestForgeGemmHelperCoverage:
     async def test_a_malformed_tuners_run_does_not_break_the_run(
         self, tmp_path, monkeypatch
     ):
-        """``tuners_run`` is forge's JSON, so it can be any shape.
-
-        Lifting a reason out of it is bookkeeping; bookkeeping that raises would
-        turn a tuning run that actually happened into a reported failure with a
-        Python exception name for a cause -- the misattribution this whole lane
-        exists to remove.
-        """
+        """``tuners_run`` is forge's JSON and may be any shape; lifting a reason
+        out of it must not turn a run that happened into a reported crash."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
 
@@ -1591,14 +1562,9 @@ class TestForgeGemmHelperCoverage:
         assert "decision" not in result
 
     # ---- MoE runtime key: log -> CSV -> payload -> forge argv ---------------
-    #
-    # The reason this whole lane exists is that MoE tuning keyed on the config
-    # produced tables no runtime lookup could reach, so the key has to come from
-    # the dispatch tuple the runtime logged. Both ends of that were covered --
-    # the CSV writer in test_gemm_bf16_aiter_routing, the tuner's preference for
-    # a caller-supplied CSV in KernelForge -- and the handoff between them was
-    # not: deleting the derivation, the payload field, or the argv option each
-    # left the suite green.
+    # Both ends were covered (the CSV writer, and KernelForge's preference for a
+    # caller-supplied CSV); the handoff between them was not, and deleting any
+    # link in it left the suite green.
 
     #: A real dispatch line, gfx field included. Fixtures that dropped the gfx
     #: field once let a regex that could never match production pass its tests.
@@ -1635,12 +1601,8 @@ class TestForgeGemmHelperCoverage:
     async def test_moe_key_travels_from_the_log_into_the_forge_payload(
         self, tmp_path, monkeypatch
     ):
-        """The dispatch tuple the runtime logged must reach forge as a CSV.
-
-        Asserts the values came from the log rather than from the config: the
-        original defect was a config-derived key (inter_dim un-sharded, dtypes
-        guessed) that aiter would never look up.
-        """
+        """The values must come from the log, not from the config: a
+        config-derived key is what aiter would never look up."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
@@ -1679,12 +1641,8 @@ class TestForgeGemmHelperCoverage:
     def test_the_token_column_comes_from_the_workload(self, tmp_path):
         """``tokens`` arrives as forge's comma-separated string, not a list.
 
-        The handler builds it with ``_normalize_tokens``, which always returns a
-        string, while this signature said ``list[int]`` and the body iterated it.
-        A real multi-token workload therefore hit ``int(',')`` and a single-token
-        one silently wrote the digits as separate tokens -- rows the runtime can
-        never look up. Every existing case passed a list, so the tests agreed
-        with the annotation and not with the caller.
+        Every prior case passed a list, so the tests agreed with the annotation
+        instead of with the only production caller.
         """
         log = tmp_path / "server.log"
         log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
@@ -1763,11 +1721,7 @@ class TestForgeGemmHelperCoverage:
     async def test_a_stale_moe_csv_path_falls_back_to_the_log(
         self, tmp_path, monkeypatch
     ):
-        """A path that no longer exists must not be forwarded to forge.
-
-        Guards against handing forge a dead path (or inline content) instead of
-        deriving the key the runtime actually asked for.
-        """
+        """A path that no longer exists must not be forwarded to forge."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
