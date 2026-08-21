@@ -49,14 +49,14 @@ subtrees:
 
 - caption: Reference
   entries:
-  - file: reference/kernel-execution-path.md
-    title: Kernel optimization execution path
   - file: reference/api-reference.rst
     title: API reference
   - file: reference/environment-variables.md
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
+  - file: reference/kernel-execution-path.md
+    title: Kernel optimization execution path
   - file: reference/operations.md
     title: Operations and self-hosting
   - file: reference/upgrade.md

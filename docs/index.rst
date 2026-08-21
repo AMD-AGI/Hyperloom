@@ -34,10 +34,10 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
   .. grid-item-card:: Reference
 
-    * :doc:`Kernel optimization execution path </reference/kernel-execution-path>`
     * :doc:`API reference </reference/api-reference>`
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
+    * :doc:`Kernel optimization execution path </reference/kernel-execution-path>`
     * :doc:`Operations and self-hosting </reference/operations>`
     * :doc:`Upgrade guide </reference/upgrade>`
     * :doc:`Session output schema </reference/session-breakdown>`
