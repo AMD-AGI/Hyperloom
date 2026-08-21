@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import site
 import sys
 import sysconfig
@@ -570,11 +571,75 @@ def summarise_framework_root_discovery(roots: str) -> str:
     return " ".join(parts)
 
 
+# A profile trace names a frame as ``<path>(<line>): <function>``. The suffix is
+# not part of the path and the path is relative to the tree being profiled.
+_TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
+
+
+def resolved_within(value: str, root: str) -> bool:
+    """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
+
+    Replaces a raw ``str.startswith`` prefix test so that ``..`` traversal and
+    shared-prefix boundary tricks (e.g. ``/x/aiter`` vs ``/x/aiterX``) cannot
+    slip a path past an allowlist root. Legitimate real paths nested under a
+    root are accepted identically to the old prefix check.
+
+    Args:
+        value (str): the candidate path string.
+        root (str): an allowlist root (may carry a trailing slash).
+
+    Returns:
+        bool: True when the resolved ``value`` equals or is nested under the
+            resolved ``root``; False on any resolution error or escape.
+    """
+    try:
+        v = Path(str(value)).resolve()
+        r = Path(str(root)).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return v == r or v.is_relative_to(r)
+
+
+def source_file_candidates(value: str) -> tuple[str, ...]:
+    """Return the path forms a ``source_file`` value may legitimately take.
+
+    Roofline evidence reaches the orchestration prompt as trace frames, and the
+    model cites them verbatim when it dispatches. Checking such a frame as
+    written resolves it against the process CWD — the Hyperloom checkout — which
+    is under no allowlist root, so every citation is denied and the task it
+    carries is cancelled before it runs.
+
+    Traversal is not widened by this: each candidate is still resolved and
+    bounded by :func:`resolved_within`, so ``../`` climbs out of the root and
+    fails as before.
+
+    Args:
+        value (str): The raw field value.
+
+    Returns:
+        tuple[str, ...]: ``value`` first (so absolute paths behave exactly as
+            they did), then the de-annotated form, then that form resolved
+            against the tree this session is optimizing.
+    """
+    raw = str(value).strip()
+    out: list[str] = [raw]
+    bare = _TRACE_FRAME_SUFFIX.sub("", raw).strip()
+    if bare and bare != raw:
+        out.append(bare)
+    if bare and not Path(bare).is_absolute():
+        root = resolve_session_framework_root()
+        if root:
+            out.append(str(Path(root) / bare))
+    return tuple(out)
+
+
 __all__ = [
     "probe_framework_source_roots_for_env",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
     "resolve_session_framework_root",
     "resolve_source_file_allowlist",
+    "resolved_within",
+    "source_file_candidates",
     "summarise_framework_root_discovery",
 ]
