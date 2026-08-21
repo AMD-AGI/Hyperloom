@@ -36,6 +36,7 @@ Fields::
     pruned_families     list[str]  — set by Robustness via PRUNE_BRANCH
     start_ts            str   — ISO timestamp
     max_minutes         int   — wall-clock budget (0 = unlimited)
+    deadline_unix       float — absolute session deadline (0 = unset/unbounded)
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
                                 `trace_analyze` REQUEST `trace_input` param
@@ -52,13 +53,14 @@ import math
 import os
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
@@ -246,6 +248,10 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "missing_integration_inputs",
         "patch_not_applied",
         "apply_failed",
+        # The served context cannot host an eval request, so the accuracy gate
+        # can never return a verdict under this configuration. The patch was
+        # never fairly measured, so it must not spend a KEEP attempt.
+        "eval_context_too_small",
         "mn_server_restart_failed_post_patch",
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
@@ -365,6 +371,27 @@ def effective_closing_grace_sec(
     if closing_grace_sec is not None:
         return float(closing_grace_sec)
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
+
+
+@contextmanager
+def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
+    """Record how long one post-deadline teardown step took on ``state``.
+
+    The session's own record never said what the unbudgeted tail cost. A step
+    that cannot be timed is the same gap as a step that never ran.
+
+    Args:
+        state: Object exposing :meth:`SharedState.record_teardown_timing`;
+            missing the method is a no-op so tests can pass a stub.
+        name: Step key stored on ``teardown_timings_sec``.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        recorder = getattr(state, "record_teardown_timing", None)
+        if callable(recorder):
+            recorder(name, time.monotonic() - started)
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -518,6 +545,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     continue_kernel_after_gemm: bool = True
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
+    # Which benchmark workload this session measures: "agentx" (agentic trace
+    # replay) or "synthetic" (ISL/OSL). Recorded at seed time and asserted on
+    # resume: the KEEP ledger is keyed on server args alone, so measurements
+    # from the two modes would silently overwrite each other in the same rows.
+    # Empty on sessions predating the field (treated as "not asserted").
+    benchmark_mode: str = ""
+    # Generation counter for AgentX measurements. Bumped whenever a change makes
+    # previously recorded AgentX numbers incomparable (aiperf/scenario upgrade,
+    # corpus generation, a fixed measurement defect). A resume whose stored
+    # epoch differs must not reuse the old KEEPs or baseline anchor.
+    agentx_epoch: int = 0
     # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
         default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
@@ -683,6 +721,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pruned_families: list[str] = field(default_factory=list)
     start_ts: str = field(default_factory=_now_iso)
     max_minutes: int = 0
+    # Absolute unix deadline for a bounded session. Stamped once from
+    # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
+    # ``0.0`` means unset or unbounded.
+    deadline_unix: float = 0.0
+    # Wall-clock seconds spent in post-deadline teardown, keyed by step.
+    teardown_timings_sec: dict[str, float] = field(default_factory=dict)
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
     closing_grace_sec: float | None = None
     last_profile_trace: str = ""
@@ -3653,8 +3697,55 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         delta = (now_dt - start).total_seconds() / 60.0
         return max(0.0, delta)
 
+    def stamp_deadline_unix(
+        self,
+        *,
+        now_unix: float | None = None,
+        budget_minutes: float | None = None,
+    ) -> float:
+        """Persist the absolute session deadline if a bounded session has none.
+
+        A resume must not reissue a full ``max_minutes`` from the moment
+        ``Coordinator.run`` is entered. The first stamp — ``start_ts`` plus the
+        budget — is what every remaining-time check reads.
+
+        ``budget_minutes`` is the run() argument before it is stored as
+        ``int(max_minutes)``. Tests pass fractional minutes; truncating first
+        would make this a no-op and leave the loop with no persisted deadline.
+
+        Args:
+            now_unix: Clock used only when ``start_ts`` cannot be parsed;
+                defaults to ``time.time()``.
+            budget_minutes: Minutes to add to ``start_ts``; ``None`` uses
+                :attr:`max_minutes`.
+
+        Returns:
+            The unix deadline, or ``0.0`` when the session is unbounded.
+        """
+        minutes = float(self.max_minutes or 0) if budget_minutes is None else float(budget_minutes)
+        existing = float(self.deadline_unix or 0.0)
+        if minutes <= 0:
+            # A truncated stored budget must not erase a stamp this process or
+            # an earlier one already wrote.
+            if existing > 0.0:
+                return existing
+            self.deadline_unix = 0.0
+            return 0.0
+        if existing > 0.0:
+            return existing
+        start = to_unix(self.start_ts, None)
+        origin = float(start) if start else float(now_unix if now_unix is not None else time.time())
+        self.deadline_unix = origin + minutes * 60.0
+        return self.deadline_unix
+
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
-        """Minutes left in the wall-clock budget; ``None`` when ``max_minutes`` unset (unbounded), else clamped at 0.
+        """Minutes left in the wall-clock budget; ``None`` when unbounded, else clamped at 0.
+
+        When :attr:`deadline_unix` is stamped, remaining time is derived from
+        it so the Coordinator loop, admission, and the grid cannot disagree —
+        including when the persisted ``max_minutes`` was truncated to 0.
+        Otherwise this falls back to ``max_minutes - elapsed`` so tests that
+        inject elapsed without a stamp keep working.
 
         Args:
             now (datetime | None): Reference time; defaults to the current UTC
@@ -3662,11 +3753,49 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         Returns:
             float | None: Minutes remaining in the budget (clamped at 0.0), or
-                ``None`` when ``max_minutes`` is unset.
+                ``None`` when the session is unbounded.
         """
+        deadline = float(self.deadline_unix or 0.0)
+        if deadline > 0.0:
+            now_dt = now or datetime.now(timezone.utc)
+            if now_dt.tzinfo is None:
+                now_dt = now_dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (deadline - now_dt.timestamp()) / 60.0)
         if not self.max_minutes:
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
+
+    def monotonic_session_deadline_sec(self) -> float | None:
+        """``time.monotonic()`` instant the session budget is spent, or ``None`` if unbounded.
+
+        Converts the persisted unix deadline into the clock the Coordinator
+        loop already consults, so a resume cannot pick a fresh full budget.
+
+        Returns:
+            A monotonic deadline, or ``None`` when ``max_minutes`` is unset.
+        """
+        remaining = self.remaining_minutes()
+        if remaining is None:
+            return None
+        return time.monotonic() + remaining * 60.0
+
+    def record_teardown_timing(self, step: str, elapsed_sec: float) -> None:
+        """Record one post-deadline teardown step's duration.
+
+        Args:
+            step: Name of the teardown step (``coordinator_stop``,
+                ``final_json``, ...).
+            elapsed_sec: Wall-clock seconds the step took.
+        """
+        name = str(step or "").strip()
+        if not name:
+            return
+        timings = self.teardown_timings_sec
+        if not isinstance(timings, dict):
+            self.teardown_timings_sec = {}
+            timings = self.teardown_timings_sec
+        timings[name] = round(max(0.0, float(elapsed_sec)), 3)
+        timings["total"] = round(sum(v for k, v in timings.items() if k != "total"), 3)
 
     def closing_reserve_sec(self) -> float:
         """Seconds held back from every unit of work so CLOSE can still report.
@@ -3746,4 +3875,4 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
 
 
-__all__ = ["SharedState", "render_model_arch_compact"]
+__all__ = ["SharedState", "render_model_arch_compact", "timed_teardown_step"]

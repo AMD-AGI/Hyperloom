@@ -27,6 +27,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -37,8 +38,13 @@ from .coordinator_helpers import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
+    _geak_accepted_kernel_specs,
+    _geak_has_accepted_kernel,
+    _geak_overlay_digest,
+    _geak_overlay_is_loadable,
     _geak_result_has_material,
     _geak_revalidation_decision,
+    _geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
@@ -870,9 +876,13 @@ class WritebackCollaborator:
         any_changed = False
         params = task.params or {}
         if task.kind == "explore" and bool(params.get("geak_fallback")):
-            pending = getattr(self.shared_state, "geak_pending", None) or {}
-            pending_task_id = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
-            if not pending_task_id or pending_task_id == task.task_id:
+            from ..phases.geak_rebench import geak_rebench_should_apply_result
+
+            if geak_rebench_should_apply_result(
+                self.shared_state,
+                task,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            ):
                 geak_result = (
                     dict(self.shared_state.geak_result)
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -2024,6 +2034,31 @@ class WritebackCollaborator:
                 "reason": f"configuration:{type(exc).__name__}",
                 "backend": "unknown",
             }
+        # Every Recipe sink funnels through agentx_kb_write_blocked; see it for
+        # why an agentic measurement must not enter a cross-session store. Placed
+        # ahead of the mode branch because in REMOTE mode _kb_amend_recipe returns
+        # early, which made the write below the only Recipe writer and the one
+        # door that gate could not see.
+        from hyperloom.orchestrator.actions.executors._workload_envs import (
+            agentx_kb_write_blocked,
+        )
+
+        if agentx_kb_write_blocked(self.shared_state):
+            log.info(
+                "Recipe KB finalize skipped (AgentX): the recipe identity has no mode "
+                "or workload dimension, so an agentic-replay result would overwrite a "
+                "synthetic best_throughput and be tagged isl/osl=%s/%s.",
+                getattr(self.shared_state, "isl", "?"),
+                getattr(self.shared_state, "osl", "?"),
+            )
+            # Backend stays as configured: "disabled" here would be
+            # indistinguishable in telemetry from a KB that was actually down,
+            # and reason= already carries why nothing was written.
+            return {
+                "status": "skipped",
+                "reason": "agentx",
+                "backend": str(getattr(config, "mode", "") or "unknown"),
+            }
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session
             # writer. T0 and runtime amendment are intentionally absent.
@@ -2542,6 +2577,10 @@ class WritebackCollaborator:
         applied, keyed by ``(action, variant_name)`` or by ``fingerprint``, so a
         rerun of an already-stacked config cannot double-apply it.
 
+        Every args string read here passes through
+        :func:`strip_benchmark_harness_flags`, the previous ``current_best``
+        included since it is re-merged onto the winner.
+
         Args:
             task_kind: The action kind that produced the winner (stamped on the
                 stack entry / current_best).
@@ -2568,17 +2607,19 @@ class WritebackCollaborator:
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
-            base_args = str(previous.get("extra_server_args") or "").strip()
+            base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
         _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
         if not _overlay and isinstance(previous, dict):
             _overlay = str(previous.get("final_overlay") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
-            candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
+            candidate_args = strip_benchmark_harness_flags(
+                bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
+            )
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or "").strip()
+            full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
         controls_effective = bool(
             isinstance(bv, dict)
             and (
@@ -2634,6 +2675,10 @@ class WritebackCollaborator:
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+                    # Carry the promoting lane's accuracy verdict onto the stack
+                    # so CLOSE reads one place instead of reconstructing which
+                    # lane promoted the champion. ``None`` means "not gated".
+                    "accuracy": (bv.get("accuracy") if isinstance(bv, dict) else None),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -2665,6 +2710,17 @@ class WritebackCollaborator:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
+                # Carry the authored-kernel names onto the stack entry so
+                # attribution can separate a config gain from a gain measured
+                # with a kernel loaded. Absent on every flags-only variant.
+                if isinstance(bv, dict):
+                    _stack_kernels = [
+                        str(k).strip()
+                        for k in (bv.get("accepted_kernels") or [])
+                        if str(k).strip()
+                    ]
+                    if _stack_kernels:
+                        stack_entry["accepted_kernels"] = _stack_kernels
                 if isinstance(bv, dict):
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
@@ -2673,7 +2729,7 @@ class WritebackCollaborator:
                         stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
                         stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
-                            str(bv.get("effective_extra_server_args") or "")
+                            strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                         )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
@@ -2756,7 +2812,7 @@ class WritebackCollaborator:
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
                 current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
-                    str(bv.get("effective_extra_server_args") or "")
+                    strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                 )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
@@ -3487,6 +3543,30 @@ class WritebackCollaborator:
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=cb_tput,
                 )
+                # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
+                # cannot see the overlay drop out between dispatch and launch —
+                # ``run_grid`` skips an overlay whose dir has gone away and logs
+                # a warning, and the run then measures plain flags while the
+                # credit still reads as a kernel win. Re-check the overlay's own
+                # identity here; a miss is inconclusive, not validated.
+                expected_overlay = str((task.params or {}).get("expected_overlay") or "")
+                overlay_loaded = True
+                if expected_overlay:
+                    expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
+                    got_digest = _geak_overlay_digest(expected_overlay)
+                    overlay_loaded = _geak_overlay_is_loadable(expected_overlay) and (
+                        got_digest == expected_digest
+                    )
+                    if not overlay_loaded and decision == "validated":
+                        log.warning(
+                            "geak 2b: overlay %r did not survive the run "
+                            "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
+                            expected_overlay,
+                            _geak_overlay_is_loadable(expected_overlay),
+                            expected_digest,
+                            got_digest,
+                        )
+                        decision = "fallback"
                 ps = (
                     self.shared_state.geak_result
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -3523,13 +3603,57 @@ class WritebackCollaborator:
                             prev_best_envs=cb_now.get("extra_envs") or {},
                         ):
                             decision = "no_material"
-                if decision == "validated":
+                pending = getattr(self.shared_state, "geak_pending", None) or {}
+                pending_tid = (
+                    str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
+                )
+                from ..phases.geak_rebench import geak_rebench_should_apply_result
+
+                macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+                if not geak_rebench_should_apply_result(
+                    self.shared_state, task, macro_cycle=macro_cycle
+                ):
+                    # The slot either names another task or already carries a
+                    # verdict, so this result is orphaned or late. Record it:
+                    # silently dropping a measured rebench is hard to diagnose.
+                    log.warning(
+                        "geak 2b: ignoring %s result from rebench task %s not tracked by "
+                        "geak_pending (pending_task=%s status=%s)",
+                        decision,
+                        task.task_id,
+                        pending_tid or "<unset>",
+                        pending_status or "<unset>",
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_rebench_result_ignored",
+                                "decision": decision,
+                                "task_id": task.task_id,
+                                "idempotency_key": str(task.idempotency_key or ""),
+                                "pending_task_id": pending_tid,
+                                "pending_status": pending_status,
+                                "measured_tput": (
+                                    float(measured) if isinstance(measured, (int, float)) else None
+                                ),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak orphan rebench: observation emit failed")
+                elif decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
                     # validated gain and clear geak_pending.
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
+                        provenance="geak_orch_harness_validated",
+                        # Only an overlay that was dispatched AND still matches
+                        # its manifest proves a kernel was in the measurement.
+                        overlay_loaded=bool(expected_overlay) and overlay_loaded,
                     )
                 elif decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
@@ -4965,8 +5089,9 @@ class WritebackCollaborator:
         delta becomes the validated cumulative gain. Tagged
         ``source=resume_stack_revalidate`` so ``_promote_to_shared_state``
         reconciles ``cumulative_gain_validated_stack_len`` + clears
-        ``resume_pending_revalidation`` from the measured throughput. Idempotent
-        via a fixed idempotency key.
+        ``resume_pending_revalidation`` from the measured throughput. GEAK 2b
+        revalidations are idempotent per macro-cycle via
+        ``geak_revalidate_idempotency_key``.
 
         Args:
             reason: Human-readable reason stamped on the task params.
@@ -4985,13 +5110,39 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+        # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
+        # a result carrying an accepted, positive-delta kernel is revalidated
+        # too, so the kernel gets an orchestrator-measured number.
+        ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
+        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
             ps_flags = str(ps_cfg.get("flags") or "").strip()
             ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
             if _ps_extra_flags:
                 ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            # An overlay that cannot load installs nothing: the server launches
+            # as plain baseline and any delta measured against it belongs to the
+            # flags alone. Resolve that BEFORE dispatch so the task never carries
+            # a dead path, and so the row cannot be read as a kernel win.
+            ps_overlay_loadable = _geak_overlay_is_loadable(ps_overlay)
+            if ps_overlay and not ps_overlay_loadable:
+                log.warning(
+                    "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
+                    "revalidating the config WITHOUT the authored kernel",
+                    ps_overlay,
+                )
+                ps_overlay = ""
+            if not (ps_flags or ps_envs or ps_overlay):
+                # The overlay was the only material and it is dead. A rebench
+                # here would measure plain baseline and credit GEAK for the
+                # noise. Hand it to the GEAK harness (2a), which reproduces the
+                # optimized config from result.json and so engages by construction.
+                return {
+                    "skipped": True,
+                    "reason": "geak_overlay_unloadable",
+                    "fallback": "geak_harness",
+                }
             if ps_flags or ps_envs or ps_overlay:
                 # Identity hash uses the SAME (args, envs) contract the grid
                 # executor fingerprints with (overlay is NOT part of the hash,
@@ -4999,11 +5150,21 @@ class WritebackCollaborator:
                 # ran variant's fingerprint by construction, and any executor-side
                 # drop/alter of config is caught downstream.
                 expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
+                # ``expected_cfg_hash`` cannot see the overlay, so carry the
+                # overlay's own identity beside it. The consumer re-checks both
+                # after the run: a dropped or altered overlay then reads as
+                # inconclusive instead of as a validated kernel win.
+                expected_overlay_digest = _geak_overlay_digest(ps_overlay)
+                # Name what ran. Without this the decision row inherits the flag
+                # string as its whole identity and the kernel rides along unnamed.
+                ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
                 params_ps: dict[str, Any] = {
                     "source": "resume_stack_revalidate",
                     "reason": reason,
                     "geak_fallback": True,
                     "expected_cfg_hash": expected_cfg_hash,
+                    "expected_overlay": ps_overlay,
+                    "expected_overlay_digest": expected_overlay_digest,
                     "grid": [
                         {
                             "name": "geak_revalidate",
@@ -5011,6 +5172,9 @@ class WritebackCollaborator:
                             "extra_envs": dict(ps_envs),
                             "overlay_pythonpath": ps_overlay,
                             "provenance": "geak_revalidate",
+                            # Only claim kernels when an overlay is actually
+                            # being loaded; a flags-only rebench carries none.
+                            "accepted_kernels": ps_kernels if ps_overlay else [],
                             "note": "same-harness config-identity revalidation of the geak e2e win",
                         }
                     ],
@@ -5021,10 +5185,16 @@ class WritebackCollaborator:
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
+                from ..phases.geak_rebench import resolve_geak_revalidate_idempotency_key
+
+                idempotency_key = await resolve_geak_revalidate_idempotency_key(
+                    self.tasks,
+                    int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                )
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
-                    idempotency_key="geak-revalidate",
+                    idempotency_key=idempotency_key,
                     # Without a TTL the row is invisible to ``reclaim_expired_running``.
                     lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
                 )
@@ -5123,8 +5293,21 @@ class WritebackCollaborator:
             A summary dict describing whether validation succeeded.
         """
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
-        if str(ps.get("status") or "") != "ok":
+        if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        # Overlay identity, captured BEFORE the replay so it can be compared
+        # after. 2a replays GEAK's own launch script, which is why a
+        # ``succeeded`` status proves the *config* engaged -- but the overlay is
+        # a separate artifact on a path in ``result.json``, and it can be gone
+        # or inert by the time the replay runs. Measured over
+        # ``/shared_nfs/hyperloom-claw``: of 64 runs declaring a
+        # ``final_overlay``, 25 name a directory that does not exist and 30 name
+        # one holding no ``sitecustomize.py``. Only 9 can install a kernel. A
+        # non-empty string is therefore not evidence the kernel ran, and using
+        # it as evidence would stamp 55 flag-only measurements as kernel wins.
+        # Same check 2b runs; see ``_geak_overlay_is_loadable``.
+        ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
+        overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -5205,9 +5388,27 @@ class WritebackCollaborator:
                 except Exception:  # noqa: BLE001
                     log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
+            # The replay proves the config engaged. It does not prove the
+            # overlay did: the overlay has to still be loadable, and still be
+            # the same overlay, at the moment the replay ran.
+            overlay_loaded_2a = bool(ps_overlay_2a) and _geak_overlay_is_loadable(ps_overlay_2a)
+            if overlay_loaded_2a and overlay_digest_before:
+                overlay_loaded_2a = _geak_overlay_digest(ps_overlay_2a) == overlay_digest_before
+            if ps_overlay_2a and not overlay_loaded_2a:
+                log.warning(
+                    "geak 2a: overlay %r is not loadable evidence "
+                    "(loadable=%r digest before=%r after=%r) -> gain credited "
+                    "to config, not to a kernel",
+                    ps_overlay_2a,
+                    _geak_overlay_is_loadable(ps_overlay_2a),
+                    overlay_digest_before,
+                    _geak_overlay_digest(ps_overlay_2a),
+                )
             self._promote_geak_from_candidate(
                 ps,
                 measured_tput=measured,
+                provenance="geak_same_harness_geak",
+                overlay_loaded=overlay_loaded_2a,
             )
             base = float(self.shared_state.baseline_tput or 0.0)
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0

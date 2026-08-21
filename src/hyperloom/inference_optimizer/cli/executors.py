@@ -12,7 +12,6 @@ must not import ``cli`` (one-way dependency).
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 from pathlib import Path
@@ -41,26 +40,6 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycl
 
 
 log = logging.getLogger(__name__)
-
-
-def _mcp_servers_from_config(config_path: str | None) -> tuple[str, ...] | None:
-    """Return MCP server names declared by an operator-supplied config file.
-
-    ``None`` means no explicit config was supplied. A tuple, including an empty
-    tuple, means an explicit config was supplied and should be authoritative for
-    MCP tool gating.
-    """
-    if not config_path:
-        return None
-    try:
-        payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("specialist_mcp_config could not be inspected for tool gating: %r", exc)
-        return ()
-    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
-    if not isinstance(servers, dict):
-        return ()
-    return tuple(str(name) for name in servers if str(name).strip())
 
 
 # Declarative action_kind -> ExecutorFn map. Keep in sync with
@@ -160,7 +139,6 @@ def _build_specialist_executor(
         # Operator --specialist-mcp-config wins; else auto-generate one from the
         # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
         mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
-        forced_mcp_servers = _mcp_servers_from_config(mcp_config_path)
         if mcp_config_path is None and knowledge_plane is not None:
             try:
                 pr_mcp_url = knowledge_plane.specialist_mcp_url()
@@ -172,7 +150,6 @@ def _build_specialist_executor(
             )
             if generated is not None:
                 mcp_config_path = str(generated)
-                forced_mcp_servers = None
         # This setting controls the Claude runtime only. Codex containment is
         # resolved independently through the canonical sandbox policy.
         specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
@@ -320,11 +297,10 @@ def _register_executors(
     # only (in INTERNAL_ONLY_ACTION_NAMES); dispatched by the enablement phase,
     # not proposed by LLM agents.  The executor runs via run_task_registered so
     # cancel_inflight_actions can stop it at shutdown or on a spent budget.
-    if session_dir is not None:
-        coordinator.sub.register_executor(
-            "targeted_build",
-            TargetedBuildExecutor(session_dir=session_dir),
-        )
+    coordinator.sub.register_executor(
+        "targeted_build",
+        TargetedBuildExecutor(session_dir=session_dir),
+    )
 
     if log.isEnabledFor(logging.DEBUG):
         for required_kind in ("roofline", "profile"):

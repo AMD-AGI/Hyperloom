@@ -317,7 +317,6 @@ class TestEvalContractFingerprint:
 
     def test_workload_change_changes_fingerprint(self, tmp_path):
         """A change to workload shape (ISL) changes the fingerprint."""
-        import yaml as _yaml
 
         cfg1 = tmp_path / "c1.yaml"
         cfg2 = tmp_path / "c2.yaml"

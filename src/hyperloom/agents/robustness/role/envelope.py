@@ -99,6 +99,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "start_ts",
         "resumed_ts",
         "max_minutes",
+        "deadline_unix",
         "closing_grace_sec",
         "optimization_stack",
         "gain_per_stack_entry",

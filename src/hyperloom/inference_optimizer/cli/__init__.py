@@ -42,6 +42,7 @@ from .backends import (
 from .model_gate import (
     _autodetect_gpu_type,
     _gpu_runner_type,
+    _load_model_max_position_embeddings,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
@@ -53,15 +54,20 @@ from ..model_config_utils import (
 )
 from .bootstrap import (
     _begin_resume_leg,
+    _clean_stop_resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
     _seed_shared_state,
     _snapshot_system_prompts,
+    agentx_state_is_stale,
     parse_operator_extra_env,
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    agentx_enabled as _agentx_enabled,
+)
 
 from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
@@ -91,7 +97,7 @@ from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
 from hyperloom.orchestrator.state.objective import Objective, build_objective
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
@@ -1119,8 +1125,164 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
+# AgentX conc-sweep budgets, sized from a measured round: 35B / conc 64 /
+# 3600s window = ~111 min end to end (46 min per-lane warmup + 60 min
+# measurement + ~5 min boot, corpus load and mapping).
+#
+# The overtime kill ratio is deliberately NOT raised. It was, until the measured
+# round showed the reasoning was wrong: a duration-based replay COMPRESSES
+# runtime spread rather than widening it, because the measurement window is
+# fixed. Only warmup scales with how slow a config is, so a variant with 3x
+# slower warmup still lands at 1.8x the baseline total -- comfortably inside the
+# stock 2.0x. Raising it would also have inverted the hard-cap/soft-kill
+# layering (see AGENTX_EXPLORE_TIMEOUT_CEILING_SEC), which is the real fix.
+_AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
+_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 43200  # 12 h for the whole sweep action
+
+
+def _preflight_agentx_backend(args: argparse.Namespace) -> None:
+    """Reject the combinations where AgentX labels work it did not do.
+
+    The AgentX switch works by overwriting ``benchmark.benchmark_script``, and
+    there are two ways for that overwrite not to happen while every other
+    AgentX-gated behaviour still fires:
+
+    * The bypass backend never reads that field for a serving framework, so
+      ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` produces a full run of ordinary
+      synthetic measurements labelled as an AgentX session.
+    * ``apply_agentx_switch`` returns early for a scriptable framework (xdit and
+      friends have no serving endpoint for aiperf to drive). ``agentx_enabled()``
+      is a bare env read, though, so the session still disables eval, turns the
+      concurrency sweep off, collapses the ISL/OSL grid, widens every budget,
+      and stamps ``benchmark_mode="agentx"`` on its state -- over a workload that
+      never touched a trace.
+
+    Neither is set on purpose; refuse instead of handing back numbers that mean
+    something other than what they claim.
+
+    Args:
+        args: Parsed CLI namespace; ``framework`` decides the scriptable case.
+
+    Raises:
+        SystemExit: When AgentX is combined with either.
+    """
+    if not _agentx_enabled():
+        return
+    from hyperloom.inference_optimizer import framework_registry
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        resolve_backend_name,
+    )
+
+    backend = resolve_backend_name()
+    if backend == "bypass":
+        print(
+            "ERROR: HYPERLOOM_AGENTX=1 with HYPERLOOM_BENCHMARK_BACKEND=bypass. "
+            "The bypass backend ignores benchmark_script for serving frameworks, "
+            "so AgentX would not run and the session would report synthetic "
+            "measurements as AgentX results. Pick one.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    framework = str(getattr(args, "framework", "") or "").strip().lower()
+    if framework and framework_registry.is_scriptable(framework):
+        print(
+            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
+            "scriptable. The AgentX switch only replaces the benchmark client of a "
+            "serving framework, so no trace would be replayed -- but the session "
+            "would still be labelled AgentX and run on AgentX budgets. Pick one.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
+    """Widen the per-variant time budgets for AgentX's much longer runs.
+
+    A synthetic benchmark round is minutes; an AgentX round replays a real trace
+    corpus for a fixed measurement window plus dataset load, per-lane warmup and
+    drain -- measured at ~111 min for a 35B model at concurrency 64. The stock
+    conc-sweep budgets are sized for the former and would record every AgentX
+    variant as ``budget_exhausted`` before it finished.
+
+    Only knobs still at their parser default are touched; a value the operator
+    typed is left exactly as typed. Two things are deliberately NOT changed:
+
+    - ``--max-hours`` is the operator's contract with the scheduler / pod lease.
+      Silently extending it gets the job killed from outside the process, which
+      is far harder to diagnose than running out of budget. It only warns.
+    - ``--explore-overtime-kill-ratio`` stays at its default, because a
+      duration-based replay compresses runtime spread instead of widening it
+      (only warmup scales with a slow config; the measurement window is fixed).
+      The per-variant hard cap is what needed adjusting, and that lives in
+      ``explore.AGENTX_EXPLORE_TIMEOUT_CEILING_SEC``.
+
+    No-op unless ``HYPERLOOM_AGENTX`` is on.
+
+    Args:
+        args: Parsed CLI namespace, mutated in place.
+    """
+    if not _agentx_enabled():
+        return
+    if float(getattr(args, "max_hours", 0) or 0) == 2.0:
+        print(
+            "NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of 2.0. "
+            "One AgentX round (corpus load + warmup + drain + measurement window) "
+            "typically exceeds that on its own; pass an explicit --max-hours sized "
+            "to the number of candidates you intend to measure.",
+            file=sys.stderr,
+        )
+    if int(getattr(args, "conc_sweep_timeout_sec", 0) or 0) == 1800:
+        args.conc_sweep_timeout_sec = _AGENTX_CONC_SWEEP_TIMEOUT_SEC
+    if int(getattr(args, "conc_sweep_total_budget_sec", 0) or 0) == 9000:
+        args.conc_sweep_total_budget_sec = _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
+
+
+# Largest input+output a single request reaches in the 256k-capped weka corpus,
+# measured over all 30,141 requests of semianalysis_cc_traces_weka_062126_256k
+# (max input alone is 255,808). That variant is what every model family outside
+# upstream's 1M-context whitelist replays, and it is deliberately the
+# conservative of the two: the whitelist lives in aiperf_client.sh and
+# duplicating it here would give two copies to keep in sync, while the families
+# on it carry ~1M contexts and so never trip this bound anyway.
+AGENTX_CAPPED_CORPUS_PEAK_TOKENS = 255_999
+
+
+def _warn_if_context_too_small_for_corpus(resolved: int, source: str) -> None:
+    """Say up front when the served window cannot hold the replay corpus.
+
+    Not fatal: the run is still the honest one to make, and a model that cannot
+    hold the corpus cannot hold a leaderboard row either. But the failure would
+    otherwise surface an hour in, as requests the server refuses accumulate into
+    a context-overflow rate the scenario turns into submission_valid=false (or,
+    past ``--failed-request-threshold``, an abort) -- with nothing pointing at
+    the cause. Deliberately checked against the RESOLVED value whatever its
+    source: an explicit ``--max-model-len 8192`` or a stale exported
+    ``$MAX_MODEL_LEN`` are the likeliest ways to get this wrong, and gating the
+    check on the auto-resolved branch would stay silent for exactly those.
+    """
+    if not _agentx_enabled() or resolved >= AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
+        return
+    print(
+        f"WARNING: HYPERLOOM_AGENTX is on but the served context window "
+        f"({resolved}, from {source}) is below the replay corpus peak "
+        f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS} input+output tokens). Requests that "
+        f"do not fit will be refused by the server; the run is expected to come "
+        f"back non-submittable, and a model this size is not comparable on the "
+        f"AgentX board.",
+        file=sys.stderr,
+    )
+
+
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
+    resolved = _resolve_run_max_model_len_inner(args)
+    _warn_if_context_too_small_for_corpus(*resolved)
+    return resolved
+
+
+def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str]:
+    """Resolution proper; the corpus-fit warning is applied by the caller."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
     max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
@@ -1133,6 +1295,28 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
                 file=sys.stderr,
             )
             raise SystemExit(2)
+    # AgentX replays real agentic traces whose lengths come from the corpus, so
+    # ISL/OSL are meaningless placeholders here (they default to 1024/1024) and
+    # ``ISL+OSL+headroom`` would pin the server at ~6k against traces reaching
+    # ~1M tokens -- the corpus would then be silently reduced to whatever fits.
+    # Upstream's agentic path requires the model's own default context; mirror
+    # that. Explicit operator values above still win.
+    if _agentx_enabled():
+        native = _load_model_max_position_embeddings(str(args.model or ""))
+        if native:
+            return int(native), "agentx-native-context"
+        # Model not on disk yet (uncached HF id). Nothing downstream recomputes
+        # this -- the client deliberately never emits a context cap and the
+        # server phase is a bare delegation -- so the fallback below really is
+        # what the server gets. It is a synthetic-shape derivation that does not
+        # describe this workload; the corpus-fit warning fires on it.
+        print(
+            "WARNING: HYPERLOOM_AGENTX is on but the model's native context could "
+            "not be read (weights not on disk yet), so MAX_MODEL_LEN falls back "
+            "to the synthetic ISL+OSL derivation and the server will be booted at "
+            "that width. Pre-fetch the weights, or pass --max-model-len.",
+            file=sys.stderr,
+        )
     return (
         _resolve_max_model_len(
             args.isl,
@@ -1511,6 +1695,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         codex_follows_claude=codex_follows_claude,
     )
 
+    # Before either session branch: these are read by the fresh-launch seeding
+    # AND by the resume path, so this is the one place that covers both.
+    _preflight_agentx_backend(args)
+    _apply_agentx_budget_profile(args)
+
     if args.resume_from:
         # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
         from ..session.paths import (
@@ -1562,6 +1751,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
         state = SharedState.load_or_init(session_dir)
+        _stale = agentx_state_is_stale(state)
+        if _stale:
+            print(
+                f"ERROR: cannot resume this session -- {_stale}. "
+                "Start a fresh session instead of mixing the two measurement sets.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1756,22 +1953,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
         else:
-            # A clean stop (no stop_reason, crash_count < 3) keeps start_ts, so
-            # --max-hours is measured from the ORIGINAL session start and the
-            # earlier legs' wall-clock is already spent. Say so: an operator who
-            # stops a run by hand reads --max-hours as "from now".
-            elapsed_h = state.elapsed_minutes() / 60.0
-            budget_h = float(getattr(args, "max_hours", 0) or 0)
-            print(
-                f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
-                f"--max-hours counts from the original session start"
-            )
-            print(f"  → budget: {elapsed_h:.2f}h already elapsed of {budget_h:.2f}h → {budget_h - elapsed_h:.2f}h left")
-            if budget_h and elapsed_h >= budget_h:
-                print(
-                    "  → WARNING: this budget is already exhausted; raise --max-hours "
-                    "or start a fresh session, or the run stops almost immediately"
-                )
+            for line in _clean_stop_resume_budget_lines(
+                state,
+                max_hours=float(getattr(args, "max_hours", 0) or 0),
+            ):
+                print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
@@ -2316,28 +2502,28 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             closing_grace_sec=args.closing_grace_sec,
         )
     finally:
-        await coordinator.stop()
+        state = coordinator.shared_state
+        with timed_teardown_step(state, "coordinator_stop"):
+            await coordinator.stop()
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
-        session_lock.release()
+        with timed_teardown_step(state, "session_lock"):
+            session_lock.release()
         # Crash-safe reports/final.json. Runs unconditionally and first so a
         # machine-readable summary always exists even when the CLOSE sequencer
         # never ran. Idempotent: a no-op when ReportExecutor already wrote it.
         try:
             from ..breakdown import write_minimal_final_json
 
-            final_json = write_minimal_final_json(session_dir)
+            with timed_teardown_step(state, "final_json"):
+                final_json = write_minimal_final_json(session_dir)
             print(f"Final summary     : {final_json}")
         except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
             log.exception("crash-safe final.json write failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
         # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
-        sequencer_done = getattr(
-            coordinator.shared_state,
-            "close_sequence_done",
-            False,
-        )
+        sequencer_done = getattr(state, "close_sequence_done", False)
         if sequencer_done:
             print(
                 "Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)"
@@ -2349,18 +2535,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     record_session_breakdown,
                 )
 
-                flush_session(session_dir)
-                from ..breakdown import patch_breakdown_langfuse
+                with timed_teardown_step(state, "langfuse"):
+                    flush_session(session_dir)
+                    from ..breakdown import patch_breakdown_langfuse
 
-                patch_breakdown_langfuse(session_dir)
-                record_session_breakdown(session_dir)
+                    patch_breakdown_langfuse(session_dir)
+                    record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
         else:
             try:
                 from ..breakdown import write_breakdown_json
 
-                breakdown_path = write_breakdown_json(session_dir)
+                with timed_teardown_step(state, "session_breakdown"):
+                    breakdown_path = write_breakdown_json(session_dir)
                 print(f"Session breakdown : {breakdown_path}")
             except Exception:  # noqa: BLE001
                 log.exception("session_breakdown finalize failed (non-fatal)")
@@ -2368,7 +2556,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             try:
                 from ..breakdown import write_minimal_final_report
 
-                final_md = write_minimal_final_report(session_dir)
+                with timed_teardown_step(state, "final_md"):
+                    final_md = write_minimal_final_report(session_dir)
                 print(f"Final report      : {final_md}")
             except Exception:  # noqa: BLE001
                 log.exception("emergency final report write failed (non-fatal)")
@@ -2383,11 +2572,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     record_session_breakdown,
                 )
 
-                flush_session(session_dir)
-                from ..breakdown import patch_breakdown_langfuse
+                with timed_teardown_step(state, "langfuse"):
+                    flush_session(session_dir)
+                    from ..breakdown import patch_breakdown_langfuse
 
-                patch_breakdown_langfuse(session_dir)
-                record_session_breakdown(session_dir)
+                    patch_breakdown_langfuse(session_dir)
+                    record_session_breakdown(session_dir)
             except Exception:  # noqa: BLE001
                 log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
 
@@ -2398,16 +2588,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         try:
             from ..breakdown import package_session_artifacts
 
-            pkg_path = package_session_artifacts(
-                session_dir,
-                session_id=str(
-                    getattr(coordinator.shared_state, "session_id", "") or "",
-                ),
-            )
+            with timed_teardown_step(state, "artifact_package"):
+                pkg_path = package_session_artifacts(
+                    session_dir,
+                    session_id=str(getattr(state, "session_id", "") or ""),
+                )
             if pkg_path is not None:
                 print(f"Artifact package  : {pkg_path}")
         except Exception:  # noqa: BLE001
             log.exception("session artifact package failed (non-fatal)")
+        try:
+            state.save(session_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to persist teardown timings (non-fatal)")
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

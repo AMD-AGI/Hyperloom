@@ -31,6 +31,13 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# The ``parse_eval_results`` reasons that prove an eval produced output: a
+# results file it could not decode, and one carrying no metric it recognises.
+# Every other reason -- no file at all, or the parser itself raising -- leaves
+# no evidence the eval ran, and calling those "ran" makes an infrastructure
+# fault read as a model that answered nothing.
+_EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
+
 
 def _merge_current_recipe_configs(
     explore: Mapping[str, Any],
@@ -1978,6 +1985,151 @@ class PreludePhase(PhaseHandler):
         self.shared_state.save(self.session_dir)
         return False
 
+    @staticmethod
+    def _replay_eval_search_root(result: dict) -> Path | None:
+        """Directory holding every round of this replay task.
+
+        The cold-start guard evaluates only in the warmup round but decides on
+        the measure round, so the score lands in a sibling directory rather
+        than under the deciding round's own workspace. Searching the workspace
+        alone finds nothing on every double-run replay: across 852 recorded
+        replays the score sat in ``warmup_round`` 320 times and in
+        ``measure_round`` never.
+
+        Args:
+            result: The ``replay_warm_recipe`` result envelope.
+
+        Returns:
+            The task-level directory containing both round directories, or
+            ``None`` when the result names no usable path.
+        """
+        from ..actions.executors.baseline import (
+            _MEASURE_ROUND_DIR,
+            _WARMUP_ROUND_DIR,
+        )
+
+        round_dirs = {_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR}
+        for key in ("output_dir", "workspace"):
+            raw = str(result.get(key) or "").strip()
+            if not raw:
+                continue
+            path = Path(raw)
+            for candidate in (path, *path.parents):
+                if candidate.name in round_dirs:
+                    return candidate.parent
+            return path
+        return None
+
+    def _warm_replay_accuracy_ok(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: dict,
+    ) -> bool:
+        """Whether a replayed config may be promoted on accuracy grounds.
+
+        Every replay is judged, not just the ones touching a knob known to be
+        risky: a KB recipe is evidence from another session and another
+        machine, so reproducing its throughput says nothing about whether it
+        still computes correctly here. The measured score is recorded either
+        way — a promotion that was checked and passed is not the same record as
+        one that was never checked.
+
+        ``eval_ran`` separates the two ways ``replay_accuracy`` can be absent.
+        A score of 0.0 means the model answered nothing; no score at all means
+        no evidence either way, and those must not collapse into one state.
+
+        Args:
+            result: The ``replay_warm_recipe`` result envelope.
+            task: The originating task, carrying the replayed args/envs.
+            outcome: The warm-replay outcome dict, stamped either way.
+
+        Returns:
+            ``True`` when promotion may proceed; ``False`` when the caller must
+            stop (the rollback and outcome have already been recorded).
+        """
+        from ..actions.executors._accuracy_gate import (
+            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+            accuracy_meets_floor,
+            accuracy_passed,
+            parse_eval_results,
+        )
+
+        state = self.shared_state
+        try:
+            baseline_accuracy = float(getattr(state, "baseline_accuracy", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            baseline_accuracy = 0.0
+
+        measured = result.get("accuracy")
+        eval_ran = isinstance(measured, (int, float))
+        eval_error = ""
+        if not eval_ran:
+            measured = None
+            root = self._replay_eval_search_root(result)
+            if root is None:
+                eval_error = "replay result names no round directory"
+            else:
+                try:
+                    eval_out = parse_eval_results(root)
+                except Exception as exc:  # noqa: BLE001 — an unreadable eval is "no verdict"
+                    eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
+                parsed = eval_out.get("accuracy")
+                if isinstance(parsed, (int, float)):
+                    measured = float(parsed)
+                    eval_ran = True
+                else:
+                    eval_error = str(
+                        eval_out.get("error") or "no accuracy in eval output"
+                    )
+                    # Only a results file the parser reached can say the eval
+                    # ran; a parser that never got one says nothing either way.
+                    eval_ran = eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE)
+
+        outcome["eval_ran"] = bool(eval_ran)
+        outcome["eval_error"] = eval_error or None
+        outcome["replay_accuracy"] = float(measured) if measured is not None else None
+        outcome["baseline_accuracy"] = (
+            baseline_accuracy if baseline_accuracy > 0 else None
+        )
+
+        if measured is None:
+            # A measurement that failed is not evidence the config broke the
+            # model, so it must not stop the run: the replay is admitted and the
+            # reason it could not be judged is recorded instead. ``eval_ran``
+            # says whether an eval produced nothing or never ran at all.
+            log.warning(
+                "warm-replay admitted without an accuracy verdict "
+                "(eval_ran=%s, baseline %.4f): %s",
+                eval_ran,
+                baseline_accuracy,
+                eval_error or "no reason recorded",
+            )
+            return True
+        if baseline_accuracy > 0:
+            if accuracy_passed(baseline_accuracy, float(measured)):
+                return True
+            reason = (
+                "accuracy regression on the replayed config "
+                f"(baseline {baseline_accuracy:.4f}, replay {measured:.4f})"
+            )
+        elif accuracy_meets_floor(measured, DEFAULT_ENABLEMENT_ACCURACY_FLOOR):
+            return True
+        else:
+            reason = (
+                "accuracy below absolute floor on the replayed config "
+                f"(replay {measured:.4f}, "
+                f"floor {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:.2f})"
+            )
+        if not self._require_combined_warm_rollback(result, task, outcome):
+            return False
+        outcome["status"] = "accuracy_failed"
+        outcome["reason"] = reason
+        state.warm_replay_outcome = outcome
+        state.save(self.session_dir)
+        log.info("warm-replay REJECTED on accuracy: %s", reason)
+        return False
+
     def _promote_warm_replay(
         self,
         result: dict,
@@ -2070,6 +2222,16 @@ class PreludePhase(PhaseHandler):
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
+            return
+        # A replayed config lands on ``current_best``, so every later
+        # measurement in the session is taken against it. Promoting one on
+        # throughput alone is how a config that makes the model emit garbage
+        # becomes the session's reference: breaking the numerics is itself a
+        # large throughput win, so the objective actively selects for it.
+        # Every replay is judged here, not only high-risk knobs: a KB recipe is
+        # evidence from another session, so reproducing its throughput says
+        # nothing about whether it still computes correctly here.
+        if not self._warm_replay_accuracy_ok(result, task, outcome):
             return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         result["combined_gain_pct"] = round(measured_gain, 3)
@@ -2198,6 +2360,11 @@ class PreludePhase(PhaseHandler):
                 "gain_pct": round(measured_gain, 3),
                 "hot_tput": float(hot_tput),
                 "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
+                # The score this promotion was judged on, recorded alongside the
+                # throughput it was judged with. ``None`` means no score could be
+                # read, not that the model scored nothing — ``eval_ran`` on the
+                # outcome separates those.
+                "accuracy": outcome.get("replay_accuracy"),
                 # source_tier records the warm-recipe tier for breakdown attribution.
                 "source_tier": outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),

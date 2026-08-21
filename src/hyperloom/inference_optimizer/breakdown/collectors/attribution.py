@@ -103,6 +103,161 @@ def _action_family(action: str) -> str:
     return "other"
 
 
+def _geak_provenance_names() -> frozenset[str]:
+    """Return the provenance labels that mark an entry as GEAK-owned.
+
+    Read from the executor that stamps them
+    (:data:`~hyperloom.orchestrator.actions.executors.explore._CONFIG_REPLAY_PROVENANCE`)
+    so there is exactly one list of these names in the tree. Collectors also
+    run offline against a tarball, where the orchestrator package may not be
+    importable at all; that case falls back to the same literal rather than
+    dropping GEAK entries on the floor.
+
+    Returns:
+        frozenset[str]: The lowercased GEAK provenance labels.
+    """
+    try:
+        from hyperloom.orchestrator.actions.executors.explore import (
+            _CONFIG_REPLAY_PROVENANCE,
+        )
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+        return frozenset({"geak_revalidate"})
+    return frozenset(str(p).strip().lower() for p in _CONFIG_REPLAY_PROVENANCE)
+
+
+def _geak_name_resolver() -> Any:
+    """Return the one resolver that turns an acceptance entry into a name.
+
+    The canonical implementation lives beside the ledger that writes these
+    entries
+    (:func:`~hyperloom.orchestrator.loop.coordinator_helpers._geak_spec_name`).
+    Importing it here keeps the collector and the ledger from drifting into two
+    spellings of the same kernel. Collectors also run offline against a
+    tarball, where the orchestrator package may not be importable at all; that
+    case falls back to the same field order rather than dropping names.
+
+    Returns:
+        Any: A callable taking one acceptance entry and returning its name.
+    """
+    try:
+        from hyperloom.orchestrator.loop.coordinator_helpers import _geak_spec_name
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+        def _geak_spec_name(spec: Any) -> str:
+            if isinstance(spec, str):
+                return spec.strip()
+            if not isinstance(spec, dict):
+                return ""
+            return str(
+                spec.get("short_name")
+                or spec.get("kernel_id")
+                or spec.get("cand_tag")
+                or ""
+            ).strip()
+
+    return _geak_spec_name
+
+
+def _geak_env_test() -> Any:
+    """Return the one test for "this acceptance is an env selection".
+
+    Same sourcing rule as :func:`_geak_name_resolver`: the ledger owns the
+    definition, the collector borrows it, and the offline fallback repeats the
+    rule rather than inventing a looser one. The rule is deliberately
+    one-sided — an acceptance is env only when it *says* ``kind: env``. A
+    missing ``kind`` is unknown, and unknown is admitted.
+
+    Returns:
+        Any: A callable taking one acceptance entry and returning ``True``
+        only when that entry is known to be an env selection.
+    """
+    try:
+        from hyperloom.orchestrator.loop.coordinator_helpers import geak_spec_is_env
+    except Exception:  # pragma: no cover - offline replay without orchestrator
+        def geak_spec_is_env(spec: Any) -> bool:
+            if not isinstance(spec, dict):
+                return False
+            return str(spec.get("kind") or "").strip().lower() == "env"
+
+    return geak_spec_is_env
+
+
+def _geak_kernel_names(entry: dict[str, Any]) -> list[str]:
+    """Return the authored-kernel names an entry carries, in row order.
+
+    Two things were wrong with reading ``accepted_kernels`` alone.
+
+    An acceptance lands in one of two lanes, ``accepted_kernels`` or
+    ``accepted_heads``, and which one it lands in is not a property of the
+    kernel. Measured over ``/shared_nfs/hyperloom-claw``, all 7 stack entries
+    with ``action=geak_e2e`` have ``accepted_kernels`` empty and 4 of them
+    carry their kernel in ``accepted_heads`` alone. Reading one lane did not
+    under-count the gain — the gain is on the entry either way — it mislabelled
+    it: :func:`_geak_contribution` returned ``"config"`` for a row that had a
+    kernel running. Both lanes are read here, in the same order the ledger
+    reads them.
+
+    ``kind == "env"`` entries are excluded. Those select an existing library or
+    server flag; no kernel was authored, so they are config gain and counting
+    them as kernels would double-book the same win.
+
+    Both written shapes are accepted: the ``geak_e2e`` promotion copies GEAK's
+    list of dicts, the revalidation path carries a flat list of names. Anything
+    unnamed is dropped rather than keyed as ``"?"``.
+
+    Args:
+        entry (dict[str, Any]): A stack / gain-ledger entry.
+
+    Returns:
+        list[str]: The kernel names, de-duplicated, order preserved.
+    """
+    resolve = _geak_name_resolver()
+    is_env = _geak_env_test()
+    lanes = list(entry.get("accepted_kernels") or []) + list(
+        entry.get("accepted_heads") or []
+    )
+    out: list[str] = []
+    for item in lanes:
+        if is_env(item):
+            continue
+        name = resolve(item)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _geak_contribution(entry: dict[str, Any]) -> str:
+    """Classify what a GEAK-family entry actually had running.
+
+    The stack rebench measures flags, env and overlay together against
+    ``baseline_tput``, so a row that carried both cannot be decomposed. Saying
+    which of the three cases a row is beats inventing a share for each.
+
+    Args:
+        entry (dict[str, Any]): A stack / gain-ledger entry.
+
+    Returns:
+        str: ``"kernel"`` when only an authored kernel was in play,
+        ``"config"`` when only server arguments or env were, and ``"joint"``
+        when both were and the measurement cannot separate them.
+    """
+    # A stack entry can name kernels that never ran: the promote path copies GEAK's
+    # self-reported lanes, and a rebench that stripped a dead overlay still promotes on
+    # its config gain. ``overlay_loaded is False`` is proof of absence, so the row is
+    # config gain whatever the lanes say -- the same call the per-kernel ledger makes.
+    # A missing key means the writer predates the stamp; those are left to the lanes.
+    kernels = [] if entry.get("overlay_loaded") is False else _geak_kernel_names(entry)
+    has_config = bool(
+        str(entry.get("candidate_extra_server_args") or "").strip()
+        or str(entry.get("extra_server_args") or "").strip()
+        or (entry.get("extra_envs") or {})
+    )
+    if kernels and has_config:
+        return "joint"
+    if kernels:
+        return "kernel"
+    return "config"
+
+
 def _phase_timeline(state: dict[str, Any]) -> list[tuple[float, str]]:
     """Return normalized phase boundaries ordered by timestamp."""
 
@@ -160,6 +315,14 @@ def _entry_family(entry: dict[str, Any]) -> str:
     """
 
     action = str(entry.get("action") or "").strip().lower()
+    # The GEAK revalidation dispatches as a plain ``explore`` task, so its
+    # action label says ``explore`` and only its provenance says GEAK. Reading
+    # the label alone files every GEAK credit under the explore family — the
+    # exact mis-crediting the ``geak`` bucket was added to prevent.
+    if action == "explore":
+        provenance = str(entry.get("provenance") or "").strip().lower()
+        if provenance in _geak_provenance_names():
+            return "geak"
     if not action.startswith("integrate_patch"):
         return _action_family(action)
     if entry.get("attribution_eligible") is False or entry.get("baseline_enablement"):
@@ -450,6 +613,8 @@ def _collect_phase_breakdown(
         "kernel_agent": {"total_gain_pct": 0.0, "by_kernel_id": {}},
         # by_tuned_file keyed on the produced CSV.
         "gemm_tuning": {"total_gain_pct": 0.0, "by_tuned_file": {}},
+        # GEAK runs inside KERNEL but is bucketed apart, like gemm_tuning.
+        "geak": {"total_gain_pct": 0.0, "by_contribution": {}, "by_kernel_id": {}},
         "sweep": {"total_gain_pct": 0.0},
         "close": {"total_gain_pct": 0.0},
         "unattributed": {"total_gain_pct": 0.0},
@@ -484,6 +649,10 @@ def _collect_phase_breakdown(
         # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"
+        # So does GEAK. Its own bucket keeps the gain out of ``unattributed``,
+        # where the KERNEL phase name (absent from these buckets) sent it.
+        elif fam == "geak":
+            phase = "geak"
         # Fall back to action family when phase_history isn't usable.
         elif phase not in phase_buckets:
             if fam in ("explore", "backends", "params"):
@@ -538,6 +707,23 @@ def _collect_phase_breakdown(
                 float(by_pr.get(pr_key, 0.0)) + float(delta),
                 2,
             )
+        elif phase == "geak":
+            # What was running, not a guessed share of it.
+            by_contrib = bucket.setdefault("by_contribution", {})
+            contribution = _geak_contribution(e)
+            by_contrib[contribution] = round(
+                float(by_contrib.get(contribution, 0.0)) + float(delta),
+                2,
+            )
+            by_kid = bucket.setdefault("by_kernel_id", {})
+            for key in _geak_kernel_names(e):
+                # One kernel per row is the normal case. When a row names
+                # several, each is named at the row's whole gain — the rebench
+                # measured them together and cannot say who earned what.
+                by_kid[key] = round(
+                    float(by_kid.get(key, 0.0)) + float(delta),
+                    2,
+                )
         elif phase == "gemm_tuning":
             # Key on the tuned CSV path, falling back to ``variant_name`` then ``?``.
             by_tuned = bucket.setdefault("by_tuned_file", {})

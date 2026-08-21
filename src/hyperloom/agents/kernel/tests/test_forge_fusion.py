@@ -77,10 +77,24 @@ def test_build_cmd_maps_core_options(tmp_path):
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--output-dir") + 1] == str(tmp_path)
     assert cmd[cmd.index("--agent-backend") + 1] == "claude"
-    assert cmd[cmd.index("--llm-model") + 1] == "claude-opus-4-6"
+    # The model flag is spelled the way forge-loop spells it; forge-fuse rejects
+    # the old --llm-model outright rather than ignoring it.
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6"
+    assert "--llm-model" not in cmd
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
     assert "--fuse-all-confirmed" in cmd
+    assert "--tp" not in cmd
+    assert "--block-size" not in cmd
+
+
+def test_build_cmd_forwards_session_serve_args(tmp_path):
+    payload = _payload(tmp_path)
+    payload.update({"tp": 8, "block_size": 128, "max_model_len": 13312})
+    cmd = forge_fusion._build_cmd(payload)
+    assert cmd[cmd.index("--tp") + 1] == "8"
+    assert cmd[cmd.index("--block-size") + 1] == "128"
+    assert cmd[cmd.index("--max-model-len") + 1] == "13312"
 
 
 def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
@@ -271,6 +285,79 @@ def test_main_timeout_emits_revert_result(tmp_path, monkeypatch, capsys):
     assert result["kept"] is False
     assert result["requires_e2e_validation"] is False
     assert json.loads((output_dir / "result.json").read_text(encoding="utf-8")) == result
+
+
+def test_main_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch, capsys):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    patch = output_dir / "fusion.patch"
+    input_json = tmp_path / "input.json"
+    payload = _payload(output_dir)
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    def fake_run(cmd, timeout):
+        (output_dir / "kernel_keep_checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "kept": True,
+                    "kernel_speedup": 2.69,
+                    "env_flag": "QWEN_FUSED",
+                    "source_file": "/fw/model.py",
+                    "repo_root": "/fw",
+                }
+            ),
+            encoding="utf-8",
+        )
+        patch.write_text("diff --git a/model.py b/model.py\n", encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    out = capsys.readouterr()
+    assert rc == 124
+    result = _sentinel_payload(out.out)
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["requires_e2e_validation"] is True
+    assert result["salvaged"] is True
+    assert result["patch"] == str(patch)
+    assert result["kernel_speedup"] == 2.69
+
+
+def test_main_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch, capsys):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "kernel_keep_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "kept": True,
+                "kernel_speedup": 9.99,
+                "env_flag": "STALE_FUSED",
+                "source_file": "/fw/stale.py",
+                "repo_root": "/fw",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "fusion.patch").write_text(
+        "diff --git a/stale.py b/stale.py\n", encoding="utf-8"
+    )
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    def fake_run(cmd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert rc == 124
+    assert result["kept"] is False
+    assert result["decision"] == "REVERT"
 
 
 def test_run_with_tree_timeout_captures_output():
@@ -718,6 +805,7 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
 
     def fake_run(_cmd, _timeout):
         # The run writes its own manifest; main() clears any stale one first.
+        _patch_file(output_dir)
         (output_dir / "fusion_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8"
         )

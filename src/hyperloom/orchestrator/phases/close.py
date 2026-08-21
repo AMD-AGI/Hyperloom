@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 import logging as _logging
+from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..state.task_registry import Task
@@ -162,6 +163,60 @@ class ClosePhase(PhaseHandler):
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
+    async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
+        """Stop any GEAK 2b rebench and close its pending slot as the run winds down.
+
+        Shared by both wind-down paths: the CLOSE sequencer and the wall-clock
+        closing phase. Neither can still turn a rebench into a headline, and a
+        running one holds the GPU lane against the post-opt roofline, so the task
+        is cancelled and the slot settled.
+
+        Args:
+            reason: Stamped on the cancellations and the settled slot.
+        """
+        try:
+            dropped = await _geak_rebench.cancel_geak_rebench_tasks(
+                self.tasks,
+                reason=reason,
+                include_running=True,
+            )
+            if dropped:
+                log.info(
+                    "%s: cancelled %d in-flight GEAK rebench task(s)",
+                    reason,
+                    len(dropped),
+                )
+            settled = await _geak_rebench.settle_dangling_geak_pending(
+                self.tasks,
+                self.shared_state,
+                reason=reason,
+            )
+            if not (dropped or settled):
+                return
+            if settled:
+                log.info("%s: settled a GEAK revalidation slot that can no longer land", reason)
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:  # noqa: BLE001
+                log.exception("%s: geak_pending settle save failed", reason)
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "geak_rebench_close_drain",
+                    "reason": reason,
+                    "cancelled_task_ids": dropped,
+                    "pending_settled": bool(settled),
+                },
+            )
+        except Exception:  # noqa: BLE001 — wind-down must proceed even if this fails
+            log.exception("%s: GEAK rebench drain failed (non-fatal)", reason)
+            await self._record_close_step(
+                "geak_rebench_drain",
+                status="failed",
+                detail="see log; geak_pending may remain awaiting_rebench",
+            )
+
     async def _on_enter_close(self, *, from_phase: str) -> None:
         """CLOSE sequencer (fixed order): post-opt roofline → fact_finalize → report → session_breakdown → langfuse flush → artifact_package → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous for historical reasons.
 
@@ -169,6 +224,7 @@ class ClosePhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
+        await self._drain_geak_rebench_for_close()
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
@@ -525,19 +581,19 @@ class ClosePhase(PhaseHandler):
         )
 
     def _close_step_wait_sec(self, task: Task) -> float:
-        """How long to wait for a close-step task that is already running.
+        """How long CLOSE waits for a close-step task to reach a terminal state.
 
         The bound is the step's own expected runtime, clamped into
         ``[_CLOSE_STEP_WAIT_FLOOR_SEC, _CLOSE_STEP_WAIT_CEILING_SEC]``. This is
         deliberately not the closing reserve: the reserve answers "how much of
         the session do we hold back for CLOSE", which scales with the session
         and is a handful of seconds for a short one, while this answers "how
-        long is it reasonable to wait for work that is already under way",
-        which scales with the work. Bounding a two-minute report by a
-        twelve-second reserve is a wait only on paper.
+        long is it reasonable to wait for the work", which scales with the
+        work. Bounding a two-minute report by a twelve-second reserve is a wait
+        only on paper.
 
         Args:
-            task: The close-step task found in ``running``.
+            task: The close-step task, already running or about to start.
 
         Returns:
             The bound in seconds.
@@ -618,8 +674,8 @@ class ClosePhase(PhaseHandler):
     async def _run_close_task(self, task: Task, *, step: str) -> str | None:
         """Run one close-step task and return the state it ended in.
 
-        ``run_task`` transitions ``queued -> running``, which the registry
-        refuses for a row that is already terminal or already running — and
+        ``run_task_registered`` transitions ``queued -> running``, which the
+        registry refuses for a row that is already terminal or running — and
         refuses correctly: the rejection is the double-spawn guard. So such a
         row is reported or waited on here instead of run, which keeps one row
         the sequencer did not create from taking down the step that was
@@ -650,8 +706,48 @@ class ClosePhase(PhaseHandler):
             return state
         if state == _TASK_STATE_RUNNING:
             return await self._await_running_close_task(task, step=step)
-        # Closing steps take no lanes, so the run always happens.
-        return (await self.run_task_registered(task)).state
+        return await self._run_fresh_close_task(task, step=step)
+
+    async def _run_fresh_close_task(self, task: Task, *, step: str) -> str:
+        """Run a queued close-step task, bounded by the same wait as an in-flight one.
+
+        A fresh report used to be awaited with no timeout, so a wedged writer
+        held the process open after the session budget was already gone. The
+        bound is the step's typical cost, not the closing reserve.
+
+        The run goes through ``run_task_registered``, so the step is reachable
+        from ``cancel_inflight_actions`` at shutdown, and the cancellation the
+        bound raises lands on the runner's ``CancelledError`` path, which writes
+        the row terminal and returns its lanes before this returns.
+
+        Args:
+            task: The queued (or otherwise runnable) close-step task.
+            step: Close-step label, for logging.
+
+        Returns:
+            The state the task ended in, or ``running`` when the bound elapsed
+            first.
+        """
+        bound_sec = self._close_step_wait_sec(task)
+        log.info(
+            "CLOSE step %s: task_id=%s starting; waiting up to %.0fs for it",
+            step,
+            task.task_id,
+            bound_sec,
+        )
+        try:
+            result = await asyncio.wait_for(self.run_task_registered(task), timeout=bound_sec)
+        except asyncio.TimeoutError:
+            log.warning(
+                "CLOSE step %s: task_id=%s still running after %.0fs; recording the step as failed",
+                step,
+                task.task_id,
+                bound_sec,
+            )
+            return _TASK_STATE_RUNNING
+        # Closing steps take no lanes, so ``None`` — the lanes-busy answer — is
+        # unreachable here; treat it as the non-terminal state either way.
+        return result.state if result is not None else _TASK_STATE_RUNNING
 
     async def _record_close_step(
         self,
@@ -728,6 +824,12 @@ class ClosePhase(PhaseHandler):
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
+
+        # The wall-clock path never reaches ``_on_enter_close``, so it owns the
+        # same wind-down: a rebench left running would keep writing back during
+        # the grace window, and an unsettled slot makes the report promise a
+        # rebench whose task the loop above has already cancelled.
+        await self._drain_geak_rebench_for_close(reason="closing_phase")
 
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task, _existing = await self.tasks.create_or_return_existing(

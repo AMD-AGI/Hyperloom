@@ -24,10 +24,12 @@ version_number = "1.0.0b2"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "generic",
+    "flavor": "hyperloom",
     "header_title": f"Hyperloom {version_number}",
     "header_link": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/",
     "version_list_link": False,
+    "use_repository_button": True,
+    "use_issues_button": True,
     "nav_secondary_items": {
         "GitHub": "https://github.com/AMD-AGI/Hyperloom",
         "Community": False,
@@ -38,6 +40,42 @@ html_theme_options = {
     },
     "link_main_doc": False,
 }
+
+# ``use_repository_button`` makes sphinx-book-theme call get_repo_parts(context),
+# which walks ["github", "bitbucket", "gitlab"] looking for a ``<provider>_url``
+# key and returns None -- not a tuple -- when it finds none. Its caller unpacks
+# that return value unconditionally, so a missing key is a build-time
+# ``TypeError: cannot unpack non-iterable NoneType object`` rather than a
+# skipped button.
+#
+# Nothing in the stack supplies the key on its own: pydata-sphinx-theme has the
+# provider defaults, but only inside the "edit this page" path, and
+# rocm-docs-core defaults ``use_edit_page_button`` off.
+#
+# Injected per page rather than declared as ``html_context``. Assigning that
+# config directly is enough to fix the local build, but it suppresses
+# rocm-docs-core's own defaults (it only sets them when the user has not) and it
+# overwrites the context Read the Docs injects for its version switcher -- which
+# turned a green RTD build red. Adding the keys at render time leaves both
+# untouched, and ``setdefault`` means an explicit value elsewhere still wins.
+_SOURCE_REPO_CONTEXT = {
+    "github_url": "https://github.com",
+    "github_user": "AMD-AGI",
+    "github_repo": "Hyperloom",
+    "github_version": "main",
+    "doc_path": "docs",
+}
+
+
+def setup(app):
+    """Supply the repository keys sphinx-book-theme unpacks without checking."""
+
+    def _add_source_repo_context(_app, _pagename, _templatename, context, _doctree):
+        for key, value in _SOURCE_REPO_CONTEXT.items():
+            context.setdefault(key, value)
+
+    # Ahead of sphinx-book-theme's own html-page-context handlers (default 500).
+    app.connect("html-page-context", _add_source_repo_context, priority=100)
 
 
 # Article info display

@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.common.platform_probe import (
+    amdgpu_device_count,
     boost_state,
     cpu_model,
     cpufreq_governor,
@@ -121,3 +122,42 @@ def test_read_kernel_file_never_raises(tmp_path):
     d = tmp_path / "adir"
     d.mkdir()
     assert read_kernel_file("adir", root=tmp_path) == ""
+
+
+def _amdgpu(root: Path, *addresses: str) -> Path:
+    """A driver directory holding the given devices next to its own entries."""
+    d = root / "sys/bus/pci/drivers/amdgpu"
+    d.mkdir(parents=True, exist_ok=True)
+    for address in addresses:
+        (d / address).mkdir()
+    for entry in ("bind", "unbind", "uevent", "new_id", "remove_id"):
+        (d / entry).write_text("")
+    (d / "module").mkdir()
+    return root
+
+
+def test_gpus_outside_pci_domain_zero_are_counted(tmp_path):
+    """A host large enough to need several PCI domains puts its GPUs outside
+    ``0000:``, and that is the hardware this record exists to describe. Matching
+    ``0000:`` alone reported no accelerators on exactly those machines."""
+    root = _amdgpu(
+        tmp_path,
+        "0002:00:01.0", "0002:00:02.0", "0002:00:03.0", "0002:00:04.0",
+        "0003:00:01.0", "0003:00:02.0", "0003:00:03.0", "0003:00:04.0",
+    )
+    assert amdgpu_device_count(root=root) == 8
+
+
+def test_the_ordinary_single_domain_host_still_counts(tmp_path):
+    root = _amdgpu(tmp_path, "0000:63:00.0", "0000:a3:00.0")
+    assert amdgpu_device_count(root=root) == 2
+
+
+def test_driver_control_entries_are_not_devices(tmp_path):
+    """``bind``, ``module`` and friends share the directory with the devices."""
+    assert amdgpu_device_count(root=_amdgpu(tmp_path)) is None
+
+
+def test_a_host_without_the_amdgpu_driver_reports_nothing(tmp_path):
+    """None, not zero: the driver dir is absent, which is not a count of zero."""
+    assert amdgpu_device_count(root=tmp_path) is None

@@ -84,6 +84,16 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
+# SGLang graph-capture profiling flag shipped by the profile YAML, and the
+# eager flag that makes it a no-op. Literals rather than an import from
+# ``baseline``: that module imports this one, so the dependency only goes one
+# way.
+_SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
+_SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
+# ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
+# was attempted and did not apply. Distinct from "never attempted": patching can
+# be disabled for an image that already ships the patch.
+_TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
 _AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 # Quality-reference env names, in resolution order. Every scriptable workload
@@ -117,6 +127,39 @@ def agentx_enabled(env: dict[str, str] | None = None) -> bool:
     return str(raw).strip().lower() in _AGENTX_TRUE_VALUES
 
 
+def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
+    """Whether an agentic measurement must stay out of the cross-session KB.
+
+    The recipe canonical id is a seven-tuple of model / hardware / framework /
+    precision identity: no workload, no mode. Row workload tags are copied from
+    ``SharedState.isl``/``osl``, which under AgentX are the inert 1024/1024
+    placeholders the corpus overrides. So an agentic throughput would overwrite a
+    synthetic ``best_throughput`` on a bare numeric comparison, and the row would
+    be tagged as a 1024/1024 synthetic run -- which a later synthetic session's
+    shape filter then matches positively. The store is machine-global and
+    ``--reset-state`` does not clear it, so the damage outlives its session.
+
+    One helper rather than a gate per sink: there are three writers (CLOSE
+    finalize, the runtime amend, and the T0 anchor), they were not all found at
+    once, and a fourth should have something obvious to call.
+
+    Prefers the persisted mode over the ambient env var. ``benchmark_mode`` is
+    stamped at seed precisely so it survives a restart, while ``HYPERLOOM_AGENTX``
+    only describes the shell that happens to be running -- an SDK caller, or a
+    CLOSE re-driven in a subprocess that did not inherit it, would otherwise
+    publish the agentic number. Either saying "agentx" is enough.
+
+    Args:
+        shared_state: Session state, when the caller has one.
+
+    Returns:
+        True when the caller must skip its Recipe KB write.
+    """
+    if agentx_enabled():
+        return True
+    return str(getattr(shared_state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+
+
 def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client."""
     if not agentx_enabled():
@@ -131,8 +174,13 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
+    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
+    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
+    # documents it as a supported knob; without forwarding it only works when
+    # the benchmark process happens to inherit the full parent environment,
+    # which is exactly the kind of silent difference this path exists to remove.
     for key, value in os.environ.items():
-        if key.startswith("AGENTX_") or key == "AIPERF_BIN":
+        if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
 
 
@@ -528,8 +576,19 @@ def _tracelens_patch_enabled() -> bool:
     """Read the ``HYPERLOOM_ENABLE_PATCH`` kill switch (default on).
 
     Set ``HYPERLOOM_ENABLE_PATCH=0`` to disable runtime patching of vLLM /
-    SGLang (keeps today's safe behaviour, no TraceLens-only flags injected).
-    Default on because the patches are backward-compatible.
+    SGLang. Default on because the patches are backward-compatible.
+
+    With the switch off, no *server flag* that only a patched build accepts is
+    injected (vLLM ``--profiler-config.detailed_trace_annotation``, SGLang
+    ``--enable-shape-discovery-for-cuda-graph-profile``), because an unpatched
+    argparse rejects them. The SGLang ``PROFILE_EXTRA_BODY`` annotations
+    (``shape_discovery`` / ``detailed_annotations``) are a different case and are
+    **kept**: they ride the ``/start_profile`` API, which an unpatched server
+    accepts, and the switch is also how a pre-patched image opts out of runtime
+    patching while still supporting them. Only a patch that was *attempted and
+    failed* clears them, which is why that gate reads
+    ``HYPERLOOM_PROFILE_DEGRADED_REASON`` (set solely on the attempted-and-failed
+    path) rather than ``tracelens_patch_ok``.
 
     Returns:
         True when runtime patching is enabled (default), else False.
@@ -999,6 +1058,16 @@ def materialize_config_with_envs(
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         if delay_iters < 0:
             delay_iters = 0
+        # The iteration-based delay assumes the client streams a predictable
+        # number of decode steps before steady state. The AgentX client instead
+        # brackets a WALL-CLOCK window with /start_profile and /stop_profile, so
+        # an iteration delay computed from the placeholder OSL (6080 steps at the
+        # 1024/1024 defaults) is never reached inside that window and the trace
+        # comes back empty. Hand the delay to the client and keep only the
+        # capture bound, which is what stops the worker accumulating events in
+        # host RAM until the OOM killer arrives.
+        if agentx_enabled():
+            delay_iters = 0
         # Operator hard-override of captured steps (e.g. a small eager FlyDSL
         # profile). Honored verbatim; warn when outside the safe band rather
         # than silently clamping.
@@ -1052,7 +1121,7 @@ def materialize_config_with_envs(
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
             if not tracelens_patch_ok:
                 envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = "tracelens_runtime_patch_unavailable"
+                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
                 log.warning(
                     "TraceLens runtime patch unavailable for framework=%s; "
                     "profile will omit annotation-only flags and roofline "
@@ -1137,8 +1206,21 @@ def materialize_config_with_envs(
                             "imprecise.",
                             _model,
                         )
+            # Both capture options are annotation-only and need TraceLens
+            # server-side support to land: without it the trace carries no
+            # ``kernel_shape_profiler`` events (trace-health check 5), so asking
+            # for them pays the capture cost for data nothing downstream reads.
+            # Keyed on the degraded *reason* rather than ``tracelens_patch_ok``:
+            # a patch that was never attempted (HYPERLOOM_ENABLE_PATCH=0) can
+            # still be baked into the image, and must keep the annotations.
+            _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
+            if _patch_degraded:
+                _shape_disc = False
             extra_body["shape_discovery"] = _shape_disc
-            extra_body.setdefault("detailed_annotations", True)
+            if _patch_degraded:
+                extra_body["detailed_annotations"] = False
+            else:
+                extra_body.setdefault("detailed_annotations", True)
             # NOTE: this write happens before the per-task ``extra_envs`` merge, so
             # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
             # start_step/num_steps the way ``args_mode="replace"`` used to drop
@@ -1224,6 +1306,19 @@ def materialize_config_with_envs(
         log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
+    # ── aiter tuned-config lookup logging ────────────────────────────────────
+    # aiter logs a line for every tuned-GEMM table lookup it MISSES
+    # unconditionally, but the corresponding HIT line only when this is set. Two
+    # things depend on having it on:
+    #   * GEMM tuning takes its shape list from the misses -- shapes derived from
+    #     config.json instead cover 0.4% of what the runtime actually asks for;
+    #   * apply verification counts hits to decide whether a tuned artifact was
+    #     ever read. Without hit lines, "0 hits" and "hit logging was off" are
+    #     indistinguishable, and treating the latter as the former would REVERT
+    #     every arm.
+    # A scan of 60 production server logs found the flag set in none of them, so
+    # this is not a hypothetical gap. setdefault keeps an operator override.
+    envs.setdefault("AITER_LOG_TUNED_CONFIG", "1")
     _sync_repo_aliases(
         bench,
         envs,
@@ -1237,6 +1332,21 @@ def materialize_config_with_envs(
     _final_args = str(envs.get(framework_env, "")).strip()
     if _final_args:
         envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
+    # An eager profile cannot capture a CUDA graph, so the profile YAML's
+    # ``--enable-profile-cuda-graph`` is dead weight the server still sets up
+    # for. The two flags reach the env from different layers -- the YAML
+    # template vs the eager fallback folded into ``extra_server_args`` -- and
+    # only meet here, after every merge above, so this is the first point that
+    # can see the contradiction.
+    if framework_env == "EXTRA_SGLANG_ARGS":
+        _sg_tokens = str(envs.get(framework_env, "")).split()
+        if _SGLANG_DISABLE_CUDA_GRAPH_FLAG in _sg_tokens and _SGLANG_PROFILE_CUDA_GRAPH_FLAG in _sg_tokens:
+            envs[framework_env] = " ".join(t for t in _sg_tokens if t != _SGLANG_PROFILE_CUDA_GRAPH_FLAG)
+            log.info(
+                "Dropping %s: %s is set, so there is no graph capture to profile.",
+                _SGLANG_PROFILE_CUDA_GRAPH_FLAG,
+                _SGLANG_DISABLE_CUDA_GRAPH_FLAG,
+            )
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
     # re-inject the quality reference here (the single scriptable choke point)

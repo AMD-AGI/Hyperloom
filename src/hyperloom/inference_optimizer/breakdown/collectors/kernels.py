@@ -779,11 +779,35 @@ def _collect_optimized_kernels(
     return sorted(by_kid.values(), key=lambda e: e.get("kernel_id") or "")
 
 
+def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
+    """Report whether a ledger row represents an adopted kernel patch.
+
+    ``validated`` tracks single-kernel gain attribution, not adoption. GEAK
+    joint rebench rows and later failed revalidations can be ``validated=False``
+    while the kernel was still promoted with a proven overlay or an earlier
+    ``KEEP`` attempt.
+    """
+    if ent.get("last_decision") == "KEEP":
+        return True
+    source = str(ent.get("source") or "")
+    if source != "geak_e2e":
+        # Forge / integrate writers stamp REVERT on the entry itself; a prior
+        # KEEP attempt must not resurrect a kernel that was later rejected.
+        return False
+    attempts = ent.get("attempts") or []
+    has_keep = any(
+        isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts
+    )
+    if ent.get("overlay_loaded") is True:
+        return True
+    return has_keep
+
+
 def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Collect KEEP-promoted (adopted) kernel patch entries.
 
-    Reads ``state.kernel_integrate_attempts`` and keeps only entries whose
-    ``last_decision`` is ``"KEEP"``.
+    Reads ``state.kernel_integrate_attempts`` and keeps entries that were
+    promoted (``KEEP`` or proven GEAK overlay / historical ``KEEP``).
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -799,7 +823,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
         for key, ent in integ.items():
             if not isinstance(ent, dict):
                 continue
-            if ent.get("last_decision") != "KEEP":
+            if not _ledger_entry_is_adopted(ent):
                 continue
             out.append(
                 {
@@ -808,10 +832,15 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "target_file": str(ent.get("target_file") or ""),
                     "extra_server_args": str(ent.get("extra_server_args") or ""),
                     "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
-                    "validated": True,
+                    # Writers that cannot attribute the measured gain to this
+                    # one kernel say so; everything else stays validated, as
+                    # every pre-existing writer's row was.
+                    "validated": bool(ent.get("validated", True)),
                     "last_status": str(ent.get("last_status") or ""),
                     "adopted_at": str(ent.get("updated_at") or ""),
                     "attempt_count": int(ent.get("attempt_count") or 0),
+                    "basis": str(ent.get("basis") or ""),
+                    "alignment_status": str(ent.get("alignment_status") or ""),
                 }
             )
     return out

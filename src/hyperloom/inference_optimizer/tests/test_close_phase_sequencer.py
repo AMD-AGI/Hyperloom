@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -433,6 +434,47 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
 
     assert state == "running"
     assert coord.sub.run_calls == []
+
+
+class _HangsUntilCancelled(_StubSubAgentRunner):
+    """A report writer that never returns unless the waiter cancels it."""
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled = False
+
+    async def run_task(self, task, *args, **kwargs):
+        self.run_calls.append(task)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return _StubSubResult(state="succeeded")
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
+    """The in-flight wait had a bound; a newly started report must too."""
+    coord.sub = _HangsUntilCancelled()
+    coord.shared_state.max_minutes = 60
+    coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
+    queued = _StubTaskRow(
+        task_id="fresh-report",
+        kind="report",
+        state="queued",
+        params={},
+        idempotency_key="internal-report-close_phase_entry",
+    )
+
+    started = time.monotonic()
+    state = await coord._run_close_task(queued, step="1 (report)")
+    elapsed = time.monotonic() - started
+
+    assert state == "running"
+    assert elapsed < 2.0
+    assert coord.sub.run_calls == [queued]
+    assert coord.sub.cancelled is True
 
 
 @pytest.mark.asyncio

@@ -402,6 +402,27 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
+def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+    out = gr.compose_server_args(
+        inherited_args="--no-enable-prefix-caching --block-size 128",
+        base_extra_args="--no-enable-prefix-caching",
+        variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
+    )
+    assert "--no-enable-prefix-caching" not in out
+    assert "--block-size 128" in out
+    assert "--kv-cache-dtype fp8" in out
+
+
+def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+    out = gr.compose_server_args(
+        inherited_args="--ignored",
+        base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
+        variant_extra_args="--kv-cache-dtype fp8",
+        args_mode="replace",
+    )
+    assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
+
+
 def test_remove_server_args_accepts_multi_flag_string() -> None:
     out = gr.remove_server_args(
         "--flag-a --flag-b --flag-c 3 --keep 4",

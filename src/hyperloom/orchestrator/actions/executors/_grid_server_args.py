@@ -168,6 +168,16 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return _reserialize_json_blobs(" ".join(out))
 
 
+# Serving-ineligible harness flags. Enroll here; compose_server_args strips them
+# from what a grid launches and _lift_to_current_best from what a KEEP persists.
+_BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
+
+
+def strip_benchmark_harness_flags(server_args: str | None) -> str:
+    """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
+    return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
 def compose_server_args(
     *,
     inherited_args: str | None = "",
@@ -176,16 +186,20 @@ def compose_server_args(
     remove_args: Any = None,
     args_mode: str = "append",
 ) -> str:
-    """Compose inherited/base/variant args with optional remove/replace semantics."""
+    """Compose inherited/base/variant args with optional remove/replace semantics.
+
+    Always applies :func:`strip_benchmark_harness_flags` to the result.
+    """
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
         pruned_base = remove_server_args(base_extra_args, remove_args)
         pruned_variant = remove_server_args(variant_extra_args, remove_args)
-        return merge_server_args(pruned_base, pruned_variant)
-    combined_base = merge_server_args(inherited_args, base_extra_args)
-    pruned = remove_server_args(combined_base, remove_args)
-    return merge_server_args(pruned, variant_extra_args)
-
+        composed = merge_server_args(pruned_base, pruned_variant)
+    else:
+        combined_base = merge_server_args(inherited_args, base_extra_args)
+        pruned = remove_server_args(combined_base, remove_args)
+        composed = merge_server_args(pruned, variant_extra_args)
+    return strip_benchmark_harness_flags(composed)
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted
@@ -821,6 +835,10 @@ def inject_sglang_context_length(
     explicit ``--max-model-len`` would inject a self-contradictory config. The
     ``max_model_len`` ceiling is applied only when it is a positive value.
 
+    Under ``HYPERLOOM_AGENTX`` the ISL/OSL cap is skipped entirely: the AgentX
+    corpus carries its own lengths and ISL/OSL are placeholders, so the window
+    is ``min(max_pos, max_model_len)``.
+
     Args:
         server_args (str | None): The server-arg string to augment.
         framework (str | None): Framework name; empty/unknown treated as sglang.
@@ -847,8 +865,19 @@ def inject_sglang_context_length(
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
         return args
-    cap = resolve_sglang_context_cap(isl, osl)
-    context_length = min(int(max_pos), cap)
+    # AgentX replays a fixed trace corpus, so ISL/OSL are placeholders here and
+    # the ISL+OSL+headroom ceiling (8192 at the 1024/1024 defaults) would pin
+    # sglang's window two orders of magnitude below what the corpus needs --
+    # every oversized trace then 4xxs. Corpus length is a property of the
+    # workload, not of a synthetic shape, so the cap does not apply; the model's
+    # own window, clamped by an explicit MAX_MODEL_LEN, is the only ceiling.
+    # Imported lazily: _workload_envs imports this module.
+    from ._workload_envs import agentx_enabled
+
+    if agentx_enabled():
+        context_length = int(max_pos)
+    else:
+        context_length = min(int(max_pos), resolve_sglang_context_cap(isl, osl))
     max_model_len_int = optional_positive_int(max_model_len)
     if max_model_len_int is not None:
         context_length = min(context_length, max_model_len_int)

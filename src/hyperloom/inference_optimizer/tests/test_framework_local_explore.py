@@ -254,9 +254,8 @@ def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path)
     # Boilerplate is in _TASK_KIND_BRIEFS; notes is empty on a fresh dispatch.
     assert params.get("task_kind") == "framework_local_explore"
     assert params.get("notes", "") == ""
-    # WebSearch/WebFetch available so the specialist can compare upstream latest.
-    assert "WebSearch" in created["allowed_tools"]
-    assert "WebFetch" in created["allowed_tools"]
+    # The per-task tool whitelist is gone; the specialist tool policy is a denylist.
+    assert "allowed_tools" not in created
     # Idempotency keyed on the candidate id.
     assert created["idempotency_key"] == "framework_agent_local_explore:local_explore:0"
     # The specialist->candidate provenance map is recorded.

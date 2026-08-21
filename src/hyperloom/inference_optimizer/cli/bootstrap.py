@@ -22,6 +22,9 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    agentx_enabled as _agentx_enabled,
+)
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from .backends import _build_robustness_options
@@ -77,6 +80,69 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
     if override:
         return override
     return Path(str(getattr(args, "model", "") or "")).name
+
+
+# Bump when a change makes previously recorded AgentX measurements
+# incomparable. Epoch 1: aligned to the InferenceX leaderboard invocation
+# (upstream scenario + 062126 corpus + native context window + error-rate gate);
+# everything measured before it used a context-truncated corpus with no error
+# gate, so those numbers describe a different workload.
+AGENTX_MEASUREMENT_EPOCH = 1
+
+
+def agentx_state_is_stale(state: Any) -> str:
+    """Return why a resumed session's AgentX state is unusable, or ``""``.
+
+    Two independent reasons, both of which would otherwise corrupt the KEEP
+    ledger silently: the session was measured in the other benchmark mode (the
+    ledger is keyed on server args alone, so rows collide), or it was measured
+    in an older AgentX epoch (same knobs, different workload).
+
+    Args:
+        state: The loaded :class:`SharedState`.
+
+    Returns:
+        A human-readable reason, or ``""`` when the state may be reused.
+    """
+    want_mode = "agentx" if _agentx_enabled() else "synthetic"
+    had_mode = str(getattr(state, "benchmark_mode", "") or "")
+    if had_mode and had_mode != want_mode:
+        return (
+            f"session was measured in benchmark_mode={had_mode!r} but this run is "
+            f"{want_mode!r}; the KEEP ledger keys on server args only, so the two "
+            "sets of measurements would overwrite each other"
+        )
+    if want_mode == "agentx":
+        had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
+        if had_epoch != AGENTX_MEASUREMENT_EPOCH:
+            return (
+                f"session carries AgentX epoch {had_epoch}, this build measures "
+                f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
+                "a different workload and cannot anchor or be compared against"
+            )
+    return ""
+
+
+def _flag_explicitly_set(args: argparse.Namespace, dest: str) -> bool:
+    """Whether the operator actually typed a ``BooleanOptionalAction`` flag.
+
+    ``argparse`` gives these flags a real default, so the parsed value alone
+    cannot distinguish "left at the default" from "explicitly set to the same
+    value as the default" -- and a mode-scoped default must never override an
+    explicit choice. Reading ``sys.argv`` is the only signal available without
+    changing the parser's public behaviour.
+
+    Args:
+        args: Parsed namespace (accepted for symmetry / future use).
+        dest: The action ``dest``, e.g. ``enable_conc_sweep``.
+
+    Returns:
+        bool: True when ``--<flag>`` or ``--no-<flag>`` appears in ``sys.argv``.
+    """
+    del args  # signature kept uniform with the other bootstrap helpers
+    flag = dest.replace("_", "-")
+    wanted = {f"--{flag}", f"--no-{flag}"}
+    return any(a.split("=", 1)[0] in wanted for a in sys.argv[1:])
 
 
 def _seed_shared_state(
@@ -306,7 +372,15 @@ def _seed_shared_state(
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
         explore_enabled=not bool(getattr(args, "no_explore", False)),
-        eval_disabled=bool(getattr(args, "no_eval", False)),
+        # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
+        # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
+        # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
+        # explicitly rejects "RUN_EVAL=false in a YAML" as an excuse and would
+        # stamp the baseline as an eval failure -- which blocks it from anchoring
+        # ``baseline_tput``, leaving every variant's gain None and stalling or
+        # stopping the session. Routing AgentX through the same channel as
+        # ``--no-eval`` is what makes the opt-out legible to that guard.
+        eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
         # FRAMEWORK config-exploration lane toggle (default OFF).
         framework_config_exploration_enabled=bool(
             getattr(args, "enable_framework_config_exploration", False),
@@ -319,7 +393,15 @@ def _seed_shared_state(
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
         # SWEEP-phase post-sweep concurrency sweep flags (on by default).
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        # A concurrency sweep is 16 runs. At AgentX's per-run cost that is the
+        # entire session budget spent without tuning a single server parameter,
+        # and the leaderboard treats each concurrency as a separate row anyway
+        # (so the "best" concurrency is not a thing to optimise toward). Default
+        # it off under AgentX; an explicit --enable-conc-sweep still wins.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True))
+        and not (_agentx_enabled() and not _flag_explicitly_set(args, "enable_conc_sweep")),
+        benchmark_mode="agentx" if _agentx_enabled() else "synthetic",
+        agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         conc_sweep_concs=_parse_conc_sweep_concs(args),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
@@ -474,11 +556,15 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     two legs to whichever phase the session stopped in.
 
     Only a previous leg that stopped for a recorded reason, or crashed
-    repeatedly, re-anchors the wall-clock budget. After a clean stop
-    ``start_ts`` is deliberately kept, so ``--max-hours`` still counts from the
-    original session start and the earlier legs' wall-clock stays spent. The
-    phase clock moves on either branch: the two answer different questions, and
-    neither answer includes time nothing was running.
+    repeatedly, re-anchors the wall-clock budget. That also clears
+    ``deadline_unix`` so ``Coordinator.run`` can stamp a new one from the
+    reset ``start_ts``; keeping the spent stamp would make ``--force-resume``
+    after ``time_exhausted`` stop immediately. After a clean stop ``start_ts``
+    and the stamp are deliberately kept, so remaining wall-clock is the
+    persisted deadline, not this invocation's ``--max-hours``. Raising that
+    flag on this path does not extend the stamp. The phase clock moves on
+    either branch: the two answer different questions, and neither answer
+    includes time nothing was running.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
@@ -501,7 +587,58 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
         state.crash_count = 0
         # Reset start_ts to now so resume budget isn't seen as already-over-budget by the LLM.
         state.start_ts = state.resumed_ts
+        # The stamp is the loop's budget. Leaving a spent one in place after
+        # resetting start_ts would make this leg look already exhausted.
+        state.deadline_unix = 0.0
+        state.teardown_timings_sec = {}
     return state.resumed_ts
+
+
+def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> list[str]:
+    """Operator-facing resume notes when the wall-clock stamp is kept.
+
+    Remaining time is :meth:`SharedState.remaining_minutes` (the stamp), not
+    this invocation's ``--max-hours``. Raising that flag here does not extend
+    the deadline.
+
+    Args:
+        state: Loaded session state after :func:`_begin_resume_leg`.
+        max_hours: This invocation's ``--max-hours``.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
+    elapsed_h = state.elapsed_minutes() / 60.0
+    remaining_min = state.remaining_minutes()
+    lines = [
+        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
+        f"the persisted deadline is kept",
+    ]
+    if remaining_min is None:
+        lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
+        return lines
+    remaining_h = remaining_min / 60.0
+    lines.append(
+        f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp"
+    )
+    cli_hours = float(max_hours or 0.0)
+    if remaining_min <= 0.0:
+        lines.append(
+            "  → WARNING: the stamped deadline is already spent; start a fresh "
+            "session, or the run stops almost immediately"
+        )
+        lines.append(
+            "  → raising --max-hours on a clean-stop resume does not extend the "
+            "stamp; a recorded stop_reason re-anchors the budget"
+        )
+    elif cli_hours > 0.0:
+        cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
+        if abs(cli_left_min - remaining_min) > 1.0:
+            lines.append(
+                f"  → this invocation's --max-hours {cli_hours:.2f} does not "
+                f"extend or shrink that stamp"
+            )
+    return lines
 
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
