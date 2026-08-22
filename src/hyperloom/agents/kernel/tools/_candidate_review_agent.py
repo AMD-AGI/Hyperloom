@@ -299,6 +299,13 @@ def build_review_prompt(
         "    or with an empty list when this kernel has none. Paths that do not",
         "    exist are dropped.",
         "  - Entries you do not mention are left exactly as they are.",
+        "  - Do not copy reusable_native_kernel back from the table you were",
+        "    given. Every unresolved row carries false there, and returning that",
+        "    value alongside a corrected path refuses the kernel you just found.",
+        "    Send the field only to veto a kernel the rules would otherwise",
+        "    accept, and always with a skip_reason saying why; a false with no",
+        "    skip_reason is ignored. Routability is recomputed from the path you",
+        "    give, so a rewrite needs nothing else from you.",
         "",
         "On shapes -- read this before proposing any:",
         "  A graph replay has no CPU-side parent op, so the profiler records no",
@@ -568,13 +575,33 @@ def _record_judgement_proposals(
     kernel_id: str,
     notes: list[str],
 ) -> None:
-    """Stage the routability hint and the verified harness list."""
+    """Stage the routability hint and the verified harness list.
+
+    A veto is only taken with a stated reason. The table handed to the session
+    already carries ``reusable_native_kernel``, and an unresolved row carries
+    ``false``; a session correcting that row's path has been observed returning
+    the field unchanged while its own prose argued the file is editable. Nothing
+    distinguishes that echo from an intended refusal except the reason the
+    prompt asks for alongside it, and refusing on the echo threw away every
+    kernel the review had just located.
+
+    The asymmetry is deliberate and matches the one below it: a permissive hint
+    is ignored because ``classify_patchability`` still has to agree, so it costs
+    nothing to drop. A restrictive one has no second gate behind it.
+    """
     proposed_skip = revision.get("skip_reason")
+    skip_text = proposed_skip.strip() if isinstance(proposed_skip, str) else ""
     if isinstance(proposed_skip, str):
-        entry["review_skip_reason"] = proposed_skip.strip()
+        entry["review_skip_reason"] = skip_text
     proposed_reusable = revision.get("reusable_native_kernel")
     if isinstance(proposed_reusable, bool):
-        entry["review_reusable_hint"] = proposed_reusable
+        if proposed_reusable or skip_text:
+            entry["review_reusable_hint"] = proposed_reusable
+        else:
+            notes.append(
+                f"{kernel_id}: veto ignored, no skip_reason given "
+                "(a refusal has to say why)"
+            )
     harnesses = _verified_harnesses(revision.get("benchmark_files"))
     if harnesses is not None:
         entry["review_benchmark_files"] = harnesses

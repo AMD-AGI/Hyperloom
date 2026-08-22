@@ -121,6 +121,56 @@ class TestImmutableFields:
         # The judgement half of the same revision still lands.
         assert row["source_file"] == str(defines)
 
+    def test_a_veto_without_a_reason_is_the_input_echoed_back(self, tree):
+        """Every unresolved row in the table carries ``reusable_native_kernel``
+        false, and a session correcting such a row has been observed returning
+        that value while its own prose argued the file is editable.
+
+        Honouring it refused four kernels the review had just located, 16% of
+        GPU time, in the run that found this. Nothing separates the echo from an
+        intended refusal except the reason the prompt asks for alongside it.
+        """
+        root, defines = tree
+        row = _candidate(source_file="", reusable_native_kernel=False)
+        notes = cra.apply_revisions(
+            [row],
+            [
+                {
+                    "kernel_id": "k001",
+                    "action": "rewrite",
+                    "source_file": str(defines),
+                    "reusable_native_kernel": False,
+                    "skip_reason": "",
+                    "reason": "opened it; defines the kernel at line 73",
+                }
+            ],
+            framework_roots=(str(root),),
+        )
+        assert "review_reusable_hint" not in row
+        assert any("veto ignored" in note for note in notes)
+        # The half of the revision that was meant still lands.
+        assert row["source_file"] == str(defines)
+
+    def test_a_veto_with_a_reason_is_still_honoured(self, tree):
+        """The refusal itself stays available; only the silent one is dropped."""
+        root, defines = tree
+        row = _candidate(source_file="", reusable_native_kernel=False)
+        cra.apply_revisions(
+            [row],
+            [
+                {
+                    "kernel_id": "k001",
+                    "action": "rewrite",
+                    "source_file": str(defines),
+                    "reusable_native_kernel": False,
+                    "skip_reason": "vendor template; only its launch config is tunable",
+                }
+            ],
+            framework_roots=(str(root),),
+        )
+        assert row["review_reusable_hint"] is False
+        assert row["review_skip_reason"] == "vendor template; only its launch config is tunable"
+
     def test_a_derived_representation_is_dropped_with_a_note(self, tree):
         """Silently ignoring a field the prompt discusses is how drift hides."""
         root, defines = tree
@@ -557,6 +607,20 @@ class TestBuildReviewPrompt:
         assert cra.REVIEW_BACKFILL_PROVENANCE in prompt
         assert cra.REVIEW_DERIVED_PROVENANCE in prompt
         assert "State where the dims came from in reason" in prompt
+
+    def test_it_tells_the_session_not_to_echo_the_routability_field(self, tmp_path):
+        """The table it audits carries the field, so "revisable" reads as
+        "return it". Saying so cost four located kernels in one run.
+        """
+        prompt = cra.build_review_prompt(
+            run_dir=tmp_path,
+            raw_candidates_path=tmp_path / "raw.json",
+            revisions_path=tmp_path / "rev.json",
+            reference_paths={},
+            framework_roots=(),
+        )
+        assert "Do not copy reusable_native_kernel back" in prompt
+        assert "a false with no" in prompt and "skip_reason is ignored" in prompt
 
     def test_it_does_not_send_the_session_after_tracelens_internals(self, tmp_path):
         """``analysis.md`` is TraceLens' only supported output; the rest of that
