@@ -41,6 +41,19 @@ def test_kill_stale_servers_noop_in_multi_node(monkeypatch):
     assert slept == []
 
 
+def test_kill_stale_servers_noop_against_external_server(monkeypatch):
+    """The engine behind an external endpoint must survive the pre-run reap.
+
+    Its cmdline matches the vLLM/SGLang kill patterns, so without this gate
+    every Magpie invocation would restart the server it is measuring.
+    """
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://infera:8000")
+    slept: list = []
+    monkeypatch.setattr("time.sleep", lambda *_a: slept.append(True))
+    gr._kill_stale_servers()
+    assert slept == []
+
+
 def _proc_open_factory(cmdlines: dict[str, bytes], maps: dict[str, str]):
     """Build a fake ``open`` that serves /proc cmdline + maps from dicts."""
     real_open = open

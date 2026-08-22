@@ -173,10 +173,13 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         info["reason"] = "scriptable framework (server-less; no server_lifecycle)"
         return info
 
-    from ._multi_node_env import is_multi_node
+    from ._multi_node_env import is_multi_node, uses_external_server
 
     if is_multi_node():
         info["reason"] = "multi-node (server_lifecycle is local-only)"
+        return info
+    if uses_external_server():
+        info["reason"] = "external server (client-only; nothing local to boot or reuse)"
         return info
 
     script_name = Path(str(bench.get("benchmark_script") or "")).name

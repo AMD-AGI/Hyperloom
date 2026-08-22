@@ -168,11 +168,19 @@ class RecoverExecutor:
         pre = await asyncio.to_thread(self._probe_gpu_free_mb)
 
         # 2) Soft cleanup — TERM/KILL stale owners.
+        from ._multi_node_env import uses_external_server
+
         killed: list[dict[str, Any]] = []
-        if force_cleanup:
-            killed = await asyncio.to_thread(self._kill_stale_owners)
-        else:
+        if not force_cleanup:
             log.info("recover_executor: force_gpu_cleanup=false; skipping kill stage")
+        elif uses_external_server():
+            # OWNER_PATTERNS match by cmdline, so the engine behind an external
+            # endpoint would be TERM/KILLed here even though we never launched
+            # it -- restarting the server the benchmark is measuring. The GPU
+            # probe above still applies: single-node, those GPUs are local.
+            log.info("recover_executor: external server; skipping kill stage (engine is not ours)")
+        else:
+            killed = await asyncio.to_thread(self._kill_stale_owners)
 
         # 3) Probe after kills.
         mid = await asyncio.to_thread(self._probe_gpu_free_mb)

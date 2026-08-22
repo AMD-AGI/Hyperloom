@@ -151,10 +151,13 @@ class BypassBackend:
         # round to it; that only holds single-node. Mirror the Magpie path's
         # multi-node gate (see _server_lifecycle.resolve_lifecycle_params),
         # which our non-None verdict would otherwise short-circuit past.
-        from ._multi_node_env import is_multi_node
+        from ._multi_node_env import is_multi_node, uses_external_server
 
         if is_multi_node():
             verdict["reason"] = "multi-node (server_lifecycle is local-only)"
+            return verdict
+        if uses_external_server():
+            verdict["reason"] = "external server (client-only; nothing local to boot or reuse)"
             return verdict
         if framework not in self._LIFECYCLE_FRAMEWORKS:
             verdict["reason"] = f"framework {framework!r} is not a serving framework"

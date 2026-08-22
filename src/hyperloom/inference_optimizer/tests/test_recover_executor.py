@@ -124,6 +124,29 @@ async def test_force_cleanup_false_skips_kill_stage(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_external_server_skips_kill_stage(tmp_path, monkeypatch):
+    """An external endpoint's engine survives recovery even with cleanup forced.
+
+    ``OWNER_PATTERNS`` match by cmdline, so a pgrep-driven kill would take down
+    a server we never launched and restart what the benchmark is measuring.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    exe = RecoverExecutor()
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://infera:8000")
+    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _healthy_probe)
+    calls: list[str] = []
+    monkeypatch.setattr(exe, "_kill_stale_owners", lambda: calls.append("kill") or [])
+
+    out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
+
+    assert calls == []
+    assert out["killed_pids"] == []
+    assert out["state"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_kills_stale_owners_and_recovers(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()

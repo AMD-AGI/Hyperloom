@@ -1310,6 +1310,28 @@ def test_magpie_remote_env_empty_for_single_node(tmp_path, monkeypatch):
     assert mne.magpie_remote_env() == {}
 
 
+def test_magpie_remote_env_external_single_node(tmp_path, monkeypatch):
+    """A single-node run targets a handed-over endpoint client-only.
+
+    Magpie's client-only path is env-driven, not multi-node specific, so an
+    Infera-hosted server fronting the engine is reachable without pretending
+    the run spans two nodes.
+    """
+    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 1})
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setattr(mne, "external_service_url", lambda: "http://infera:8000")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
+        lambda: "/opt/venv/bin/python",
+    )
+
+    env = mne.magpie_remote_env()
+
+    assert env["MAGPIE_RUN_PHASE"] == "client"
+    assert env["BENCHMARK_BASE_URL"] == "http://infera:8000"
+    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
+
+
 # ---------------------------------------------------------------------------
 # _write_rayjob_meta sidecar JSON tests.
 

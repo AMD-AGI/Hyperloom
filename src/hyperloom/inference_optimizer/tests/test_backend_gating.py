@@ -166,6 +166,34 @@ def test_lifecycle_magpie_default_unchanged(tmp_path, monkeypatch):
     assert info["eligible"] is True  # magpie built-in script -> eligible
 
 
+def test_lifecycle_ineligible_against_external_server(tmp_path, monkeypatch):
+    """An external endpoint makes the reuse protocol ineligible single-node.
+
+    Magpie runs client-only there, so there is no local server to boot on round
+    one or re-attach to on round two. Same config as the eligible case above:
+    only the hand-off env differs.
+    """
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://infera:8000")
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "benchmark_script": "vllm_mi300x.sh",
+            "envs": {"PORT": 8888},
+            "profiler": {"torch_profiler": {"enabled": False}},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is False
+    assert "external server" in info["reason"]
+
+
 def test_lifecycle_magpie_non_builtin_ineligible(tmp_path, monkeypatch):
     """magpie backend: a non-built-in script stays ineligible (unchanged)."""
     import yaml

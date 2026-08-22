@@ -788,16 +788,18 @@ def _kill_stale_servers() -> None:
     Reaps vLLM::Worker / EngineCore children that escape Magpie's pgrp-leader
     cleanup. Called before every Magpie invocation; uses a /proc scan (not
     pgrep) to avoid clashing with test subprocess mocks. No-op in multi-node
-    mode (servers live in RayJob pods).
+    mode (servers live in RayJob pods) and against an external server (the
+    engine behind it is not ours to kill -- reaping it would restart the very
+    server the client-only run is measuring).
 
     Note:
         Side-effecting and best-effort: it sends signals to matching processes
         and unlinks stale shared-memory segments, swallowing errors. Returns
         nothing.
     """
-    from ._multi_node_env import is_multi_node
+    from ._multi_node_env import is_multi_node, uses_external_server
 
-    if is_multi_node():
+    if is_multi_node() or uses_external_server():
         return
 
     import signal

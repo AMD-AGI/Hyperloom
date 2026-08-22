@@ -10,6 +10,8 @@ Reads ``$INFERENCE_OPTIMIZER_NODES`` + ``$MULTI_NODE_STATE_FILE``. Single node
 (< 2): returns ``{}``. Multi-node (>= 2) with a ``service_url``: returns
 ``MAGPIE_RUN_PHASE=client`` + ``BENCHMARK_BASE_URL=<service_url>`` so Magpie
 skips its own server launch and points ``benchmark_serving`` at the head pod.
+``$HYPERLOOM_MN_EXT_SERVICE_URL`` selects that same client-only path at any node
+count (:func:`uses_external_server`).
 :func:`export_ray_address_to_os` also copies ``ray_address`` into
 ``RAY_ADDRESS`` for kernel-agent ``ray.init``.
 """
@@ -87,6 +89,21 @@ def is_multi_node() -> bool:
     except ValueError:
         return False
     return env_n >= 2
+
+
+def uses_external_server() -> bool:
+    """True when benchmarks target a server Hyperloom does not manage.
+
+    ``HYPERLOOM_MN_EXT_SERVICE_URL`` hands over an OpenAI-compatible endpoint --
+    a platform cluster, or an Infera router fronting the vLLM/SGLang engine.
+    Independent of node count: Magpie's client-only path is env-driven, so a
+    single-node run can target an externally hosted engine. Callers must then
+    neither launch, reuse, nor reap a local server.
+
+    Returns:
+        True when an external endpoint was handed over, else False.
+    """
+    return bool(external_service_url())
 
 
 def resolve_kb_topology() -> dict[str, Any]:
@@ -358,10 +375,12 @@ def _remote_client_env(service_url: str) -> dict[str, str]:
 def magpie_remote_env() -> dict[str, str]:
     """Return env vars to inject into a Magpie ``benchmark`` subprocess.
 
-    Single-node: ``{}`` (Magpie's ``--run-mode local`` untouched). Multi-node
-    with a ``service_url``: ``MAGPIE_RUN_PHASE=client`` + ``BENCHMARK_BASE_URL``
-    so Magpie skips its local server launch and points ``benchmark_serving`` at
-    the head pod, plus ``MAGPIE_EVAL_PYTHON`` (see :func:`_remote_client_env`).
+    An external endpoint (:func:`uses_external_server`) wins at any node count:
+    ``MAGPIE_RUN_PHASE=client`` + ``BENCHMARK_BASE_URL`` so Magpie skips its
+    local server launch and points ``benchmark_serving`` at that endpoint, plus
+    ``MAGPIE_EVAL_PYTHON`` (see :func:`_remote_client_env`). Otherwise
+    multi-node resolves the same env from the state file's ``service_url``, and
+    single-node returns ``{}`` (Magpie's ``--run-mode local`` untouched).
     Multi-node without a state file: ``{}`` + WARN (the local-launch failure
     surfaces clearly).
 
@@ -369,9 +388,8 @@ def magpie_remote_env() -> dict[str, str]:
         Env vars to inject into the Magpie subprocess, or ``{}`` for the
         single-node path or when no service URL is available.
     """
-    # External mode: point benchmarks at the env-provided endpoint when multi-node.
     ext = external_service_url()
-    if ext and is_multi_node():
+    if ext:
         return _remote_client_env(ext)
     if not is_multi_node():
         return {}
@@ -446,4 +464,5 @@ __all__ = [
     "ray_gcs_address_from_state",
     "rayjob_id_from_state",
     "resolve_kb_topology",
+    "uses_external_server",
 ]
