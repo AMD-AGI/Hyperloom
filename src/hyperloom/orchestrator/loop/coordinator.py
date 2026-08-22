@@ -1684,7 +1684,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached, time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (via the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
@@ -1823,7 +1823,21 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state):
-                    stop_reason = "target_reached"
+                    # Route the terminal through CLOSE instead of breaking here.
+                    # ``machine_state`` registers ``target_reached`` as an
+                    # "any phase -> CLOSE" transition reason, but nothing ever
+                    # produced it, so a met target skipped the 7-step close
+                    # sequencer and left only the cli safety-net report.
+                    # Publishing the stop_reason lets ``_global_terminal`` drive
+                    # that transition on the next tick; the stop-condition check
+                    # above then exits once CLOSE has run. Bounded by design:
+                    # that check fires on the very next tick regardless of
+                    # whether CLOSE succeeded, so this cannot spin.
+                    if not self.shared_state.stop_reason:
+                        self.shared_state.set_stop_reason("target_reached")
+                        self.shared_state.save(self.session_dir)
+                        continue
+                    stop_reason = self.shared_state.stop_reason
                     break
                 if deadline is not None and time.monotonic() >= deadline and not in_closing:
                     if grace_sec <= 0:
