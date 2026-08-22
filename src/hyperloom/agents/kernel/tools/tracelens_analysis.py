@@ -6848,11 +6848,17 @@ def _run_candidate_review_stage(
     source_paths = [str(c.get("source_file") or "") for c in candidates if isinstance(c, dict)]
     before = source_fingerprint(source_paths)
 
+    # Only ``analysis.md`` is a supported TraceLens output; everything else in
+    # that directory is internal and may be removed without notice. The rest of
+    # the list is Hyperloom's own or the model's, so it is ours to offer.
+    #
+    # Little is lost by not pointing at the sidecars: for every operator they
+    # describe, ``analysis.md`` carries the same operand dims and launcher in
+    # its own table, and for a graph-launched operator neither has anything --
+    # the replay has no CPU-side parent op, so nothing recorded the arguments.
     reference_paths = {
         "source resolution audit": str(run_dir / _SOURCE_RESOLUTION_NAME),
         "tracelens report": str(tracelens_dir / "analysis.md"),
-        "per-category metrics": str(tracelens_dir / "category_data"),
-        "priority data": str(tracelens_dir / "priority_data.json"),
         "trace input manifest": str(run_dir / "trace_input_manifest.json"),
         "model directory": str(_RUNTIME_CONTEXT.get("model_path") or ""),
     }
