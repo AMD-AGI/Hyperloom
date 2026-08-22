@@ -21,11 +21,20 @@ Rather than pre-loading any of that into a prompt, this hands the agent the
 
 Three properties keep the added freedom bounded:
 
-* **Proposals only.** The agent may revise where a kernel lives and whether it
-  is worth dispatching. It may not touch what the trace measured -- GPU share,
-  durations, shapes, argument specs. Those are evidence, and everything
-  downstream (impact ranking, harness generation, the final report) is computed
-  from them. :data:`IMMUTABLE_FIELDS` is enforced here, not requested in prose.
+* **Proposals only.** The agent may revise where a kernel lives, whether it is
+  worth dispatching, and the operand dims to tune it against. It may not touch
+  the trace's own measurements -- GPU share, duration, launch count -- nor the
+  keys the row is identified by. Those carry the impact ranking, the closing
+  gain figure and the attempt ledger. :data:`IMMUTABLE_FIELDS` is enforced here,
+  not requested in prose.
+
+  Operand dims are the exception, and deliberately so: a graph replay has no
+  CPU-side parent op, so the profiler records no arguments for exactly the
+  kernels that dominate a captured model, and the field arrives empty. Refusing
+  the review's answer there does not preserve a measurement -- it hands the
+  choice to a tuning backend that cannot see the serving configuration. Review
+  dims therefore carry their own provenance so a later reader can still tell a
+  recovered shape from a computed one.
 * **Nothing is taken on faith.** A revised path must exist under a known
   framework root. This is not a correctness check; it stops an invented path
   from being written.
@@ -53,29 +62,58 @@ try:
 except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
 
+try:
+    from hyperloom.common.kernel_shape_contract import (
+        REVIEW_BACKFILL_PROVENANCE,
+        REVIEW_DERIVED_PROVENANCE,
+        REVIEW_SHAPE_PROVENANCE,
+    )
+except ImportError:  # pragma: no cover - standalone invocation
+    REVIEW_BACKFILL_PROVENANCE = "review_backfill"
+    REVIEW_DERIVED_PROVENANCE = "review_derived"
+    REVIEW_SHAPE_PROVENANCE = frozenset(
+        {REVIEW_BACKFILL_PROVENANCE, REVIEW_DERIVED_PROVENANCE}
+    )
+
 #: Written by the agent; its presence is what marks the session successful.
 REVISIONS_FILENAME = "kernel_candidates_revisions.json"
 
 #: The pre-review table, kept so a bad review can be told from a bad parse.
 RAW_CANDIDATES_FILENAME = "kernel_candidates.raw.json"
 
-#: Measured by the trace. A revision naming any of these is rejected: the
-#: impact ranking, the tuning harness and the final report are all computed
-#: from them, so a plausible-looking edit here is indistinguishable from data.
+#: Rejected outright. Two different reasons, both fatal to accept:
+#:
+#: ``gpu_pct`` / ``duration_us`` / ``call_count`` are event durations read
+#: straight off the trace -- there is no parsing ambiguity to correct. They also
+#: feed the dispatch floor and the final gain accounting, so a plausible edit
+#: here lets the review talk a kernel past the gate it is not supposed to open,
+#: and makes the closing report unfalsifiable.
+#:
+#: ``kernel_id`` / ``name`` / ``device_kernel_name`` are join keys, not facts.
+#: ``kernel_id`` is half the attempt-ledger identity; ``name`` is what every
+#: shape and metric lookup keys on. Revising either detaches the row from its
+#: own history and from the CSVs the review is meant to consult.
 IMMUTABLE_FIELDS: frozenset[str] = frozenset(
     {
         "call_count",
         "device_kernel_name",
         "duration_us",
         "gpu_pct",
-        "input_dtypes",
-        "input_shapes",
-        "invocation_cases",
         "kernel_id",
         "name",
+    }
+)
+
+#: Recomputed from the operand dims, so a revision naming one is dropped with a
+#: note rather than silently overwritten downstream. The session supplies
+#: ``shapes`` and ``input_dtypes``; everything the harness builder needs is
+#: derived from those by :func:`_rederive_after_review`, which keeps the three
+#: representations from drifting apart.
+DERIVED_SHAPE_FIELDS: frozenset[str] = frozenset(
+    {
+        "input_shapes",
+        "invocation_cases",
         "raw_arg_spec",
-        "shape_provenance",
-        "shapes",
     }
 )
 
@@ -250,9 +288,11 @@ def build_review_prompt(
         "  - Prefer unresolve over a guess. A wrong path costs an entire",
         "    optimization attempt; an empty one just falls through.",
         "  - You may revise source_file, reusable_native_kernel, skip_reason,",
-        "    recommended_backends and benchmark_files. You may not revise",
-        "    anything the trace measured (gpu_pct, duration_us, call_count,",
-        "    shapes, raw_arg_spec); such fields are ignored if present.",
+        "    benchmark_files, shapes and input_dtypes. You may not revise what",
+        "    the trace measured (gpu_pct, duration_us, call_count) or the",
+        "    identity it is keyed by (kernel_id, name, device_kernel_name);",
+        "    those are ignored if present. input_shapes, invocation_cases and",
+        "    raw_arg_spec are recomputed from shapes, so do not send them.",
         "  - benchmark_files comes from a curated table keyed by coarse name",
         "    markers, so it often names a harness for the wrong member of a",
         "    kernel family. Replace it with harnesses you located and can open,",
@@ -260,12 +300,41 @@ def build_review_prompt(
         "    exist are dropped.",
         "  - Entries you do not mention are left exactly as they are.",
         "",
+        "On shapes -- read this before proposing any:",
+        "  A graph replay has no CPU-side parent op, so the profiler records no",
+        "  arguments for a graph-launched kernel and shapes arrives empty. That",
+        "  is not harmless: with no shapes the tuning backend picks its own, and",
+        "  it cannot see the serving configuration. A prefill kernel serving an",
+        "  8192-token input has been tuned at sequence length 512 this way, which",
+        "  measured a large speedup that vanished end to end.",
+        "  So an empty shapes is worth filling. Two ways, in this order:",
+        f"    {REVIEW_BACKFILL_PROVENANCE}  you found the dims already recorded",
+        "                      against the op that launched this device kernel,",
+        "                      in the per-category CSVs under tracelens/. Match",
+        "                      loosely -- the deterministic lookup keys on the",
+        "                      synthetic op name and therefore finds nothing.",
+        f"    {REVIEW_DERIVED_PROVENANCE}    you computed the dims from the model config,",
+        "                      the serving arguments and the kernel signature.",
+        "  Set shape_provenance to whichever applies; any other value is read as",
+        f"  {REVIEW_DERIVED_PROVENANCE}. Give one shape string per operand, dims first and",
+        '  dtype second, e.g. "(8192,6144) bf16".',
+        "  State the derivation in reason -- which CSV row, or which config",
+        "  fields and what arithmetic -- so a reader can check it in seconds. An",
+        "  unstated derivation is not reviewable, and a shape nothing can check",
+        "  is what the tuning backend already produces on its own.",
+        "",
         f"Write your answer to {revisions_path} as JSON:",
         '  {"revisions": [{"kernel_id": "k001", "action": "rewrite",',
         '                  "source_file": "/abs/path.py",',
         '                  "reusable_native_kernel": true,',
         '                  "skip_reason": "",',
+        '                  "shapes": ["(8192,6144) bf16", "(6144,1536) fp4"],',
+        '                  "input_dtypes": ["bf16", "fp4"],',
+        f'                  "shape_provenance": "{REVIEW_DERIVED_PROVENANCE}",',
         '                  "reason": "one sentence citing what you checked"}]}',
+        "",
+        "Use action keep with shapes when the recorded path is already right and",
+        "only the dims are missing.",
         "",
         f"Write nothing outside {run_dir}. Do not modify framework source.",
     ]
@@ -431,6 +500,82 @@ def _acceptable_path(picked: str, roots: Sequence[str]) -> str:
     return _KSC.canonical_source_path(bare, tuple(roots)) or ""
 
 
+def _proposed_strings(value: Any) -> list[str] | None:
+    """Keep the non-empty strings in a proposed list, or ``None`` when unset."""
+    if not isinstance(value, list):
+        return None
+    return [entry.strip() for entry in value if isinstance(entry, str) and entry.strip()]
+
+
+def _proposed_shape_provenance(value: Any) -> str:
+    """Narrow a claimed shape provenance to one the review is allowed to assert.
+
+    A session that located a recorded shape and one that computed a shape from
+    the model config are both useful, but only the first is a measurement. The
+    claim is therefore restricted to the two review values, and anything else --
+    including a session naming ``torch_trace`` -- degrades to the derived label
+    rather than being taken at its word. Laundering a derivation as a
+    measurement would strip the one signal that tells a later reader whether a
+    disappointing end-to-end result is worth blaming on the shape.
+    """
+    claimed = str(value or "").strip().lower()
+    if claimed in REVIEW_SHAPE_PROVENANCE:
+        return claimed
+    return REVIEW_DERIVED_PROVENANCE
+
+
+def _record_shape_proposal(
+    entry: dict[str, Any],
+    revision: dict[str, Any],
+    *,
+    kernel_id: str,
+    notes: list[str],
+) -> None:
+    """Stage proposed operand dims for the deterministic re-derivation pass.
+
+    Held under ``review_*`` keys rather than written straight onto the row, so
+    the stamping pass stays the only thing that decides what the harness builder
+    finally sees -- the same split the routability hint already uses.
+    """
+    shapes = _proposed_strings(revision.get("shapes"))
+    if shapes is None:
+        return
+    if not shapes:
+        notes.append(f"{kernel_id}: empty shapes proposal ignored")
+        return
+    entry["review_shapes"] = shapes
+    entry["review_shape_provenance"] = _proposed_shape_provenance(
+        revision.get("shape_provenance")
+    )
+    dtypes = _proposed_strings(revision.get("input_dtypes"))
+    if dtypes:
+        entry["review_input_dtypes"] = dtypes
+    notes.append(
+        f"{kernel_id}: shapes -> {len(shapes)} operand(s) "
+        f"({entry['review_shape_provenance']})"
+    )
+
+
+def _record_judgement_proposals(
+    entry: dict[str, Any],
+    revision: dict[str, Any],
+    *,
+    kernel_id: str,
+    notes: list[str],
+) -> None:
+    """Stage the routability hint and the verified harness list."""
+    proposed_skip = revision.get("skip_reason")
+    if isinstance(proposed_skip, str):
+        entry["review_skip_reason"] = proposed_skip.strip()
+    proposed_reusable = revision.get("reusable_native_kernel")
+    if isinstance(proposed_reusable, bool):
+        entry["review_reusable_hint"] = proposed_reusable
+    harnesses = _verified_harnesses(revision.get("benchmark_files"))
+    if harnesses is not None:
+        entry["review_benchmark_files"] = harnesses
+        notes.append(f"{kernel_id}: benchmark_files -> {len(harnesses)} verified path(s)")
+
+
 def apply_revisions(
     candidates: list[dict[str, Any]],
     revisions: Sequence[dict[str, Any]],
@@ -478,8 +623,21 @@ def apply_revisions(
         touched = sorted(IMMUTABLE_FIELDS.intersection(revision) - {"kernel_id"})
         if touched:
             notes.append(f"{kernel_id}: ignored measured field(s) {', '.join(touched)}")
+        derived = sorted(DERIVED_SHAPE_FIELDS.intersection(revision))
+        if derived:
+            notes.append(
+                f"{kernel_id}: ignored derived field(s) {', '.join(derived)}; "
+                "propose shapes instead"
+            )
         reason = str(revision.get("reason") or "").strip()
+
+        # Operand dims are worth having whether or not the path moved, and the
+        # rows that most need them are the ones the deterministic tiers already
+        # located: under graph capture a replay records no arguments, so a
+        # correctly resolved kernel can still arrive with no shape at all.
         if action == _ACTION_KEEP:
+            _record_shape_proposal(entry, revision, kernel_id=kernel_id, notes=notes)
+            _record_judgement_proposals(entry, revision, kernel_id=kernel_id, notes=notes)
             continue
 
         previous_file = str(entry.get("source_file") or "")
@@ -506,28 +664,22 @@ def apply_revisions(
             notes.append(f"{kernel_id}: rejected unverifiable path {picked!r}")
             continue
         previous_bare = _KSC.strip_line_suffix(previous_file) if _KSC else previous_file
-        if canonical == previous_bare:
-            continue
-        entry["previous_source_file"] = previous_file
-        entry["previous_method"] = previous_method
-        entry["source_file"] = canonical
-        entry.pop("source_line", None)
-        entry.pop("source_function", None)
-        entry["source_resolution_method"] = "llm_review"
-        entry["review_action"] = action
-        entry["review_reason"] = reason or "no reason given"
-        notes.append(f"{kernel_id}: {previous_file or '(none)'} -> {canonical}")
+        # A rewrite that lands on the path already recorded is not a correction,
+        # but the rest of the same revision still is: falling through keeps a
+        # confirmed location from costing the shapes proposed alongside it.
+        if canonical != previous_bare:
+            entry["previous_source_file"] = previous_file
+            entry["previous_method"] = previous_method
+            entry["source_file"] = canonical
+            entry.pop("source_line", None)
+            entry.pop("source_function", None)
+            entry["source_resolution_method"] = "llm_review"
+            entry["review_action"] = action
+            entry["review_reason"] = reason or "no reason given"
+            notes.append(f"{kernel_id}: {previous_file or '(none)'} -> {canonical}")
 
-        proposed_skip = revision.get("skip_reason")
-        if isinstance(proposed_skip, str):
-            entry["review_skip_reason"] = proposed_skip.strip()
-        proposed_reusable = revision.get("reusable_native_kernel")
-        if isinstance(proposed_reusable, bool):
-            entry["review_reusable_hint"] = proposed_reusable
-        harnesses = _verified_harnesses(revision.get("benchmark_files"))
-        if harnesses is not None:
-            entry["review_benchmark_files"] = harnesses
-            notes.append(f"{kernel_id}: benchmark_files -> {len(harnesses)} verified path(s)")
+        _record_shape_proposal(entry, revision, kernel_id=kernel_id, notes=notes)
+        _record_judgement_proposals(entry, revision, kernel_id=kernel_id, notes=notes)
     return notes
 
 
@@ -644,8 +796,12 @@ def run_candidate_review(
 
 __all__ = [
     "ALLOWED_TOOLS",
+    "DERIVED_SHAPE_FIELDS",
     "IMMUTABLE_FIELDS",
     "RAW_CANDIDATES_FILENAME",
+    "REVIEW_BACKFILL_PROVENANCE",
+    "REVIEW_DERIVED_PROVENANCE",
+    "REVIEW_SHAPE_PROVENANCE",
     "REVISIONS_FILENAME",
     "ReviewOutcome",
     "apply_revisions",

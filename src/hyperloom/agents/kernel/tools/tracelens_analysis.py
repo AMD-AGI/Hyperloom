@@ -144,6 +144,15 @@ try:
 except ImportError:  # pragma: no cover - standalone invocation
     _KSC = None  # type: ignore[assignment]
 
+try:
+    from hyperloom.common.kernel_shape_contract import (
+        REVIEW_DERIVED_PROVENANCE as _REVIEW_DERIVED_PROVENANCE,
+    )
+except ImportError:  # pragma: no cover - standalone invocation
+    # This script also runs against an installed hyperloom that may predate the
+    # constant; the literal keeps the review's dims labelled either way.
+    _REVIEW_DERIVED_PROVENANCE = "review_derived"
+
 log = logging.getLogger(__name__)
 
 # Duplicated from kernel_source_contract.SOURCE_RESOLUTION_FILENAME: the
@@ -6805,6 +6814,45 @@ def run_candidate_review_stage(
         return {}
 
 
+#: Rebuilt from ``shapes``, so they must not outlive the dims they described.
+_REVIEW_STALE_SHAPE_FIELDS = (
+    "input_shapes",
+    "invocation_cases",
+    "raw_arg_spec",
+    "shape_donor_operation",
+    "_input_shapes_synthetic",
+)
+
+
+def _adopt_reviewed_shapes(item: dict[str, Any]) -> None:
+    """Take the operand dims the review supplied, if it supplied any.
+
+    Only fires where the deterministic stage came up empty. A recorded shape
+    outranks a reviewed one even when the review is confident, because the
+    reviewed dims can be arithmetic over the serving configuration and nothing
+    downstream re-measures them; the integration benchmark hours later is the
+    first thing that would notice they were wrong.
+
+    The alternate representations are dropped rather than translated. They
+    describe the previous dims, and a harness built from a mix of the two would
+    be wrong in a way that still benchmarks cleanly.
+    """
+    proposed = item.get("review_shapes")
+    if not isinstance(proposed, list) or not proposed:
+        return
+    if item.get("shapes"):
+        return
+    item["shapes"] = list(proposed)
+    item["shape_provenance"] = str(
+        item.get("review_shape_provenance") or _REVIEW_DERIVED_PROVENANCE
+    )
+    reviewed_dtypes = item.get("review_input_dtypes")
+    if isinstance(reviewed_dtypes, list) and reviewed_dtypes:
+        item["input_dtypes"] = list(reviewed_dtypes)
+    for key in _REVIEW_STALE_SHAPE_FIELDS:
+        item.pop(key, None)
+
+
 def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
     """Recompute everything that follows from ``source_file`` after a revision.
 
@@ -6825,6 +6873,7 @@ def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | No
         item["source_type"] = "vendor_binary"
         item["vendor_dispatch_wrapper"] = True
     item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
+    _adopt_reviewed_shapes(item)
     _stamp_candidate_metadata(item, op_cat_map)
     # Stamping recomputes benchmark_files from the curated marker table, which
     # is coarser than a session that went and looked. Its verified answer wins.

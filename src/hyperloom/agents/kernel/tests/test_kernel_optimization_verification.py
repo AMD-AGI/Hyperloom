@@ -131,6 +131,38 @@ def test_structured_shape_cases_parse_moe_args():
     assert cases["supplementary_shapes"] == []
 
 
+def test_captured_shapes_block_claims_measurement_only_for_a_measurement():
+    """The block tells the backend not to invent shapes, so it has to be honest
+    about where these came from: a graph replay records no arguments, and the
+    dims may have been reconstructed by the candidate review. Whether they were
+    measured is exactly what a later reader needs when the tuned kernel turns
+    out not to move end-to-end throughput.
+    """
+    measured = ko._build_captured_shapes_block(
+        {"shapes": ["(8192,6144) bf16"], "shape_provenance": "torch_trace"}
+    )
+    assert "TraceLens-captured" in measured
+    assert "do NOT invent" in measured
+
+    for provenance in ("review_backfill", "review_derived"):
+        reviewed = ko._build_captured_shapes_block(
+            {"shapes": ["(8192,6144) bf16"], "shape_provenance": provenance}
+        )
+        assert "TraceLens-captured" not in reviewed
+        assert "reconstructed" in reviewed
+        assert provenance in reviewed
+        # The instruction itself does not soften: choosing its own shapes is
+        # what the backend does when this block is absent.
+        assert "do NOT invent" in reviewed
+
+
+def test_captured_shapes_block_is_empty_without_dims():
+    """No block means the backend picks its own shapes -- the state this whole
+    path exists to get out of.
+    """
+    assert ko._build_captured_shapes_block({"shapes": []}) == ""
+
+
 def test_structured_shape_cases_prefer_input_shapes():
     candidate = {
         "name": "aiter::ck_moe_stage2",
