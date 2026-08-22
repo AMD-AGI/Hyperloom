@@ -556,7 +556,27 @@ class TestBuildReviewPrompt:
         assert "shapes" in prompt
         assert cra.REVIEW_BACKFILL_PROVENANCE in prompt
         assert cra.REVIEW_DERIVED_PROVENANCE in prompt
-        assert "State the derivation in reason" in prompt
+        assert "State where the dims came from in reason" in prompt
+
+    def test_it_does_not_send_the_session_after_tracelens_internals(self, tmp_path):
+        """``analysis.md`` is TraceLens' only supported output; the rest of that
+        directory is internal and may be deleted.
+
+        Nothing is really given up by staying inside the contract: for every
+        operator the sidecars describe, ``analysis.md`` carries the same dims and
+        launcher in its own table, and for a graph-launched operator neither has
+        anything.
+        """
+        prompt = cra.build_review_prompt(
+            run_dir=tmp_path,
+            raw_candidates_path=tmp_path / "raw.json",
+            revisions_path=tmp_path / "rev.json",
+            reference_paths={},
+            framework_roots=(),
+        )
+        for internal in ("category_data", "priority_data", "perf_report_csvs"):
+            assert internal not in prompt
+        assert "analysis.md is TraceLens' only supported output" in prompt
 
     def test_it_does_not_offer_a_field_the_stamping_pass_recomputes(self, tmp_path):
         """Inviting a revision that is then silently overwritten spends the
@@ -718,6 +738,27 @@ class TestReviewStageBoundary:
         assert tla.run_candidate_review_stage(
             tmp_path, candidates=[], args=self._args()
         ) == {"kernel_candidates_raw": "/x/raw.json"}
+
+    def test_the_session_is_only_pointed_at_supported_outputs(self, tmp_path, monkeypatch):
+        """The reference list is what the session is invited to read.
+
+        TraceLens supports ``analysis.md`` and nothing else in that directory,
+        so naming a sidecar there both breaks the contract and points the
+        session at a file that may not exist.
+        """
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return cra.ReviewOutcome(status="failed", detail="not run")
+
+        monkeypatch.setattr(cra, "run_candidate_review", _capture)
+        tla._run_candidate_review_stage(tmp_path, candidates=[], args=self._args())
+
+        offered = " ".join(captured["reference_paths"].values())
+        for internal in ("category_data", "priority_data", "perf_report_csvs"):
+            assert internal not in offered
+        assert "analysis.md" in offered
 
     def test_dims_land_even_though_the_path_did_not_move(self, tmp_path, monkeypatch):
         """The re-derivation is skipped for rows that did not change, and for a
