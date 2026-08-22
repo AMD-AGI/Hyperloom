@@ -1674,3 +1674,43 @@ async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
     )
 
     assert s.current_best["extra_envs"] == {"KEEP_ME": "1", "TUNED": "new"}
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_stacks_every_applied_winner(session_dir):
+    """Every winner applied in a round must reach optimization_stack.
+
+    Winners in one round are applied cumulatively: ``running_base_tput``
+    advances with each in-batch KEEP, so the second variant is stack-rebenched
+    on top of the first and the round's ``output_throughput`` reflects both.
+    Recording only ``best_variant`` therefore credits the round's cumulative
+    throughput to a config that is missing the other winners' args.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    w1 = {"name": "v1", "fingerprint": "f1", "tput": 120.0, "extra_server_args": "--flag-a"}
+    w2 = {"name": "v2", "fingerprint": "f2", "tput": 130.0, "extra_server_args": "--flag-b"}
+
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {},
+            "winners": [w1, w2],
+            "round_id": "r1",
+            "best_variant": w1,
+            "output_throughput": 130.0,
+            "best_gain_pct": 20.0,
+        },
+        task=_task("explore"),
+    )
+
+    accepted = s.explore_search.get("accepted") if isinstance(s.explore_search, dict) else None
+    assert isinstance(accepted, list) and len(accepted) == 2
+
+    stacked_args = " ".join(str(e.get("extra_server_args") or "") for e in s.optimization_stack)
+    assert "--flag-a" in stacked_args
+    assert "--flag-b" in stacked_args, (
+        f"winner v2 was applied and counted in output_throughput but its args are "
+        f"missing from optimization_stack: {s.optimization_stack}"
+    )

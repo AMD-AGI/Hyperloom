@@ -3851,20 +3851,41 @@ class WritebackCollaborator:
                             prov,
                         )
                 changed = True
-            # 4. Lift the best winner into current_best / optimization_stack.
-            if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
-                best_winner = dict(best_winner)
+            # 4. Lift every applied winner into current_best / optimization_stack.
+            # Winners in a round are applied cumulatively -- ``running_base_tput``
+            # advances with each in-batch KEEP and ``output_throughput`` is the
+            # resulting final stack -- so lifting only ``best_variant`` credited
+            # the round's cumulative throughput to a config missing the other
+            # winners' args, and those args never reached the stack at all.
+            # Each entry carries its own post-apply ``tput`` (explore overwrites
+            # it with the stack rebench result), which rises with the running
+            # base, so the anchor check clears them in application order.
+            explore_gap_cid = (
+                str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
+            )
+            for winner in winners:
+                if not isinstance(winner, dict):
+                    continue
+                entry = dict(winner)
                 if task is not None:
-                    best_winner["task_id"] = str(task.task_id or "")
-                explore_gap_cid = (
-                    str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
-                )
-                promoted = self._lift_to_current_best(
+                    entry["task_id"] = str(task.task_id or "")
+                entry_tput = entry.get("tput")
+                if not isinstance(entry_tput, (int, float)) or float(entry_tput) <= 0:
+                    # A payload without a per-winner tput (older executors, and
+                    # some test doubles) only carries the round throughput; fall
+                    # back to it so the single-winner path is unchanged. With
+                    # several such winners the anchor check keeps the first one,
+                    # which is the pre-existing behaviour.
+                    entry_tput = best_tput
+                if not isinstance(entry_tput, (int, float)) or float(entry_tput) <= 0:
+                    continue
+                if self._lift_to_current_best(
                     "explore",
-                    float(best_tput),
-                    best_winner,
+                    float(entry_tput),
+                    entry,
                     gap_canonical_id=explore_gap_cid,
-                )
+                ):
+                    promoted = True
                 changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
