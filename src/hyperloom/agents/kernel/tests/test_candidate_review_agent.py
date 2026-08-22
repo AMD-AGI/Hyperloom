@@ -719,6 +719,48 @@ class TestReviewStageBoundary:
             tmp_path, candidates=[], args=self._args()
         ) == {"kernel_candidates_raw": "/x/raw.json"}
 
+    def test_dims_land_even_though_the_path_did_not_move(self, tmp_path, monkeypatch):
+        """The re-derivation is skipped for rows that did not change, and for a
+        long time a path was the only thing that could change.
+
+        Operand dims are most often supplied for a kernel the deterministic
+        tiers already located, so a check keyed on the path alone drops exactly
+        the proposals that were hardest to get. Two production analyses staged
+        `review_backfill` dims on `keep` revisions and shipped a table with none.
+        """
+        source = tmp_path / "sparse_attn.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        candidate = {
+            "kernel_id": "k004",
+            "name": "_gqa_sparse_fwd_kernel",
+            "source_file": str(source),
+            "source_type": "python",
+            "shapes": [],
+        }
+        monkeypatch.setattr(tla, "_reusable_roots", lambda: (str(tmp_path).lower(),))
+        monkeypatch.setattr(
+            cra,
+            "run_candidate_review",
+            lambda **_kw: cra.ReviewOutcome(
+                status="completed",
+                revisions=[
+                    {
+                        "kernel_id": "k004",
+                        "action": "keep",
+                        "shapes": ["(8192,8,128) bf16", "(8192,1,128) bf16"],
+                        "shape_provenance": cra.REVIEW_BACKFILL_PROVENANCE,
+                    }
+                ],
+            ),
+        )
+
+        tla._run_candidate_review_stage(
+            tmp_path, candidates=[candidate], args=self._args()
+        )
+
+        assert candidate["shapes"] == ["(8192,8,128) bf16", "(8192,1,128) bf16"]
+        assert candidate["shape_provenance"] == cra.REVIEW_BACKFILL_PROVENANCE
+
 
 class TestRederiveAfterReview:
     def test_a_veto_is_honoured(self, tmp_path, monkeypatch):
