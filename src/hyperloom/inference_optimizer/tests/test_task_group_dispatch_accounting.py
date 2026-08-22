@@ -856,7 +856,7 @@ async def test_single_candidate_handler_preserves_task_group(tmp_path, monkeypat
     monkeypatch.setattr(
         krh,
         "_batch_kernel_candidates",
-        lambda _payload, session_dir: [candidate],
+        lambda _payload, session_dir, skipped_out=None: [candidate],
     )
     monkeypatch.setattr(krh, "_run_optimization_single", fake_single)
 

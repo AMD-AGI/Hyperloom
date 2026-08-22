@@ -64,26 +64,36 @@ def tree(tmp_path: Path):
 
 
 class TestImmutableFields:
-    def test_measured_fields_are_declared_immutable(self):
-        """The set is enforced in code, not requested in prose."""
-        for field in (
-            "gpu_pct",
-            "duration_us",
-            "call_count",
-            "shapes",
-            "raw_arg_spec",
-            "invocation_cases",
-            "device_kernel_name",
-        ):
+    def test_trace_measurements_are_declared_immutable(self):
+        """Event durations off the trace; also the dispatch floor's input."""
+        for field in ("gpu_pct", "duration_us", "call_count"):
+            assert field in cra.IMMUTABLE_FIELDS
+
+    def test_join_keys_are_declared_immutable(self):
+        """Revising these detaches the row from its ledger and from the CSVs."""
+        for field in ("kernel_id", "name", "device_kernel_name"):
             assert field in cra.IMMUTABLE_FIELDS
 
     def test_judgement_fields_stay_revisable(self):
         """Locking these would leave the review nothing to correct."""
-        for field in ("source_file", "reusable_native_kernel", "skip_reason", "benchmark_files"):
+        for field in (
+            "source_file",
+            "reusable_native_kernel",
+            "skip_reason",
+            "benchmark_files",
+            "shapes",
+            "input_dtypes",
+        ):
+            assert field not in cra.IMMUTABLE_FIELDS
+
+    def test_alternate_shape_representations_are_derived_not_revisable(self):
+        """Accepting these alongside shapes is how the three drift apart."""
+        for field in ("input_shapes", "invocation_cases", "raw_arg_spec"):
+            assert field in cra.DERIVED_SHAPE_FIELDS
             assert field not in cra.IMMUTABLE_FIELDS
 
     def test_a_revision_cannot_overwrite_what_the_trace_measured(self, tree):
-        """The impact ranking and the tuning harness are computed from these.
+        """The impact ranking and the closing gain figure are computed from these.
 
         A plausible-looking edit here is indistinguishable from data, so it is
         dropped and reported rather than trusted.
@@ -98,18 +108,154 @@ class TestImmutableFields:
                     "action": "rewrite",
                     "source_file": str(defines),
                     "gpu_pct": 99.0,
-                    "shapes": ["(1,1) fp32"],
                     "duration_us": 1.0,
+                    "name": "something_else",
                 }
             ],
             framework_roots=(str(root),),
         )
         assert row["gpu_pct"] == 9.47
-        assert row["shapes"] == ["(8192,1024) bf16"]
         assert row["duration_us"] == 1234.0
+        assert row["name"] == "_gqa_sparse_decode_kernel"
         assert any("ignored measured field" in note for note in notes)
         # The judgement half of the same revision still lands.
         assert row["source_file"] == str(defines)
+
+    def test_a_derived_representation_is_dropped_with_a_note(self, tree):
+        """Silently ignoring a field the prompt discusses is how drift hides."""
+        root, defines = tree
+        row = _candidate(invocation_cases=[{"operation": "real"}])
+        notes = cra.apply_revisions(
+            [row],
+            [
+                {
+                    "kernel_id": "k001",
+                    "action": "rewrite",
+                    "source_file": str(defines),
+                    "invocation_cases": [{"operation": "invented"}],
+                    "raw_arg_spec": {"0": "invented"},
+                }
+            ],
+            framework_roots=(str(root),),
+        )
+        assert row["invocation_cases"] == [{"operation": "real"}]
+        assert any("ignored derived field" in note for note in notes)
+
+
+# --- operand dims the trace never recorded ---------------------------------
+
+
+class TestShapeProposals:
+    """A graph replay records no arguments, so the hottest kernels of a
+    captured model arrive with no shape. Left empty, the tuning backend picks
+    its own without any view of the serving configuration.
+    """
+
+    def test_dims_are_staged_for_the_deterministic_pass_not_written(self, tree):
+        """Same split as the routability hint: stamping stays the only writer."""
+        root, defines = tree
+        row = _candidate(shapes=[], source_file=str(defines))
+        cra.apply_revisions(
+            [row],
+            [
+                {
+                    "kernel_id": "k001",
+                    "action": "keep",
+                    "shapes": ["(8192,6144) bf16", "(6144,1536) fp4"],
+                    "input_dtypes": ["bf16", "fp4"],
+                    "shape_provenance": cra.REVIEW_BACKFILL_PROVENANCE,
+                }
+            ],
+            framework_roots=(str(root),),
+        )
+        assert row["shapes"] == []
+        assert row["review_shapes"] == ["(8192,6144) bf16", "(6144,1536) fp4"]
+        assert row["review_input_dtypes"] == ["bf16", "fp4"]
+        assert row["review_shape_provenance"] == cra.REVIEW_BACKFILL_PROVENANCE
+
+    def test_a_confirmed_path_still_carries_its_dims(self, tree):
+        """The rows most needing dims are the ones already resolved correctly.
+
+        A rewrite naming the path the row already holds is not a correction, but
+        dropping the whole revision there would discard the shapes proposed with
+        it -- which is every kernel the deterministic tiers got right.
+        """
+        root, defines = tree
+        row = _candidate(shapes=[], source_file=str(defines))
+        cra.apply_revisions(
+            [row],
+            [
+                {
+                    "kernel_id": "k001",
+                    "action": "rewrite",
+                    "source_file": str(defines),
+                    "shapes": ["(64,9216) bf16"],
+                }
+            ],
+            framework_roots=(str(root),),
+        )
+        assert row["review_shapes"] == ["(64,9216) bf16"]
+        # The path did not move, so nothing was recorded as a correction.
+        assert "previous_source_file" not in row
+        assert row["source_resolution_method"] == "name_grep"
+
+    def test_a_derivation_cannot_be_claimed_as_a_measurement(self, tree):
+        """Provenance is the only thing separating a recovered shape from a
+        computed one when a tuned kernel later fails to move throughput.
+        """
+        root, defines = tree
+        row = _candidate(shapes=[], source_file=str(defines))
+        cra.apply_revisions(
+            [row],
+            [
+                {
+                    "kernel_id": "k001",
+                    "action": "keep",
+                    "shapes": ["(1,1) fp32"],
+                    "shape_provenance": "torch_trace",
+                }
+            ],
+            framework_roots=(str(root),),
+        )
+        assert row["review_shape_provenance"] == cra.REVIEW_DERIVED_PROVENANCE
+
+    def test_an_unlabelled_derivation_is_not_promoted(self, tree):
+        root, defines = tree
+        row = _candidate(shapes=[], source_file=str(defines))
+        cra.apply_revisions(
+            [row],
+            [{"kernel_id": "k001", "action": "keep", "shapes": ["(8,8) bf16"]}],
+            framework_roots=(str(root),),
+        )
+        assert row["review_shape_provenance"] == cra.REVIEW_DERIVED_PROVENANCE
+
+    def test_an_empty_proposal_is_reported_rather_than_staged(self, tree):
+        """Clearing dims is not a correction the review has any use for."""
+        root, defines = tree
+        row = _candidate(shapes=[], source_file=str(defines))
+        notes = cra.apply_revisions(
+            [row],
+            [{"kernel_id": "k001", "action": "keep", "shapes": []}],
+            framework_roots=(str(root),),
+        )
+        assert "review_shapes" not in row
+        assert any("empty shapes proposal" in note for note in notes)
+
+    def test_an_unmentioned_row_keeps_its_dims(self, tree):
+        root, _ = tree
+        row = _candidate()
+        before = dict(row)
+        cra.apply_revisions([row], [], framework_roots=(str(root),))
+        assert row == before
+
+    def test_review_provenance_is_dispatchable(self):
+        """Dims the gate rejects are worse than none: an empty shape has an
+        override, an untrusted provenance does not.
+        """
+        from hyperloom.common.kernel_shape_contract import DISPATCHABLE_SHAPE_PROVENANCE
+
+        for provenance in cra.REVIEW_SHAPE_PROVENANCE:
+            assert provenance in DISPATCHABLE_SHAPE_PROVENANCE
 
 
 # --- a path is taken only when it can be verified ---------------------------
@@ -396,6 +542,35 @@ class TestBuildReviewPrompt:
         for token in ("keep", "rewrite", "unresolve", "drop", "gpu_pct", "benchmark_files"):
             assert token in prompt
 
+    def test_it_asks_for_dims_and_for_how_they_were_obtained(self, tmp_path):
+        """An unstated derivation is no more reviewable than the backend's own
+        guess, which is what the dims are there to replace.
+        """
+        prompt = cra.build_review_prompt(
+            run_dir=tmp_path,
+            raw_candidates_path=tmp_path / "raw.json",
+            revisions_path=tmp_path / "rev.json",
+            reference_paths={},
+            framework_roots=(),
+        )
+        assert "shapes" in prompt
+        assert cra.REVIEW_BACKFILL_PROVENANCE in prompt
+        assert cra.REVIEW_DERIVED_PROVENANCE in prompt
+        assert "State the derivation in reason" in prompt
+
+    def test_it_does_not_offer_a_field_the_stamping_pass_recomputes(self, tmp_path):
+        """Inviting a revision that is then silently overwritten spends the
+        session's effort on nothing and hides the overwrite from the audit.
+        """
+        prompt = cra.build_review_prompt(
+            run_dir=tmp_path,
+            raw_candidates_path=tmp_path / "raw.json",
+            revisions_path=tmp_path / "rev.json",
+            reference_paths={},
+            framework_roots=(),
+        )
+        assert "recommended_backends" not in prompt
+
     def test_write_scope_is_stated(self, tmp_path):
         prompt = cra.build_review_prompt(
             run_dir=tmp_path,
@@ -598,3 +773,66 @@ class TestRederiveAfterReview:
         }
         tla._rederive_after_review(item)
         assert item["benchmark_files"] == [str(source)]
+
+
+class TestAdoptReviewedShapes:
+    def test_dims_are_taken_where_the_trace_recorded_none(self, tmp_path):
+        """Empty dims are not a neutral state: the backend then picks its own
+        without any view of the serving configuration.
+        """
+        source = tmp_path / "k.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        item = {
+            "name": "k",
+            "source_file": str(source),
+            "shapes": [],
+            "review_shapes": ["(8192,6144) bf16"],
+            "review_input_dtypes": ["bf16"],
+            "review_shape_provenance": "review_backfill",
+        }
+        tla._rederive_after_review(item)
+        assert item["shapes"] == ["(8192,6144) bf16"]
+        assert item["input_dtypes"] == ["bf16"]
+        assert item["shape_provenance"] == "review_backfill"
+
+    def test_a_recorded_shape_outranks_a_reviewed_one(self, tmp_path):
+        """Nothing downstream re-measures the reviewed dims, so a real
+        measurement is never given up for them.
+        """
+        item = {
+            "name": "k",
+            "source_file": "",
+            "shapes": ["(1,1) fp32"],
+            "shape_provenance": "torch_trace",
+            "review_shapes": ["(9,9) bf16"],
+            "review_shape_provenance": "review_derived",
+        }
+        tla._adopt_reviewed_shapes(item)
+        assert item["shapes"] == ["(1,1) fp32"]
+        assert item["shape_provenance"] == "torch_trace"
+
+    def test_the_alternate_representations_do_not_outlive_the_dims(self, tmp_path):
+        """A harness built from a mix of old and new dims still benchmarks
+        cleanly, which is why the stale halves are dropped rather than kept.
+        """
+        item = {
+            "name": "k",
+            "source_file": "",
+            "shapes": [],
+            "input_shapes": [["stale"]],
+            "invocation_cases": [{"operation": "stale"}],
+            "raw_arg_spec": {"0": "stale"},
+            "_input_shapes_synthetic": True,
+            "review_shapes": ["(8192,6144) bf16"],
+        }
+        tla._adopt_reviewed_shapes(item)
+        for key in ("input_shapes", "invocation_cases", "raw_arg_spec", "_input_shapes_synthetic"):
+            assert key not in item
+
+    def test_an_unlabelled_adoption_still_records_a_provenance(self, tmp_path):
+        """The dispatch gate reads this field; leaving it blank reads as
+        measured, which is the one thing it must not say.
+        """
+        item = {"name": "k", "source_file": "", "shapes": [], "review_shapes": ["(8,8) bf16"]}
+        tla._adopt_reviewed_shapes(item)
+        assert item["shape_provenance"] == "review_derived"
