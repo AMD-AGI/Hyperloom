@@ -6814,6 +6814,18 @@ def run_candidate_review_stage(
         return {}
 
 
+#: Everything the review can stage without moving ``source_file``. The
+#: re-derivation is skipped for rows that did not change, and a path is only one
+#: of the things that can: operand dims are most often supplied for a kernel the
+#: deterministic tiers already located, so keying the check on the path alone
+#: drops exactly the proposals that were hardest to obtain.
+_REVIEW_STAGED_PROPOSALS = (
+    "review_shapes",
+    "review_input_dtypes",
+    "review_reusable_hint",
+    "review_benchmark_files",
+)
+
 #: Rebuilt from ``shapes``, so they must not outlive the dims they described.
 _REVIEW_STALE_SHAPE_FIELDS = (
     "input_shapes",
@@ -7044,8 +7056,8 @@ def _run_candidate_review_stage(
         if not isinstance(item, dict):
             continue
         kernel_id = str(item.get("kernel_id") or "")
-        if str(item.get("source_file") or "") == before_state.get(kernel_id) and (
-            item.get("review_reusable_hint") is None
+        if str(item.get("source_file") or "") == before_state.get(kernel_id) and not any(
+            item.get(key) is not None for key in _REVIEW_STAGED_PROPOSALS
         ):
             continue
         _rederive_after_review(item, op_cat_map)
