@@ -292,7 +292,13 @@ _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
-_DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
+# forge-loop holds back a finalize reserve of half this window, so the figure
+# here buys only half as much search as it reads. At 60 a campaign completed one
+# iteration -- planning alone took 16 of its 30 usable minutes -- and terminated
+# on budget_exhausted with nothing kept, which reads as "the kernel cannot be
+# optimized" rather than "the kernel was tried once". 90 leaves ~45 usable
+# minutes, enough for a second iteration to act on what the first measured.
+_DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized

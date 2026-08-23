@@ -236,7 +236,7 @@ Optional:
 | `TRACELENS_INTERNAL_ROOT` | TraceLens internal extension; unset = open-source-only |
 | `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 60); wins over the LLM-authored payload value |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 90); wins over the LLM-authored payload value |
 
 Fusion lane:
 
