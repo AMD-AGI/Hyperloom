@@ -663,10 +663,11 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
     assert cand["shape_provenance"] == "torch_trace"
 
 
-def test_routable_candidate_carries_shapes_for_orchestrator_gate():
-    # The orchestrator shape gate reads candidate["shapes"] and rejects dispatch
-    # with "empty_kernel_shape" when empty, so a routable candidate with real
-    # trace-captured dims must expose a non-empty "shapes" list.
+def test_routable_candidate_carries_shapes_for_dispatch():
+    # Dispatch reads candidate["shapes"] to pin the harness to the serving dims,
+    # so a routable candidate whose trace DID record them must expose them in
+    # the downstream contract form rather than leaving the backend to recover
+    # dims that were measured all along.
     kernels = [
         {
             "name": "triton_silu",
@@ -682,7 +683,7 @@ def test_routable_candidate_carries_shapes_for_orchestrator_gate():
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     shapes = cand.get("shapes")
     assert isinstance(shapes, list) and shapes, (
-        "routable candidate must expose a non-empty 'shapes' for the orchestrator gate"
+        "a routable candidate with trace-captured dims must expose a non-empty 'shapes'"
     )
     assert cand["shape_provenance"] in {"torch_trace", "tuning_csv"}
     # shapes mirrors input_shapes in the harness-consumable contract form.
@@ -699,15 +700,15 @@ def test_trace_shape_entries_contract_format():
     assert out == [{"call_num": 5, "shape": "(4,1024) bf16<br>(1024,) fp32"}]
     # unmapped dtype -> bare shape (no suffix).
     assert report._trace_shape_entries([[8, 8]], ["weird"], 1) == [{"call_num": 1, "shape": "(8,8)"}]
-    # no renderable operand -> empty (gate will reject as empty_kernel_shape).
+    # no renderable operand -> empty, which the backend recovers dims for.
     assert report._trace_shape_entries([[]], ["float"], 1) == []
     assert report._trace_shape_entries([], [], 1) == []
 
 
 def test_unresolved_shape_candidate_has_empty_shapes():
     # A kernel with no captured dims stays shape-less: "shapes" is an empty list
-    # (present, not absent) and the gate will correctly reject it as
-    # empty_kernel_shape.
+    # (present, not absent) and the provenance says why, so the dispatch can
+    # tell "no dims were recorded" from "these are the dims".
     kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand.get("shapes") == []

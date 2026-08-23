@@ -2342,15 +2342,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
     else:
         print("Recipe sediment : DISABLED (--no-recipe-sediment)")
-    from hyperloom.orchestrator.kernel.request_handlers import set_allow_empty_kernel_shape
-
-    allow_empty_kernel_shape = bool(getattr(args, "allow_empty_kernel_shape", False))
-    set_allow_empty_kernel_shape(allow_empty_kernel_shape)
-    if allow_empty_kernel_shape:
-        print("Kernel shape    : empty-shape dispatch ALLOWED (--allow-empty-kernel-shape)")
-    else:
-        print("Kernel shape    : non-empty trace shape REQUIRED for kernel-opt dispatch")
-
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
     critic_choice = _resolve_critic_choice(args)
     if critic_choice == "mock" and args.critic_protocol != "auto":

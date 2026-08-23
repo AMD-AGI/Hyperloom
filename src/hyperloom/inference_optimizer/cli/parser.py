@@ -1110,17 +1110,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # Integration toggles. Roofline refresh is unconditional (fires at PRELUDE
     # and every 10% cumulative_gain_validated crossing).
     opt.add_argument(
-        "--allow-empty-kernel-shape",
-        dest="allow_empty_kernel_shape",
-        action="store_true",
-        default=False,
-        help="Escape hatch (default off): allow kernel optimization to "
-        "dispatch a candidate with no trace-anchored shape. Normally "
-        "a shapeless candidate is rejected with a structured error so "
-        "the run returns to ``trace_analyze`` instead of burning a "
-        "kernel-optimization budget on an unanchored kernel.",
-    )
-    opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
         action=argparse.BooleanOptionalAction,

@@ -899,35 +899,23 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     return None
 
 
-_ALLOW_EMPTY_KERNEL_SHAPE = False
-
-
-def set_allow_empty_kernel_shape(value: bool) -> None:
-    """Set the process-local empty-shape escape hatch used by CLI runs."""
-    global _ALLOW_EMPTY_KERNEL_SHAPE
-    _ALLOW_EMPTY_KERNEL_SHAPE = bool(value)
-
-
-def _allow_empty_kernel_shape(payload: dict) -> bool:
-    """Escape hatch (default off) via ``payload['allow_empty_kernel_shape']`` or the CLI process flag.
-
-    Args:
-        payload: Request payload that may carry ``allow_empty_kernel_shape``.
-
-    Returns:
-        ``True`` when empty kernel shapes are explicitly permitted.
-    """
-    if bool(payload.get("allow_empty_kernel_shape")):
-        return True
-    return _ALLOW_EMPTY_KERNEL_SHAPE
-
-
 def _validate_kernel_shape_and_paths(
     payload: dict,
     *,
     session_dir: Path,
 ) -> HandlerResult | None:
-    """Reject a kernel-opt dispatch with no trace-anchored shape or a missing source/workspace path.
+    """Reject a kernel-opt dispatch with untrusted shape provenance or a missing source/workspace path.
+
+    A shapeless candidate is NOT rejected. A graph-launched kernel records no
+    CPU-side parent, so the profiler strips its argument dims; refusing to
+    dispatch those means the hottest kernels of a captured model can never be
+    optimized. The invocation spec reports the absent operands under its
+    ``missing`` list and the backend's driver preparation recovers them from the
+    kernel source, the tests it names and the deployment context the spec
+    carries. Provenance is still checked, but only for a shape that is actually
+    there: on a shapeless row the marker names why the dims are absent
+    (``unresolved``), and reading that as an untrusted operand dim would close
+    the same door from the other side.
 
     Args:
         payload: Kernel-opt dispatch payload to validate.
@@ -944,24 +932,9 @@ def _validate_kernel_shape_and_paths(
     kernel_id = str(payload.get("kernel_id") or "")
     name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
 
-    shapes = candidate.get("shapes")
-    if not isinstance(shapes, list):
-        shapes = []
+    has_shapes = bool(candidate.get("shapes"))
     provenance = str(candidate.get("shape_provenance") or payload.get("shape_provenance") or "").strip()
-    if not shapes and not _allow_empty_kernel_shape(payload):
-        return {
-            "status": "failed",
-            "error_class": "empty_kernel_shape",
-            "error": (
-                "selected kernel candidate has no trace-anchored shape; "
-                "re-run trace_analyze to capture shapes before optimizing "
-                "(or pass --allow-empty-kernel-shape to override)"
-            ),
-            "kernel_id": kernel_id,
-            "kernel_name": name,
-            "shape_provenance": provenance,
-        }
-    if provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
+    if has_shapes and provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
         return {
             "status": "failed",
             "error_class": "untrusted_shape_provenance",
