@@ -13,7 +13,7 @@ branch makes gfx1201 a first-class target.
 
 | Target | Arch | Status |
 |---|---|---|
-| Radeon AI PRO R9700 | gfx1201 | **MEASURED.** Board autodetects; runner benchmarked end-to-end on 2× R9700 |
+| Radeon AI PRO R9700 | gfx1201 | **MEASURED.** Board autodetects; `test-backend-ops` passes vs the CPU reference; runner benchmarked end-to-end on 2× R9700 |
 | RX 9070 / 9070 XT | gfx1201 | Same arch, board never tested here. Autodetect keys on arch, so it should resolve — unverified |
 | RX 9060 XT | gfx1200 | **Deliberately unmapped.** Navi 44 is the same ISA family but nobody has measured it; a runner label is a claim of support |
 | W7900 / RX 7600 | gfx1100 / gfx1102 | Methodology **independently validated** by [@kyuubyN](https://github.com/kyuubyN) — see below. Runner map not covered here yet |
@@ -98,7 +98,11 @@ Run the probe and open an **RDNA hardware report** issue with its output:
 ```
 
 It prints a paste-ready block and a verdict — `CONFIRMED`, `PARTIAL`, or
-`UNSUPPORTED` (with the exact change needed to map your arch). Agents working
+`UNSUPPORTED` (with the exact change needed to map your arch). `CONFIRMED`
+requires **both** a passing correctness gate (`test-backend-ops` vs the CPU
+reference on your arch) and a measurement Hyperloom's validator accepts:
+throughput alone cannot confirm support, because a kernel that is fast and
+wrong benchmarks beautifully. Agents working
 in this repo should read [`AGENTS.md`](../../AGENTS.md): §1 confirm, §2 add a
 target, §3 the playbook for when it does not work.
 

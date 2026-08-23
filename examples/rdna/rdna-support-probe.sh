@@ -6,15 +6,22 @@
 # machine, or to show exactly what is missing to ADD it.
 #
 # Prints a paste-ready markdown report and exits with the verdict:
-#   0 = CONFIRMED    board resolves AND a measurement passed Hyperloom's validator
-#   1 = PARTIAL      board resolves, no harness-accepted measurement
+#   0 = CONFIRMED    correctness PASSED *and* a measurement passed Hyperloom's validator
+#   1 = PARTIAL      board resolves, but one of those two halves is missing
 #   2 = UNSUPPORTED  arch is not mapped (see AGENTS.md §2)
 #
 #   ./rdna-support-probe.sh              identity + resolution only
-#   ./rdna-support-probe.sh --bench      also run the runner and have Hyperloom judge it
+#   ./rdna-support-probe.sh --bench      correctness gate + benchmark + harness verdict
+#
+# CORRECTNESS IS NOT OPTIONAL. Throughput alone cannot confirm support: a kernel
+# that is fast and WRONG will produce a beautiful number. --bench runs
+# llama.cpp's test-backend-ops (every op compared against the CPU reference on
+# this arch) and refuses CONFIRMED without it.
 #
 # Env for --bench: MODEL=/path/*.gguf  plus LLAMA_BENCH= or LLAMA_CPP_DIR=
-# Optional: PY=<python with the repo installed>  GPU=<index, default 0>
+# Optional: PY=<python>  GPU=<index, default 0>  TEST_BACKEND_OPS=<path>
+#           CORRECTNESS_OPS=MUL_MAT,MUL_MAT_ID   (comma-separated, or ALL)
+#           PPL_FILE=<corpus> PPL_MAX=<float>    (adds a model-level gate too)
 set -uo pipefail
 
 BENCH=0; [ "${1:-}" = "--bench" ] && BENCH=1
@@ -75,7 +82,41 @@ else
     echo "      Set PY=/path/to/python (the one with the repo deps installed)." >&2
 fi
 
-# --- optional: run the real thing and let Hyperloom judge it
+# --- CORRECTNESS FIRST. A wrong-but-fast kernel is worth zero, so this gates
+# --- the verdict; the benchmark below is only meaningful once this passes.
+CORRECT="not run"; CORRECT_OK=0
+if [ "$BENCH" = 1 ]; then
+    TBO="${TEST_BACKEND_OPS:-}"
+    if [ -z "$TBO" ]; then
+        for c in "$(dirname "${LLAMA_BENCH:-/nonexistent}")/test-backend-ops" \
+                 "${LLAMA_CPP_DIR:-}/build/bin/test-backend-ops" \
+                 "$(command -v test-backend-ops 2>/dev/null || true)"; do
+            [ -n "$c" ] && [ -x "$c" ] && { TBO="$c"; break; }
+        done
+    fi
+    if [ -z "$TBO" ] || [ ! -x "$TBO" ]; then
+        CORRECT="NOT RUN — test-backend-ops not found (build it, or set TEST_BACKEND_OPS)"
+    else
+        OPS="${CORRECTNESS_OPS:-MUL_MAT,MUL_MAT_ID}"
+        CLOG="$(mktemp)"; CORRECT_OK=1; PASSED_TOTAL=0
+        if [ "$OPS" = "ALL" ]; then OPLIST=""; else OPLIST="$(tr ',' ' ' <<<"$OPS")"; fi
+        for op in ${OPLIST:-__all__}; do
+            if [ "$op" = "__all__" ]; then ARGS=(); else ARGS=(-o "$op"); fi
+            if HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-$GPU}" "$TBO" "${ARGS[@]}" >"$CLOG" 2>&1; then
+                n="$(grep -oE '[0-9]+/[0-9]+ tests passed' "$CLOG" | tail -1)"
+                PASSED_TOTAL="$PASSED_TOTAL ${op}:${n:-ok}"
+            else
+                CORRECT_OK=0
+                CORRECT="FAILED on ${op} — $(grep -iE 'FAIL|error' "$CLOG" | head -2 | tr '\n' ' ')"
+                break
+            fi
+        done
+        [ "$CORRECT_OK" = 1 ] && CORRECT="PASSED vs CPU reference (${OPS}):${PASSED_TOTAL}"
+        rm -f "$CLOG"
+    fi
+fi
+
+# --- then measure, and let Hyperloom judge the measurement
 BENCH_MD=""; VALID="not run"; PP_TS=""; TG_TS=""
 if [ "$BENCH" = 1 ]; then
     SCRIPT_PATH="$REPO/examples/rdna/custom_${RUNNER}.sh"
@@ -100,6 +141,9 @@ print("ACCEPTED by is_valid_measurement()" if is_valid_measurement(m) else "REJE
 PY
 )"
             BENCH_MD="prefill ${PP_TS:-?} t/s / decode ${TG_TS:-?} t/s"
+            QGATE="$($PY -c "
+import json;g=json.load(open('$RES')).get('quality_gate')
+print('none supplied' if not g else ('PASSED' if g.get('passed') else ('SKIPPED: '+str(g.get('reason'))) if g.get('skipped') else 'FAILED')+' '+str({k:v for k,v in g.items() if k in ('metric','value','threshold')}))" 2>/dev/null)"
         else
             VALID="runner FAILED — see log tail below"
             BENCH_MD="$(tail -5 "$OUTDIR/run.log" 2>/dev/null)"
@@ -110,8 +154,13 @@ fi
 # --- verdict
 if [ "$RUNNER" = "-" ] || [ -z "$RESOLVED" ] || [ "$RESOLVED" = "-" ]; then
     VERDICT="UNSUPPORTED"; RC=2
-elif [[ "$VALID" == ACCEPTED* ]]; then
+elif [[ "$VALID" == ACCEPTED* ]] && [ "$CORRECT_OK" = 1 ]; then
     VERDICT="CONFIRMED"; RC=0
+elif [[ "$VALID" == ACCEPTED* ]]; then
+    # Fast is not the same as right. Say so in the verdict, not in a footnote.
+    VERDICT="PARTIAL (throughput only — CORRECTNESS UNVERIFIED)"; RC=1
+elif [ "$CORRECT_OK" = 1 ]; then
+    VERDICT="PARTIAL (correctness passed, no accepted measurement)"; RC=1
 else
     VERDICT="PARTIAL"; RC=1
 fi
@@ -134,8 +183,10 @@ cat <<MD
 | hyperloom resolves as | $(u "$RESOLVED") |
 | dispatch identity | $(u "$IDENTITY") |
 | runner for this arch | $(u "$RUNNER") |
+| **correctness** | $CORRECT |
 | benchmark | ${BENCH_MD:-not run} |
 | harness verdict | $VALID |
+| model-level gate | ${QGATE:-none supplied} |
 
 MD
 if [ "$RC" = 2 ]; then cat <<MD
@@ -151,9 +202,16 @@ if [ "$RC" = 2 ]; then cat <<MD
 Map only the arch you actually ran. Do not add sibling chips you have not booted.
 MD
 elif [ "$RC" = 1 ]; then cat <<MD
-**Recognised, not yet proven.** Re-run with \`--bench\` and a model to reach
-CONFIRMED: \`MODEL=/path/model.gguf LLAMA_CPP_DIR=/path/llama.cpp ./rdna-support-probe.sh --bench\`
-Support-matrix entries move to MEASURED only on CONFIRMED.
+**Recognised, not yet proven.** CONFIRMED needs BOTH halves:
+
+1. **correctness** — \`test-backend-ops\` passing against the CPU reference on this arch
+2. **a measurement** Hyperloom's own validator accepts
+
+\`MODEL=/path/model.gguf LLAMA_CPP_DIR=/path/llama.cpp ./rdna-support-probe.sh --bench\`
+
+A throughput number with no correctness gate is not support: a kernel that is
+fast and wrong reports beautifully. Add \`PPL_FILE=\`/\`PPL_MAX=\` for a
+model-level gate on top. Support-matrix entries move to MEASURED only on CONFIRMED.
 MD
 else cat <<MD
 **Confirmed on this machine.** Say what you did NOT test — GPU count, other

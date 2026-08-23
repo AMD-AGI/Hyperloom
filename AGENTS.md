@@ -57,16 +57,41 @@ Corollaries that have already bitten this project:
 ```
 
 Use `--bench` whenever a model is available (`MODEL=/path/to/*.gguf` and a
-llama.cpp build). Without a benchmark you can only confirm that the board is
-*recognised*, which is the weaker half of the claim.
+llama.cpp build). Without it you can only confirm that the board is
+*recognised* — which proves the identity plumbing works and nothing about
+whether this GPU computes correct answers.
 
 The probe prints a paste-ready markdown block and one of three verdicts:
 
 | Verdict | Means |
 |---|---|
-| `CONFIRMED` | Board resolves **and** the runner produced a measurement Hyperloom's own validator accepted |
-| `PARTIAL` | Board resolves, but no accepted measurement (no model, no llama.cpp, or the run failed) |
+| `CONFIRMED` | Correctness **passed** against the CPU reference **and** the runner produced a measurement Hyperloom's own validator accepted. Both halves, or it is not confirmed |
+| `PARTIAL` | One half is missing. `PARTIAL (throughput only — CORRECTNESS UNVERIFIED)` is called out separately, because it is the dangerous one |
 | `UNSUPPORTED` | The arch is not in `_GFX_TO_RUNNER` — go to §2 |
+
+### 1.1a Correctness is half the verdict, not a footnote
+
+**A throughput number with no correctness gate is not evidence of support.** A
+kernel that is fast and *wrong* produces a beautiful benchmark — that is the
+normal failure mode of a bad port, not an exotic one. This is also the first
+thing Hyperloom's own methodology insists on: correctness gate *before* any
+benchmark is trusted.
+
+`--bench` therefore runs llama.cpp's `test-backend-ops`, which compares backend
+ops against the **CPU reference on your arch**, and refuses `CONFIRMED` without
+it. Defaults to `MUL_MAT,MUL_MAT_ID` — the matmul paths a quant or arch port
+actually breaks. Widen with `CORRECTNESS_OPS=ALL` (slower, more thorough) or
+narrow it if you are iterating.
+
+Add a model-level gate on top when you can — `PPL_FILE=<corpus> PPL_MAX=<float>`
+runs perplexity through the runner. Op-level correctness proves the kernels
+compute the right thing; a perplexity bound proves the assembled model still
+produces sane output. They fail differently, so both are worth having.
+
+Note what `is_valid_measurement()` does **not** do: a *missing* `quality_gate`
+is non-blocking there, so the harness will happily accept a fast run with no
+correctness evidence at all. That is correct behaviour for the harness and the
+wrong bar for a support claim, which is why this probe adds its own.
 
 ### 1.2 Do not edit the matrix from a PARTIAL
 
@@ -130,10 +155,17 @@ generosity — it is a support claim written by someone who cannot honour it.
 PY=<a python with pytest>
 PYTHONPATH=src $PY -m pytest src/hyperloom/inference_optimizer/tests/ -q \
   -k "gpu or quant or preflight or parser or provenance"
-./examples/rdna/rdna-support-probe.sh --bench
+MODEL=/path/model.gguf LLAMA_CPP_DIR=/path/llama.cpp \
+  ./examples/rdna/rdna-support-probe.sh --bench
 ```
 
-Both must pass, and the probe must say `CONFIRMED`, before the matrix changes.
+Both must pass, and the probe must say `CONFIRMED` — which means the
+correctness gate passed on your arch, not merely that it went fast — before the
+matrix changes.
+
+If correctness FAILS on a new arch, that is the most valuable thing you can
+report. Post it with the failing op list and stop; do not tune a kernel that is
+computing the wrong answer, and do not add a matrix row.
 
 ---
 

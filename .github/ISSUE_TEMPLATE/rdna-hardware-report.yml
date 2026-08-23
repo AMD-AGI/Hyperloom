@@ -7,6 +7,10 @@ body:
       value: |
         Use this to report **measured** results from RDNA hardware — yours or a machine you have access to.
 
+        **A correctness failure is a first-class report.** If `test-backend-ops` fails on your arch,
+        post that and stop — do not tune a kernel that computes the wrong answer. That report is
+        worth more than a fast number.
+
         Run the probe first and paste its output below:
 
         ```bash
@@ -18,6 +22,20 @@ body:
 
         **Negative results are welcome.** "This failed on gfx1102, here is the exact error" is a real
         contribution and nobody without your hardware can produce it.
+
+  - type: dropdown
+    id: correctness
+    attributes:
+      label: Correctness gate
+      description: |
+        Did `test-backend-ops` pass against the CPU reference on this arch? Throughput without
+        this proves nothing — a kernel that is fast and wrong benchmarks beautifully.
+      options:
+        - "PASSED — test-backend-ops passed on this arch"
+        - "FAILED — ops failed vs the CPU reference (please paste which ones below)"
+        - "NOT RUN — no test-backend-ops build available"
+    validations:
+      required: true
 
   - type: dropdown
     id: verdict
