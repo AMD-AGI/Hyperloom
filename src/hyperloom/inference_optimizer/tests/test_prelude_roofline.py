@@ -476,6 +476,74 @@ def test_a_trace_of_a_different_workload_is_still_stale(coord: Coordinator):
     assert coord.phase_kernel._profile_workload_changed() is True
 
 
+def _recorded_under(state, *, server_args: str, envs: dict) -> None:
+    """Record a profile the way the roofline path does: with the task params."""
+    state.current_best = {"extra_server_args": server_args, "extra_envs": dict(envs)}
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.profile_workload_context(
+        {"base_extra_args": server_args, "base_extra_envs": dict(envs)}
+    )
+
+
+def _reprofiles(coord: Coordinator) -> bool:
+    """Whether the two staleness checks together call for a re-profile."""
+    phase = coord.phase_kernel
+    signature = phase._current_profile_config_signature()
+    return phase._profile_config_changed(signature) or phase._profile_workload_changed()
+
+
+_BASE_ARGS = "--block-size 128 --enable-expert-parallel"
+_BASE_ENVS = {"VLLM_ROCM_USE_AITER": "1"}
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate", "expected"),
+    [
+        ("nothing moved", lambda s: None, False),
+        (
+            "explore added a server arg",
+            lambda s: s.current_best.__setitem__(
+                "extra_server_args", _BASE_ARGS + " --max-num-batched-tokens 16384"
+            ),
+            True,
+        ),
+        (
+            "explore added an env",
+            lambda s: s.current_best.__setitem__(
+                "extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER_MOE": "1"}
+            ),
+            True,
+        ),
+        (
+            "an env changed value",
+            lambda s: s.current_best.__setitem__(
+                "extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER": "0"}
+            ),
+            True,
+        ),
+        ("the workload changed", lambda s: setattr(s, "isl", int(s.isl or 0) + 4096), True),
+    ],
+)
+def test_serving_config_changes_still_force_a_reprofile(
+    coord: Coordinator, label, mutate, expected
+):
+    """Forgiving the parameterization must not forgive a real config change.
+
+    A configuration EXPLORE found and integrated changes which kernels run, so a
+    trace taken before it is genuinely stale. Those changes reach
+    ``_profile_config_changed``, which reads them from ``current_best`` on both
+    sides; only the recording-shape mismatch was taken out of
+    ``_profile_workload_changed``. This pins the boundary between the two.
+    """
+    state = coord.shared_state
+    _recorded_under(state, server_args=_BASE_ARGS, envs=_BASE_ENVS)
+    assert _reprofiles(coord) is False, "the recorded trace starts fresh"
+
+    mutate(state)
+
+    assert _reprofiles(coord) is expected, label
+
+
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
