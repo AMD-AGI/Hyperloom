@@ -16,7 +16,8 @@ branch makes gfx1201 a first-class target.
 | Radeon AI PRO R9700 | gfx1201 | **MEASURED.** Board autodetects; runner benchmarked end-to-end on 2× R9700 |
 | RX 9070 / 9070 XT | gfx1201 | Same arch, board never tested here. Autodetect keys on arch, so it should resolve — unverified |
 | RX 9060 XT | gfx1200 | **Deliberately unmapped.** Navi 44 is the same ISA family but nobody has measured it; a runner label is a claim of support |
-| gfx11 (RDNA3) | gfx1100/1101 | Not in this branch yet |
+| W7900 / RX 7600 | gfx1100 / gfx1102 | Methodology **independently validated** by [@kyuubyN](https://github.com/kyuubyN) — see below. Runner map not covered here yet |
+| gfx11 (other RDNA3) | gfx1101 etc. | Not in this branch yet |
 | Instinct | gfx942/gfx950 | Unchanged from upstream |
 
 Multi-GPU: measured on a **2-card** host only. On this box the two GPUs report
@@ -87,6 +88,44 @@ gfx1201:
 upstream MI355X gate: the MX scaled-convert instructions are gfx950/gfx1250
 gated, so an assembler capability probe on gfx1201 grades them REJECTED. There
 is no hardware datapath to fall back to.
+
+## RDNA3 (gfx11) — what is actually established
+
+Upstream [issue #1041](https://github.com/AMD-AGI/Hyperloom/issues/1041) is the
+RDNA3 counterpart to #1196, opened by [@kyuubyN](https://github.com/kyuubyN).
+Be precise about what it demonstrates, because it is easy to overstate:
+
+**What was validated:** Hyperloom's *methodology* — bounded discrete catalog,
+correctness gate before any benchmark is trusted, interleaved A/B with warmup
+discarded, non-overlapping-IQR significance test, graded
+KEEP/NEEDS_REVIEW/REVERT verdict, and an engagement proof that the candidate
+actually compiled and ran — independently re-implemented against **their own
+HIP inference engine**, on gfx1102 (RX 7600, 8 GB) and gfx1100 (W7900, 48 GB),
+with real measured results including a run whose honest verdict was "revert
+everything". Write-up:
+[Radeon-hackathon-2026-07-Aetheris](https://github.com/kyuubyN/Radeon-hackathon-2026-07-Aetheris/blob/main/PROJECT_SPECIFICATION.md#61-self-optimizing-kernels-built-on-amds-own-methodology).
+
+**What was NOT validated:** Hyperloom itself running on RDNA3. The runner map
+still excludes gfx11, and upstream's suite *asserts* the exclusion
+(`test_profile_and_kernel_handlers.py`: `_GFX_TO_RUNNER.get("gfx1100") is None`).
+So "verified on RDNA3" means the approach transfers to gfx11 — not that this
+port runs there. Nobody should read the matrix above as more than that.
+
+That distinction is the same discipline the port itself is built on: a result
+measured on A does not close B until B is measured.
+
+One finding from #1041 worth carrying over regardless of arch: their engagement
+check compares the **actual rendered source each instance compiled**, rather
+than inferring engagement from log markers — and it caught a tuning knob that
+looked plausible but never reached the GPU. That is the same failure mode as
+optimizing a code path that is not the live dispatched one, and it is worth
+having on any arch.
+
+**RDNA3 contributions are welcome here.** What it needs: a `gfx1100`/`gfx1102`
+entry in the identities table plus `_GFX_TO_RUNNER`, a runner script (the
+llama.cpp one in `examples/rdna/` should port with little more than a name and
+different measured caveats), and flipping upstream's negative gfx1100
+assertion into positive coverage. The gfx1201 work is the template.
 
 ## Upstream posture
 
