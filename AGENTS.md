@@ -80,8 +80,10 @@ benchmark is trusted.
 `--bench` therefore runs llama.cpp's `test-backend-ops`, which compares backend
 ops against the **CPU reference on your arch**, and refuses `CONFIRMED` without
 it. Defaults to `MUL_MAT,MUL_MAT_ID` — the matmul paths a quant or arch port
-actually breaks. Widen with `CORRECTNESS_OPS=ALL` (slower, more thorough) or
-narrow it if you are iterating.
+actually breaks — which takes **~90 s on gfx1201** (measured: 1196/1196 and
+865/865 against the CPU reference). That is a one-time cost for a support
+claim. Widen with `CORRECTNESS_OPS=ALL` (slower, more thorough), or narrow it
+while you are iterating.
 
 Add a model-level gate on top when you can — `PPL_FILE=<corpus> PPL_MAX=<float>`
 runs perplexity through the runner. Op-level correctness proves the kernels

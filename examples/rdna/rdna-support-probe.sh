@@ -97,8 +97,10 @@ if [ "$BENCH" = 1 ]; then
     if [ -z "$TBO" ] || [ ! -x "$TBO" ]; then
         CORRECT="NOT RUN — test-backend-ops not found (build it, or set TEST_BACKEND_OPS)"
     else
+        # ~90s on gfx1201 for the default pair. A one-time cost for a support
+        # claim; narrow it with CORRECTNESS_OPS while iterating.
         OPS="${CORRECTNESS_OPS:-MUL_MAT,MUL_MAT_ID}"
-        CLOG="$(mktemp)"; CORRECT_OK=1; PASSED_TOTAL=0
+        CLOG="$(mktemp)"; CORRECT_OK=1; PASSED_TOTAL=""
         if [ "$OPS" = "ALL" ]; then OPLIST=""; else OPLIST="$(tr ',' ' ' <<<"$OPS")"; fi
         for op in ${OPLIST:-__all__}; do
             if [ "$op" = "__all__" ]; then ARGS=(); else ARGS=(-o "$op"); fi
