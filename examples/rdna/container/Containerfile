@@ -12,16 +12,22 @@
 #       --build-arg AMDGPU_TARGETS=gfx1201 \
 #       -f examples/rdna/container/Containerfile .
 #
+# Then just use the wrapper, which handles device passthrough and mounts:
+#
+#   MODEL=/path/to/model.gguf examples/rdna/container/run.sh
+#
+# Or by hand. No --group-add: the container runs as root, which reaches
+# /dev/kfd and /dev/dri via CAP_DAC_OVERRIDE.
+#
 #   docker run --rm --device /dev/kfd --device /dev/dri \
-#       --group-add "$(getent group render | cut -d: -f3)" \
-#       --group-add "$(getent group video  | cut -d: -f3)" \
 #       --security-opt seccomp=unconfined \
 #       -e MODEL=/models/your.gguf -v /path/to/models:/models:ro \
 #       hyperloom-rdna:test
 #
-# NOTE the numeric GIDs. `--group-add render` resolves the name INSIDE the
-# image, which has no render group, and fails with "unable to find group
-# render". The host's GID is what grants access to /dev/kfd and /dev/dri.
+# Only when dropping to a non-root user (--user) do you need --group-add, and
+# then it must be the host's NUMERIC gid: `--group-add render` resolves the name
+# INSIDE the image, which has no render group, and fails with "unable to find
+# group render". run.sh does this for you via RUN_AS_USER.
 #
 ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:latest
 FROM ${ROCM_IMAGE}

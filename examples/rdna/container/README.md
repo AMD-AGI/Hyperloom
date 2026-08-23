@@ -29,20 +29,32 @@ Pin the inputs when you want a reproducible run:
 ## Run
 
 ```bash
+MODEL=/path/to/model.gguf examples/rdna/container/run.sh
+```
+
+`run.sh` resolves the model path, mounts its directory read-only, passes the
+devices, forwards the knobs (`PP`, `TG`, `REPS`, `CORRECTNESS_OPS`, `PPL_FILE`,
+`PPL_MAX`, `HIP_VISIBLE_DEVICES`), and fails immediately with a clear message if
+`/dev/kfd` is missing rather than 90 seconds into a run. Arguments pass through
+to the probe. It works with `DOCKER=podman` too.
+
+By hand, if you prefer:
+
+```bash
 docker run --rm \
     --device /dev/kfd --device /dev/dri \
-    --group-add "$(getent group render | cut -d: -f3)" \
-    --group-add "$(getent group video  | cut -d: -f3)" \
     --security-opt seccomp=unconfined \
     -v /path/to/models:/models:ro \
     -e MODEL=/models/your-model.gguf \
     hyperloom-rdna:test
 ```
 
-Use the **numeric** GIDs. `--group-add render` resolves the group name inside
-the image, which has no `render` group, and fails with `unable to find group
-render`; the host's GID is what actually grants access to `/dev/kfd` and
-`/dev/dri`.
+**No `--group-add` is needed.** The container runs as root, which reaches
+`/dev/kfd` and `/dev/dri` through `CAP_DAC_OVERRIDE` — verified: `rocminfo`
+sees both GPUs and `test-backend-ops` passes without it. It is required *only*
+when dropping to a non-root user, and then it must be the host's **numeric**
+GID, because `--group-add render` resolves the group name inside the image,
+which has no `render` group. `run.sh` handles that via `RUN_AS_USER=1000:1000`.
 
 Defaults to the full probe (`--bench`), so it runs the correctness gate and the
 benchmark and prints a paste-ready report. Add `-e CORRECTNESS_OPS=ALL` for a
@@ -74,8 +86,16 @@ Both of these were found by *running* it, and both would have looked like
   Compilation still succeeds, because cmake passes `-L` explicitly; every
   ROCm-linked binary then dies at **load** time. The Containerfile now writes
   the `ld.so.conf.d` entry, runs `ldconfig`, and **verifies** the result in the
-  same layer, so a regression fails the build rather than the run.
-- **`unable to find group render`** — the `--group-add` name-vs-GID trap above.
+  same layer, so a regression fails the build rather than the run. Verified
+  after the fix: 4 hipblas entries in `ldconfig -p`, and **0** unresolved
+  libraries in both `llama-bench` and `test-backend-ops`.
+- **`unable to find group render`.** `--group-add` resolves the group name
+  inside the image, which has no `render` group. The first fix was to document
+  the numeric-GID workaround; the actual fix was to check whether the flag was
+  needed at all. It is not — the container runs as root and reaches the devices
+  via `CAP_DAC_OVERRIDE`, confirmed by `rocminfo` and a passing
+  `test-backend-ops` with no group flags. It is now absent from the documented
+  command, and `run.sh` adds it only under `RUN_AS_USER`.
 
 Note also that the probe behaved correctly during the broken run: it reported
 `PARTIAL` with the linker error in the correctness row, rather than a false
