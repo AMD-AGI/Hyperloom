@@ -280,19 +280,35 @@ class KernelPhase(PhaseHandler):
         return previous != signature
 
     def _profile_workload_changed(self) -> bool:
-        """Whether the latest trace predates the active serving workload."""
+        """Whether the latest trace predates the active serving workload.
+
+        Compares only the fields that identify the profiled workload. The rest
+        of the context records how the profile task was parameterized, and the
+        two writers disagree there by construction: the roofline path records
+        through ``record_profile_workload(task_params)`` and fills them, while
+        the kernel-entry path records through ``profile_workload_context()`` and
+        leaves them empty. A whole-dict comparison therefore reported a change
+        on every first entry -- costing a full re-profile and a second TraceLens
+        pass, roughly fifty minutes, with the serving configuration provably
+        unchanged -- and then stopped reporting one, because the re-profile it
+        forced had rewritten the record in the other writer's shape.
+
+        The serving configuration is not compared here; that is
+        :meth:`_profile_config_changed`, which reads it from ``current_best`` on
+        both sides and is symmetric for the same reason this now is.
+        """
         status = str(getattr(self.shared_state, "last_profile_status", "") or "").strip().lower()
         if status and status != "succeeded":
             return True
         recorded = getattr(self.shared_state, "last_profile_workload", None)
-        expected = self.shared_state.profile_workload_context()
         if not isinstance(recorded, dict) or not recorded:
             return bool(
                 getattr(self.shared_state, "last_profile_trace", "")
                 or getattr(self.shared_state, "last_trace_analyze", None)
                 or getattr(self.shared_state, "roofline_snapshots", None)
             )
-        return recorded != expected
+        identity = self.shared_state.profile_workload_identity
+        return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""

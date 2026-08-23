@@ -435,6 +435,47 @@ async def test_kernel_entry_does_not_dispatch_without_untried_candidates(
     assert dispatched == 0
 
 
+def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
+    """The two writers of ``last_profile_workload`` disagree by construction.
+
+    The roofline path records through ``record_profile_workload(task_params)``
+    and fills ``server_args`` / ``extra_envs``; the kernel-entry path records
+    through ``profile_workload_context()`` and leaves them empty. Comparing the
+    whole dict therefore reported a change on every first KERNEL entry -- a full
+    re-profile plus a second TraceLens pass, with the serving configuration
+    provably unchanged -- and then stopped, because the re-profile it forced had
+    rewritten the record in the other writer's shape.
+    """
+    state = coord.shared_state
+    state.current_best = {
+        "extra_server_args": "--block-size 128 --enable-expert-parallel",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.profile_workload_context(
+        {
+            "base_extra_args": "--block-size 128 --enable-expert-parallel",
+            "base_extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+    # The record and a freshly built context differ, exactly as in production.
+    assert state.last_profile_workload != state.profile_workload_context()
+
+    assert coord.phase_kernel._profile_workload_changed() is False
+
+
+def test_a_trace_of_a_different_workload_is_still_stale(coord: Coordinator):
+    """Only the parameterization is forgiven; the workload itself still counts."""
+    state = coord.shared_state
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.profile_workload_context()
+    assert coord.phase_kernel._profile_workload_changed() is False
+
+    state.isl = int(state.isl or 0) + 4096
+
+    assert coord.phase_kernel._profile_workload_changed() is True
+
+
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""

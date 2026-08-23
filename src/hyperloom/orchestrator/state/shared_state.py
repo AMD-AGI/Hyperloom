@@ -53,7 +53,7 @@ import math
 import os
 import shlex
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -1093,6 +1093,42 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
+
+    #: Fields of :meth:`profile_workload_context` that say *what was profiled*.
+    #: The rest -- ``server_args``, ``extra_envs``, ``remove_args``,
+    #: ``unset_envs``, ``args_mode`` -- say how the profile task was
+    #: parameterized, and are only populated when the recorder had those params
+    #: to hand. Two call sites record the same trace differently for that reason
+    #: alone, so comparing them makes a perfectly fresh trace read as stale.
+    #: ``serving_config`` is excluded here too: it has its own comparison, which
+    #: comes from ``current_best`` on both sides and is therefore symmetric.
+    PROFILE_WORKLOAD_IDENTITY_KEYS: tuple[str, ...] = (
+        "framework",
+        "precision",
+        "model_path",
+        "tp",
+        "conc",
+        "isl",
+        "osl",
+        "max_model_len",
+    )
+
+    @classmethod
+    def profile_workload_identity(cls, context: Any) -> dict[str, Any]:
+        """Project a workload context down to what identifies the profiled run.
+
+        Args:
+            context (Any): A :meth:`profile_workload_context` result, or
+                anything else (treated as carrying no identity).
+
+        Returns:
+            dict[str, Any]: The identity fields, missing ones included as
+            ``None`` so a recorded context and a freshly built one compare
+            equal when they describe the same workload.
+        """
+        if not isinstance(context, Mapping):
+            return {}
+        return {key: context.get(key) for key in cls.PROFILE_WORKLOAD_IDENTITY_KEYS}
 
     def profile_workload_context(
         self,
