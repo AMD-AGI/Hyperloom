@@ -1238,8 +1238,8 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
             "for the corresponding P-item. Treat them as starting points —",
             "verify each against the source / a quick micro-benchmark before",
             "committing to a direction. If your measurements contradict any",
-            "hypothesis, follow the data and document the discrepancy in",
-            "`optimization_report.md`.",
+            "hypothesis, follow the data and record the discrepancy in your",
+            "final summary.",
             "",
         ]
         for entry in all_prose:
@@ -1287,7 +1287,7 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
         "verify the reasoning against the source / a quick micro-benchmark",
         "before committing to the recommended direction. If your",
         "measurements contradict the hypothesis, follow the data and",
-        "document the discrepancy in `optimization_report.md`.",
+        "record the discrepancy in your final summary.",
         "",
     ]
     if identification:
@@ -1542,22 +1542,26 @@ def build_prompt(
     *,
     backend: str | None = None,
 ) -> str:
-    """Render the full optimization prompt handed to a rewrite backend.
+    """Render the optimization prompt handed to a rewrite backend.
 
-    Assembles the hardware/budget/source-attribution preamble, the source
-    listing, semantically-ordered benchmark references, and the TraceLens
-    benchmark-cases / priority / hypothesis blocks into one prompt string.
+    Two shapes, because the backends own different amounts of the run. GEAK is
+    handed the whole harness: budget protocol, sandbox rules, the deliverable
+    contract Hyperloom later parses, and the A/B recipes it needs because it
+    brings no benchmark of its own. Forge brings its own driver, clock, gate and
+    artifact export, so it is handed only what it cannot derive -- the trace
+    evidence and the source-attribution guards. See the ``backend == "forge"``
+    branch for why the omitted sections are not merely redundant there.
 
     Args:
         candidate (dict[str, Any]): Kernel candidate dict supplying source,
             benchmarks, shapes, and TraceLens context.
         args (argparse.Namespace): Parsed CLI args (source override, GPU
             count, kernel id, etc.).
-        backend (str | None): Target backend name, used to tailor backend-
-            specific prompt sections; None for the generic prompt.
+        backend (str | None): Target backend name. ``"forge"`` selects the slim
+            prompt; every other value (including None) renders the full one.
 
     Returns:
-        str: The fully rendered prompt text for the rewrite backend.
+        str: The rendered prompt text for the rewrite backend.
     """
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
@@ -1780,8 +1784,11 @@ def build_prompt(
         is_multinode_run = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "0") or 0) >= 2
     except ValueError:
         is_multinode_run = False
+    # Held separately from ``safety``: the GPU-less sandbox applies to whichever
+    # backend runs, while the rest of ``safety`` describes the GEAK harness only.
+    multinode_block = ""
     if is_multinode_run:
-        safety += (
+        multinode_block = (
             "\nMULTI-NODE SANDBOX (no local GPU): every compile + benchmark\n"
             "step MUST be dispatched to a GPU-bearing RayJob pod. Do NOT\n"
             "call `hipcc`, `torch.cuda.*`, or `torch.utils.cpp_extension.load`\n"
@@ -1803,6 +1810,7 @@ def build_prompt(
             "Treat `kernel-bench` as your only measurement gate; everything\n"
             "else (code edits, correctness reasoning) still happens locally.\n"
         )
+    safety += multinode_block
     if not is_multigpu:
         safety += "- Use the provided benchmark/test files above for correctness/perf measurement.\n"
     elif num_gpus >= 2:
@@ -1817,6 +1825,40 @@ def build_prompt(
             "rank's slice of the algorithm (e.g. local reduce + memcpy) so you can "
             "still measure compute/IO improvements.\n"
         )
+    if (backend or "").strip().lower() == "forge":
+        # Forge already owns everything the sections below describe, and two of
+        # them fight it. The deliverables (``optimization_report.md``, a copy
+        # under ``optimized_versions/``) arrive as new untracked paths that its
+        # workspace guard refuses, which costs the iteration that wrote them --
+        # while Hyperloom writes both itself from forge's published manifest and
+        # git diff, so nothing reads the agent's copies. The A/B recipes
+        # (standalone hipcc program, ``cpp_extension.load``) tell the agent to
+        # stand up a second benchmark beside the driver its own in-session gate
+        # scores, and a number from the wrong benchmark is worse than no number.
+        # The budget protocol narrates a mini-swe-agent cost meter forge has no
+        # header for, and the runtime-metadata block is labelled for GEAK's
+        # parser -- forge reads the invocation spec instead, which carries the
+        # same operands in more detail.
+        #
+        # What is left is what forge cannot derive: the trace evidence, and the
+        # two source-attribution guards that keep a rewrite off a @compile_ops
+        # wrapper and on the right ``__global__``.
+        forge_sections = [
+            f"# TASK: Optimize the `{kernel_name}` kernel",
+            f"kernel_name: {kernel_name}\nkernel_url: {source_file}",
+            promotion_block,
+            device_symbol_block,
+            hypothesis_block,
+            extra_context_block,
+            benchmark_cases_block,
+            priority_block,
+            "Preserve function name, signature, decorators, and numerical behavior.",
+            repo_block,
+            multinode_block,
+        ]
+        # Most of these blocks render empty for any given kernel; joining them
+        # unfiltered leaves runs of blank lines where a section was skipped.
+        return "\n\n".join(part.strip() for part in forge_sections if part.strip())
     tracelens_context_block = ""
     # Fall back to the full analysis.md only when no hypothesis_block was rendered.
     if not hypothesis_block.strip():

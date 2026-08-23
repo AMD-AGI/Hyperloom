@@ -260,6 +260,11 @@ def test_structured_shape_cases_falls_back_to_input_shapes_when_group_rows_empty
 
 
 def test_build_prompt_includes_structured_shape_contract():
+    """The runtime-metadata block promotes ``input_shapes`` into a shape contract.
+
+    Rendered through the full prompt: the metadata block is GEAK's, and forge is
+    handed the same operands through its invocation spec instead.
+    """
     shape = "(15360,8,768) bf16<br>(128,1536,2048) bf16"
     candidate = {
         "name": "aiter::ck_moe_stage2",
@@ -270,7 +275,7 @@ def test_build_prompt_includes_structured_shape_contract():
         "input_shapes": [{"call_num": 48, "shape": shape}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="forge")
+    prompt = ko.build_prompt(candidate, _args())
 
     assert "when `benchmark_shape_cases` is present" in prompt
     assert '"benchmark_shape_cases"' in prompt
@@ -294,13 +299,57 @@ def test_build_prompt_omits_structured_shape_cases_without_program_output():
         "shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="forge")
+    prompt = ko.build_prompt(candidate, _args())
     metadata_json = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     metadata = json.loads(metadata_json)
 
     assert "benchmark_shape_cases" not in metadata
     assert "Shapes:" in prompt
     assert "when `benchmark_shape_cases` is present" not in prompt
+
+
+def test_build_prompt_forge_drops_the_geak_harness_and_keeps_trace_evidence():
+    """Forge is handed trace evidence only, not the harness it does not run.
+
+    The dropped sections are not merely redundant there. The deliverable files
+    land as new untracked paths that forge's workspace guard refuses, costing the
+    iteration that wrote them, and the A/B recipes stand up a second benchmark
+    beside the driver its own gate scores. Asserting their absence is what keeps
+    a later edit from reintroducing either through the shared prompt.
+    """
+    candidate = {
+        "name": "aiter::ck_moe_stage2",
+        "source_file": "/tmp/gemm_moe_ck2stages.cu",
+        "source_type": "hip_cpp",
+        "kernel_repo": "/tmp/aiter",
+        "gpu_pct": 24.3,
+        "device_kernel_name": "ck_moe_stage2_kernel",
+        "source_resolution_method": "op_to_source",
+        "input_shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
+    }
+
+    forge = ko.build_prompt(candidate, _args(), backend="forge")
+    full = ko.build_prompt(candidate, _args())
+
+    # Absent from forge, still present for the backend that needs them.
+    for token in (
+        "optimization_report.md",
+        "optimized_versions/",
+        "mini-swe-agent step",
+        "cpp_extension.load",
+        "structured context for GEAK",
+        "IMPORTANT — sandbox rules",
+    ):
+        assert token not in forge, token
+        assert token in full, token
+
+    # Kept: what forge cannot derive from the kernel or its invocation spec.
+    assert "DEVICE KERNEL FOCUS" in forge
+    assert "ck_moe_stage2_kernel" in forge
+    assert "Preserve function name" in forge
+    assert forge.startswith("# TASK: Optimize the `aiter::ck_moe_stage2` kernel")
+    # A skipped section must not leave a run of blank lines behind.
+    assert "\n\n\n" not in forge
 
 
 def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
