@@ -1293,6 +1293,46 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
+def agentx_variant_timeout_sec(cap: int) -> int:
+    """Raise a variant's hard cap to what an AgentX round actually needs.
+
+    Every variant cap in the tree is sized for the synthetic 1024/1024 shape --
+    7800s for integrate, 2400s for explore, 1800s for the conc sweep. A
+    canonical AgentX warmup is 10 requests per lane against real agentic
+    traces, which on a 700B-class model runs well past two hours before the
+    measured round even begins, so those caps kill the round mid-warmup.
+    Measured on GLM-5.2: a variant launched 09:47:41 was killed at
+    11:47:41.575, twenty-plus connections dropping in the same millisecond
+    while the server was still prefilling with 55 requests running. Downstream
+    that reads as a warmup failure, because aiperf treats a cancelled root
+    warmup credit as terminal -- so the real cause (a subprocess kill) is
+    invisible in the abort reason.
+
+    ``baseline`` already derives an AgentX-aware cap; only that one path got
+    it. This reuses the same derivation rather than introducing a second number
+    to keep in sync, and never lowers a cap, so an operator who asked for
+    longer keeps it.
+
+    AgentX is an opt-in benchmark branch: with it disabled this returns ``cap``
+    untouched and the default path is unaffected.
+
+    Args:
+        cap: The declared hard timeout for the round, in seconds.
+
+    Returns:
+        int: ``cap``, or the AgentX-derived cap when that is larger.
+    """
+    # Local import: baseline imports from this module, and the rest of the file
+    # already resolves _workload_envs this way.
+    from ._workload_envs import agentx_enabled
+
+    if not agentx_enabled():
+        return cap
+    from .baseline import agentx_baseline_timeout_sec
+
+    return max(cap, agentx_baseline_timeout_sec())
+
+
 def session_clamped_timeout_sec(
     cap: int,
     session_deadline_sec: float | None,
@@ -1575,7 +1615,20 @@ async def run_grid(
         Returns:
             int: The hard timeout to grant this round, in seconds.
         """
-        cap = int(variant_timeout_sec)
+        declared = int(variant_timeout_sec)
+        cap = agentx_variant_timeout_sec(declared)
+        if cap != declared:
+            log.info(
+                "grid_runner: variant %d/%d name=%s %s cap raised %ds -> %ds "
+                "(AgentX: AGENTX_DURATION + overhead; the synthetic default "
+                "cannot cover a canonical agentic warmup)",
+                idx + 1,
+                len(grid),
+                name,
+                round_label,
+                declared,
+                cap,
+            )
         clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=reserve_sec)
         if clamped == cap:
             return cap
