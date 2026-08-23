@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: 2026 The-Monk
+# SPDX-License-Identifier: MIT
+#
+# Portability test for the RDNA port: a CLEAN ROCm image, STOCK upstream
+# llama.cpp built from source, and this fork installed from git.
+#
+# The point is that none of it is ours. The port was first validated against a
+# private llama.cpp fork and a pinned ROCm, which proves nothing about anybody
+# else's machine. If it works here it works for a stranger.
+#
+#   docker build -t hyperloom-rdna:test \
+#       --build-arg AMDGPU_TARGETS=gfx1201 \
+#       -f examples/rdna/container/Containerfile .
+#
+#   docker run --rm --device /dev/kfd --device /dev/dri \
+#       --group-add "$(getent group render | cut -d: -f3)" \
+#       --group-add "$(getent group video  | cut -d: -f3)" \
+#       --security-opt seccomp=unconfined \
+#       -e MODEL=/models/your.gguf -v /path/to/models:/models:ro \
+#       hyperloom-rdna:test
+#
+# NOTE the numeric GIDs. `--group-add render` resolves the name INSIDE the
+# image, which has no render group, and fails with "unable to find group
+# render". The host's GID is what grants access to /dev/kfd and /dev/dri.
+#
+ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:latest
+FROM ${ROCM_IMAGE}
+
+# gfx1201 = RDNA4 (R9700 / RX 9070). Override for your arch; the build is
+# arch-specific, so a wrong value here produces a binary that cannot run.
+ARG AMDGPU_TARGETS=gfx1201
+ARG LLAMA_CPP_REF=master
+ARG FORK_REF=rdna
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential ccache \
+        libcurl4-openssl-dev python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# The ROCm dev image ships the libraries in /opt/rocm/lib but registers that
+# path with neither ld.so.conf.d nor LD_LIBRARY_PATH, so `ldconfig -p` knows no
+# hipblas at all. Compilation still succeeds (cmake passes -L explicitly), and
+# then every ROCm-linked binary dies at LOAD time with
+#   libhipblas.so.3: cannot open shared object file
+# which reads as "the GPU support is broken" rather than "the linker was never
+# told where the libraries live". Found by running this container; fixed here so
+# nobody else loses an afternoon to it.
+RUN echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf \
+    && echo "/opt/rocm/lib64" >> /etc/ld.so.conf.d/rocm.conf \
+    && ldconfig \
+    && ldconfig -p | grep -q libhipblas || { echo "ldconfig still cannot see hipblas" >&2; exit 1; }
+
+# --- STOCK upstream llama.cpp. Not our fork: if the runner only works against
+# --- our kernels, that is a fork feature, not RDNA support.
+WORKDIR /opt
+RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} https://github.com/ggml-org/llama.cpp.git
+WORKDIR /opt/llama.cpp
+RUN cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_HIP=ON \
+        -DAMDGPU_TARGETS=${AMDGPU_TARGETS} \
+        -DLLAMA_CURL=OFF \
+        -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
+        -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+    && cmake --build build --target llama-bench llama-perplexity test-backend-ops -j"$(nproc)"
+
+# --- the fork, from git. Installed the way a stranger would install it.
+WORKDIR /opt
+RUN git clone --depth 1 --branch ${FORK_REF} https://github.com/The-Monk/hyperloom-rdna.git
+WORKDIR /opt/hyperloom-rdna
+# The probe needs the package importable and PyYAML for the validator import
+# chain. A venv keeps us off the image's system python (PEP 668).
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir pyyaml
+
+ENV PY=/opt/venv/bin/python \
+    LLAMA_BENCH=/opt/llama.cpp/build/bin/llama-bench \
+    TEST_BACKEND_OPS=/opt/llama.cpp/build/bin/test-backend-ops \
+    LLAMA_PERPLEXITY=/opt/llama.cpp/build/bin/llama-perplexity \
+    HIP_VISIBLE_DEVICES=0 \
+    PP=512 TG=64 REPS=2
+
+# Default: the full support probe. Correctness gate included — it is the half
+# that a fresh toolchain is most likely to break.
+ENTRYPOINT ["/opt/hyperloom-rdna/examples/rdna/rdna-support-probe.sh"]
+CMD ["--bench"]

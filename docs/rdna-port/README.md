@@ -13,7 +13,7 @@ branch makes gfx1201 a first-class target.
 
 | Target | Arch | Status |
 |---|---|---|
-| Radeon AI PRO R9700 | gfx1201 | **MEASURED.** Board autodetects; `test-backend-ops` passes vs the CPU reference (MUL_MAT 1196/1196, MUL_MAT_ID 865/865); runner benchmarked end-to-end on 2× R9700 (prefill ~4476 t/s, decode ~169 t/s, 8B Q2_0) |
+| Radeon AI PRO R9700 | gfx1201 | **MEASURED, and reproduced in a clean container against stock upstream llama.cpp** (see `examples/rdna/container/`). Board autodetects; `test-backend-ops` passes vs the CPU reference (MUL_MAT 1196/1196, MUL_MAT_ID 865/865); runner benchmarked end-to-end on 2× R9700 (prefill ~4476 t/s, decode ~169 t/s, 8B Q2_0) |
 | RX 9070 / 9070 XT | gfx1201 | Same arch, board never tested here. Autodetect keys on arch, so it should resolve — unverified |
 | RX 9060 XT | gfx1200 | **Deliberately unmapped.** Navi 44 is the same ISA family but nobody has measured it; a runner label is a claim of support |
 | W7900 / RX 7600 | gfx1100 / gfx1102 | Methodology **independently validated** by [@kyuubyN](https://github.com/kyuubyN) — see below. Runner map not covered here yet |
