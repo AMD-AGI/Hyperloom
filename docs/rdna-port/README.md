@@ -89,6 +89,19 @@ upstream MI355X gate: the MX scaled-convert instructions are gfx950/gfx1250
 gated, so an assembler capability probe on gfx1201 grades them REJECTED. There
 is no hardware datapath to fall back to.
 
+## Reporting from your own hardware
+
+Run the probe and open an **RDNA hardware report** issue with its output:
+
+```bash
+./examples/rdna/rdna-support-probe.sh --bench    # MODEL=... LLAMA_CPP_DIR=...
+```
+
+It prints a paste-ready block and a verdict — `CONFIRMED`, `PARTIAL`, or
+`UNSUPPORTED` (with the exact change needed to map your arch). Agents working
+in this repo should read [`AGENTS.md`](../../AGENTS.md): §1 confirm, §2 add a
+target, §3 the playbook for when it does not work.
+
 ## RDNA3 (gfx11) — what is actually established
 
 Upstream [issue #1041](https://github.com/AMD-AGI/Hyperloom/issues/1041) is the

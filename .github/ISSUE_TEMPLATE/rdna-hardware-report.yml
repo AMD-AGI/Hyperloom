@@ -1,0 +1,71 @@
+name: "RDNA hardware report"
+description: "Confirm support on RDNA hardware you have, or report what is missing to add it"
+labels: ["rdna", "hardware-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this to report **measured** results from RDNA hardware — yours or a machine you have access to.
+
+        Run the probe first and paste its output below:
+
+        ```bash
+        ./examples/rdna/rdna-support-probe.sh            # identity only
+        ./examples/rdna/rdna-support-probe.sh --bench    # with a real benchmark (preferred)
+        ```
+
+        Agents working this repo: read `AGENTS.md` first — §1 confirm, §2 add, §3 playbook when it breaks.
+
+        **Negative results are welcome.** "This failed on gfx1102, here is the exact error" is a real
+        contribution and nobody without your hardware can produce it.
+
+  - type: dropdown
+    id: verdict
+    attributes:
+      label: Probe verdict
+      description: What did the probe print?
+      options:
+        - "CONFIRMED — board resolves and a measurement was accepted by the harness"
+        - "PARTIAL — board resolves, no accepted measurement yet"
+        - "UNSUPPORTED — arch is not mapped"
+        - "The probe itself failed to run"
+    validations:
+      required: true
+
+  - type: textarea
+    id: probe_output
+    attributes:
+      label: Probe output
+      description: Paste the whole block verbatim. Do not tidy the numbers or omit failures.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: not_tested
+    attributes:
+      label: What you did NOT test
+      description: |
+        Be specific — this is what keeps the support matrix honest. GPU count, other models,
+        multi-GPU, other quantisations, anything you skipped or could not run.
+      placeholder: "Single GPU only; one model (Q4_K_M); did not test multi-GPU or fp8."
+    validations:
+      required: true
+
+  - type: textarea
+    id: model_and_stack
+    attributes:
+      label: Model and llama.cpp build
+      description: Which GGUF, and which llama.cpp (upstream commit, or a fork + branch)?
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything surprising
+      description: |
+        Hangs, wrong output, throughput that looks too good (often a cache artefact), counters
+        reading zero, anything you had to work around to get it running.
+    validations:
+      required: false

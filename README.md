@@ -8,7 +8,9 @@
 > - **Start here → [`docs/rdna-port/README.md`](docs/rdna-port/README.md)** —
 >   support matrix (what is measured vs. untested), quickstart, and the RDNA4
 >   profiling caveats that silently break Instinct-shaped tooling.
-> - The llama.cpp runner is [`examples/rdna/custom_r9700.sh`](examples/rdna/custom_r9700.sh).
+> - The llama.cpp runner is [`examples/rdna/custom_r9700.sh`](examples/rdna/custom_r9700.sh);
+>   report your own hardware with [`examples/rdna/rdna-support-probe.sh`](examples/rdna/rdna-support-probe.sh).
+> - **Agents:** read [`AGENTS.md`](AGENTS.md) — confirm support, add a target, or work a failure.
 > - Tracking issues upstream: [#1196](https://github.com/AMD-AGI/Hyperloom/issues/1196) (RDNA4, ours) and
 >   [#1041](https://github.com/AMD-AGI/Hyperloom/issues/1041) (RDNA3, [@kyuubyN](https://github.com/kyuubyN) —
 >   methodology independently validated on gfx1100/gfx1102). **RDNA3 runner support is welcome here.**
