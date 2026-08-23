@@ -1,29 +1,20 @@
-# RDNA support port — private scoping (pre-PR)
+# RDNA support port — scoping (superseded by the implementation)
 
 Issue: https://github.com/AMD-AGI/Hyperloom/issues/1196
 
-## Integration points found (all Hyperloom-side; Magpie untouched)
+**This document is kept for history and is partly WRONG.** It was written
+against a clone that was 402 commits stale, and upstream has since refactored
+the integration points it names. Recorded here because the correction is the
+useful part:
 
-1. `src/hyperloom/inference_optimizer/gpu_types.py`
-   - `_AMD_GPU_TYPES` += "r9700" (RDNA4 wave-1 target)
-   - `_GFX_TO_RUNNER` += {"gfx1201": "r9700", "gfx1200": "r9700"}
-   - `_AMD_GPU_DISPATCH_IDENTITIES` += {"r9700": ("gfx1201", 64)}
-   - `_autodetect_gpu_type`: add R9700/RADEON product tags + gfx fallthrough
-2. Runner: `custom_{runner_type}.sh` convention in
-   `orchestrator/actions/executors/_workload_envs.py` — deliver
-   `custom_r9700.sh` wrapping llama-bench/llama-server (tg/pp/PPL gates,
-   interleaved A/B, anchor+config emission). No vLLM/SGLang dependency.
-3. Quant schemes: `orchestrator/phases/quantization_schemes.py` — add RDNA4
-   table (dp4a-universal set; WMMA int8/fp8; NO mxfp4 [gfx950-only],
-   NO MFMA; sparse24 available).
-4. Profiling guards (TraceLens/Magpie consumers): document + guard
-   gfx1201 realities: host_trap-only PC sampling (min interval 512),
-   FETCH_SIZE/PMC-derived counters read zero, GL2C ratios-only under
-   profile_standard, setperflevel high = -10% throughput trap.
-5. Tests: flip `test_profile_and_kernel_handlers.py` gfx1100 expectation
-   pattern into positive gfx1201 coverage.
+| Scoped (stale) | Actual |
+|---|---|
+| Edit `_AMD_GPU_TYPES`, `_GFX_TO_RUNNER` and `_AMD_GPU_DISPATCH_IDENTITIES` separately in `gpu_types.py` | Identities moved to `hyperloom/common/gpu_identity.py`; `_AMD_GPU_TYPES` and the rocm-smi product tags are **derived** from it. Adding a board is one row + one `_GFX_TO_RUNNER` entry |
+| Add R9700/RADEON product tags to `_autodetect_gpu_type` | Not needed — tags derive from the identities table, so autodetect works the moment the row exists |
+| Deliver `custom_r9700.sh` as a core change | The runner is operator-supplied via `$HYPERLOOM_BYPASS_SCRIPTS_DIR`; no core change. Shipped as `examples/rdna/custom_r9700.sh` |
+| Add an RDNA4 quant table to `quantization_schemes.py` | The existing MI355X gate already excludes mxfp4 everywhere else. What was missing was the *reason* (gfx950-gated silicon, not a missing kernel) and a test locking it |
+| Flip `test_profile_and_kernel_handlers.py`'s gfx1100 expectation | Left alone; coverage added as `test_rdna4_r9700_support.py` instead |
 
-## Evidence base (ours, measured on gfx1201)
-- instrument map + measurement protocol: roc10 ledger 2026-08-11..16
-- scheme/datapath grid: tools/bench-card isa-grid (17 arches x 32 instrs)
-- llama.cpp harness: bench-card provenance + PPL gates + interleaved A/B
+Net: the port is far smaller than scoped, because upstream had already done the
+single-source-of-truth refactor this needed. See `README.md` in this directory
+for the delivered state.

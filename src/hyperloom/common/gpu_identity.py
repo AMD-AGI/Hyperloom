@@ -20,6 +20,13 @@ AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
     "mi308x": ("gfx942", 304),
     "mi325x": ("gfx942", 304),
     "mi355x": ("gfx950", 256),
+    # RDNA4 consumer/workstation. Unlike the Instinct rows this is a wave-32
+    # arch with no MFMA, so anything that assumes CDNA matrix instructions must
+    # branch on the arch rather than on "is AMD". CU count read from the board
+    # (amd-smi NUM_COMPUTE_UNITS on an AMD Radeon AI PRO R9700), not a spec
+    # sheet. gfx1200 (Navi 44) is deliberately absent: same ISA family, but no
+    # one has measured it here, and a runner label is a claim of support.
+    "r9700": ("gfx1201", 64),
 }
 
 

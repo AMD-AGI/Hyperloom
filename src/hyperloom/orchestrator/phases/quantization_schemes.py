@@ -14,6 +14,15 @@ Two invariants:
   ``mxfp4`` / ``mxfp4_fp8`` are MI355X-only. :func:`validate_scheme` enforces
   this so an mxfp4 request on an mi300x target fails loudly instead of
   producing an unservable artifact.
+
+  On RDNA4 (``r9700``/gfx1201) the same exclusion holds, for a different
+  reason worth stating: the MX scaled-convert instructions are gfx950/gfx1250
+  gated, so mxfp4 has no hardware datapath here at all -- a capability probe on
+  gfx1201 grades them REJECTED, not merely slow. ``fp8`` remains available
+  (RDNA4 has WMMA fp8 and a native E4M3 path); there is no MFMA on this arch,
+  so anything reaching for CDNA matrix cores must branch on the gfx arch rather
+  than on "is AMD". See ``docs/rdna-port/README.md`` for the measured
+  scheme-to-datapath table.
 """
 
 from __future__ import annotations

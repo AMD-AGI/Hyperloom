@@ -26,6 +26,11 @@ _GFX_TO_RUNNER: dict[str, str] = {
     # the arch a runner is reached by is a deliberate choice, not an inverse.
     "gfx942": "mi300x",
     "gfx950": "mi355x",
+    # RDNA4. Reached by the llama.cpp scriptable runner (custom_r9700.sh), not
+    # vLLM/SGLang: below ~32GB the serving stacks' VRAM and concurrency
+    # assumptions do not hold, and llama.cpp is what this class of card is
+    # actually served with.
+    "gfx1201": "r9700",
 }
 
 #: Re-exported from ``hyperloom.common`` so provenance and this module cannot
