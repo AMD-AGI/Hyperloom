@@ -1,3 +1,22 @@
+> ### 🔴 RDNA fork — community port, not an AMD product
+>
+> This is a fork of [AMD-AGI/Hyperloom](https://github.com/AMD-AGI/Hyperloom)
+> (MIT, © Advanced Micro Devices, Inc.) adding **RDNA4 / gfx1201** support —
+> Radeon AI PRO R9700 and friends. It is **not endorsed by or affiliated with
+> AMD**, and upstream is the place for anything not RDNA-specific.
+>
+> - **Start here → [`docs/rdna-port/README.md`](docs/rdna-port/README.md)** —
+>   support matrix (what is measured vs. untested), quickstart, and the RDNA4
+>   profiling caveats that silently break Instinct-shaped tooling.
+> - The llama.cpp runner is [`examples/rdna/custom_r9700.sh`](examples/rdna/custom_r9700.sh).
+> - Tracking issue upstream: [AMD-AGI/Hyperloom#1196](https://github.com/AMD-AGI/Hyperloom/issues/1196).
+> - Branches: `rdna` (this work, default) · `main` (tracks upstream byte-for-byte
+>   so PR branches cherry-pick cleanly).
+>
+> Everything below is upstream's README, unmodified.
+
+---
+
 # ROCm Hyperloom
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
