@@ -709,6 +709,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     closing_report_task_id: str = ""
     # True at END of CLOSE 7-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
     close_sequence_done: bool = False
+    # True only when the CLOSE session_breakdown step actually succeeded this leg.
+    # cli.finally requires BOTH this and close_sequence_done before skipping the
+    # safety-net breakdown write, so a failed breakdown step (or a wall-clock
+    # closing path that never runs it) still gets re-exported and cannot desync
+    # from a freshly rewritten final.json. Resume clears it (idempotent).
+    session_breakdown_done: bool = False
     # Auto-roofline gate (EXPLORE-entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""

@@ -2524,9 +2524,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
             log.exception("crash-safe final.json write failed (non-fatal)")
         # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
-        # Skip when the CLOSE sequencer already wrote it (close_sequence_done is locked in CORE_STATE_FIELDS).
+        # Skip ONLY when the CLOSE sequencer ran AND its session_breakdown step
+        # actually succeeded. A sequencer that finished with a failed breakdown
+        # step (or a wall-clock closing path that rewrote final.json without ever
+        # running the step) leaves session_breakdown.json stale; re-export it here
+        # so it cannot desync from a freshly rewritten final.json.
         sequencer_done = getattr(state, "close_sequence_done", False)
-        if sequencer_done:
+        breakdown_done = getattr(state, "session_breakdown_done", False)
+        if sequencer_done and breakdown_done:
             print(
                 "Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)"
             )

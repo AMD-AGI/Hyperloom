@@ -346,12 +346,18 @@ class ClosePhase(PhaseHandler):
             )
             terminal_state = await self._run_close_task(bd_task, step="2 (session_breakdown)")
             if terminal_state in {"succeeded", None}:
+                # Record that the breakdown was actually written this leg, so
+                # cli.finally does not skip its safety-net re-export (which would
+                # leave session_breakdown.json stale against a rewritten
+                # final.json). Only a real success flips it.
+                self.shared_state.session_breakdown_done = True
                 await self._record_close_step(
                     "session_breakdown",
                     status="done",
                     task_id=bd_task.task_id,
                 )
             else:
+                self.shared_state.session_breakdown_done = False
                 await self._record_close_step(
                     "session_breakdown",
                     status="failed",
@@ -360,6 +366,7 @@ class ClosePhase(PhaseHandler):
                 )
         except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 2 (session_breakdown) failed")
+            self.shared_state.session_breakdown_done = False
             await self._record_close_step(
                 "session_breakdown",
                 status="failed",

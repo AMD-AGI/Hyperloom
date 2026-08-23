@@ -40,6 +40,7 @@ class _BareState:
     recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     stop_reason: str = ""
     close_sequence_done: bool = False
+    session_breakdown_done: bool = False
     recipe_finalize_status: str = ""
     recipe_finalize_attempts: int = 0
     recipe_finalize_outcome: dict[str, Any] = field(default_factory=dict)
@@ -606,6 +607,48 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_session_breakdown_success_flips_the_breakdown_done_flag(coord):
+    """A real session_breakdown success must set ``session_breakdown_done`` so
+    cli.finally skips its safety-net re-export (breakdown already fresh)."""
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    assert coord.shared_state.session_breakdown_done is False
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.session_breakdown_done is True
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    bd = next(r for r in rows if r["step"] == "session_breakdown")
+    assert bd["status"] == "done"
+
+
+class _FailsBreakdownRunner(_StubSubAgentRunner):
+    """Sub-agent runner double that fails only the session_breakdown task."""
+
+    async def run_task(self, task, *args, **kwargs):
+        self.run_calls.append(task)
+        if getattr(task, "kind", "") == "session_breakdown":
+            return _StubSubResult(state="failed")
+        return _StubSubResult(state="succeeded")
+
+
+@pytest.mark.asyncio
+async def test_session_breakdown_failure_leaves_the_breakdown_done_flag_false(coord):
+    """A failed breakdown step must NOT flip the flag, so cli.finally re-exports
+    the breakdown against the (report-rewritten) final.json instead of skipping."""
+    coord.sub = _FailsBreakdownRunner()
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.session_breakdown_done is False
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    bd = next(r for r in rows if r["step"] == "session_breakdown")
+    assert bd["status"] == "failed"
+    # The loop-terminating flag still flips: breakdown failure must not wedge CLOSE.
+    assert coord.shared_state.close_sequence_done is True
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_surfaces_remote_finalize_failure(
     coord,
     monkeypatch,
@@ -722,6 +765,7 @@ def test_close_and_recipe_finalize_fields_in_core_state_fields():
     """LLM update_state must not flip close_sequence_done and bypass cli.finally's safety net."""
     assert {
         "close_sequence_done",
+        "session_breakdown_done",
         "recipe_finalize_status",
         "recipe_finalize_attempts",
         "recipe_finalize_outcome",

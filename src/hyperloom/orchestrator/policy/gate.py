@@ -608,6 +608,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "plateau_overrides",
         # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
+        # CLOSE breakdown-success signal (pairs with close_sequence_done to gate
+        # the cli.finally safety-net re-export); Coordinator-owned, LLM must not toggle it.
+        "session_breakdown_done",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,

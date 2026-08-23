@@ -98,6 +98,11 @@ class MachinePhase(PhaseHandler):
         # that then never reaches CLOSE, it suppresses the write that would have
         # stood in for it, and the leg produces no breakdown at all.
         state.close_sequence_done = False
+        # Same reasoning for the breakdown-success signal: a leg that resumes past
+        # CLOSE must re-prove it wrote the breakdown, or a stale True from the
+        # previous leg would let cli.finally skip the re-export and leave
+        # session_breakdown.json desynced from a rewritten final.json.
+        state.session_breakdown_done = False
 
     def _ensure_recipe_kb_t0_anchored(self) -> None:
         """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when recipe_kb is None or recipe_kb_session_id set."""
