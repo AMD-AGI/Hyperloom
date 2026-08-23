@@ -347,6 +347,74 @@ def test_the_geak_route_subject_names_geak(tmp_path: Path) -> None:
     assert subjects == {"geak"}, subjects
 
 
+def test_geak_env_lever_win_reaches_the_geak_column(tmp_path: Path) -> None:
+    """An env / KB-CSV GEAK win (no authored kernel, no journey pair) is credited.
+
+    ``record_geak_operation`` files the route under ``kernel_optimizer_run``,
+    which the collector does not count as an attempt, so a rebench-validated env
+    lever never reached ``by_backend.geak``. ``record_geak_e2e_attempt`` records
+    the same win as a countable ``gemm_tuning`` attempt with ``strategy="geak"``
+    and the frozen throughput pair, so it is credited by name in points of the
+    session baseline.
+    """
+    _record_baseline(tmp_path)
+    # 1.673x over the session baseline via an AITER gemm CSV lever.
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="gemm_tuning",
+        throughput_before=BASELINE_TPUT,
+        throughput_after=BASELINE_TPUT * 1.673,
+        baseline_tput=BASELINE_TPUT,
+        gain_pct=67.3,
+        attribution_eligible=True,
+        macro_cycle=0,
+        accepted_config={"env": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/x/tuned.csv"},
+        provenance="revalidation",
+    )
+    column = _column(tmp_path)
+    geak = (column.get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 1, geak
+    assert abs(float(geak.get("total_gain_pct") or 0.0) - 67.3) < 0.01, geak
+    assert not (column.get("by_backend") or {}).get("unattributed", {}).get("keeps")
+
+
+def test_geak_e2e_attempt_without_a_throughput_pair_is_a_noop(tmp_path: Path) -> None:
+    """No before/after pair means nothing to attribute; the call must not invent one."""
+    _record_baseline(tmp_path)
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="gemm_tuning",
+        throughput_before=0.0,
+        throughput_after=0.0,
+        baseline_tput=BASELINE_TPUT,
+    )
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert not geak.get("keeps"), geak
+
+
+def test_journey_attributable_win_guard_gates_the_aggregate(tmp_path: Path) -> None:
+    """The double-count guard: True when the journey already carries a summable
+    pair, False for an env / KB-CSV lever with no such pair."""
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    kp = KernelPhase.__new__(KernelPhase)
+    with_pair = _journey(
+        tmp_path, [_kernel("k", gain=12.0, before=1000.0, after=1120.0)]
+    )
+    assert kp._geak_journey_has_attributable_win(
+        {"kernel_journey_path": with_pair}
+    ) is True
+
+    # A journey whose only kernel has no throughput pair (env / KB-CSV lever).
+    nopair_kernel = _kernel_without_throughput_pair("k_env", gain=29.0)
+    p = tmp_path / "kj_nopair.json"
+    p.write_text(
+        json.dumps({"kernels": [nopair_kernel]}), encoding="utf-8"
+    )
+    assert kp._geak_journey_has_attributable_win({"kernel_journey_path": str(p)}) is False
+    assert kp._geak_journey_has_attributable_win({}) is False
+
+
 def test_every_journey_replay_call_names_its_route() -> None:
     """Derived from the source, not from a list a seventh call site can miss.
 

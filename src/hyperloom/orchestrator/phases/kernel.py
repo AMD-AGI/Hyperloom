@@ -1620,6 +1620,87 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001
             log.debug("geak v4 final validation recording failed", exc_info=True)
 
+        # ``record_geak_operation`` above upserts the GEAK route under
+        # ``kind="kernel_optimizer_run"``, which the optimizations collector does
+        # not count as an attempt -- so this validated win never reaches
+        # ``summary_by_source.kernel_agent.by_backend.geak``, the field the
+        # dashboard reads. Emit the same win as a countable attempt. The
+        # authored-kernel journey (``_record_geak_kernel_journey``) already lands
+        # there with a throughput pair, so only supply the aggregate row for the
+        # env / KB-CSV levers it does not cover, to avoid double-counting.
+        try:
+            pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
+            if (
+                base > 0
+                and pre_geak > 0
+                and measured > pre_geak
+                and not self._geak_journey_has_attributable_win(result)
+            ):
+                is_gemm = any(
+                    str(k).upper().startswith("AITER_CONFIG_") or str(v).lower().endswith(".csv")
+                    for k, v in dict(parsed_envs or {}).items()
+                )
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                instrument.record_geak_e2e_attempt(
+                    self.session_dir,
+                    kind="gemm_tuning" if is_gemm else "kernel_optimization",
+                    throughput_before=pre_geak,
+                    throughput_after=measured,
+                    baseline_tput=base,
+                    gain_pct=(measured - pre_geak) / base * 100.0,
+                    attribution_eligible=True,
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    accepted_config=result.get("accepted_config"),
+                    provenance=provenance,
+                )
+        except Exception:  # noqa: BLE001
+            log.debug("geak e2e attempt recording failed", exc_info=True)
+
+    def _geak_journey_has_attributable_win(self, result: dict[str, Any]) -> bool:
+        """Whether the authored-kernel journey already carries a summable win.
+
+        ``_record_geak_kernel_journey`` replays ``kernel_journey.json`` into
+        ``record_kernel_e2e``, which credits the ``geak`` backend for any kernel
+        whose ``e2e`` block is a validated KEEP with a positive throughput pair
+        (``base_tput``/``new_tput``). When that is present the aggregate
+        promotion row would double-count it, so the caller suppresses the
+        aggregate. Env / KB-CSV levers and patch-only wins have no such block and
+        return False, so the aggregate is the only thing crediting them.
+        """
+        if not isinstance(result, dict):
+            return False
+        try:
+            journey_path = result.get("kernel_journey_path") or ""
+            if not journey_path:
+                eval_dir = result.get("eval_dir") or ""
+                if eval_dir:
+                    candidate = Path(eval_dir) / "kernel_journey.json"
+                    if candidate.exists():
+                        journey_path = str(candidate)
+            if not journey_path or not Path(journey_path).exists():
+                return False
+            data = json.loads(Path(journey_path).read_text(encoding="utf-8"))
+            for kernel in data.get("kernels") or []:
+                if not isinstance(kernel, dict):
+                    continue
+                e2e = kernel.get("e2e") if isinstance(kernel.get("e2e"), dict) else {}
+                decision = str(e2e.get("decision") or "").upper()
+                base_tput = e2e.get("base_tput")
+                new_tput = e2e.get("new_tput")
+                if (
+                    e2e.get("validated") is True
+                    and decision in {"KEEP", "ADOPTED"}
+                    and isinstance(base_tput, (int, float))
+                    and isinstance(new_tput, (int, float))
+                    and base_tput > 0
+                    and new_tput > 0
+                ):
+                    return True
+        except Exception:  # noqa: BLE001
+            log.debug("geak journey attributable-win probe failed", exc_info=True)
+        return False
+
     def _record_geak_adopted_kernels(
         self,
         result: dict[str, Any],

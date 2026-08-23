@@ -1983,6 +1983,167 @@ def _record_geak_internal_ref(
     )
 
 
+def record_geak_e2e_attempt(
+    session_dir: Path | str | None,
+    *,
+    kind: str,
+    throughput_before: float,
+    throughput_after: float,
+    baseline_tput: float | None = None,
+    gain_pct: float | None = None,
+    attribution_eligible: bool = True,
+    macro_cycle: int | None = None,
+    accepted_config: Mapping[str, Any] | None = None,
+    provenance: str = "",
+    occurrence: Any = None,
+    producer: str = PRODUCER_COORDINATOR,
+) -> None:
+    """Record an orchestrator-validated GEAK end-to-end win as a countable attempt.
+
+    ``record_geak_operation`` upserts the GEAK *route* under
+    ``kind="kernel_optimizer_run"``, which the optimizations collector does not
+    count as an attempt (``_ATTEMPT_KINDS``) -- so a GEAK win that the
+    orchestrator re-benched and promoted (env / KB-CSV levers as well as authored
+    kernels) never reaches ``summary_by_source.kernel_agent.by_backend.geak``, the
+    one field the dashboard reads for GEAK. This writes that same win as its own
+    ``kernel_optimization``/``gemm_tuning`` operation with ``strategy="geak"`` and
+    a validated KEEP adoption carrying the frozen throughput pair, which is what
+    the collector needs to credit it by name.
+
+    The pair is ``throughput_before`` = the current-best throughput *before* GEAK
+    (so the gain the chain books is the marginal points GEAK added to the session
+    baseline, not GEAK's isolated A/B ratio) and ``throughput_after`` = the
+    orchestrator's re-measured throughput.
+
+    Args:
+        session_dir: The session directory; a falsy value is a no-op.
+        kind: ``kernel_optimization`` (authored kernel / patch) or ``gemm_tuning``
+            (env / KB-CSV gemm lever). Anything else is coerced to
+            ``kernel_optimization`` so the record is never silently dropped.
+        throughput_before: Current-best throughput before GEAK, in tok/s.
+        throughput_after: Orchestrator re-measured throughput after GEAK, tok/s.
+        baseline_tput: Session baseline (informational; the chain reads its own).
+        gain_pct: Marginal gain in points of the session baseline (informational;
+            the collector recomputes from the pair).
+        attribution_eligible: Whether the pair is a clean before/after that may be
+            summed into the total. The caller only records on a KEEP with
+            ``after > before > 0``, so this is normally True.
+        macro_cycle: The kernel macro-cycle, to keep the id resume-stable.
+        accepted_config: The GEAK accepted config (env/flags) carried as evidence.
+        provenance: Why this promotion fired (e.g. ``revalidation``), for the
+            adoption reason.
+        occurrence: Which re-bench these numbers were read from; defaults to the
+            throughput pair so a replay lands on the same reading.
+        producer: The breakdown producer label.
+    """
+    if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
+        return
+    before = to_float(throughput_before)
+    after = to_float(throughput_after)
+    if not (before and after and before > 0 and after > 0):
+        trace_skip(reason="no throughput pair to attribute", section="operations")
+        return
+    try:
+        attempt_kind = kind if kind in {"kernel_optimization", "gemm_tuning"} else "kernel_optimization"
+        cycle = int(macro_cycle) if macro_cycle is not None else 0
+        now = _now_iso_safe()
+        route_id = _kernel_route_operation_id(session_dir, "geak", macro_cycle=macro_cycle)
+        operation_id = _stable_id(
+            "op",
+            "geak_e2e_attempt",
+            _session_key(session_dir),
+            f"macro_cycle:{cycle}",
+        )
+        recorded_occurrence = (
+            occurrence
+            if occurrence is not None
+            else f"{before}->{after}"
+        )
+        subject = {
+            "subject_id": _kernel_route_subject_id(session_dir, "geak", route_operation_id=route_id),
+            "subject_type": "kernel_optimizer_route",
+            "role": "selected",
+            "name": "geak",
+        }
+        measurement_refs: list[str] = []
+        for name, numeric in (("baseline_throughput", before), ("final_throughput", after)):
+            measurement_id = _stable_id(
+                "measurement",
+                operation_id,
+                name,
+                _measurement_occurrence(recorded_occurrence, value=numeric),
+            )
+            record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                producer=producer,
+                operation_id=operation_id,
+                subject=subject,
+                kind="throughput",
+                name=name,
+                value=numeric,
+                unit="tok/s",
+                status="validated",
+                measured_at=now,
+                metric_basis="output",
+                dimensions={"role": "baseline" if name == "baseline_throughput" else "final"},
+                **_measurement_metadata("geak_e2e_orchestrator", harness="geak_e2e"),
+            )
+            measurement_refs.append(measurement_id)
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind=attempt_kind,
+            name="geak_e2e",
+            phase="KERNEL_AGENT",
+            macro_cycle=cycle,
+            scope="run",
+            strategy_group="kernel_optimizer",
+            strategy="geak",
+            executor_class="llm_tool",
+            status="succeeded",
+            parent_operation_id=route_id,
+            root_operation_id=route_id,
+            subject=subject,
+            outputs={
+                "decision": "KEEP",
+                "validated": True,
+                "source": "geak_e2e",
+                "accepted_config": dict(accepted_config or {}),
+            },
+            measurement_refs=measurement_refs,
+            ended_at=now,
+        )
+        adoption_id = _stable_id("adoption", operation_id, "geak_e2e")
+        _record_adoption_transition(
+            session_dir,
+            adoption_id=adoption_id,
+            producer=producer,
+            operation_id=operation_id,
+            adopted=True,
+            attribution_eligible=bool(attribution_eligible),
+            reason=provenance or "geak_e2e_validated",
+            subject=subject,
+            transitioned_at=now,
+            measurement_ids=measurement_refs,
+            kind=attempt_kind,
+            gain_pct=to_float(gain_pct),
+            # Frozen inline so a later re-bench of the same route cannot displace
+            # the numbers this KEEP was decided on.
+            throughput_before=before,
+            throughput_after=after,
+            configuration=dict(accepted_config or {}),
+            validation_basis="e2e_validation",
+            metadata={"validation_tier": "geak_e2e_orchestrator"},
+        )
+        record_operation(session_dir, operation_id=operation_id, producer=producer, adoption_refs=[adoption_id])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("record_geak_e2e_attempt failed", exc_info=True)
+        trace_skip(reason="writer raised", section="operations", error=exc)
+
+
 def record_gemm_tuning_operation(
     session_dir: Path | str | None,
     *,
