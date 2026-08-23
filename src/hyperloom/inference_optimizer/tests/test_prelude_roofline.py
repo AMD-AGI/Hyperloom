@@ -371,6 +371,71 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
 
 
 @pytest.mark.asyncio
+async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(
+    coord: Coordinator, monkeypatch
+):
+    """The phase dispatches its own kernel_opt on both entry routes.
+
+    The dispatch sat on the GEMM route alone, so skipping GEMM tuning removed
+    the phase's source-level kernel work too -- two unrelated settings, with
+    nothing in the log connecting them. A run then held eight routable
+    candidates, cleared the dispatch floor, and reached SWEEP having optimized
+    nothing, because the only remaining path was an orchestration request that
+    was never made.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+    assert coord._gemm_tuning_required_before_kernel_opt() is False
+
+    dispatched = 0
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    async def _dispatch() -> None:
+        nonlocal dispatched
+        dispatched += 1
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+
+    await coord._on_enter_kernel(from_phase="EXPLORE")
+
+    assert dispatched == 1
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_does_not_dispatch_without_untried_candidates(
+    coord: Coordinator, monkeypatch
+):
+    """Nothing routable left is the one reason to hand the phase back."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+
+    dispatched = 0
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    async def _dispatch() -> None:
+        nonlocal dispatched
+        dispatched += 1
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+
+    await coord._on_enter_kernel(from_phase="EXPLORE")
+
+    assert dispatched == 0
+
+
+@pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]

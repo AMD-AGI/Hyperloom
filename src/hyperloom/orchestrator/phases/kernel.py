@@ -429,9 +429,7 @@ class KernelPhase(PhaseHandler):
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
-            await self._maybe_reprofile_for_kernel()
-            await self._maybe_run_forge_fusion_before_kernel_opt()
-            await self._maybe_run_collective_before_kernel_opt()
+            await self._finish_kernel_entry()
             return
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
@@ -503,12 +501,8 @@ class KernelPhase(PhaseHandler):
                 "tuned_file": result.get("tuned_file"),
             },
         )
-        # Capture explore + GEMM-tuning gains before inline GEAK.
-        await self._maybe_reprofile_for_kernel()
-        await self._maybe_run_forge_fusion_before_kernel_opt()
-        await self._maybe_run_collective_before_kernel_opt()
-        if self._should_continue_kernel_after_gemm():
-            await self._run_kernel_opt_after_gemm()
+        # Capture explore + GEMM-tuning gains before the entry batch.
+        await self._finish_kernel_entry()
 
     async def _run_bf16_dense_gemm_fallback(
         self,
@@ -3347,8 +3341,30 @@ class KernelPhase(PhaseHandler):
             result["micro_decision"] = "candidate_no_e2e_gain"
         self._replace_latest_gemm_tuning_attempt(result)
 
-    def _should_continue_kernel_after_gemm(self) -> bool:
-        """Decide whether to run source-level kernel_opt right after GEMM tuning.
+    async def _finish_kernel_entry(self) -> None:
+        """Close out KERNEL entry on either route: re-profile, run the
+        independently gated stages, then dispatch whatever kernel_opt work the
+        candidate table already justifies.
+
+        The dispatch used to sit on the GEMM route alone, so skipping GEMM
+        tuning silently removed the phase's own kernel_opt as well. The two
+        settings are unrelated -- one tunes GEMM shape tables, the other
+        rewrites source-level kernels -- and nothing in the log connected them,
+        so a run could hold eight routable candidates, clear the dispatch floor,
+        and still reach SWEEP having optimized nothing, waiting on an
+        orchestration request that never came.
+
+        What the dispatch needs is untried routable candidates. That is what it
+        asks for, on both routes.
+        """
+        await self._maybe_reprofile_for_kernel()
+        await self._maybe_run_forge_fusion_before_kernel_opt()
+        await self._maybe_run_collective_before_kernel_opt()
+        if self._kernel_opt_work_remains():
+            await self._run_kernel_opt_entry_batch()
+
+    def _kernel_opt_work_remains(self) -> bool:
+        """Whether KERNEL entry should dispatch source-level kernel_opt itself.
 
         Returns:
             bool: ``True`` when the ``continue_kernel_after_gemm`` flag is set
@@ -3358,15 +3374,21 @@ class KernelPhase(PhaseHandler):
             return False
         return bool(self.shared_state.untried_hot_reusable_kernels())
 
-    async def _run_kernel_opt_after_gemm(self) -> None:
-        """Run the source-level kernel optimization batch after GEMM tuning."""
+    async def _run_kernel_opt_entry_batch(self) -> None:
+        """Dispatch the source-level kernel optimization batch at KERNEL entry.
+
+        No ``kernel_id`` is named, so the handler's own filter decides the set:
+        every candidate that clears the dispatch floor and has retries left goes
+        in one batch. Naming one here would put the phase back in the business
+        of picking, which is the part that stalls when nobody picks.
+        """
         cached = self.shared_state.last_trace_analyze or {}
         candidates_path = str(cached.get("candidates_path") or "")
         if not candidates_path:
-            log.info("KERNEL entry: skip kernel_opt after GEMM; no candidates_path")
+            log.info("KERNEL entry: skip kernel_opt; no candidates_path")
             return
         log.info(
-            "KERNEL entry: continuing to source-level kernel_opt after GEMM tuning",
+            "KERNEL entry: dispatching the source-level kernel_opt batch",
         )
         try:
             from ..kernel.request_handlers import run_optimization_handler
@@ -3396,7 +3418,7 @@ class KernelPhase(PhaseHandler):
                     "kind": "run_optimization_done",
                     "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
                     "result": result,
-                    "source": "kernel_entry_auto_after_gemm",
+                    "source": "kernel_entry_auto",
                 },
                 priority=1,
             )

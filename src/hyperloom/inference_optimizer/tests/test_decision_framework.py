@@ -415,7 +415,8 @@ async def test_run_optimization_handler_forwards_verification_evidence(
               "kernel_id": "k006",
               "name": "aiter_native_kernel",
               "source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-              "reusable_native_kernel": true
+              "reusable_native_kernel": true,
+              "gpu_pct": 12.5
             }
           ]
         }

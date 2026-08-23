@@ -517,9 +517,9 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     assert coord._gemm_tuning_required_before_kernel_opt() is False
 
 
-def test_should_continue_kernel_after_gemm(coord: Coordinator) -> None:
+def test_kernel_opt_work_remains(coord: Coordinator) -> None:
     coord.shared_state.continue_kernel_after_gemm = False
-    assert coord._should_continue_kernel_after_gemm() is False
+    assert coord._kernel_opt_work_remains() is False
 
 
 # -- canonical id helpers --------------------------------------------------
