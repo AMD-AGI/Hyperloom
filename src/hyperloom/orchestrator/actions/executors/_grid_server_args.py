@@ -1096,61 +1096,6 @@ def inject_sglang_moe_runner_backend(
     )
 
 
-# sglang flags that route work through aiter kernels. On a MoE checkpoint whose
-# per-partition intermediate size is not 128-aligned, aiter's assembly MoE path
-# (module_moe_asm) finds no tuned config, falls back to a default one, and reads
-# out of bounds -- ROCm aborts the rank with "Memory access fault by GPU node-N"
-# during init. Qwen3-30B-A3B at TP 4 (768 -> 192) is the observed case.
-# ``--moe-runner-backend triton`` does NOT avoid it: that knob only picks the
-# runner, while these flags still hand the MoE asm module the work.
-_SGLANG_AITER_SELECTING_ARGS = (
-    "--attention-backend aiter",
-    "--enable-aiter-allreduce-fusion",
-)
-
-
-def strip_aiter_args_for_unaligned_moe(
-    server_args: str | None,
-    framework: str | None,
-    model_path: str | None,
-    tp: int | None,
-) -> str:
-    """Drop aiter-selecting sglang flags when the MoE shape cannot feed aiter.
-
-    Returns ``server_args`` unchanged when: framework is not sglang, no model
-    path is known, or the checkpoint's MoE shape is 128-aligned for this TP
-    (including every non-MoE checkpoint, which never reaches the kernel).
-
-    Args:
-        server_args (str | None): The server-arg string to filter.
-        framework (str | None): Framework name; only sglang is affected.
-        model_path (str | None): Model path whose ``config.json`` is inspected.
-        tp (int | None): Tensor-parallel degree the MoE weights shard across.
-
-    Returns:
-        str: ``server_args`` without the aiter-selecting flags, or unchanged.
-    """
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    path = str(model_path or "").strip()
-    if not path:
-        return args
-    from hyperloom.inference_optimizer.cli.model_gate import model_supports_aiter_ck_fused_moe
-
-    if model_supports_aiter_ck_fused_moe(path, int(tp or 1)):
-        return args
-    stripped = remove_server_args(args, list(_SGLANG_AITER_SELECTING_ARGS))
-    if stripped != args:
-        log.info(
-            "MoE intermediate size is not 128-aligned at TP=%s: dropping aiter-selecting "
-            "server args (%s); aiter's asm MoE path faults on this shape.",
-            tp,
-            ", ".join(_SGLANG_AITER_SELECTING_ARGS),
-        )
-    return stripped
-
-
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],
     *,
