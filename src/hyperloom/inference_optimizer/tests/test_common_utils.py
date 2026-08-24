@@ -414,6 +414,45 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
     assert calls == ["write", "plan", "ingest"]
 
 
+def test_recover_looks_complete_requires_breakdown_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.inference_optimizer.cli import recover
+    import hyperloom.inference_optimizer.breakdown as breakdown_mod
+    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
+    monkeypatch.setattr(
+        emitter,
+        "read_receipt",
+        lambda _session_dir: {"counts": {"breakdown_recorded": 1}, "counts_final": True},
+    )
+    assert not (session / breakdown_mod.BREAKDOWN_FILENAME).exists()
+
+    status = recover._session_recovery_status(session)
+    assert status["breakdown_exists"] is False
+    assert status["breakdown_recorded"] is True
+    assert status["close_done"] is True
+    assert status["looks_complete"] is False
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        breakdown_mod,
+        "write_breakdown_json",
+        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+    )
+    monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
+    monkeypatch.setattr(breakdown_mod, "package_session_artifacts", lambda s: calls.append("package") or None)
+    monkeypatch.setattr(emitter, "flush_session", lambda s: calls.append("flush"))
+    monkeypatch.setattr(emitter, "record_session_breakdown", lambda s: calls.append("record"))
+
+    rc = recover._run_recover_session(argparse.Namespace(session_dir=session, force=False, backfill_trace=False))
+    assert rc == 0
+    assert "write" in calls
+
+
 # ---------------------------------------------------------------------------
 # inference_optimizer.cli.multi_node / multi_node commands
 # ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
         "breakdown_exists": breakdown_exists,
         "breakdown_recorded": breakdown_recorded,
         "counts_final": counts_final,
-        "looks_complete": close_done and breakdown_recorded,
+        "looks_complete": close_done and breakdown_recorded and breakdown_exists,
     }
 
 
