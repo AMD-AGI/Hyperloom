@@ -266,6 +266,14 @@ def build_review_prompt(
     Deliberately carries no file contents. Pre-loading the framework tree would
     bound the review by whatever was guessed to be relevant, whereas the agent
     can follow the evidence -- and only ships what it actually opened.
+
+    The closing "write nothing outside the run directory" line is an
+    instruction, and on the Claude backend that is all it is: see
+    :data:`ALLOWED_TOOLS` for why. What stands behind it there is the
+    fingerprint taken around the session, which covers the source files the
+    candidate table names and nothing else. Read this line as the boundary and a
+    write elsewhere in the framework tree looks impossible; it is merely
+    undetected.
     """
     lines = [
         "Audit the kernel-candidate table produced by the deterministic "
