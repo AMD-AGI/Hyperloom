@@ -105,8 +105,6 @@ def make_entry(
         kernel_id: Stable-within-run candidate id (``k001``).
         name: Kernel symbol as the profiler reported it.
         gpu_pct: Share of GPU time, used to rank what is worth resolving.
-            Must be a finite, non-bool float; non-conforming values are
-            clamped to 0.0.
         source_file: Resolved path, or ``""`` when unresolved.
         source_line: 1-based line when the tier produced one.
         source_function: Enclosing function when the tier produced one.

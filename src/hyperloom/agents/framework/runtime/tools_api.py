@@ -13,9 +13,8 @@ Three helpers wrapping framework-agent internals without a full
 * :func:`evaluate_candidate_outcome` - stateless winner check given
   pre-computed benchmark/accuracy JSON blobs.
 
-The CLI reaches these helpers indirectly (``explorer`` uses
-``coerce.first_float``; ``phase-audit`` uses ``fetch_pr_audit_material``);
-this module never imports the CLI.
+The CLI reaches these helpers indirectly via ``explorer`` and
+``phase-audit``; this module never imports the CLI.
 """
 
 from __future__ import annotations

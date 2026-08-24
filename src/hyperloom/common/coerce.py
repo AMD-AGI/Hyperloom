@@ -52,13 +52,9 @@ def to_float(value: Any, default: _T | None = None) -> float | _T | None:
 
 
 def to_int(value: Any, default: _T | None = None) -> int | _T | None:
-    """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite
-    floats.
+    """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite floats.
 
-    String inputs are stripped before parsing; a numeric string is parsed with
-    ``int(str(value).strip())`` (base-10, no float truncation). Non-finite
-    float inputs (``nan``, ``inf``) are rejected rather than raising
-    ``OverflowError`` from the ``int()`` cast.
+    String inputs are stripped before parsing (base-10, no float truncation).
 
     Args:
         value: The value to coerce.
