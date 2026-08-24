@@ -182,7 +182,9 @@ def test_heredoc_bodies_are_excluded_from_the_shell_scan():
     script = _install_scripts()[0]
     raw = script.read_text(encoding="utf-8")
     assert f"export {CLAUDE_OAUTH_TOKEN_ENV}=sk-ant-oat01" in raw, "usage text moved; update this guard"
-    assert not any(line.startswith(f"export {CLAUDE_OAUTH_TOKEN_ENV}=sk-ant-oat01") for line in _executable_lines(script))
+    assert not any(
+        line.startswith(f"export {CLAUDE_OAUTH_TOKEN_ENV}=sk-ant-oat01") for line in _executable_lines(script)
+    )
 
 
 @pytest.mark.parametrize("script", _install_scripts(), ids=lambda p: f"{p.parent.name}/{p.name}")

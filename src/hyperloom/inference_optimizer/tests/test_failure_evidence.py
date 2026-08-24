@@ -92,9 +92,21 @@ class TestFailureFromVariantOutcome:
     def test_all_fields_present(self):
         vo = self._make_vo()
         fe = failure_from_variant_outcome(task_id="t1", round_id="r1", vo=vo)
-        for key in ("failure_id", "task_id", "round_id", "variant_name", "fingerprint",
-                    "stage", "outcome", "error_class", "error_excerpt", "reason",
-                    "server_log_path", "workspace", "variant"):
+        for key in (
+            "failure_id",
+            "task_id",
+            "round_id",
+            "variant_name",
+            "fingerprint",
+            "stage",
+            "outcome",
+            "error_class",
+            "error_excerpt",
+            "reason",
+            "server_log_path",
+            "workspace",
+            "variant",
+        ):
             assert key in fe, f"missing key: {key}"
 
     def test_stage_defaults_to_decision_when_absent(self):

@@ -113,9 +113,7 @@ class HyperloomRemoteKB:
         """Build a configured facade, requiring both KB Store variables."""
         client = RemoteRecipeClient.from_env_optional()
         if client is None:
-            raise RemoteRecipeConfigurationError(
-                "KB_STORE_URL and KB_STORE_TOKEN are required for HyperloomRemoteKB"
-            )
+            raise RemoteRecipeConfigurationError("KB_STORE_URL and KB_STORE_TOKEN are required for HyperloomRemoteKB")
         return cls(client)
 
     def read(
@@ -222,15 +220,8 @@ class RemoteWarmRecipeAdapter:
         self._candidate_views: dict[str, dict[str, Any]] = {}
         self._candidate_rows: dict[str, dict[str, Any]] = {}
         self._scanned_candidate_ids: set[str] = set()
-        self._deactivate_path(
-            self._destination.parent
-            / f".{self._destination.name}-candidates"
-        )
-        self._deactivate_path(
-            self._destination.with_name(
-                f".{self._destination.name}.selected"
-            )
-        )
+        self._deactivate_path(self._destination.parent / f".{self._destination.name}-candidates")
+        self._deactivate_path(self._destination.with_name(f".{self._destination.name}.selected"))
 
     @staticmethod
     def _deactivate_path(path: Path) -> None:
@@ -262,12 +253,9 @@ class RemoteWarmRecipeAdapter:
                     self._deactivate_path(self._destination)
                     raise
                 try:
-                    replay_material = (
-                        row.get("replay_material_available") is True
-                        and self._candidate_has_replay_material(
-                            self._destination
-                        )
-                    )
+                    replay_material = row.get(
+                        "replay_material_available"
+                    ) is True and self._candidate_has_replay_material(self._destination)
                 except (
                     KBStoreError,
                     OSError,
@@ -325,9 +313,8 @@ class RemoteWarmRecipeAdapter:
         replay = RecipeReplayKB(sections)
         config = replay.read_config()
         config_envs = config.get("extra_envs")
-        if (
-            str(config.get("extra_server_args") or "").strip()
-            or (isinstance(config_envs, Mapping) and bool(config_envs))
+        if str(config.get("extra_server_args") or "").strip() or (
+            isinstance(config_envs, Mapping) and bool(config_envs)
         ):
             return True
         for reader_type in (ExploreAgentKB, FrameworkAgentKB):
@@ -379,10 +366,7 @@ class RemoteWarmRecipeAdapter:
         pages_scanned = 0
         has_more = False
         rows: list[dict[str, Any]] = []
-        while (
-            len(self._scanned_candidate_ids) < self.search_candidate_cap
-            and pages_scanned < self.search_page_cap
-        ):
+        while len(self._scanned_candidate_ids) < self.search_candidate_cap and pages_scanned < self.search_page_cap:
             has_more = False
             result = self._remote_kb.search_identities(
                 scheme="inference",
@@ -394,9 +378,7 @@ class RemoteWarmRecipeAdapter:
             pages_scanned += 1
             items = result.get("items")
             if not isinstance(items, list):
-                raise RemoteRecipeValidationError(
-                    "KB Store identity search items must be a list"
-                )
+                raise RemoteRecipeValidationError("KB Store identity search items must be a list")
             if not items:
                 break
             for item in items:
@@ -409,10 +391,7 @@ class RemoteWarmRecipeAdapter:
                 if cached is not None:
                     rows.append(dict(cached))
                     continue
-                if (
-                    len(self._scanned_candidate_ids)
-                    >= self.search_candidate_cap
-                ):
+                if len(self._scanned_candidate_ids) >= self.search_candidate_cap:
                     break
                 self._scanned_candidate_ids.add(canonical_id)
                 try:
@@ -456,9 +435,7 @@ class RemoteWarmRecipeAdapter:
                     "KB Store identity search next_offset must be integer or null"
                 ) from exc
             if resolved_offset <= offset:
-                raise RemoteRecipeValidationError(
-                    "KB Store identity search pagination did not advance"
-                )
+                raise RemoteRecipeValidationError("KB Store identity search pagination did not advance")
             offset = resolved_offset
             has_more = True
         if pages_scanned >= self.search_page_cap and has_more:
@@ -472,11 +449,7 @@ class RemoteWarmRecipeAdapter:
         """Materialize a candidate only after T0 accepts and ranks it."""
         canonical_id = str(row.get("canonical_id") or "").strip()
         envelope = self._candidate_views.get(canonical_id)
-        if (
-            not canonical_id
-            or row.get("replayable") is not True
-            or envelope is None
-        ):
+        if not canonical_id or row.get("replayable") is not True or envelope is None:
             return False
         document = self._remote_kb.materialize_view(
             canonical_id,

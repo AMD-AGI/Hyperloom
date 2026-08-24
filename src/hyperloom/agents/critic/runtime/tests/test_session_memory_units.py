@@ -137,5 +137,3 @@ def test_read_json_corrupt_raises(sm):
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(SessionMemoryError):
         sm.load_context("s1")
-
-

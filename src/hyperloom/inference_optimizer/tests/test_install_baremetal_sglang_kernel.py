@@ -36,9 +36,7 @@ def _kernel_dir(checkout: Path) -> subprocess.CompletedProcess[str]:
         ("v0517_aot", "python/sglang/kernels/aot"),
     ],
 )
-def test_sglang_kernel_rocm_build_dir_known_layouts(
-    fixture_name: str, expected_suffix: str
-) -> None:
+def test_sglang_kernel_rocm_build_dir_known_layouts(fixture_name: str, expected_suffix: str) -> None:
     checkout = _FIXTURES / fixture_name
     result = _kernel_dir(checkout)
     assert result.returncode == 0, result.stderr

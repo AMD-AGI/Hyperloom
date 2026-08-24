@@ -45,11 +45,11 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+---------------------------------------+
 | Requirement         | Support                               |
 +=====================+=======================================+
-| AMD Instinct GPU    | MI300X, MI325X, MI355X                |
+| AMD Instinct™ GPU   | MI300X, MI325X, MI355X                |
 +---------------------+---------------------------------------+
 | Operating System    | Ubuntu 22.04, Ubuntu 24.04            |
 +---------------------+---------------------------------------+
-| ROCm Version        | 7.2.x                                 |
+| ROCm Version        | 7.2.x, 10.0                           |
 +---------------------+---------------------------------------+
 | Python              | >= 3.10                               |
 +---------------------+---------------------------------------+
@@ -70,23 +70,23 @@ The following table lists the validated Hyperloom version and component combinat
    :align: left
    :class: compat-matrix format-big-table
 
-+-------------------+---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-| Hyperloom version | Component                 | GPU                    | ROCm version               | Ubuntu        | Python      | GitHub                      |
-+===================+===========================+========================+============================+===============+=============+=============================+
-| 1.0.0b2           | `TraceLens 0.1.0`_        | Hardware-agnostic      | No dependency              | OS-independent| >= 3.6      | |tracelens-github|          |
-+                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-|                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
-+                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-|                   | `IntelliKit 0.1.0`_       | MI300X, MI325X, MI355X | 7.2.x                      | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
-+                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-|                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
-+                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-|                   | `Magpie 0.2.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
-+-------------------+---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
++-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
+| Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
++===================+===========================+========================+====================================+===============+=============+=============================+
+| 1.0.0b2           | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
++                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
+|                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0   | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
++                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
+|                   | `IntelliKit 0.1.1`_       | MI300X, MI325X, MI355X | 7.2.x, 10.0                        | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
++                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
+|                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0                        | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
++                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
+|                   | `Magpie 0.2.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0          | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
++-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 
-.. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/
+.. _TraceLens 1.0.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-1.0.0/
 .. _GEAK 4.0.0: https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/
-.. _IntelliKit 0.1.0: https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/
+.. _IntelliKit 0.1.1: https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.1/
 .. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/
 .. _Magpie 0.2.0: https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/
 
@@ -184,7 +184,7 @@ Hyperloom does not install ROCm or torch itself.
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
      - v0.5.17 (rocm720)
-     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0. Note: ``SGLANG_REF`` (v0.5.17) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which may resolve to a different patch release.
+     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0. Note: ``SGLANG_REF`` (v0.5.17) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release.
    * - vLLM
      - v0.27.1 (rocm723), isolated venv
      - Installs ``vllm==0.27.1+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.

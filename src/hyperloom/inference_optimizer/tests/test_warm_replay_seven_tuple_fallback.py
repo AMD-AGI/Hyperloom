@@ -248,9 +248,7 @@ def test_empty_exact_material_falls_back_before_runtime() -> None:
     donor = _candidate("alias-a")
     row, tier, confidence = _cascade(_RemoteKB([[donor]], exact=exact))
     assert row["canonical_id"] == donor["canonical_id"]
-    assert row["exact_history"]["what_worked"] == [
-        {"name": "exact-prior"}
-    ]
+    assert row["exact_history"]["what_worked"] == [{"name": "exact-prior"}]
     assert (tier, confidence) == ("same_arch_class", 0.95)
 
 
@@ -265,9 +263,7 @@ def test_relaxed_model_allowed_but_unrelated_structure_rejected() -> None:
         "checkpoint-a-mirror",
         gain=8.0,
     )
-    row, tier, _confidence = _cascade(
-        _RemoteKB([[unrelated, compatible]])
-    )
+    row, tier, _confidence = _cascade(_RemoteKB([[unrelated, compatible]]))
     assert tier == "same_arch_class"
     assert row["canonical_id"] == compatible["canonical_id"]
 
@@ -313,9 +309,7 @@ def test_final_tier_rejects_newer_and_wrong_minor_then_chooses_nearest() -> None
     valid_near = _candidate("near", framework_version="1.2.4", gain=2.0)
     newer = _candidate("newer", framework_version="1.2.6", gain=100.0)
     wrong_minor = _candidate("minor", framework_version="1.1.99", gain=100.0)
-    row, tier, confidence = _cascade(
-        _RemoteKB([[], [], [valid_old, newer, wrong_minor, valid_near]])
-    )
+    row, tier, confidence = _cascade(_RemoteKB([[], [], [valid_old, newer, wrong_minor, valid_near]]))
     assert row["canonical_id"] == valid_near["canonical_id"]
     assert (tier, confidence) == ("compatible_framework_version", 0.72)
 
@@ -339,6 +333,4 @@ def test_hardware_search_passes_exact_same_isa_values() -> None:
     assert _cascade(kb)[1:] == ("miss", 0.0)
     assert "hardware_in" not in kb.search_calls[0]
     for call in kb.search_calls[1:]:
-        assert call["hardware_in"] == _hardware_fallback_values(
-            TARGET["hardware"]
-        )
+        assert call["hardware_in"] == _hardware_fallback_values(TARGET["hardware"])

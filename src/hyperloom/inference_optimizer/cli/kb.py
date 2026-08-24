@@ -295,9 +295,7 @@ def _build_recipe_kb_dispatcher(
 
     # No remote client is constructed in local mode, even when ambient
     # KB Store or GBrain credentials are present.
-    explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get(
-        "HYPERLOOM_LOCAL_KB_ROOT"
-    )
+    explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
     explicit_knowledge_root = str(os.environ.get("KNOWLEDGE_LOCAL_ROOT") or "").strip()
     if not explicit_knowledge_root and explicit_compatibility_root:
         config = replace(config, local_root=str(_resolve_local_kb_root(args)))
@@ -422,8 +420,7 @@ def _bootstrap_recipe_kb(
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
     except Exception as exc:  # noqa: BLE001 — defensive
         print(
-            f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\n"
-            "Continuing without warm-start.",
+            f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",
             file=sys.stderr,
         )
         args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "t0_runtime_fail"
@@ -512,10 +509,7 @@ def _bootstrap_knowledge_plane(
         degraded_env["KNOWLEDGE_STORE_MODE"] = "local"
         config = KnowledgeConfig.from_env(degraded_env)
     else:
-        config = (
-            getattr(recipe_kb_client, "knowledge_config", None)
-            or KnowledgeConfig.from_env()
-        )
+        config = getattr(recipe_kb_client, "knowledge_config", None) or KnowledgeConfig.from_env()
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
         pr_monitor_mcp_url=pr_mcp_url,

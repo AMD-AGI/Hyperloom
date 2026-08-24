@@ -35,8 +35,7 @@ class KernelStackPhase(PhaseHandler):
             kid = str(pending.get("kernel_id") or "")
             integration_id = str(pending.get("integration_id") or "")
             log.info(
-                "SWEEP entry: draining pending KEEP integrate for kernel_id=%s "
-                "integration_id=%s (drained %d so far)",
+                "SWEEP entry: draining pending KEEP integrate for kernel_id=%s integration_id=%s (drained %d so far)",
                 kid,
                 integration_id,
                 drained,
@@ -47,12 +46,8 @@ class KernelStackPhase(PhaseHandler):
                     {
                         "kernel_id": kid,
                         "integration_id": integration_id,
-                        "task_group_key": str(
-                            pending.get("task_group_key") or ""
-                        ),
-                        "identity_route": str(
-                            pending.get("identity_route") or ""
-                        ),
+                        "task_group_key": str(pending.get("task_group_key") or ""),
+                        "identity_route": str(pending.get("identity_route") or ""),
                         "base_tput": base,
                     },
                     session_dir=self.session_dir,
@@ -71,24 +66,15 @@ class KernelStackPhase(PhaseHandler):
                 if state.rejected_kernel_ids is None:
                     state.rejected_kernel_ids = []
                 pending_task_key = str(pending.get("task_key") or "")
-                if (
-                    not pending_task_key
-                    and kid not in state.rejected_kernel_ids
-                ):
+                if not pending_task_key and kid not in state.rejected_kernel_ids:
                     state.rejected_kernel_ids.append(kid)
                 attempt = _entry_by_kernel_id(state, kid)
                 if isinstance(attempt, dict):
                     attempt["rejected_reason"] = "integrate_dispatch_exception"
-                stable_attempt = (state.kernel_opt_task_attempts or {}).get(
-                    pending_task_key
-                )
+                stable_attempt = (state.kernel_opt_task_attempts or {}).get(pending_task_key)
                 if isinstance(stable_attempt, dict):
-                    stable_attempt["rejected_reason"] = (
-                        "integrate_dispatch_exception"
-                    )
-                queued = (state.pending_kernel_integrations or {}).get(
-                    integration_id
-                )
+                    stable_attempt["rejected_reason"] = "integrate_dispatch_exception"
+                queued = (state.pending_kernel_integrations or {}).get(integration_id)
                 if isinstance(queued, dict):
                     queued["status"] = "dispatch_failed"
                 state.save(self.session_dir)
@@ -518,9 +504,7 @@ class KernelStackPhase(PhaseHandler):
                         # The args the bench server ran under, so a serving
                         # context too small to host an eval is not read as a
                         # broken eval.
-                        server_args=str(
-                            (self.shared_state.current_best or {}).get("extra_server_args") or ""
-                        ),
+                        server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
                     )
                     if accuracy_gate.get("blocked"):
                         decision = "NEEDS_REVIEW"
@@ -586,10 +570,7 @@ class KernelStackPhase(PhaseHandler):
             return result
         except Exception as exc:  # noqa: BLE001
             reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-            any_failed = any(
-                str(r.get("status") or "") not in {"ok", "skipped"}
-                for r in reverts
-            )
+            any_failed = any(str(r.get("status") or "") not in {"ok", "skipped"} for r in reverts)
             revert_status = "failed" if any_failed else "ok"
             return {
                 "status": "failed",
@@ -652,12 +633,8 @@ class KernelStackPhase(PhaseHandler):
                         "kind": "integrate",
                         "kernel_id": kid,
                         "integration_id": integration_id,
-                        "task_group_key": str(
-                            pending.get("task_group_key") or ""
-                        ),
-                        "identity_route": str(
-                            pending.get("identity_route") or ""
-                        ),
+                        "task_group_key": str(pending.get("task_group_key") or ""),
+                        "identity_route": str(pending.get("identity_route") or ""),
                         "source": "auto_integrate_after_kernel_opt",
                     },
                     priority=2,

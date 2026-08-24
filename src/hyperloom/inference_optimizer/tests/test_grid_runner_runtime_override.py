@@ -32,6 +32,7 @@ def _base_yaml(tmp_path: Path, framework: str = "vllm") -> Path:
 # Unit tests for apply_runtime_override
 # ---------------------------------------------------------------------------
 
+
 def test_path_prefix_prepended():
     envs: dict[str, str] = {}
     apply_runtime_override(envs, {"path_prefix": "/attempt/bin"})
@@ -58,11 +59,14 @@ def test_pythonpath_unsafe_colon_dropped():
 
 def test_framework_keys_written():
     envs: dict[str, str] = {}
-    apply_runtime_override(envs, {
-        "framework_bin": "/attempt/bin/vllm",
-        "framework_python": "/attempt/bin/python",
-        "framework_venv_root": "/attempt/venv",
-    })
+    apply_runtime_override(
+        envs,
+        {
+            "framework_bin": "/attempt/bin/vllm",
+            "framework_python": "/attempt/bin/python",
+            "framework_venv_root": "/attempt/venv",
+        },
+    )
     assert envs["HYPERLOOM_FRAMEWORK_BIN"] == "/attempt/bin/vllm"
     assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/attempt/bin/python"
     assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == "/attempt/venv"
@@ -77,6 +81,7 @@ def test_empty_override_is_noop():
 # ---------------------------------------------------------------------------
 # Integration test: override lands in materialized YAML, NOT os.environ
 # ---------------------------------------------------------------------------
+
 
 def test_runtime_override_in_yaml_not_process_env(tmp_path):
     """The attempt framework_bin must appear in materialized YAML benchmark.envs,
@@ -129,6 +134,7 @@ def test_no_runtime_override_field_is_noop(tmp_path):
 # ---------------------------------------------------------------------------
 # compiled-artifact runtime prefixes
 # ---------------------------------------------------------------------------
+
 
 def test_pythonpath_prefixes_multi_entry_ordered_prepended():
     envs = {"PYTHONPATH": "/opt/venv"}
@@ -188,10 +194,13 @@ def test_runtime_python_exe_writes_hyperloom_framework_python():
 def test_runtime_python_exe_overrides_framework_python():
     """runtime_python_exe must win when both keys are present."""
     envs: dict[str, str] = {}
-    apply_runtime_override(envs, {
-        "framework_python": "/old/bin/python",
-        "runtime_python_exe": "/venv/bin/python3.11",
-    })
+    apply_runtime_override(
+        envs,
+        {
+            "framework_python": "/old/bin/python",
+            "runtime_python_exe": "/venv/bin/python3.11",
+        },
+    )
     assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/venv/bin/python3.11"
 
 
@@ -228,6 +237,7 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
 # ---------------------------------------------------------------------------
 # Fingerprint: runtime_override participates but stays back-compatible
 # ---------------------------------------------------------------------------
+
 
 def test_fingerprint_unchanged_for_empty_override():
     plain = GridVariant(name="a", extra_server_args="--x 1")

@@ -241,9 +241,7 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
             out[key] = [str(val).strip()]
         else:
             out[key] = []
-    out["next_cycle_directive"] = _sanitize_cycle_directive(
-        str(obj.get("next_cycle_directive") or "")
-    )
+    out["next_cycle_directive"] = _sanitize_cycle_directive(str(obj.get("next_cycle_directive") or ""))
     return out
 
 
@@ -332,9 +330,7 @@ def build_memory_record(
     learnings = learnings[-50:]  # cap so state.json stays bounded
     # Non-empty-wins: an empty field inherits the previous record's value.
     plan = str(parsed.get("current_plan") or "").strip() or prev.get("current_plan", "")
-    directive = str(parsed.get("next_cycle_directive") or "").strip() or str(
-        prev.get("next_cycle_directive") or ""
-    )
+    directive = str(parsed.get("next_cycle_directive") or "").strip() or str(prev.get("next_cycle_directive") or "")
     record: dict[str, Any] = {
         "current_plan": plan,
         "learnings": learnings,

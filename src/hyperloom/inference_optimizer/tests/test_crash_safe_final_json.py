@@ -150,12 +150,15 @@ def test_crash_safe_platform_does_not_drag_in_the_orchestrator():
     )
     out = subprocess.run(
         [sys.executable, "-c", probe],
-        cwd=str(_REPO_ROOT), env=_child_env(),
-        capture_output=True, text=True, timeout=120,
+        cwd=str(_REPO_ROOT),
+        env=_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert out.returncode == 0, out.stderr
     # Without this the child imports whichever ``hyperloom`` is installed, and a
     # green result would say nothing about the sources under test.
-    origin = next(ln[len("FROM:"):] for ln in out.stdout.splitlines() if ln.startswith("FROM:"))
+    origin = next(ln[len("FROM:") :] for ln in out.stdout.splitlines() if ln.startswith("FROM:"))
     assert origin.startswith(str(_REPO_ROOT / "src")), f"child imported {origin}"
     assert "CLEAN" in out.stdout, out.stdout

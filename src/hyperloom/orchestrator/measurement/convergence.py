@@ -88,9 +88,7 @@ def _spread_pct(values: list[float]) -> float | None:
 
 def _is_monotonic_increasing(values: list[float]) -> bool:
     """True only for a series long enough for a rise to mean something."""
-    return len(values) >= MIN_ROUNDS_FOR_TREND and all(
-        b > a for a, b in zip(values, values[1:], strict=False)
-    )
+    return len(values) >= MIN_ROUNDS_FOR_TREND and all(b > a for a, b in zip(values, values[1:], strict=False))
 
 
 def assess_convergence(
@@ -121,7 +119,11 @@ def assess_convergence(
         # One usable round cannot be shown to be steady. Saying so beats
         # reporting it as if it were.
         return ConvergenceVerdict(
-            False, "insufficient_rounds", None, used, discarded,
+            False,
+            "insufficient_rounds",
+            None,
+            used,
+            discarded,
             spread_pct=_spread_pct(used),
         )
 
@@ -132,18 +134,32 @@ def assess_convergence(
         # Still climbing: the last round is the least settled, so taking it
         # would systematically overstate the result.
         return ConvergenceVerdict(
-            False, "monotonic_increasing", None, used, discarded,
-            spread_pct=spread, monotonic=True,
+            False,
+            "monotonic_increasing",
+            None,
+            used,
+            discarded,
+            spread_pct=spread,
+            monotonic=True,
         )
     if spread is not None and spread > tolerance_pct:
         return ConvergenceVerdict(
-            False, "spread_exceeds_tolerance", None, used, discarded,
+            False,
+            "spread_exceeds_tolerance",
+            None,
+            used,
+            discarded,
             spread_pct=spread,
         )
 
     value = sum(used) / len(used)
     return ConvergenceVerdict(
-        True, "converged", value, used, discarded, spread_pct=spread,
+        True,
+        "converged",
+        value,
+        used,
+        discarded,
+        spread_pct=spread,
     )
 
 
@@ -159,12 +175,13 @@ def converged_throughput(
     falling back to the last round -- that fallback is what turned a warm-up
     climb into a reported gain.
     """
-    verdict = assess_convergence(
-        rounds, tolerance_pct=tolerance_pct, warmup_rounds=warmup_rounds
-    )
+    verdict = assess_convergence(rounds, tolerance_pct=tolerance_pct, warmup_rounds=warmup_rounds)
     if not verdict.converged:
         log.info(
             "throughput not converged (%s): used=%s discarded=%s spread=%.1f%%",
-            verdict.reason, verdict.used, verdict.discarded, verdict.spread_pct or 0.0,
+            verdict.reason,
+            verdict.used,
+            verdict.discarded,
+            verdict.spread_pct or 0.0,
         )
     return verdict.value
