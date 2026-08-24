@@ -165,21 +165,45 @@ def _wait_ports_free(ports: list[int], timeout_s: float) -> list[int]:
 def _gpu_vram_used_mb() -> list[float] | None:
     """Return per-GPU used VRAM (MiB) via rocm-smi, or None if unavailable.
 
-    Delegates to :func:`hyperloom.common.rocm_smi.gpu_vram_usage` and adapts
-    the result to the flat ``list[float]`` shape expected by this module.
-    Best-effort: any parse or exec failure returns None so the caller skips
-    the GPU-free wait.
+    Uses ``rocm-smi --showmeminfo vram --json`` so it works without HIP device
+    visibility (the kill actor runs with num_gpus=0). Best-effort: any parse or
+    exec failure returns None so the caller skips the GPU-free wait.
+
+    This duplicates ``hyperloom.common.rocm_smi`` on purpose: the pod copy of
+    this script is heredoc'd in and run by a bare ``python3``, so hyperloom is
+    not importable there.
 
     Returns:
         list[float] | None: Used VRAM per GPU in MiB, or None when rocm-smi is
         missing / unparseable.
     """
-    from hyperloom.common.rocm_smi import gpu_vram_usage
-
-    snapshots = gpu_vram_usage()
-    if snapshots is None:
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
-    return [s.used_mib for s in snapshots] or None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    used: list[float] = []
+    for fields in data.values():
+        if not isinstance(fields, dict):
+            continue
+        for key, val in fields.items():
+            kl = key.lower()
+            if "vram" in kl and "used" in kl:
+                try:
+                    used.append(float(val) / (1024.0 * 1024.0))
+                except (TypeError, ValueError):
+                    pass
+    return used or None
 
 
 def _wait_gpu_free(threshold_mb: float, timeout_s: float) -> list[float]:

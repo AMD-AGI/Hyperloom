@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.common.rocm_smi."""
+"""Tests for the shared rocm-smi VRAM reader."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ import json
 
 import pytest
 
+from hyperloom.common import rocm_smi
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage
+
+_TOTAL_B = 288 * 1024**3
+_TOTAL_MIB = 288 * 1024.0
 
 
 class _FakeProc:
@@ -18,103 +22,70 @@ class _FakeProc:
         self.stdout = stdout
 
 
-_CARD0_BOTH = {
-    "VRAM Total Memory (B)": str(int(288 * 1024**3)),
-    "VRAM Total Used Memory (B)": str(100 * 1024 * 1024),
-}
-_CARD1_USED_ONLY = {
-    "VRAM Total Used Memory (B)": str(250 * 1024 * 1024),
-}
-_SYSTEM_ROW = {"Driver version": "6.1.4"}
+@pytest.fixture(autouse=True)
+def _binary_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rocm_smi.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
 
 
-def test_gpu_vram_usage_parses_used_and_total(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both used and total are parsed; non-card top-level dicts are ignored."""
-    import hyperloom.common.rocm_smi as mod
+def _stub_output(monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    monkeypatch.setattr(rocm_smi.subprocess, "run", lambda *a, **k: _FakeProc(0, text))
 
-    payload = {
-        "card0": _CARD0_BOTH,
-        "card1": _CARD1_USED_ONLY,
-        "system": _SYSTEM_ROW,
+
+def _card(used_b: int) -> dict[str, str]:
+    return {
+        "VRAM Total Memory (B)": str(_TOTAL_B),
+        "VRAM Total Used Memory (B)": str(used_b),
     }
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
-    monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload))
+
+
+def test_parses_used_and_total_per_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Byte fields become MiB per card; rows without vram keys are skipped."""
+    _stub_output(
+        monkeypatch,
+        {
+            "card0": _card(100 * 1024**2),
+            "card1": _card(250 * 1024**2),
+            "system": {"Driver version": "6.1.4"},
+        },
     )
-
-    result = gpu_vram_usage()
-    assert result is not None
-    assert len(result) == 2
-
-    assert result[0].used_mib == pytest.approx(100.0)
-    assert result[0].total_mib == pytest.approx(288 * 1024.0)
-
-    assert result[1].used_mib == pytest.approx(250.0)
-    assert result[1].total_mib is None
+    assert gpu_vram_usage() == [
+        GpuVram(100.0, _TOTAL_MIB),
+        GpuVram(250.0, _TOTAL_MIB),
+    ]
 
 
-def test_gpu_vram_usage_total_absent_does_not_block_used(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A card with no total still yields a GpuVram with total_mib=None."""
-    import hyperloom.common.rocm_smi as mod
-
-    payload = {"card0": {"VRAM Total Used Memory (B)": str(512 * 1024 * 1024)}}
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
-    monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload))
-    )
-
-    result = gpu_vram_usage()
-    assert result is not None
-    assert result[0] == GpuVram(used_mib=512.0, total_mib=None)
-
-
-def test_gpu_vram_usage_none_when_rocm_smi_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing rocm-smi binary returns None."""
-    import hyperloom.common.rocm_smi as mod
-
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: None)
+def test_none_when_a_card_omits_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Used without total cannot answer a ratio gate, so the probe is unknown."""
+    _stub_output(monkeypatch, {"card0": {"VRAM Total Used Memory (B)": str(512 * 1024**2)}})
     assert gpu_vram_usage() is None
 
 
-def test_gpu_vram_usage_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-zero rocm-smi exit code returns None."""
-    import hyperloom.common.rocm_smi as mod
-
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
-    monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeProc(1, "GPU error")
-    )
+def test_none_when_total_is_not_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero total would make the ratio undefined."""
+    _stub_output(monkeypatch, {"card0": {"VRAM Total Memory (B)": "0", "VRAM Total Used Memory (B)": "0"}})
     assert gpu_vram_usage() is None
 
 
-def test_gpu_vram_usage_none_on_empty_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty rocm-smi stdout returns None."""
-    import hyperloom.common.rocm_smi as mod
-
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
-    monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeProc(0, "   ")
-    )
+def test_none_when_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No rocm-smi on PATH."""
+    monkeypatch.setattr(rocm_smi.shutil, "which", lambda _n: None)
     assert gpu_vram_usage() is None
 
 
-def test_gpu_vram_usage_none_on_bad_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unparseable JSON returns None."""
-    import hyperloom.common.rocm_smi as mod
-
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
-    monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: _FakeProc(0, "{not valid json")
-    )
+def test_none_on_unusable_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-zero exit, blank stdout, bad JSON, non-object JSON, and exec errors."""
+    monkeypatch.setattr(rocm_smi.subprocess, "run", lambda *a, **k: _FakeProc(1, "boom"))
     assert gpu_vram_usage() is None
 
+    _stub_output(monkeypatch, "   ")
+    assert gpu_vram_usage() is None
 
-def test_gpu_vram_usage_none_on_exec_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An OSError during subprocess.run returns None."""
-    import hyperloom.common.rocm_smi as mod
+    _stub_output(monkeypatch, "{not json")
+    assert gpu_vram_usage() is None
 
-    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/opt/rocm/bin/rocm-smi")
-    monkeypatch.setattr(
-        mod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("no device"))
-    )
+    _stub_output(monkeypatch, "[]")
+    assert gpu_vram_usage() is None
+
+    monkeypatch.setattr(rocm_smi.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("no device")))
     assert gpu_vram_usage() is None
