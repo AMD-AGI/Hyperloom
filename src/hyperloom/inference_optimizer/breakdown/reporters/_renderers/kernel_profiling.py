@@ -3,63 +3,18 @@
 
 """Kernel profiling renderer.
 
-Surfaces profile / TraceLens runs: launch args, artifact paths,
-parsed top-k kernels, and (verbose only) the last 40 lines of
-tracelens CLI logs.
+Surfaces profile / TraceLens runs: launch args, artifact paths and
+parsed top-k kernels. Artifact locations are reported as recorded; this
+renderer reads no files.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from ..base import RenderedSection, md_kv_list, md_table, register_renderer
 
-_CLI_LOG_TAIL_LINES = 40
 _MAX_KERNEL_ROWS = 15
-
-
-def _session_root(breakdown: dict[str, Any]) -> Path | None:
-    """Resolve the on-disk session root from the breakdown.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        Path | None: The session directory as a :class:`~pathlib.Path`, or
-            ``None`` when ``session.session_dir`` is absent.
-    """
-    session = breakdown.get("session") or {}
-    raw = session.get("session_dir")
-    if not raw:
-        return None
-    return Path(str(raw))
-
-
-def _read_log_tail(session_root: Path | None, rel_path: str | None) -> str:
-    """Read the last few lines of a log file relative to the session root.
-
-    Args:
-        session_root (Path | None): The session directory, or ``None``.
-        rel_path (str | None): Path to the log file relative to the session
-            root, or ``None``.
-
-    Returns:
-        str: Up to ``_CLI_LOG_TAIL_LINES`` trailing lines of the file, or an
-            empty string when inputs are missing or the file is unreadable.
-    """
-    if not session_root or not rel_path:
-        return ""
-    path = session_root / rel_path
-    if not path.is_file():
-        return ""
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    if len(lines) <= _CLI_LOG_TAIL_LINES:
-        return "\n".join(lines)
-    return "\n".join(lines[-_CLI_LOG_TAIL_LINES:])
 
 
 def _kernel_rows(kernels: list[dict[str, Any]]) -> list[list[Any]]:
@@ -91,8 +46,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the kernel-profiling section from recorded profile runs.
 
     Lists each profile / TraceLens run with its launch args, artifact
-    paths and top-k kernel table, optionally including a CLI log tail when
-    the detail level is verbose. Skipped when no runs were recorded.
+    paths and top-k kernel table. Skipped when no runs were recorded.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
@@ -102,8 +56,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             there are no profiling runs.
     """
     runs = breakdown.get("kernel_profiling") or []
-    detail_level = str(breakdown.get("detail_level") or "standard")
-    session_root = _session_root(breakdown)
 
     if not runs:
         return RenderedSection(
@@ -163,18 +115,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
             if len(kernels) > _MAX_KERNEL_ROWS:
                 parts.append(f"_Showing top {_MAX_KERNEL_ROWS} of {len(kernels)} kernels._")
-        log_rel = artifacts.get("tracelens_log")
-        if detail_level == "verbose" and log_rel:
-            tail = _read_log_tail(session_root, str(log_rel))
-            if tail:
-                parts.append("")
-                parts.append(f"<details><summary>CLI log tail ({_CLI_LOG_TAIL_LINES} lines max): `{log_rel}`</summary>")
-                parts.append("")
-                parts.append("```")
-                parts.append(tail)
-                parts.append("```")
-                parts.append("")
-                parts.append("</details>")
         parts.append("")
 
     return RenderedSection(

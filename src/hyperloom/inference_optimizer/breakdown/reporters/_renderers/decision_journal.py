@@ -19,7 +19,7 @@ from ..base import (
     register_renderer,
 )
 
-_MAX_ROUNDS_STANDARD = 20
+_MAX_ROUNDS = 20
 
 
 def _variant_rows(variants: list[dict[str, Any]]) -> list[list[Any]]:
@@ -52,7 +52,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the decision-journal section: one block per search round.
 
     Each round shows its promotion verdict plus a variant table (gain,
-    outcome, reject reason), capping rounds at standard detail level.
+    outcome, reject reason), capping the number of rounds shown.
     Skipped when no params/backends rounds were recorded.
 
     Args:
@@ -63,7 +63,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             the journal is empty.
     """
     journal = breakdown.get("decision_journal") or []
-    detail_level = str(breakdown.get("detail_level") or "standard")
 
     if not journal:
         return RenderedSection(
@@ -90,11 +89,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         f"{len(journal)} round(s): {promoted} promoted, {discarded} discarded, "
         f"{variant_total} variant row(s) exported.",
     ]
-    if detail_level != "verbose" and variant_total:
-        facts.append(
-            "standard detail_level: variant list capped at promoted/rejected "
-            "+ top 30 tested by |gain| (see session_breakdown.json)."
-        )
+    if variant_total:
+        facts.append("variant list capped at promoted/rejected + top 30 tested by |gain| (see session_breakdown.json).")
 
     decisions: list[Decision] = []
     if promoted:
@@ -114,10 +110,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
         )
 
-    rounds = journal if detail_level == "verbose" else journal[-_MAX_ROUNDS_STANDARD:]
+    rounds = journal[-_MAX_ROUNDS:]
     parts: list[str] = []
     if len(rounds) < len(journal):
-        parts.append(f"_Showing last {len(rounds)} of {len(journal)} rounds (detail_level={detail_level})._")
+        parts.append(f"_Showing last {len(rounds)} of {len(journal)} rounds._")
         parts.append("")
 
     from .... import framework_registry
