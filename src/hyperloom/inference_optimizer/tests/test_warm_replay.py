@@ -2347,3 +2347,105 @@ def test_dirty_worktree_required_patch_is_republished(tmp_path):
     assert coord.shared_state.optimization_stack[-1]["replayed_patch_refs"] == [
         "old.patch"
     ]
+
+
+def _warm_replay_ledger(session_dir):
+    """Assemble the recorded parts plus the baseline reading gains are measured against."""
+    from hyperloom.inference_optimizer.breakdown.collectors import (
+        collect_recorded_optimizations,
+    )
+    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+
+    parts = assemble_parts(session_dir)
+    operations = list(parts.get("operations") or [])
+    measurements = list(parts.get("measurements") or [])
+    operations.append(
+        {"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]}
+    )
+    measurements.append(
+        {"measurement_id": "m-base", "name": "throughput", "value": 600.0}
+    )
+    return collect_recorded_optimizations(
+        "s1",
+        operations,
+        measurements,
+        list(parts.get("adoptions") or []),
+        list(parts.get("artifacts") or []),
+        [],
+        [],
+        [],
+    )
+
+
+def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
+    """A promoted warm replay must be an adopted step in the recorded ledger.
+
+    The replay executor settles on ``succeeded`` whether or not the recipe
+    reproduced, and the keep decision is reached only by ``_promote_warm_replay``.
+    Mirroring the action before that ruling published every replay as
+    discarded, so a reproduced one was pushed onto the stack and moved
+    ``cumulative_gain_validated`` while the canonical streams held no adoption
+    for it -- ``optimizations.entries`` came back empty on a session that had
+    measurably gained. The verdict-aware mirror closes that gap.
+    """
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "exact",
+    }
+    task = _StubTask(
+        params={
+            "extra_server_args": "--attention-backend AITER",
+            "baseline_tput_anchor": 600.0,
+        }
+    )
+    result = {"status": "succeeded", "output_throughput": 660.0}
+    coord._promote_warm_replay(result, task=task)
+    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    # The anchor the gain was measured against is stamped for the mirror.
+    assert coord.shared_state.warm_replay_outcome["baseline_tput_anchor"] == 600.0
+
+    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
+
+    ledger = _warm_replay_ledger(tmp_path)
+    entry = ledger["entries"][0]
+    assert entry["source"] == "warm_replay"
+    assert entry["optimization_kind"] == "replay_warm_recipe"
+    assert entry["gain_pct"] == pytest.approx(10.0, abs=0.01)
+    assert ledger["validation"]["ledger_total_gain_pct"] == pytest.approx(10.0, abs=0.01)
+    assert ledger["validation"]["keep_count"] == 1
+
+
+def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
+    """A replay that missed the bar must not be credited any gain.
+
+    The fix for the discarded-reproduced replay must not reach the other way
+    and let a drift claim a keep it never earned.
+    """
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "exact",
+    }
+    task = _StubTask(
+        params={
+            "extra_server_args": "--attention-backend AITER",
+            "baseline_tput_anchor": 600.0,
+        }
+    )
+    result = {"status": "succeeded", "output_throughput": 600.0}
+    coord._promote_warm_replay(result, task=task)
+    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
+
+    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
+
+    ledger = _warm_replay_ledger(tmp_path)
+    assert ledger["entries"] == []
+    assert ledger["validation"]["ledger_total_gain_pct"] == 0.0
+    assert ledger["attempts"][0]["adopted"] is False

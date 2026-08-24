@@ -2861,7 +2861,12 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
-        if task_kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+        # ``replay_warm_recipe`` is mirrored by _promote_replay_warm_recipe
+        # instead: its executor settles on "succeeded" and the keep decision is
+        # only reached further down this call, so mirroring it here published
+        # every replay as discarded -- including the ones that went on to be
+        # pushed onto the stack.
+        if task_kind in {"framework_agent", "conc_sweep", "integrate_patch"}:
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2871,19 +2876,7 @@ class WritebackCollaborator:
                 # rejected in the breakdown and stripped its attribution.
                 kept = result_status.lower() in {"kept", "kept_inert", "promoted", "adopted"}
                 v4_result = dict(result)
-                v4_result.setdefault(
-                    "workload",
-                    {
-                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
-                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
-                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
-                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
-                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
-                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
-                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
-                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
-                    },
-                )
+                v4_result.setdefault("workload", self._v4_workload())
                 instrument.record_action_operation(
                     self.session_dir,
                     action=task_kind,
@@ -3261,6 +3254,89 @@ class WritebackCollaborator:
             log.exception("baseline drain: queued-task scan failed")
         return {t for t in spared if t}
 
+    def _v4_workload(self) -> dict[str, Any]:
+        """The workload identity a mirrored action result is measured under."""
+        return {
+            "framework": str(getattr(self.shared_state, "framework", "") or ""),
+            "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
+            "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
+            "precision": str(getattr(self.shared_state, "precision", "") or ""),
+            "tp": int(getattr(self.shared_state, "tp", 0) or 0),
+            "conc": int(getattr(self.shared_state, "conc", 0) or 0),
+            "isl": int(getattr(self.shared_state, "isl", 0) or 0),
+            "osl": int(getattr(self.shared_state, "osl", 0) or 0),
+        }
+
+    def _mirror_warm_replay_verdict(
+        self,
+        result: dict,
+        task: "Task | None",
+    ) -> None:
+        """Mirror the replay under the verdict the promote path just reached.
+
+        A replay's keep decision belongs to the promote path, not to its
+        executor: the action settles on ``succeeded`` whether or not the recipe
+        reproduced, and only ``_promote_warm_replay`` compares the measured
+        throughput against the bar. Mirroring it alongside the other actions,
+        ahead of that ruling, recorded every replay as discarded -- so a
+        reproduced one was pushed onto ``optimization_stack``, moved
+        ``cumulative_gain_validated`` and journalled a KEEP while the canonical
+        streams held no adoption for it. Its gain then had no adopted step to
+        hang on: ``optimizations.entries`` came back empty on a session that had
+        measurably gained, and the whole gain surfaced as a reconciliation gap.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        state = self.shared_state
+        outcome = dict(getattr(state, "warm_replay_outcome", None) or {})
+        reproduced = str(outcome.get("status") or "") == "reproduced"
+        result_status = str(result.get("status") or "succeeded")
+        mirrored = dict(result)
+        mirrored.setdefault("workload", self._v4_workload())
+        if reproduced:
+            gain = to_float(outcome.get("actual_gain_pct"))
+            before = to_float(outcome.get("baseline_tput_anchor"))
+            after = to_float(outcome.get("throughput_after"))
+            mirrored.update(
+                {
+                    # The verdict the adoption is keyed off. "succeeded" only
+                    # says the benchmark ran.
+                    "status": "kept",
+                    "provenance": "warm_replay",
+                    "decision_reason": (
+                        f"warm replay reproduced {gain:+.2f}% over baseline"
+                        if gain is not None
+                        else "warm replay reproduced"
+                    ),
+                    # A replayed recipe is measured against the session
+                    # baseline, so the gain it moved is its own to claim.
+                    "attribution_eligible": True,
+                    # An accuracy gate that never ran must not be recorded as
+                    # one that passed; ``eval_ran`` is what separates them.
+                    "validated": True if outcome.get("eval_ran") else None,
+                }
+            )
+            if gain is not None:
+                mirrored["delta_pct"] = gain
+            if before is not None:
+                mirrored["base_tput"] = before
+            if after is not None:
+                mirrored["output_throughput"] = after
+            keep_threshold = to_float(outcome.get("keep_threshold_pct"))
+            if keep_threshold is not None:
+                mirrored["keep_threshold_pct"] = keep_threshold
+        instrument.record_action_operation(
+            self.session_dir,
+            action="replay_warm_recipe",
+            task_id=str(getattr(task, "task_id", "") or "") if task is not None else "",
+            status="kept" if reproduced else result_status,
+            decision="promoted" if reproduced else "discarded",
+            result=mirrored,
+            phase=str(getattr(state, "phase", "") or ""),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            tick=int(getattr(state, "tick", 0) or 0),
+        )
+
     async def _promote_replay_warm_recipe(
         self,
         result: dict,
@@ -3272,6 +3348,12 @@ class WritebackCollaborator:
             self._promote_warm_replay(result, task=task)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("warm-replay promote failed")
+        # Mirrored after the ruling, so the canonical streams carry the verdict
+        # the run actually acted on.
+        try:
+            self._mirror_warm_replay_verdict(result, task)
+        except Exception:  # noqa: BLE001 — best-effort recording
+            log.debug("warm-replay v4 verdict capture failed", exc_info=True)
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
 

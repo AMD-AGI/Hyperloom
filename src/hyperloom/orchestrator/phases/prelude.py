@@ -2264,6 +2264,9 @@ class PreludePhase(PhaseHandler):
         )
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
+        # The reading the gain was measured against, kept beside it so the
+        # canonical adoption can state the pair rather than a bare percentage.
+        outcome["baseline_tput_anchor"] = float(baseline_tput)
         outcome["keep_threshold_pct"] = keep_threshold
         if expected_gain > 0:
             historical_bar = expected_gain * min_reproduce
