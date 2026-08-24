@@ -275,22 +275,29 @@ def teardown_lifecycle_server(
         pass
 
     if server_pid is not None and os.name == "posix":
-        # Server is setsid'd, so pgid == pid unless the pid file gave one.
-        pgid = server_pgid if server_pgid is not None else server_pid
-        _signal_group(pgid, signal.SIGTERM)
-        deadline = time.monotonic() + TERM_GRACE_SECONDS
-        while time.monotonic() < deadline:
-            if not _process_group_alive(pgid):
-                break
-            time.sleep(0.1)
-        if _process_group_alive(pgid):
-            _signal_group(pgid, signal.SIGKILL)
-        log.info(
-            "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
-            pgid,
-            framework,
-            port,
-        )
+        if not _looks_like_server_process(server_pid):
+            log.warning(
+                "server_lifecycle teardown — pid %d does not look like a Hyperloom server "
+                "(possible pid reuse); skipping signal, removing stale pid files only",
+                server_pid,
+            )
+        else:
+            # Server is setsid'd, so pgid == pid unless the pid file gave one.
+            pgid = server_pgid if server_pgid is not None else server_pid
+            _signal_group(pgid, signal.SIGTERM)
+            deadline = time.monotonic() + TERM_GRACE_SECONDS
+            while time.monotonic() < deadline:
+                if not _process_group_alive(pgid):
+                    break
+                time.sleep(0.1)
+            if _process_group_alive(pgid):
+                _signal_group(pgid, signal.SIGKILL)
+            log.info(
+                "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
+                pgid,
+                framework,
+                port,
+            )
     for p in (pid_file, meta_file):
         try:
             p.unlink()

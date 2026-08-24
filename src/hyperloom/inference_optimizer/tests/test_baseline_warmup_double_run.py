@@ -2539,6 +2539,26 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     assert not (pid_dir / "vllm_8888.json").exists()
 
 
+def test_teardown_lifecycle_server_skips_signal_on_pid_reuse(tmp_path, monkeypatch):
+    """A pid that does not look like a Hyperloom server must not receive a signal."""
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    (pid_dir / "vllm_8888.pid").write_text("99999")
+    (pid_dir / "vllm_8888.json").write_text("{}")
+
+    signals_sent: list[int] = []
+    monkeypatch.setattr(sl, "_signal_group", lambda pgid, sig: signals_sent.append(sig))
+    monkeypatch.setattr(sl, "_looks_like_server_process", lambda pid: False)
+
+    sl.teardown_lifecycle_server(pid_dir=pid_dir, framework="vllm", port=8888)
+
+    assert signals_sent == [], "must not signal a pid that failed the identity check"
+    assert not (pid_dir / "vllm_8888.pid").exists(), "stale pid file must still be removed"
+    assert not (pid_dir / "vllm_8888.json").exists(), "stale meta file must still be removed"
+
+
 # Every output slot a multi-node baseline round launches a benchmark process
 # into, in launch order. The discarded client warmup is a full pass and costs the
 # same wall-clock as the measured round it precedes, so both need the deadline.
