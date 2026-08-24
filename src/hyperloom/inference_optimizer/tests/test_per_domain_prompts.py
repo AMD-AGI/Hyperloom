@@ -207,8 +207,6 @@ def _build_split(domain_key: str) -> tuple[str, str]:
         warm_start_recipe={"name": "r1"},
         warm_start_lessons=[{"attrs": {"statement": "prior keep lesson"}}],
         warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
-        kg_recommended_knobs=[{"knob": "--enable-chunked-prefill"}],
-        kg_guided_knobs=[{"name": "kg-knob", "args": "--foo"}],
         kb_subgraph={"nodes": ["x"]},
         workspace_path=f"/tmp/test/{domain_key}",
     )
