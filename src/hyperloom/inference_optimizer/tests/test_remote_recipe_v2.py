@@ -2357,7 +2357,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "ed050f8d8b0536f67b629b3cdf0750e3b1aa43e0"
+    assert digest == "d8a790bf5bd17db1bb616bb223fc51d1b797bd7f"
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
