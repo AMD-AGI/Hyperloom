@@ -228,11 +228,7 @@ def ray_status_ok() -> bool:
 
 
 def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> None:
-    """Best-effort ``ray stop --force`` with a bounded timeout.
-
-    Used before starting a fresh local head when auto-discovery points at a
-    stale or unreachable GCS. Never raises.
-    """
+    """Run ``ray stop --force`` with a bounded timeout; never raises."""
     cmd = ["ray", "stop", "--force"]
     timeout = _ray_stop_timeout_sec()
     try:
@@ -245,14 +241,7 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
                 subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=timeout)
         else:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        if log_path is not None:
-            try:
-                with log_path.open("a", encoding="utf-8") as log:
-                    log.write(f"[ray_stop_timeout] exceeded {timeout}s\n")
-            except OSError:
-                pass
-    except OSError:
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
 
@@ -266,27 +255,17 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     Raises:
         RuntimeError: If starting the Ray head node fails.
     """
-    # ``ray status`` reads the container-private /tmp/ray/ray_current_cluster,
-    # so a head already started by this session (kernel agent or serving lease)
-    # is reused regardless of which free port it bound.
     if ray_status_ok():
         return
-    _stop_ray_force(
-        log_path=log_path,
-        reason="Clearing stale Ray discovery state before starting a local head",
-    )
-    # Raise the open-files limit before the raylet starts.
+    _stop_ray_force(log_path=log_path, reason="Clearing stale Ray discovery state before starting a local head")
     ensure_fd_limit(log_path=log_path)
-    # Bind the dashboard/jobs API to loopback (avoids exposing the
-    # unauthenticated Ray Jobs RCE surface).
     gcs_port, iso_args = _isolated_head_port_args()
+    # Dashboard bound to loopback: keeps the unauthenticated Ray Jobs endpoint off the pod network.
     cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
-    # Free, probed GCS/dashboard/client ports so co-located host-network sessions
-    # never collide on Ray's fixed defaults (6379/8265/10001).
     cmd.extend(iso_args)
-    # Declare the ``serving_slot`` custom resource (authoritative mutex).
+    # serving_slot: whole-machine mutex so serving-family tasks serialise GPU access.
     cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,17 +308,13 @@ def force_restart_local_cluster(
     Raises:
         RuntimeError: If the fresh head node fails to start.
     """
-    # Raise the open-files limit before the fresh raylet starts.
     ensure_fd_limit(log_path=log_path)
     _stop_ray_force(log_path=log_path, reason="Stopping foreign cluster before version-mismatch recovery")
-    # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster).
     gcs_port, iso_args = _isolated_head_port_args()
     start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         start_cmd.append(f"--num-gpus={num_gpus}")
-    # Free, probed GCS/dashboard/client ports (see ensure_ray_cluster).
     start_cmd.extend(iso_args)
-    # Re-declare the ``serving_slot`` custom resource after a fresh head.
     start_cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
