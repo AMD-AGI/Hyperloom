@@ -2896,9 +2896,11 @@ def _run_loop_via_cli(
     _apply_gpu_type_env(env, gpu_type)
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
-    # Git identity for every commit the forge-loop issues; keeps .git/config clean.
-    for _git_var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-        env.setdefault(_git_var, "forge-bot" if "NAME" in _git_var else "forge-bot@local")
+    # Identity for the commits the loop makes, so no repo .git/config is touched.
+    env.setdefault("GIT_AUTHOR_NAME", "forge-bot")
+    env.setdefault("GIT_AUTHOR_EMAIL", "forge-bot@local")
+    env.setdefault("GIT_COMMITTER_NAME", "forge-bot")
+    env.setdefault("GIT_COMMITTER_EMAIL", "forge-bot@local")
     # KernelForge owns content-addressed AITER cache invalidation. Do not set
     # AITER_REBUILD globally: cpp_itfs interprets it by deleting the whole build
     # tree on every driver-process import, causing repeated attention rebuilds.
@@ -3606,9 +3608,8 @@ def _finalize_forge_workspace(
     directory moves the producer's published bundle with it, so its artifact paths
     are repointed rather than left naming a directory this just emptied.
     """
-    # Restore the info/exclude entry regardless of path: _git_exclude_file uses
-    # --git-common-dir, which resolves to the main repo's .git even when called
-    # from a linked worktree. Skip when workspace is a throwaway scratch dir.
+    # --git-common-dir resolves to the live repo even from a linked worktree, so
+    # the exclude entry outlives a worktree run unless it is removed here too.
     if not nogit_scratch:
         _restore_generated_driver_exclude(Path(workspace))
 

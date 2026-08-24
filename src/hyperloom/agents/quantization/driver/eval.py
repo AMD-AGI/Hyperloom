@@ -17,9 +17,11 @@ agent-owned ``eval_report.json`` wrapper:
 
 This module reads that file, resolves the acceptance threshold, and decides
 whether the gap is within budget. It does not parse the raw Markdown — the LLM
-normalizes scores into the schema above. Keys are validated; if anything is
-missing the classifier maps the attempt to ``eval_env_unavailable`` rather than
-treating absent fields as zero.
+normalizes scores into the schema above. Because ``relative_gap`` is authored by
+the LLM rather than measured, it is recomputed from the two scores and rejected
+when the two disagree. Keys, numeric ranges and that consistency check are all
+validated; any failure maps the attempt to ``eval_env_unavailable`` rather than
+treating absent or bogus fields as zero.
 
 Threshold resolution priority:
 
@@ -39,6 +41,10 @@ from pathlib import Path
 DEFAULT_ACCEPTABLE_GAP = 0.03
 
 _REQUIRED_EVAL_KEYS = ("source_score", "quantized_score", "relative_gap")
+
+# How far the reported relative_gap may drift from the value recomputed out of
+# the two scores before the report is treated as self-contradictory.
+_GAP_CONSISTENCY_TOLERANCE = 0.02
 
 
 @dataclass(frozen=True)
@@ -111,59 +117,34 @@ def decide(
         ``within``, or ``exceeded``), the relative gap, and the threshold used.
     """
     threshold, source = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
+    missing = EvalDecision(
+        status="missing",
+        relative_gap=None,
+        threshold=threshold,
+        threshold_source=source,
+    )
 
     if not isinstance(eval_report, dict):
-        return EvalDecision(
-            status="missing",
-            relative_gap=None,
-            threshold=threshold,
-            threshold_source=source,
-        )
-
-    missing = [k for k in _REQUIRED_EVAL_KEYS if k not in eval_report]
-    if missing:
-        return EvalDecision(
-            status="missing",
-            relative_gap=None,
-            threshold=threshold,
-            threshold_source=source,
-        )
+        return missing
+    if any(k not in eval_report for k in _REQUIRED_EVAL_KEYS):
+        return missing
 
     try:
         gap = float(eval_report["relative_gap"])
         src = float(eval_report["source_score"])
         qtd = float(eval_report["quantized_score"])
     except (TypeError, ValueError):
-        return EvalDecision(
-            status="missing",
-            relative_gap=None,
-            threshold=threshold,
-            threshold_source=source,
-        )
+        return missing
+    if not all(math.isfinite(v) for v in (gap, src, qtd)):
+        return missing
 
-    if not math.isfinite(gap) or not math.isfinite(src) or not math.isfinite(qtd):
-        return EvalDecision(
-            status="missing",
-            relative_gap=None,
-            threshold=threshold,
-            threshold_source=source,
-        )
+    # relative_gap is LLM-authored, so recompute it from the scores it claims to
+    # summarise (SKILL.md §5.3) and reject a report that contradicts itself.
+    if src > 0 and abs(gap - max(0.0, (src - qtd) / src)) > _GAP_CONSISTENCY_TOLERANCE:
+        return missing
 
-    # Cross-check the LLM-authored relative_gap against the two raw scores.
-    # SKILL.md §5.3 formula: (source - quantized) / source, clamped to 0 for negative gaps.
-    if src > 0:
-        expected_gap = max(0.0, (src - qtd) / src)
-        if abs(gap - expected_gap) > 0.02:
-            return EvalDecision(
-                status="missing",
-                relative_gap=None,
-                threshold=threshold,
-                threshold_source=source,
-            )
-
-    status = "within" if gap <= threshold else "exceeded"
     return EvalDecision(
-        status=status,
+        status="within" if gap <= threshold else "exceeded",
         relative_gap=gap,
         threshold=threshold,
         threshold_source=source,

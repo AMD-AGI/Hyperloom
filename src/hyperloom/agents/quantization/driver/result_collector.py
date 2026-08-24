@@ -236,8 +236,8 @@ def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
         patterns: Glob patterns to test.
 
     Returns:
-        ``True`` if at least one pattern matches a regular file, otherwise
-        ``False``. Directories whose names match a pattern are excluded.
+        ``True`` if at least one pattern matches a regular file; a directory
+        whose name matches does not count.
     """
     for pat in patterns:
         for match in directory.glob(pat):
