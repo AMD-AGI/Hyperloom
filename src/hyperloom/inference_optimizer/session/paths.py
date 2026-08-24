@@ -357,6 +357,27 @@ def tracelens_root() -> Path:
     return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
 
 
+def is_path_within(path: Path, root: Path) -> bool:
+    """Whether ``path`` provably resolves to ``root`` or a location below it.
+
+    Both sides are resolved first, so symlinks and ``..`` components cannot
+    escape ``root``. Fails closed: a path that cannot be resolved (broken
+    symlink chain, symlink loop, permission error) is not provably inside.
+
+    Args:
+        path (Path): The candidate path.
+        root (Path): The directory that must contain ``path``.
+
+    Returns:
+        Whether the resolved ``path`` is ``root`` or below it.
+    """
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def mn_profile_trace_root() -> Path:
     """``<workspace_root>/profile-traces/`` — multi-node torch profile shared
     root (``<rayjob_id>/torch_trace/`` per provision). Multi-node operators
@@ -381,6 +402,7 @@ __all__ = [
     "asset_root",
     "asset_system_prompts_dir",
     "db_path_for",
+    "is_path_within",
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
