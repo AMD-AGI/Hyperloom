@@ -101,10 +101,15 @@ def classify_closure(paths: list[str]) -> ClosureVerdict:
 
 
 def parse_diff_paths(diff_text: str) -> list[str]:
-    """Return the repo-relative paths a unified diff touches (first-seen order)."""
+    """Return the repo-relative paths a unified diff modifies or adds (first-seen order).
+
+    Deleted-file entries are excluded because a deletion has no target file to
+    localize; including them would silently change what callers operate on when
+    the diff-parsing bug fix makes deletions visible.
+    """
     from hyperloom.agents.framework._audit_common import parse_unified_diff
 
-    return [c.path for c in parse_unified_diff(diff_text or "") if c.path]
+    return [c.path for c in parse_unified_diff(diff_text or "") if c.path and not c.is_deleted]
 
 
 def synthesize_vendor_diff(files: list[tuple[str, str, str]]) -> str:
