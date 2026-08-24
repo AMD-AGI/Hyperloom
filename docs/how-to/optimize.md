@@ -1,20 +1,20 @@
 ---
 myst:
     html_meta:
-        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude, monitoring, resuming, and reading output artifacts."
-        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude, GEAK, TraceLens, session, throughput"
+        "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Claude Code, monitoring, resuming, and reading output artifacts."
+        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Claude Code, GEAK, TraceLens, session, throughput"
 ---
 # Run a Hyperloom optimization
 
 This topic assumes you have already completed installation. If you haven't, follow the [Hyperloom installation instructions](../install/install.md) then return here to launch your first run.
 
-## Launch from Claude
+## Launch from Claude Code
 
-Open the Hyperloom workspace in Claude, then paste the following prompt into
-the Chat, filling in your workload details:
+Open the Hyperloom workspace in Claude Code, then paste the following prompt into
+the Claude Code Chat, filling in your workload details:
 
 ```{note}
-The prompt includes `install.sh`. This is intentional: Claude runs in its own
+The prompt includes `install.sh`. This is intentional: Claude Code runs in its own
 shell process, which does not inherit the environment you sourced during
 installation. The agent must re-source the env files and re-run `install.sh` in
 its own context before launching the optimizer. Because `install.sh` is
@@ -66,7 +66,7 @@ happens in each phase.
 
 ## Resume an interrupted session
 
-Paste this prompt into the Claude chat to resume an existing session:
+Paste this prompt into the Claude Code chat to resume an existing session:
 
 ```text
 @src/hyperloom/inference_optimizer/SKILL.md
