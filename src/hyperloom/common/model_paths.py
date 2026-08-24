@@ -41,6 +41,18 @@ def _identity_bare(full: str) -> str:
     return full.rsplit("/", 1)[-1] if "/" in full else full
 
 
+def _is_hf_repo_id(raw: str) -> bool:
+    """True when *raw* looks like a plain ``org/repo`` HuggingFace repo id.
+
+    A repo id has exactly one ``/`` and neither component is a filesystem path
+    indicator (starts with ``/``, contains ``..``, etc.).
+    """
+    parts = raw.split("/")
+    if len(parts) != 2:
+        return False
+    return all(p and not p.startswith(".") for p in parts)
+
+
 def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[str]]:
     """Return ``(full, bare)`` casefolded identity candidate sets.
 
@@ -48,15 +60,37 @@ def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[s
     ``bare`` is the repo tail only (``qwen2.5-7b``). Covers flat dirs, bare
     names, HF repo ids, and HF hub cache paths whose ``snapshots/<hash>``
     basename hides the repo name in an upstream ``models--org--repo`` segment.
+
+    For a plain HF repo id (exactly one ``/``, no path indicators) the full
+    ``org/repo`` form is preserved directly so that cross-org comparisons in
+    :func:`model_identities_match` can reject ``a/Llama-8B`` vs ``b/Llama-8B``.
+
+    The snapshot commit hash that appears as the basename of an HF hub cache
+    path (``snapshots/<hash>``) is excluded from the candidate sets because it
+    is not part of the model identity.
     """
     raw = ("" if model is None else str(model)).strip()
     if not raw:
         return set(), set()
     p = Path(raw)
-    segments = [p.name]
+
+    # Plain HF repo id: preserve the org/repo form without going through the
+    # Path.name decomposition that would strip the org component.
+    if _is_hf_repo_id(raw):
+        full = {raw}
+        bare = {_identity_bare(raw)}
+        return {f.casefold() for f in full}, {b.casefold() for b in bare}
+
+    segments: list[str] = []
     # HF hub cache hides the repo name in a mid-path models--org--repo segment;
     # the snapshots/<hash> basename alone cannot recover it.
-    segments += [part for part in p.parts if part.startswith("models--")]
+    cache_segs = [part for part in p.parts if part.startswith("models--")]
+    if cache_segs:
+        # Use only the models-- segments; the basename is a commit hash.
+        segments = cache_segs
+    else:
+        segments = [p.name]
+
     full = {_identity_leaf(s) for s in segments if s}
     full = {f for f in full if f}
     bare = {_identity_bare(f) for f in full}
