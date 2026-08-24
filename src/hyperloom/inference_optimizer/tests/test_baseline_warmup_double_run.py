@@ -1719,6 +1719,49 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     assert result["error_class"] == "no_report", result
 
 
+def test_baseline_nonzero_rc_with_valid_measurement_fails(tmp_path):
+    """A parseable measurement must not launder a non-zero exit code into success."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        ws = slot / "benchmark_vllm_20260602_010101"
+        ws.mkdir(parents=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "vllm",
+                    "throughput": {
+                        "output_throughput": 1200.0,
+                        "request_throughput": 120.0,
+                        "completed_requests": 640,
+                        "duration_seconds": 120.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 1, "stdout tail", "server exited 1")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed", result
+    assert result["error_class"] == "magpie_nonzero_after_valid_measurement", result
+    assert result["returncode"] == 1
+
+
 def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
     """A stale benchmark_* workspace from a prior attempt must not be adopted
     as a successful result when the current subprocess crashes (rc=1)."""

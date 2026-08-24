@@ -4642,8 +4642,6 @@ class BaselineExecutor:
             subprocess_started_unix=subprocess_started_unix,
         )
         warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
-        if proc_returncode != 0:
-            warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
@@ -4675,6 +4673,21 @@ class BaselineExecutor:
                 "error_class": error_class,
                 "returncode": proc_returncode,
                 "error": error,
+                "output_dir": str(output_dir),
+                "workspace": str(workspace),
+                "report_path": str(report_path) if report_path.exists() else None,
+                "reported_success": measurement.get("reported_success"),
+                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                "nonfatal_warnings": warnings,
+                **capture_meta,
+            }
+
+        if proc_returncode != 0:
+            return {
+                "status": "failed",
+                "error_class": "magpie_nonzero_after_valid_measurement",
+                "returncode": proc_returncode,
+                "error": redact_secret_values((proc_stderr or proc_stdout or "")[-2000:]),
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
                 "report_path": str(report_path) if report_path.exists() else None,
