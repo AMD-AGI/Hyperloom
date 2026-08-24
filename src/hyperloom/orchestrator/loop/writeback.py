@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
@@ -4604,10 +4607,12 @@ class WritebackCollaborator:
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
-            source_phase = str(result.get("source_phase") or "").strip()
+            source_phase = patch_owner_phase(result)
             gap_layer = str(result.get("gap_layer") or "").strip()
             if source_phase:
                 bv["source_phase"] = source_phase
+            else:
+                bv["recipe_publishable"] = False
             if domain:
                 bv["domain"] = domain
             if gap_layer:

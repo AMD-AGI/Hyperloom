@@ -6,6 +6,9 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
@@ -477,6 +480,24 @@ class ProposalsCollaborator:
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
+            owner = patch_owner_phase(params)
+            if not owner:
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "proposal_materialize_skipped",
+                        "reason": "integrate_patch_owner_missing",
+                        "proposal_msg_id": pending.proposal_msg_id,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                        "specialist_task_id": str(
+                            params.get("specialist_task_id") or ""
+                        ),
+                    },
+                )
+                return
+            params["source_phase"] = owner
             params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
             # Seed the patched-eval server with the same base args/config every
             # other eval server uses, else it launches on bare framework defaults

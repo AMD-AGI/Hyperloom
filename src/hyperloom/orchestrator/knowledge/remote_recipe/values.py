@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Mapping
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from .models import (
     MAX_FILE_BYTES,
     Artifact,
@@ -250,8 +253,12 @@ class _Files:
 
 
 def _entry_origin(entry: Mapping[str, Any]) -> str:
-    phase = str(entry.get("source_phase") or "").strip().upper()
     action = str(entry.get("action") or "").strip().lower()
+    phase = (
+        patch_owner_phase(entry)
+        if action.startswith("integrate_patch")
+        else str(entry.get("source_phase") or "").strip().upper()
+    )
     if phase == "FRAMEWORK_AGENT" or action == "framework":
         return "framework"
     if phase == "EXPLORE" or action == "explore":
