@@ -9,30 +9,14 @@ numbers); any cross-section reasoning belongs in this module.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 from hyperloom.common.coerce import to_float
 
 from .base import RenderedSection, as_dict
 
-log = logging.getLogger(__name__)
-
 __all__ = ["GlobalFacts", "build_global_facts"]
-
-_T = TypeVar("_T")
-
-#: Stage counts every consumer of the funnel indexes unconditionally.
-_EMPTY_FUNNEL: dict[str, int] = {
-    "detected": 0,
-    "recommended": 0,
-    "optimized": 0,
-    "adopted": 0,
-    "partial": 0,
-    "reverted": 0,
-    "rejected": 0,
-}
 
 
 @dataclass(frozen=True)
@@ -99,9 +83,9 @@ def _gain_attribution_lines(
         A tuple of the human-readable attribution lines and a label
         describing the method used to derive them.
     """
-    optimizations = breakdown.get("optimizations") or {}
-    summary = optimizations.get("summary_by_source") or {}
-    validation = optimizations.get("validation") or {}
+    optimizations = as_dict(breakdown.get("optimizations"))
+    summary = as_dict(optimizations.get("summary_by_source"))
+    validation = as_dict(optimizations.get("validation"))
     canonical_sources = {
         source: to_float(bucket.get("total_gain_pct")) for source, bucket in summary.items() if isinstance(bucket, dict)
     }
@@ -118,8 +102,8 @@ def _gain_attribution_lines(
         method = validation.get("method")
         return lines, str(method) if isinstance(method, str) and method else "missing"
 
-    attribution = breakdown.get("attribution") or {}
-    sb = attribution.get("source_breakdown") or {}
+    attribution = as_dict(breakdown.get("attribution"))
+    sb = as_dict(attribution.get("source_breakdown"))
     total = to_float(sb.get("validated_total_pct"))
     sources = {
         "backends": to_float(sb.get("backends_pct_of_total")),
@@ -137,7 +121,7 @@ def _gain_attribution_lines(
         ]
         return lines, "validated"
 
-    final = breakdown.get("final") or {}
+    final = as_dict(breakdown.get("final"))
     path = final.get("action_path") or []
     gain_v = to_float(final.get("cumulative_gain_pct_validated"))
     # No validated per-source split. We must NOT claim a KEEP or "100% via"
@@ -175,7 +159,7 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
             ``recommended``, ``optimized``, ``adopted``, ``partial``,
             ``reverted`` and ``rejected``).
     """
-    kl = breakdown.get("kernel_lifecycle") or {}
+    kl = as_dict(breakdown.get("kernel_lifecycle"))
     return {
         "detected": len(kl.get("detected") or []),
         "recommended": len(kl.get("recommended") or []),
@@ -221,15 +205,15 @@ def _data_quality_flags(
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
 
-    optimizations = breakdown.get("optimizations") or {}
-    validation = optimizations.get("validation") or {}
-    attribution = breakdown.get("attribution") or {}
+    optimizations = as_dict(breakdown.get("optimizations"))
+    validation = as_dict(optimizations.get("validation"))
+    attribution = as_dict(breakdown.get("attribution"))
     notes = validation.get("notes") or attribution.get("notes") or []
     if notes:
         for n in notes:
             _push(f"[attribution] {n}")
-    cap = breakdown.get("capability_summary") or {}
-    val = cap.get("validate_stack") or {}
+    cap = as_dict(breakdown.get("capability_summary"))
+    val = as_dict(cap.get("validate_stack"))
     if val.get("status") == "not_attempted":
         _push(
             "[legacy validate_stack] never ran — cumulative_gain_pct_validated "
@@ -250,11 +234,11 @@ def _capabilities_split(
         tuple[list[str], list[str]]: A sorted list of capability names with
             status ``"kept"`` and a sorted list with status ``"not_attempted"``.
     """
-    cap = breakdown.get("capability_summary") or {}
+    cap = as_dict(breakdown.get("capability_summary"))
     kept = []
     not_attempted = []
     for name, v in cap.items():
-        status = (v or {}).get("status") or "not_attempted"
+        status = as_dict(v).get("status") or "not_attempted"
         if status == "kept":
             kept.append(name)
         elif status == "not_attempted":
@@ -274,10 +258,10 @@ def _headline(breakdown: dict[str, Any]) -> str:
     """
     from ... import framework_registry
 
-    fw = (breakdown.get("workload") or {}).get("framework_name")
-    b = (breakdown.get("baseline") or {}).get("throughput_tok_s_per_gpu")
-    f = (breakdown.get("final") or {}).get("throughput_tok_s_per_gpu")
-    g = (breakdown.get("final") or {}).get("cumulative_gain_pct_validated")
+    fw = as_dict(breakdown.get("workload")).get("framework_name")
+    b = to_float(as_dict(breakdown.get("baseline")).get("throughput_tok_s_per_gpu"))
+    f = to_float(as_dict(breakdown.get("final")).get("throughput_tok_s_per_gpu"))
+    g = to_float(as_dict(breakdown.get("final")).get("cumulative_gain_pct_validated"))
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
         return (
@@ -305,43 +289,23 @@ def build_global_facts(
         rendered (list[RenderedSection]): The already-rendered sections, used
             to gather per-section data-quality warnings.
 
-    Each fact is computed in isolation: a section whose shape drifted from
-    what its computation expects costs that one fact and is reported as a
-    data-quality flag, rather than losing the whole pack.
-
     Returns:
         GlobalFacts: The populated, frozen fact pack.
     """
-    unavailable: list[str] = []
-
-    def _fact(label: str, compute: Callable[[], _T], default: _T) -> _T:
-        """Compute one fact, recording a flag and falling back on failure."""
-        try:
-            return compute()
-        except Exception as exc:  # noqa: BLE001 — one bad fact must not lose the pack
-            log.exception("global fact %s failed", label)
-            unavailable.append(f"`{label}` could not be computed: {type(exc).__name__}: {exc}")
-            return default
-
     workload = as_dict(breakdown.get("workload"))
     session = as_dict(breakdown.get("session"))
-    attribution_lines, attribution_method = _fact(
-        "gain_attribution",
-        lambda: _gain_attribution_lines(breakdown),
-        ([], "unavailable"),
-    )
-    kept, not_attempted = _fact("capabilities", lambda: _capabilities_split(breakdown), ([], []))
-    flags = _fact("data_quality_flags", lambda: _data_quality_flags(breakdown, rendered), [])
+    attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
+    kept, not_attempted = _capabilities_split(breakdown)
     return GlobalFacts(
-        headline=_fact("headline", lambda: _headline(breakdown), "no headline available"),
+        headline=_headline(breakdown),
         stop_reason=str(session.get("stop_reason") or ""),
         elapsed_minutes=to_float(session.get("elapsed_minutes")),
-        objective=_fact("objective", lambda: dict(workload.get("objective") or {}), {}),
-        workload_summary=_fact("workload_summary", lambda: _workload_summary(workload), "unavailable"),
+        objective=as_dict(workload.get("objective")),
+        workload_summary=_workload_summary(workload),
         gain_attribution_lines=attribution_lines,
         capabilities_not_attempted=not_attempted,
         capabilities_kept=kept,
-        kernel_pipeline_funnel=_fact("kernel_pipeline_funnel", lambda: _kernel_funnel(breakdown), dict(_EMPTY_FUNNEL)),
-        data_quality_flags=flags + unavailable,
+        kernel_pipeline_funnel=_kernel_funnel(breakdown),
+        data_quality_flags=_data_quality_flags(breakdown, rendered),
         attribution_method=attribution_method,
     )
