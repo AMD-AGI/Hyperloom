@@ -126,6 +126,16 @@ _ACTIONS = frozenset({_ACTION_KEEP, _ACTION_REWRITE, _ACTION_UNRESOLVE, _ACTION_
 #: Read and search freely; run shell commands; write only the revision file.
 #: ``Edit`` is withheld deliberately -- the agent proposes, it does not patch,
 #: and the framework tree here is the code under optimization.
+#:
+#: The two backends do not enforce that equally, and the difference is worth
+#: stating rather than implying. Codex confines writes with
+#: ``writable_roots=(run_dir,)``, so the sandbox refuses a path outside it. The
+#: Claude branch has no equivalent: ``Bash`` and ``Write`` are permitted and
+#: ``cwd`` is set to the run directory, which orders relative paths but forbids
+#: nothing -- "write nothing outside the run directory" is a prompt instruction
+#: there, not a boundary. What backs it instead is the fingerprint taken around
+#: the session, and that covers only the source files the candidate table names:
+#: a write elsewhere in the framework tree would not be detected.
 ALLOWED_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "Bash", "Write")
 
 _DENIED_TOOLS: tuple[str, ...] = (
@@ -399,8 +409,59 @@ async def _run_claude_session(
         kwargs.pop("cwd", None)
         options = sdk.ClaudeAgentOptions(**kwargs)
 
+    # The in-process SDK query has no client-side read timeout, so a stalled
+    # gateway stream blocks until the overall bound -- fifteen minutes of a run
+    # that is already over. Bound each wait for the next message instead, using
+    # the same two tiers the TraceLens runner established: the SDK is silent by
+    # design between the block that launches a tool and the result that ends it,
+    # so a single bound tight enough to catch a dead stream would kill a working
+    # tool call.
+    # Absolute, not relative: this module is loaded as a top-level module by the
+    # analysis tool, not as a package member.
+    from tracelens_skill_runner import (  # noqa: PLC0415
+        _resolve_stream_idle_timeout_sec,
+        _resolve_tool_idle_timeout_sec,
+        _tool_call_transition,
+    )
+
+    idle_timeout = _resolve_stream_idle_timeout_sec()
+    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
+    sdk_error = ""
+
     async def _drive() -> None:
-        async for message in sdk.query(prompt=prompt, options=options):
+        nonlocal sdk_error
+        tool_in_flight = False
+        stream = sdk.query(prompt=prompt, options=options)
+        stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
+        while True:
+            wait_for = tool_idle_timeout if tool_in_flight else idle_timeout
+            try:
+                if wait_for > 0:
+                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_for)
+                else:
+                    message = await stream_iter.__anext__()
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                # Name the phase: silence during a tool call means the tool
+                # overran its bound, not that the gateway died.
+                phase = "while a tool call was in flight" if tool_in_flight else "with no tool call in flight"
+                sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
+                if log is not None:
+                    log(f"[review-agent] WARNING: {sdk_error}")
+                # Tear the generator down so its transport does not leak.
+                aclose = getattr(stream_iter, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await asyncio.wait_for(aclose(), timeout=10.0)
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                        pass
+                break
+            transition = _tool_call_transition(message)
+            if transition == "start":
+                tool_in_flight = True
+            elif transition == "end":
+                tool_in_flight = False
             if log is not None:
                 for text in _message_text(message):
                     if text.strip():
@@ -410,7 +471,7 @@ async def _run_claude_session(
         await asyncio.wait_for(_drive(), timeout=max(60.0, timeout_sec))
     except Exception as exc:  # noqa: BLE001 - artifact presence decides success
         return _safe_exception_label(exc)
-    return ""
+    return sdk_error
 
 
 def _message_text(message: Any) -> list[str]:
