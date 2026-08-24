@@ -470,8 +470,7 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
     therefore pinned empty -- otherwise the pool is resolved from the host's real
     GPUs and the test only passes on a GPU-less machine.
     """
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP",
-                 "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
     gate = _gate_with_gpu_capacity(0)

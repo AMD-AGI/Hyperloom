@@ -835,9 +835,7 @@ def test_baseline_skips_probe_gate_when_eval_disabled(tmp_path, monkeypatch):
     _write_eval_dest_lib(ix_root)
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text(
-        yaml.safe_dump(
-            {"benchmark": {"inferencex_path": str(ix_root), "envs": {"RUN_EVAL": "false"}}}
-        ),
+        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root), "envs": {"RUN_EVAL": "false"}}}),
         encoding="utf-8",
     )
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
@@ -856,10 +854,7 @@ def test_eval_probe_is_concurrency_safe(tmp_path, monkeypatch):
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
     results: list[bool] = []
-    threads = [
-        threading.Thread(target=lambda: results.append(ensure_eval_probe_patched(tmp_path)))
-        for _ in range(8)
-    ]
+    threads = [threading.Thread(target=lambda: results.append(ensure_eval_probe_patched(tmp_path))) for _ in range(8)]
     for t in threads:
         t.start()
     for t in threads:
@@ -941,9 +936,7 @@ def test_failed_patch_anchors_flags_text_upstream_rewrote(tmp_path, monkeypatch)
 
     lib = _write_full_lib(tmp_path)
     lib.write_text(
-        lib.read_text(encoding="utf-8").replace(
-            'mv -f "$jf" ./ ', 'mv --force "$jf" ./ '
-        ),
+        lib.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
         encoding="utf-8",
     )
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
@@ -1003,9 +996,7 @@ def test_baseline_hook_fails_loudly_when_an_eval_critical_anchor_rots(tmp_path, 
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
-    out = BaselineExecutor()._after_materialize_config(
-        _write_baseline_config(tmp_path, ix_root), tmp_path / "out"
-    )
+    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
 
     assert isinstance(out, dict)
     assert out["error_class"] == "inferencex_patch_anchor_broken"
@@ -1027,9 +1018,7 @@ def test_baseline_hook_proceeds_when_only_a_non_critical_anchor_rots(tmp_path, m
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
-    out = BaselineExecutor()._after_materialize_config(
-        _write_baseline_config(tmp_path, ix_root), tmp_path / "out"
-    )
+    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
 
     assert out is None
 
@@ -1049,9 +1038,7 @@ def test_baseline_hook_ignores_anchors_it_does_not_own(tmp_path, monkeypatch):
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
 
-    out = BaselineExecutor()._after_materialize_config(
-        _write_baseline_config(tmp_path, ix_root), tmp_path / "out"
-    )
+    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
 
     assert out is None
 

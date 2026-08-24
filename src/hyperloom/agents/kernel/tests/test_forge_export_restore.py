@@ -191,21 +191,15 @@ def test_canonical_forge_artifacts_resolve_from_campaign_root(tmp_path):
         "patch_path": "best/iter_003/forge.patch",
         "changed_files": ["a.py"],
     }
-    (campaign / "best" / "manifest.json").write_text(
-        json.dumps(manifest)
-    )
+    (campaign / "best" / "manifest.json").write_text(json.dumps(manifest))
 
     normalized = forge_submit._canonical_forge_artifacts(
         str(workspace),
         manifest,
     )
 
-    assert normalized["best_manifest"] == str(
-        campaign / "best" / "manifest.json"
-    )
-    assert normalized["canonical_patch_path"] == str(
-        bundle / "forge.patch"
-    )
+    assert normalized["best_manifest"] == str(campaign / "best" / "manifest.json")
+    assert normalized["canonical_patch_path"] == str(bundle / "forge.patch")
     assert normalized["canonical_files_root"] == str(files)
     assert normalized["changed_files"] == ["a.py"]
 
@@ -489,10 +483,7 @@ def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
     assert result["best_commit"] == best_commit
     exported = output_dir / "optimized_versions" / "v1_forge.py"
     assert exported.read_text() == "KERNEL_VALIDATED_BEST\n"
-    assert (
-        "KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE"
-        not in (output_dir / "optimized_versions" / "forge.patch").read_text()
-    )
+    assert "KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE" not in (output_dir / "optimized_versions" / "forge.patch").read_text()
 
 
 def test_default_branch_resolves_main():

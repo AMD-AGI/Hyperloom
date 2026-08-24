@@ -133,11 +133,15 @@ def verify_applied(
     if wanted and (consulted or merged):
         seen = {Path(p).name for p in consulted} | {Path(m).name for m in merged}
         canonical = {str(n).strip() for n in (runtime_table_names or []) if str(n).strip()}
-        if not (seen & (canonical or set())) :
+        if not (seen & (canonical or set())):
             missing = [a for a in wanted if Path(a).name not in seen]
             if len(missing) == len(wanted):
                 return ApplyVerdict(
-                    "not_merged", hits, misses, merged, missing,
+                    "not_merged",
+                    hits,
+                    misses,
+                    merged,
+                    missing,
                     detail=(
                         f"none of the {len(wanted)} tuned table(s) appear in what the "
                         f"runtime consulted ({sorted(seen)}); the server loaded its "
@@ -149,7 +153,10 @@ def verify_applied(
     #    so their absence is only informative when the flag was on.
     if hits > 0:
         return ApplyVerdict(
-            "served", hits, misses, merged,
+            "served",
+            hits,
+            misses,
+            merged,
             detail=f"{hits} lookup(s) hit the tuned table",
         )
     if misses > 0:
@@ -159,14 +166,17 @@ def verify_applied(
         # the flag set in none of them, so the default has to stay inconclusive.
         if hit_logging:
             return ApplyVerdict(
-                "zero_hit", hits, misses, merged,
-                detail=(
-                    f"{misses} lookup(s) with hit logging on, none matched the "
-                    "tuned table"
-                ),
+                "zero_hit",
+                hits,
+                misses,
+                merged,
+                detail=(f"{misses} lookup(s) with hit logging on, none matched the tuned table"),
             )
         return ApplyVerdict(
-            "inconclusive_no_hit_logging", hits, misses, merged,
+            "inconclusive_no_hit_logging",
+            hits,
+            misses,
+            merged,
             detail=(
                 "misses logged but hit logging was off or unknown; cannot "
                 "distinguish 'never read' from 'not recorded' -- set "
@@ -175,6 +185,9 @@ def verify_applied(
         )
 
     return ApplyVerdict(
-        "no_lookups", hits, misses, merged,
+        "no_lookups",
+        hits,
+        misses,
+        merged,
         detail="the server made no tuned-config lookups at all",
     )

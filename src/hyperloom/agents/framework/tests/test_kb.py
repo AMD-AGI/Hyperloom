@@ -39,9 +39,7 @@ class TestResolveKbRoot:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
         assert kb._resolve_kb_root() == tmp_path / "io-kb"
 
-    def test_defaults_to_its_own_workspace_subdirectory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_defaults_to_its_own_workspace_subdirectory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """With no override the KB lives in its own directory under the workspace.
 
         Not ``<workspace>/kb``: the recipe KB owns that, and ``list_domains``
@@ -52,9 +50,7 @@ class TestResolveKbRoot:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
         assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
 
-    def test_withdrawn_override_is_ignored_not_raised(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_withdrawn_override_is_ignored_not_raised(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Resolution stays total; rejecting the withdrawn override is start-up's job.
 
         Read paths treat KB lookups as advisory and swallow their own failures,
@@ -65,9 +61,7 @@ class TestResolveKbRoot:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
         assert kb._resolve_kb_root() == tmp_path / "io-kb"
 
-    def test_framework_agent_root_is_not_a_kb_override(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_framework_agent_root_is_not_a_kb_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """That variable means "where the skill is installed" and must not raise."""
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
         monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)

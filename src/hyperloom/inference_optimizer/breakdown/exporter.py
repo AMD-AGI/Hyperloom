@@ -427,9 +427,7 @@ def build(
     )
     if not optimizations:
         optimizations = _unavailable_optimizations(
-            "the recorder projection failed"
-            if recorded_operations
-            else "no operations were recorded for this session",
+            "the recorder projection failed" if recorded_operations else "no operations were recorded for this session",
             state=state,
             warnings=warnings,
         )

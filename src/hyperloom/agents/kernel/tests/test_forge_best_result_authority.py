@@ -101,12 +101,7 @@ def test_missing_manifest_yields_no_evidence(repo):
     workspace, base_commit = repo
 
     assert forge_submit._read_forge_best_result(str(workspace)) is None
-    assert (
-        forge_submit._validated_forge_best_result(
-            None, workspace=str(workspace), base_commit=base_commit
-        )
-        is None
-    )
+    assert forge_submit._validated_forge_best_result(None, workspace=str(workspace), base_commit=base_commit) is None
 
 
 @pytest.mark.parametrize(
@@ -244,9 +239,7 @@ def _publish_applyback(
     changed_files = ["flydsl_kernel.py", "kernel.py"]
     for relative in changed_files:
         (artifact_dir / "files" / relative).write_text((workspace / relative).read_text())
-    patch = patch_body if patch_body is not None else _git(
-        workspace, "diff", f"{base_commit}..{best_commit}"
-    )
+    patch = patch_body if patch_body is not None else _git(workspace, "diff", f"{base_commit}..{best_commit}")
     (artifact_dir / "forge.patch").write_text(patch + "\n")
 
     manifest = {
@@ -395,11 +388,7 @@ def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
         text=True,
         env={
             **os.environ,
-            "PYTHONPATH": (
-                producer_root
-                + os.pathsep
-                + os.environ.get("PYTHONPATH", "")
-            ),
+            "PYTHONPATH": (producer_root + os.pathsep + os.environ.get("PYTHONPATH", "")),
         },
         timeout=120,
     )
@@ -488,9 +477,7 @@ def test_outer_result_that_breaks_the_contract_is_rejected(repo, overrides):
     outer = _publish_applyback(workspace, base_commit, outer_overrides=overrides)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -511,9 +498,7 @@ def test_untrustworthy_temporary_path_declaration_fails_the_result(repo, overrid
     outer = _publish_applyback(workspace, base_commit, outer_overrides=overrides)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -553,9 +538,7 @@ def test_manifest_that_breaks_the_contract_is_rejected(repo, overrides):
     outer = _publish_applyback(workspace, base_commit, manifest_overrides=overrides)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -592,9 +575,7 @@ def test_manifest_commit_disagreeing_with_the_outer_result_is_rejected(repo):
     outer["best_commit"] = base_commit
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -606,9 +587,7 @@ def test_applyback_pinned_to_a_foreign_commit_is_rejected(repo):
     _git(workspace, "update-ref", _APPLYBACK_REF, base_commit)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -622,9 +601,7 @@ def test_applyback_patch_disagreeing_with_changed_files_is_rejected(repo):
     )
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -636,9 +613,7 @@ def test_applyback_off_the_base_lineage_is_rejected(repo):
     advanced_base = _git(workspace, "rev-parse", "HEAD")
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=advanced_base
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=advanced_base)
         is None
     )
 
@@ -649,9 +624,7 @@ def test_corrupt_applyback_manifest_is_ignored_rather_than_raising(repo):
     (workspace / _ARTIFACT_DIR / "manifest.json").write_text('{"schema_version": 2, "comm')
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 

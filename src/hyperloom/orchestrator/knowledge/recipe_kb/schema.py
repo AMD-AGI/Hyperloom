@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+
 def _coerce_server_args(value: Any) -> str:
     """Normalize launch arguments into one command-line string."""
 
@@ -64,8 +65,7 @@ def _best_config_split(
         envs = {
             str(k): str(v)
             for k, v in best_config.items()
-            if k not in non_env_keys
-            and not isinstance(v, (Mapping, list, tuple))
+            if k not in non_env_keys and not isinstance(v, (Mapping, list, tuple))
         }
     return args, envs
 

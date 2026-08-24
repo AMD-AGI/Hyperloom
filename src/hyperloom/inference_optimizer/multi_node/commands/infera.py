@@ -881,10 +881,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
         for record in per_node:
             ip = str(record.get("host") or "")
             target = _infera_target_for_host(state, ip)
-            op_args = (
-                "revert --records-json "
-                f"{shlex.quote(json.dumps([record], sort_keys=True))}"
-            )
+            op_args = f"revert --records-json {shlex.quote(json.dumps([record], sort_keys=True))}"
             parsed, tx = _infera_ssh_node_op(
                 state,
                 target,
@@ -918,9 +915,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     """
     state = _infera_require_state()
     try:
-        records_by_host = json.loads(
-            getattr(args, "records_json", "") or "{}"
-        )
+        records_by_host = json.loads(getattr(args, "records_json", "") or "{}")
         backup_map = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         err(f"--backup-map-json not valid JSON: {exc}")
@@ -944,10 +939,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
         target = _infera_target_for_host(state, str(ip))
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"revert-patch (infera): ssh -> {ip}:{port}")
-        op_args = (
-            "revert --records-json "
-            f"{shlex.quote(json.dumps(records, sort_keys=True))}"
-        )
+        op_args = f"revert --records-json {shlex.quote(json.dumps(records, sort_keys=True))}"
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):
             per_node.append({"host": ip, **parsed})
@@ -975,10 +967,7 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
     per_node, failures = [], []
     for ip, records in records_by_host.items():
         target = _infera_target_for_host(state, str(ip))
-        op_args = (
-            "finalize --records-json "
-            f"{shlex.quote(json.dumps(records, sort_keys=True))}"
-        )
+        op_args = f"finalize --records-json {shlex.quote(json.dumps(records, sort_keys=True))}"
         parsed, tx = _infera_ssh_node_op(
             state,
             target,
@@ -991,9 +980,7 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
             failures.append(
                 {
                     "host": ip,
-                    "error": (parsed or {}).get("error")
-                    or tx.get("stderr")
-                    or "unknown",
+                    "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown",
                     **tx,
                 }
             )

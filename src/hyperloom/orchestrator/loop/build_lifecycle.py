@@ -63,9 +63,7 @@ def _driver_command(action: TargetedBuildAction, attempt_root: str) -> list[str]
 
     root = _Path(str(attempt_root))
     root.mkdir(parents=True, exist_ok=True)
-    (root / "plan.json").write_text(
-        json.dumps(action.to_state()), encoding="utf-8"
-    )
+    (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
     return [
         _sys.executable,
         "-m",

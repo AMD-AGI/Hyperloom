@@ -19,6 +19,7 @@ from hyperloom.orchestrator.framework.build_actions import (
 # TargetedBuildAction round-trip
 # ---------------------------------------------------------------------------
 
+
 def test_targeted_build_action_round_trip():
     a = TargetedBuildAction(
         gap_id="gap.enablement.hip_kernel_missing",
@@ -75,6 +76,7 @@ def test_targeted_build_action_from_none():
 # BuildResult round-trip + failure-class
 # ---------------------------------------------------------------------------
 
+
 def test_build_result_ok_round_trip():
     rt = FrameworkRuntime(bin_path="/b", pythonpath_prefixes=("/pkg",))
     r = BuildResult(
@@ -114,6 +116,7 @@ def test_build_result_from_state_normalizes_bad_failure_class():
 # ---------------------------------------------------------------------------
 # build_novelty_key — repeat vs novel
 # ---------------------------------------------------------------------------
+
 
 def _action(**kw):
     base = dict(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe")

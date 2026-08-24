@@ -30,9 +30,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-INSTALL_SH = (
-    REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
-)
+INSTALL_SH = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 
 _ROCM_HIP = "7.2.53211"
 
@@ -52,7 +50,7 @@ def _extract_array(name: str) -> str:
 
 
 _FAKE_PYTHON = textwrap.dedent(
-    '''\
+    """\
     #!/usr/bin/env python3
     import os, re, sys
 
@@ -109,7 +107,7 @@ _FAKE_PYTHON = textwrap.dedent(
         sys.exit(0)
 
     sys.exit(0)
-    '''
+    """
 )
 
 
@@ -169,17 +167,11 @@ def test_constraints_prevent_torch_clobber(tmp_path: Path) -> None:
     proc, hip_after, piplog = _run(tmp_path, mode="respect")
     assert proc.returncode == 0, proc.stdout
     # The dep install passed a constraints file (-c) to pip.
-    install_lines = [
-        ln for ln in piplog.splitlines() if "install" in ln and "-r" not in ln
-    ]
+    install_lines = [ln for ln in piplog.splitlines() if "install" in ln and "-r" not in ln]
     assert install_lines, f"no dep-install pip call recorded:\n{piplog}"
-    assert any(" -c " in f" {ln} " for ln in install_lines), (
-        f"dep install ran WITHOUT a constraints file:\n{piplog}"
-    )
+    assert any(" -c " in f" {ln} " for ln in install_lines), f"dep install ran WITHOUT a constraints file:\n{piplog}"
     # And torch is still the ROCm build afterwards.
-    assert hip_after == _ROCM_HIP, (
-        f"ROCm torch was clobbered despite the constraint (hip={hip_after!r})"
-    )
+    assert hip_after == _ROCM_HIP, f"ROCm torch was clobbered despite the constraint (hip={hip_after!r})"
     assert "[die]" not in proc.stdout, proc.stdout
 
 
@@ -191,10 +183,9 @@ def test_tripwire_aborts_when_torch_clobbered(tmp_path: Path) -> None:
     assert "clobbered the load-bearing ROCm torch" in proc.stdout, proc.stdout
     assert hip_after == "", "sanity: clobber simulation should have emptied hip"
     # Rollback attempted: a force-reinstall --no-deps from the pinned file.
-    assert any(
-        "--force-reinstall" in ln and "--no-deps" in ln and "-r " in f" {ln} "
-        for ln in piplog.splitlines()
-    ), f"no rollback reinstall recorded:\n{piplog}"
+    assert any("--force-reinstall" in ln and "--no-deps" in ln and "-r " in f" {ln} " for ln in piplog.splitlines()), (
+        f"no rollback reinstall recorded:\n{piplog}"
+    )
 
 
 def test_static_no_unconstrained_install_remains() -> None:

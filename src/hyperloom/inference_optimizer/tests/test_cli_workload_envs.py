@@ -233,8 +233,7 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
         src,
         tmp_path / "out",
         extra_server_args=(
-            "--compilation-config {cudagraph_mode:FULL} "
-            "--speculative-config {method:ngram,num_speculative_tokens:7}"
+            "--compilation-config {cudagraph_mode:FULL} --speculative-config {method:ngram,num_speculative_tokens:7}"
         ),
         args_mode="append",
     )
@@ -252,11 +251,7 @@ def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):
     _write_yaml_with_envs(
         src,
         "vllm",
-        {
-            "EXTRA_VLLM_ARGS": (
-                '--compilation-config {"cudagraph_mode":"FULL"} --port 8888'
-            )
-        },
+        {"EXTRA_VLLM_ARGS": ('--compilation-config {"cudagraph_mode":"FULL"} --port 8888')},
     )
 
     out = materialize_config_with_envs(

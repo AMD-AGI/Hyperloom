@@ -153,10 +153,7 @@ def _do_apply(a: argparse.Namespace) -> int:
             {
                 "status": "failed",
                 "host": host,
-                "error": (
-                    "py_compile failed (auto-reverted): "
-                    f"{exc.msg}"
-                ),
+                "error": (f"py_compile failed (auto-reverted): {exc.msg}"),
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -202,11 +199,7 @@ def _do_revert(a: argparse.Namespace) -> int:
                 "restored_targets": [],
             }
         )
-    if (
-        not records_json
-        and getattr(a, "backup_path", "")
-        and not Path(a.backup_path).is_file()
-    ):
+    if not records_json and getattr(a, "backup_path", "") and not Path(a.backup_path).is_file():
         return _emit(
             {
                 "status": "noop_missing_backup",

@@ -377,23 +377,26 @@ def test_stable_group_key_survives_member_id_reranking(tmp_path):
     state.last_trace_analyze = candidates_payload
     state.save(tmp_path)
 
-    assert state.untried_hot_reusable_kernels(
-        min_gpu_pct=0.0,
-        top_n=10,
-    ) == []
-    assert krh._batch_kernel_candidates(
-        {"candidates_path": str(candidates_path)},
-        session_dir=tmp_path,
-    ) == []
+    assert (
+        state.untried_hot_reusable_kernels(
+            min_gpu_pct=0.0,
+            top_n=10,
+        )
+        == []
+    )
+    assert (
+        krh._batch_kernel_candidates(
+            {"candidates_path": str(candidates_path)},
+            session_dir=tmp_path,
+        )
+        == []
+    )
 
 
 def test_versioned_group_identity_matches_legacy_ledger_alias(tmp_path):
     candidates_path = tmp_path / "candidates.json"
     legacy_key = '["py","operator","/repo/operator.py","forward"]'
-    versioned_key = (
-        '{"operation":"operator","source_kind":"py",'
-        '"source_path":"/repo/operator.py","version":2}'
-    )
+    versioned_key = '{"operation":"operator","source_kind":"py","source_path":"/repo/operator.py","version":2}'
     candidates_payload = {
         "hot_kernels": [
             {
@@ -434,10 +437,13 @@ def test_versioned_group_identity_matches_legacy_ledger_alias(tmp_path):
     )
     state.save(tmp_path)
 
-    assert krh._batch_kernel_candidates(
-        {"candidates_path": str(candidates_path)},
-        session_dir=tmp_path,
-    ) == []
+    assert (
+        krh._batch_kernel_candidates(
+            {"candidates_path": str(candidates_path)},
+            session_dir=tmp_path,
+        )
+        == []
+    )
 
 
 def test_group_ledger_migrates_to_reranked_member_id():
@@ -762,14 +768,8 @@ def test_grouped_integrate_revert_clears_kernel_work_pending():
         }
     )
 
-    assert (
-        state.kernel_opt_task_attempts["stable-task"]["integration_status"]
-        == "rejected"
-    )
-    assert (
-        state.kernel_opt_attempts["k002"]["integration_status"]
-        == "rejected"
-    )
+    assert state.kernel_opt_task_attempts["stable-task"]["integration_status"] == "rejected"
+    assert state.kernel_opt_attempts["k002"]["integration_status"] == "rejected"
     assert kernel_work_pending(state) is False
 
 

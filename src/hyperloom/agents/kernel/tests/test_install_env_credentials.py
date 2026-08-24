@@ -106,9 +106,7 @@ write_env_file
             "MAGPIE_PATH",
         )
         exports = "".join(f"export {k}={v}\n" for k, v in exported.items())
-        script = exports + f'. {env_file!s}\n' + "".join(
-            f'echo "{name}=${{{name}:-}}"\n' for name in reported
-        )
+        script = exports + f". {env_file!s}\n" + "".join(f'echo "{name}=${{{name}:-}}"\n' for name in reported)
         proc = subprocess.run(
             ["bash", "-c", script],
             text=True,
@@ -120,9 +118,7 @@ write_env_file
             0,
             f"sourcing the env file failed\nstdout={proc.stdout}\nstderr={proc.stderr}",
         )
-        values = dict(
-            line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line
-        )
+        values = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
         return values, proc.stderr
 
     def test_rotated_dotenv_credentials_survive_the_env_file(self) -> None:
@@ -174,9 +170,7 @@ write_env_file
             repo_root = work / "repo"
             repo_root.mkdir()
             env_file = self._write_env_file(work, repo_root)
-            values, stderr = self._source_and_report(
-                env_file, {"ANTHROPIC_API_KEY": _INSTALL_KEY}
-            )
+            values, stderr = self._source_and_report(env_file, {"ANTHROPIC_API_KEY": _INSTALL_KEY})
 
         self.assertEqual(values["ANTHROPIC_API_KEY"], _INSTALL_KEY)
         self.assertEqual(stderr, "")
@@ -192,9 +186,7 @@ write_env_file
             repo_root = work / "repo"
             repo_root.mkdir()
             env_file = self._write_env_file(work, repo_root)
-            values, _ = self._source_and_report(
-                env_file, {"MAGPIE_PATH": "/stale/other-workspace/Magpie"}
-            )
+            values, _ = self._source_and_report(env_file, {"MAGPIE_PATH": "/stale/other-workspace/Magpie"})
 
         self.assertEqual(values["MAGPIE_PATH"], "/data/.cache/Magpie@abc1234")
 

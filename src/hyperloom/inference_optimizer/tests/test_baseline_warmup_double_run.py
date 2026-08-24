@@ -517,9 +517,7 @@ def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp
         benchmark_sec=550.0,
     )
 
-    assert result["_rounds_run"] == 2, (
-        "a cold pass was spent on a round the gate after it was always going to refuse"
-    )
+    assert result["_rounds_run"] == 2, "a cold pass was spent on a round the gate after it was always going to refuse"
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
 
 
@@ -1058,15 +1056,9 @@ def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
-    assert all(
-        cfg["benchmark"]["envs"]["RUN_EVAL"] == "false"
-        for cfg in captured
-    )
+    assert all(cfg["benchmark"]["envs"]["RUN_EVAL"] == "false" for cfg in captured)
     assert result["accuracy_stage"]["status"] == "skipped"
-    assert (
-        result["accuracy_stage"]["reason"]
-        == "throughput_below_threshold"
-    )
+    assert result["accuracy_stage"]["reason"] == "throughput_below_threshold"
 
 
 def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
@@ -1120,14 +1112,8 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 3
-    assert [
-        cfg["benchmark"]["envs"]["RUN_EVAL"]
-        for cfg in captured
-    ] == ["false", "false", "true"]
-    assert [
-        cfg["benchmark"]["server_lifecycle"]["cleanup"]
-        for cfg in captured
-    ] == [False, False, True]
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == ["false", "false", "true"]
+    assert [cfg["benchmark"]["server_lifecycle"]["cleanup"] for cfg in captured] == [False, False, True]
     assert result["accuracy"] == pytest.approx(0.9)
     assert result["accuracy_stage"]["status"] == "succeeded"
 
@@ -1728,16 +1714,18 @@ def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
     stale = output_dir / "benchmark_vllm_20260101_000000"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {
-                "output_throughput": 9999.0,
-                "completed_requests": 64,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {
+                    "output_throughput": 9999.0,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1769,16 +1757,18 @@ def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
     stale = output_dir / "benchmark_vllm_20260101_000000"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {
-                "output_throughput": 9999.0,
-                "completed_requests": 64,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {
+                    "output_throughput": 9999.0,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1809,16 +1799,18 @@ def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, m
     stale = output_dir / "benchmark_vllm_29991231_235959"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {
-                "output_throughput": 9999.0,
-                "completed_requests": 64,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {
+                    "output_throughput": 9999.0,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1853,11 +1845,13 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
     stale = output_dir / "benchmark_vllm_29991231_235959"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {"output_throughput": 9999.0, "completed_requests": 64},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {"output_throughput": 9999.0, "completed_requests": 64},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1890,11 +1884,13 @@ def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypa
     stale = output_dir / "benchmark_vllm_20260101_000000"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {"output_throughput": 1.0, "completed_requests": 1},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {"output_throughput": 1.0, "completed_requests": 1},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0

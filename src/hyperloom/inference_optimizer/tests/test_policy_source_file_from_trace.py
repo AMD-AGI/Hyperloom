@@ -150,7 +150,4 @@ def test_sentinel_pass_through_is_logged(tmp_path, monkeypatch, caplog):
     _framework_tree(tmp_path, monkeypatch)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.policy.gate"):
         _gate(tmp_path).validate_intent("orchestration", _dispatch_intent("Not found"))
-    assert any(
-        "absent-value sentinel" in record.message and "Not found" in record.message
-        for record in caplog.records
-    )
+    assert any("absent-value sentinel" in record.message and "Not found" in record.message for record in caplog.records)
