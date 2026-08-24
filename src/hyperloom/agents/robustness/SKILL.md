@@ -37,7 +37,6 @@ src/hyperloom/agents/robustness/
 │   ├── envelope.py         # IntentType / Intent / build_* helpers (mirror upstream)
 │   ├── prompt_inputs.py    # Coordinator prompt -> ReactorContext
 │   ├── findings.py         # JSONL append sink for Findings
-│   ├── postmortem.py       # session-end postmortem finalizer
 │   └── reactor.py          # Reactor.tick() pipeline driver
 ├── decision/
 │   ├── policy_aware.py     # local PolicyGate-equivalent payload guard
@@ -273,24 +272,6 @@ Fields: `tick_index`, `timestamp_unix`, `symptom_name`, `severity`,
 
 These records are the hand-off point for a future findings publisher;
 today they remain local-only.
-
-## Session-end postmortem
-
-When the Coordinator sets `state.json::stop_reason` (run wind-down)
-the reactor fires :class:`hyperloom.agents.robustness.role.postmortem.PostmortemFinalizer`
-exactly once. It aggregates the in-session findings + per-task
-`runs/<action>/<task_id>/result.json` into:
-
-```
-{session_dir}/reports/robustness_postmortem.md   # flashpoint + catalogue + per-action summary
-{session_dir}/reports/decision_trace.json        # machine-readable per-task ledger
-{session_dir}/reports/.robustness_finalized      # idempotency marker
-```
-
-Disable via `Config.finalize_enabled=False`. Operators can re-run the
-finalizer post-hoc via
-`hyperloom.agents.robustness.role.postmortem.finalize_session(session_dir, session_id=...)`
-(noop when the marker exists).
 
 ## Critic feedback loop
 

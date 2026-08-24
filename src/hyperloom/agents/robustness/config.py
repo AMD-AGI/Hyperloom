@@ -240,13 +240,6 @@ class Config:
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0
 
-    # -- postmortem finalizer --
-    # False disables the flashpoint + decision_trace writers.
-    finalize_enabled: bool = True
-    finalize_reports_subdir: str = "reports"
-    finalize_max_findings_in_report: int = 20
-    finalize_max_tasks_per_action: int = 50
-
     # -- phase budget / conversation progress signals --
     phase_budget_warn_used_pct: float = 90.0
     conversation_progress_enabled: bool = True

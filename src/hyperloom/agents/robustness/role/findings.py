@@ -31,8 +31,8 @@ log = logging.getLogger(__name__)
 
 
 # On-disk JSONL subdir under the session dir. The single source of truth for
-# this path; ``PostmortemFinalizer`` reads the same subtree and the Critic's
-# ``decision_reviewer`` imports this constant to discover the findings file.
+# this path; the Critic's ``decision_reviewer`` imports this constant to
+# discover the findings file.
 FINDINGS_SUBDIR: str = "agents/robustness/findings"
 
 

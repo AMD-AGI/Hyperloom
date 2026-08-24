@@ -60,7 +60,6 @@ from hyperloom.common.subprocess_bridge import RuntimeAdapterError, emit_json, r
 from ..config import Config
 from ..factory import build_reactor_components
 from ..role.envelope import build_envelope_dict
-from ..role.postmortem import finalize_session
 from ..role.prompt_inputs import from_coordinator_prompt
 
 
@@ -218,49 +217,10 @@ def _cmd_tick(args: argparse.Namespace) -> None:
     emit_json(emit, args.out)
 
 
-def _cmd_finalize(args: argparse.Namespace) -> None:
-    """Run the postmortem finalizer as a one-shot operator tool.
-
-    Use when the reactor never observed ``stop_reason`` going
-    non-empty (e.g. Coordinator killed by SIGKILL before the wind-down
-    intent landed). Idempotent — re-running has no effect once the
-    ``.robustness_finalized`` marker exists, matching the in-reactor
-    behaviour.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI arguments with
-            ``session_dir``, ``session_id``, ``stop_reason``, and ``out``
-            attributes.
-
-    Raises:
-        RuntimeAdapterError: If ``--session-dir`` does not point to an
-            existing directory.
-    """
-    session_dir = Path(str(args.session_dir)).expanduser()
-    if not session_dir.is_dir():
-        raise RuntimeAdapterError(f"--session-dir does not point to a directory: {session_dir}")
-    session_id = (args.session_id or session_dir.name or "default").strip()
-    stop_reason = (args.stop_reason or "manual_finalize").strip()
-    wrote = finalize_session(
-        session_dir,
-        session_id=session_id,
-        stop_reason=stop_reason,
-    )
-    payload = {
-        "session_dir": str(session_dir),
-        "session_id": session_id,
-        "stop_reason": stop_reason,
-        "wrote_new_files": bool(wrote),
-        "reports_dir": str(session_dir / "reports"),
-    }
-    emit_json(payload, args.out)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     """Build the runtime CLI argument parser.
 
-    Registers the ``tick`` and ``finalize`` subcommands with their
-    respective options and handler functions.
+    Registers the ``tick`` subcommand with its options and handler function.
 
     Returns:
         argparse.ArgumentParser: The configured parser.
@@ -286,36 +246,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to write the emit JSON (default: stdout).",
     )
     tick.set_defaults(func=_cmd_tick)
-
-    finalize = sub.add_parser(
-        "finalize",
-        help=(
-            "Run the postmortem finalizer post-hoc "
-            "(for sessions whose Coordinator died before stop_reason "
-            "was written)."
-        ),
-    )
-    finalize.add_argument(
-        "--session-dir",
-        required=True,
-        help="Path to the session directory to finalize.",
-    )
-    finalize.add_argument(
-        "--session-id",
-        default="",
-        help="Session id (default: basename of --session-dir).",
-    )
-    finalize.add_argument(
-        "--stop-reason",
-        default="manual_finalize",
-        help="stop_reason to record in the postmortem (default: manual_finalize).",
-    )
-    finalize.add_argument(
-        "--out",
-        default="-",
-        help="Path to write the finalize summary JSON (default: stdout).",
-    )
-    finalize.set_defaults(func=_cmd_finalize)
     return parser
 
 
