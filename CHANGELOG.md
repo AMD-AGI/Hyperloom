@@ -36,6 +36,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`force_restart_local_cluster` now routes its `ray stop` through `_stop_ray_force`.**
+  The function previously inlined its own `subprocess.run(["ray", "stop", "--force"], ...)`
+  without a timeout or `OSError` guard, meaning a hung `ray stop` on the
+  version-mismatch recovery path would block indefinitely. `_stop_ray_force`
+  already enforces `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable via
+  `HYPERLOOM_RAY_STOP_TIMEOUT_SEC`) and swallows both `TimeoutExpired` and
+  `OSError`, so the timeout constant now covers all three stop sites instead of
+  only one. Log output is unchanged: `_stop_ray_force` appends the stop command
+  and any timeout note to `log_path` in the same order as before.
+
 - **Multi-node SSH forwarding now uses the shared env-safety definitions.**
   `multi_node/_internal/env_safety` declared its own nine-name `_DENY_KEYS` set
   and its own copy of the POSIX key-shape regex. The denylist was missing
