@@ -315,3 +315,163 @@ def test_enablement_artifacts_are_included(tmp_path: Path) -> None:
     assert "reports/enablement/tid-abc/round.json" in names
     assert "reports/enablement/tid-abc/patches/001_fix.patch" in names
     assert "reports/enablement/enablement_setting.sh" in names
+
+
+# ---- session boundary ------------------------------------------------------
+def _manifest(zip_path: Path) -> dict:
+    with zipfile.ZipFile(zip_path) as zf:
+        return json.loads(zf.read(MANIFEST_JSON_NAME))
+
+
+def test_symlink_out_of_the_session_is_not_bundled(tmp_path: Path) -> None:
+    """A link planted in the session must not pull outside content into the bundle."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    outside = tmp_path / "outside" / "secret.json"
+    _write(outside, '{"secret":"OUTSIDE"}')
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "final.json").symlink_to(outside)
+    dest = tmp_path / "workspace"
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
+
+    assert out is not None
+    names = _zip_names(out)
+    assert "reports/final.json" not in names
+    with zipfile.ZipFile(out) as zf:
+        for name in names:
+            assert b"OUTSIDE" not in zf.read(name)
+    assert not (dest / "reports" / "final.json").exists()
+
+    manifest = _manifest(out)
+    assert "reports/final.json" in manifest["refused_files"]
+    assert manifest["complete"] is False
+
+
+def test_symlink_staying_inside_the_session_is_still_bundled(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    real = sd / "runs" / "b1" / "benchmark_report.json"
+    _write(real, '{"tput":1}')
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "final.json").symlink_to(real)
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    assert "reports/final.json" in _zip_names(out)
+    assert _manifest(out)["refused_files"] == []
+
+
+def test_non_regular_files_are_refused(tmp_path: Path) -> None:
+    """Sockets/FIFOs are not artifacts and cannot be archived."""
+    import os
+
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    os.mkfifo(sd / "reports" / "final.json")
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    assert "reports/final.json" not in _zip_names(out)
+    assert "reports/final.json" in _manifest(out)["refused_files"]
+
+
+# ---- manifest describes what was written ----------------------------------
+def test_manifest_never_claims_a_file_the_zip_lacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    real_write = zipfile.ZipFile.write
+
+    def _flaky(self, filename, arcname=None, **kw):  # noqa: ANN001, ANN202
+        if arcname == "reports/final.json":
+            raise OSError("disk gone")
+        return real_write(self, filename, arcname=arcname, **kw)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", _flaky)
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    manifest = _manifest(out)
+    claimed = {e["path"] for e in manifest["included_files"]}
+    assert claimed <= names
+    assert "reports/final.json" not in claimed
+    assert manifest["failed_files"] == ["reports/final.json"]
+    assert manifest["complete"] is False
+    assert manifest["included_count"] == len(manifest["included_files"])
+
+
+def test_loose_manifest_describes_the_loose_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A loose copy failure is reported in the loose manifest, not the zip's."""
+    from hyperloom.inference_optimizer.breakdown import session_package as sp
+
+    sd = tmp_path / "session"
+    _build_session(sd)
+    dest = tmp_path / "workspace"
+    real_copy = sp.shutil.copy2
+
+    def _flaky(src, dst, **kw):  # noqa: ANN001, ANN202
+        if Path(dst).name == "final.json":
+            raise OSError("disk gone")
+        return real_copy(src, dst, **kw)
+
+    monkeypatch.setattr(sp.shutil, "copy2", _flaky)
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
+
+    assert out is not None
+    assert "reports/final.json" in _zip_names(out)  # zip was fine
+    assert _manifest(out)["failed_files"] == []
+    loose = json.loads((dest / MANIFEST_JSON_NAME).read_text(encoding="utf-8"))
+    assert loose["failed_files"] == ["reports/final.json"]
+    assert loose["complete"] is False
+    assert "reports/final.json" not in {e["path"] for e in loose["included_files"]}
+
+
+def test_complete_flag_set_on_a_clean_bundle(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    manifest = _manifest(out)
+    assert manifest["complete"] is True
+    assert manifest["failed_files"] == []
+    assert manifest["refused_files"] == []
+    assert manifest["dropped_files"] == []
+
+
+def test_truncated_bundle_is_not_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.breakdown import session_package as sp
+
+    monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
+    sd = tmp_path / "session"
+    _build_session(sd)
+
+    out = sp.package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    assert _manifest(out)["complete"] is False
+
+
+def test_manifest_text_names_missing_files_for_a_human_reader(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    outside = tmp_path / "outside" / "secret.json"
+    _write(outside, "{}")
+    (sd / "reports").mkdir(parents=True, exist_ok=True)
+    (sd / "reports" / "final.json").symlink_to(outside)
+
+    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    with zipfile.ZipFile(out) as zf:
+        text = zf.read(MANIFEST_TXT_NAME).decode("utf-8")
+    assert "complete     : False" in text
+    assert "REFUSED" in text
+    assert "reports/final.json" in text

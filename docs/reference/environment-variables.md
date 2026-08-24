@@ -640,10 +640,20 @@ Primary switch (default **off**) for live Langfuse trace push.
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent**: A second flush only re-writes the receipt
   (no re-emit), so a duplicated CLOSE step won't double-push.
-* **Package truncation**: The bundle caps at 5000 files / 256 MB. On a very
-  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
-  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
-  a truncated package as complete.
+* **Package completeness**: `PACKAGE_MANIFEST` describes what was actually
+  written, and `included_files` never names a file the package lacks. Check
+  `complete` before treating a package as the whole selection; it is `false`
+  whenever anything selected is absent, and the reason is itemized in
+  `dropped_files` (the bundle caps at 5000 files / 256 MB and a very long
+  session can stop it short, alongside `truncated: true`), `failed_files`
+  (the write failed) or `refused_files` (the entry was not a regular file
+  inside the session — see below). The zip and the loose tree are written
+  independently and each carries a manifest describing its own contents.
+* **Session boundary**: a session directory is shared-filesystem state that
+  agents write into, so the packager only bundles entries that resolve
+  inside the session. A symlink pointing out of the session is refused
+  rather than followed, which keeps unrelated file content from being
+  copied to the dest root and synced onward.
 * **Generation duration is ~0**: Both live and backfill stamp a single
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.
