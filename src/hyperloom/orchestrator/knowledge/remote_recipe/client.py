@@ -195,10 +195,7 @@ def _validate_recipe_scope(
     if not isinstance(knowledge, dict):
         raise RemoteRecipeValidationError("Hyperloom Recipe View knowledge is missing")
     shape = knowledge.get("workload_shape")
-    expected = scope.as_dict()
-    if not isinstance(shape, dict) or any(
-        shape.get(key) != expected[key] for key in ("tp", "conc", "isl", "osl")
-    ):
+    if not scope.matches_workload_shape(shape):
         raise RemoteRecipeValidationError(
             "Hyperloom Recipe workload shape does not match the requested scope"
         )

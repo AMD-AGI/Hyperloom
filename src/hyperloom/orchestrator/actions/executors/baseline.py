@@ -3266,7 +3266,7 @@ class BaselineExecutor:
                 )
             return stopped_result
 
-        before_apply_sha = _git_head_sha(patch_target)
+        before_apply_sha = _git_head_sha(patch_target) if patch_target else ""
         def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
             if live_shared_state is None:
                 return True
@@ -3292,12 +3292,20 @@ class BaselineExecutor:
                 return False
             return True
 
-        patch_application = _apply_warm_patches(
-            params,
-            patch_target,
-            output_dir,
-            before_mutation=_persist_recipe_snapshot,
-        )
+        if params.get("patches") and not patch_target:
+            patch_application = {
+                "status": "failed",
+                "failure": "missing_target_repo",
+                "patches": [],
+                "applied": [],
+            }
+        else:
+            patch_application = _apply_warm_patches(
+                params,
+                patch_target,
+                output_dir,
+                before_mutation=_persist_recipe_snapshot,
+            )
         if isinstance(patch_application, dict):
             applied_patches = list(patch_application.get("applied") or [])
             _pre_patch_sha = str(patch_application.get("pre_sha") or "")

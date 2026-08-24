@@ -709,6 +709,7 @@ def _resolve_warm_replay_patch_root(
     allowlist: tuple[str, ...],
     missing_patch_reason: str,
     missing_allowlist_reason: str,
+    explicit_root: str | None = None,
 ) -> WarmReplayRootResolution:
     from hyperloom.orchestrator.specialists.patch_safety import (
         resolve_patch_apply_root,
@@ -719,18 +720,17 @@ def _resolve_warm_replay_patch_root(
         for diff in (_patch_source_diff(source) for source in patch_sources)
         if diff.strip()
     ]
-    env_root = resolve_session_framework_root()
     resolution = resolve_patch_apply_root(
         diffs,
-        explicit_root=Path(env_root.rstrip("/")) if env_root else None,
+        explicit_root=Path(explicit_root.rstrip("/")) if explicit_root else None,
         candidate_roots=tuple(Path(candidate.rstrip("/")) for candidate in allowlist),
     )
     if resolution.root is not None:
         return WarmReplayRootResolution(
             root=_normalize_root(str(resolution.root)),
-            source="env" if env_root else "allowlist",
+            source="env" if explicit_root else "allowlist",
             reason="",
-            allowlist=() if env_root else allowlist,
+            allowlist=() if explicit_root else allowlist,
         )
     reason = {
         "patch_content_missing": missing_patch_reason,
@@ -755,6 +755,7 @@ def resolve_warm_replay_framework_root(
         allowlist=_warm_replay_framework_patch_roots(),
         missing_patch_reason="active_framework_root_missing",
         missing_allowlist_reason="framework_patch_root_not_in_allowlist",
+        explicit_root=resolve_session_framework_root() or None,
     )
 
 
@@ -763,7 +764,7 @@ def resolve_warm_replay_kernel_root(
     patch_paths: Sequence[Path] | None = None,
     patch_entries: Iterable[Any] | None = None,
 ) -> WarmReplayRootResolution:
-    """Resolve the kernel patch root for warm replay (env first, then allowlist)."""
+    """Resolve the kernel patch root from the kernel-specific allowlist."""
     return _resolve_warm_replay_patch_root(
         patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
         allowlist=_warm_replay_kernel_patch_roots(),
