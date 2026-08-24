@@ -33,6 +33,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from hyperloom.common.coerce import to_unix
+
 from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
@@ -224,7 +226,7 @@ class SqliteLeaseBackend:
             for row in rows:
                 lane = row["lane"]
                 row_holder = row["holder_id"]
-                row_expires = datetime.fromisoformat(row["expires_at"]).timestamp()
+                row_expires = to_unix(row["expires_at"], default=0.0)
                 if row_expires > now_ts:
                     holders_per_lane.setdefault(lane, set()).add(row_holder)
                 else:
