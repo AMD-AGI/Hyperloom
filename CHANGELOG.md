@@ -7,14 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
-- **The `filter_untrusted_env_mapping` call on `reference_envs` inside
-  `materialize_config_with_envs` is gone.** The only writer of that mapping is
-  `cli/bootstrap.py` via `reference_script.parse_reference_script`, which
-  already filters every key through `is_allowed_external_env_key` — a predicate
-  strictly stronger than the `valid_env_key` shape check that was being applied
-  here.  The redundant pass dropped nothing in production, added a warning log
-  that could never fire, and obscured the invariant that the upstream parser is
-  the real gate for this data.
+- **The `reference_envs` filter inside `materialize_config_with_envs` is gone.**
+  The only writer of that mapping is `cli/bootstrap.py` via
+  `reference_script.parse_reference_script`, which already filters every key
+  through `is_allowed_external_env_key` — strictly stronger than the
+  `valid_env_key` shape check applied here. The pass dropped nothing in
+  production and its warning log could never fire.
 
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and
@@ -26,26 +24,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **The multi-node SSH forward denylist is now the shared
-  `BLOCKED_UNTRUSTED_ENV_NAMES` definition.** `multi_node/_internal/env_safety`
-  previously declared its own nine-name `_DENY_KEYS` set, which was missing
-  thirteen names that `BLOCKED_UNTRUSTED_ENV_NAMES` covers
-  (`CDPATH`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
-  `PYTHONINSPECT`, `PYTHONUSERBASE`, `SHELLOPTS`, and others).  The local symbol
-  is deleted; `is_forward_env_key_allowed` now checks the shared constant.
-  The forwarding logic in `_collect_forward_env` (prefix allowlist +
-  four hardcoded names) produces no names that overlap with the blocked set, so
-  no legitimate forwarding is affected.
+- **Multi-node SSH forwarding now uses the shared env-safety definitions.**
+  `multi_node/_internal/env_safety` declared its own nine-name `_DENY_KEYS` set
+  and its own copy of the POSIX key-shape regex. The denylist was missing
+  `CDPATH`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
+  `PYTHONINSPECT`, `PYTHONUSERBASE` and `SHELLOPTS`, all of which a
+  shell-launched remote pod is exposed to. Both local definitions are deleted in
+  favour of `BLOCKED_UNTRUSTED_ENV_NAMES` and `valid_env_key`. Forwarding is
+  unaffected: `_collect_forward_env` builds its mapping from a prefix allowlist
+  plus four hardcoded names, none of which are in the blocked set.
 
 - **`BLOCKED_UNTRUSTED_ENV_NAMES` and `BLOCKED_CHILD_ENV_NAMES` no longer list
   `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, or `RUBYOPT`.** This is a
-  ROCm/Linux-only repository with no macOS platform code and no Ruby tooling;
-  those three entries were copied from a generic checklist and blocked nothing
-  real. Every name that remains corresponds to a process this repository
-  actually spawns: bash benchmark wrappers, Python subprocesses, the glibc
-  dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT` is
-  retained because `moreutils` (`ts`) is a perl program that the benchmark
-  wrapper's timestamped logging shim pipes through.
+  ROCm/Linux-only repository with no macOS platform code and no Ruby tooling, so
+  those three blocked nothing real. Every remaining name corresponds to a process
+  this repository actually spawns: bash benchmark wrappers, Python subprocesses,
+  the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
+  stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
+  timestamped logging shim pipes through.
 
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
@@ -56,27 +52,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **Shell and loader hijack names (`LD_PRELOAD`, `PYTHONPATH`, `PATH`, etc.) are
-  now rejected from the `extra_envs` argument to `materialize_config_with_envs`
-  before the config is persisted to disk.** The predicate was previously
-  `valid_env_key` (key-shape only), which let any name through.  It is now
-  `is_allowed_variant_env_key`, the same predicate already used by `GridVariant`
-  when it accepts per-variant env overrides from LLM proposals.  The credential
-  filter at the persistence boundary (`:1664`) is unchanged.
+- **Shell and loader hijack names are rejected from the `extra_envs` argument to
+  `materialize_config_with_envs` before the config is persisted.** The predicate
+  was `valid_env_key`, a key-shape check that let `LD_PRELOAD`, `PYTHONPATH` and
+  `PATH` through into the rendered YAML and from there into the benchmark
+  subprocess. It is now `is_allowed_variant_env_key`, the predicate `GridVariant`
+  already uses for per-variant overrides. The credential filter that runs
+  immediately before the YAML is written is unchanged; it still covers the
+  operator `--extra-env` channel, which has no upstream filtering.
 
-- **Specialist `config_changes` and `extra_envs` overrides are now filtered at
-  the point they enter `integrate_patch`, not only when they reach the benchmark
-  subprocess.** Previously the raw LLM-supplied mapping was assembled into
-  `proposal_extra_envs` with no key validation, then branched in two directions:
-  the gate-bench path passed it through `GridVariant` (which applies
-  `is_allowed_variant_env_key`) while the `status="advanced"` path persisted the
-  unfiltered mapping into `accepted_config` and ultimately into the revalidation
-  baseline. That divergence meant the configuration that was benchmarked and the
-  configuration that was recorded as KEEP differed silently. Applying
-  `filter_untrusted_env_mapping` with `is_allowed_variant_env_key` at assembly
-  time collapses both paths to the same filtered value. Dropped key names are
-  logged, returned in `dropped_env_overrides` on every result dict that carries
-  `extra_envs_applied`, and written to the enablement `round.json`.
+- **A specialist's `config_changes` / `extra_envs` proposal is filtered where it
+  enters `integrate_patch`, so the benchmarked configuration and the recorded one
+  can no longer differ.** The raw mapping was assembled with no key validation and
+  then took two paths: the gate bench went through `GridVariant` (which filters)
+  while an `advanced` verdict persisted the unfiltered mapping into
+  `accepted_config` and on into the revalidation baseline. Filtering once at
+  assembly collapses both paths onto the same value. Dropped key names are logged
+  and reported as `dropped_env_overrides` on the gate verdict and in the
+  enablement `round.json`.
 
 - **`best_result.json` is read again.** `_validated_forge_best_result` gated on
   `schema_version == 1`; KernelForge has stamped `2` into that file since
