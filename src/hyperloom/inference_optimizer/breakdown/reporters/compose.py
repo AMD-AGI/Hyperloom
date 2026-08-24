@@ -53,6 +53,11 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
         "Kernel Optimization",
         [
             "kernel_lifecycle",
+            # The per-backend invocation logs behind the capability-summary
+            # counts. Without them the report states how many kernels a lane
+            # adopted while showing none of the attempts behind the number.
+            "geak_invocations",
+            "forge_invocations",
             "kernel_profiling",
             "kernel_decision_path",
             "critic_robustness",

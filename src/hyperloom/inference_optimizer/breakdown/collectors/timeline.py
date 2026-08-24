@@ -227,18 +227,29 @@ def collect_phase_timeline(
         ev["ts"] = iso_z(ev.get("ts"))
 
     # De-dup: journal rows are appended first and win on collision.
-    seen: set[tuple[str, str, str]] = set()
+    #
+    # Rows collide on ``(action, ts-to-second, change)``. Rows that also carry
+    # distinct task ids are distinct events and are all kept -- but only while
+    # every row seen for that triple was itself task-tagged. An untagged row is
+    # the same event observed from the other source (journal vs audit list), so
+    # it keeps the legacy fold instead of being duplicated.
+    seen_tasks: dict[tuple[str, str, str], set[str]] = {}
     deduped: list[dict[str, Any]] = []
     for ev in events:
-        key = (
+        base = (
             str(ev.get("action") or ""),
             (str(ev.get("ts") or ""))[:19],
             str(ev.get("change") or ev.get("task_id") or ""),
         )
-        if key in seen:
+        task_id = str(ev.get("task_id") or "")
+        prior = seen_tasks.get(base)
+        if prior is None:
+            seen_tasks[base] = {task_id}
+            deduped.append(ev)
             continue
-        seen.add(key)
-        deduped.append(ev)
+        if task_id and task_id not in prior and all(prior):
+            prior.add(task_id)
+            deduped.append(ev)
 
     deduped.sort(key=lambda e: e.get("ts") or "")
     return deduped
@@ -345,28 +356,43 @@ def collect_capability_summary(
             invs (list[dict[str, Any]]): A lane's invocation records.
 
         Returns:
-            dict[str, Any]: ``{"status", "attempts", "keeps"}`` where
-            ``keeps`` counts ``decision == "KEEP"`` entries.
+            dict[str, Any]: ``{"status", "attempts", "keeps"}`` where ``keeps``
+            counts distinct kernels an integrate verdict adopted, plus optional
+            ``reverts`` / ``micro_only_keeps`` / ``e2e_gain_pct``.
         """
         attempts = len(invs)
-        adopted = 0
-        reverted = 0
+        # Tally distinct kernels, not invocation rows: one kernel re-tried
+        # across runs is still one kernel.
+        adopted_kids: set[str] = set()
+        reverted_kids: set[str] = set()
+        micro_only_kids: set[str] = set()
         best_e2e: float | None = None
-        for v in invs:
+        for i, v in enumerate(invs):
             if v.get("decision") != "KEEP":
                 continue
-            outcome = integ_by_kid.get(str(v.get("kernel_id") or ""))
+            kid = str(v.get("kernel_id") or "")
+            # A row without a kernel id cannot be folded with any other row.
+            ident = kid or f"__row_{i}"
+            outcome = integ_by_kid.get(kid) if kid else None
             if outcome is None:
-                # micro-KEEP with no integrate record stands as kept.
-                adopted += 1
+                # A KEEP that never reached integrate cleared the micro
+                # benchmark only. It is not an adoption (see CapabilityEntry:
+                # ``keeps`` is "kernels adopted at integrate").
+                micro_only_kids.add(ident)
                 continue
             g = outcome["e2e_gain_pct"]
             if g is not None and (best_e2e is None or g > best_e2e):
                 best_e2e = g
             if outcome["decision"] in ("REVERT", "REJECT"):
-                reverted += 1
+                reverted_kids.add(ident)
             else:
-                adopted += 1
+                adopted_kids.add(ident)
+        # An adoption outranks a revert or a micro-only KEEP for the same kernel.
+        reverted_kids -= adopted_kids
+        micro_only_kids -= adopted_kids | reverted_kids
+        adopted = len(adopted_kids)
+        reverted = len(reverted_kids)
+        micro_only = len(micro_only_kids)
         status = (
             "kept" if adopted > 0 else "reverted" if reverted > 0 else "attempted" if attempts > 0 else "not_attempted"
         )
@@ -377,6 +403,8 @@ def collect_capability_summary(
         }
         if reverted:
             row["reverts"] = reverted
+        if micro_only:
+            row["micro_only_keeps"] = micro_only
         if best_e2e is not None:
             row["e2e_gain_pct"] = best_e2e
         return row

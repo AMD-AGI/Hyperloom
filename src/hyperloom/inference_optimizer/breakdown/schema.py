@@ -410,6 +410,7 @@ class CapabilityEntry(TypedDict, total=False):
     status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
     attempts: int
     keeps: int  # kernels adopted at integrate (NOT micro-only KEEP)
+    micro_only_keeps: int  # micro-KEPT kernels that never reached integrate
     reverts: int  # micro-KEPT kernels reverted at integrate (e2e regressed)
     e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
     tested: int  # for backends/params/explore: distinct variants tested

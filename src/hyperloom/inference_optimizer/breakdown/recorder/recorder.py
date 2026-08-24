@@ -16,9 +16,15 @@ re-walk heterogeneous artifacts later. Each producer owns its own files:
   — the same, but merged into the prior fragment payload instead of replacing
   it, for producers that emit a fact in several partial updates.
 
-Writes are atomic (tmp + ``os.replace``) and filenames are unique per
-(section, producer), so this is safe across processes and on network
-filesystems (no shared-append dependency).
+Every write lands atomically (tmp + ``os.replace``) and filenames are unique
+per (section, producer), so :meth:`Recorder.record_item` and
+:meth:`Recorder.record_singleton` are safe across processes and on network
+filesystems (no shared-append dependency). The ``record_upsert_*`` methods are
+NOT: they read the current fragment, merge, and rewrite it under an in-process
+lock only, so two processes upserting the same (section, producer, key) can
+lose one side of the merge. Keep every upsert for a given fragment in one
+process -- today the coordinator is the only writer, and
+``test_breakdown_recorder_no_subprocess_writers`` keeps it that way.
 
 Every write funnels through :meth:`Recorder._write`, which is where the write
 trace is emitted; ``HYPERLOOM_BREAKDOWN_TRACE=1`` turns it on (see
@@ -27,6 +33,7 @@ trace is emitted; ``HYPERLOOM_BREAKDOWN_TRACE=1`` turns it on (see
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -332,12 +339,42 @@ class Recorder:
             The path of the written item fragment.
         """
         self._check_shape(section, "item")
+        seq: int | None = None
         if key:
-            filename = f"{_slug(section)}__{self._producer}__{_slug(key)}.json"
+            filename = self._stable_item_filename(section, key)
         else:
+            # One number serves both the filename and the envelope: someone
+            # reading ``seq=N`` in a trace line must be able to find the file
+            # that write produced.
             seq = self._next_seq()
             filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
-        return self._write(section, "item", payload, filename=filename)
+        return self._write(section, "item", payload, filename=filename, seq=seq)
+
+    def _stable_item_filename(self, section: str, key: str) -> str:
+        """Name the fragment file that holds ``key``'s item in ``section``.
+
+        ``_slug`` folds every character outside ``[A-Za-z0-9._-]`` to a dash, so
+        ``a/b``, ``a:b`` and ``a b`` all name the same file and the last writer
+        silently wins. A digest of the untouched key keeps the readable part
+        readable while making the name injective.
+
+        Fragments written before this digest existed keep their old name: a
+        resumed session must go on updating the file it already wrote, not
+        start a second one for the same key.
+
+        Args:
+            section (str): The breakdown section name.
+            key (str): The caller's stable item identity, unsanitized.
+
+        Returns:
+            str: The fragment filename to write within the spool directory.
+        """
+        prefix = f"{_slug(section)}__{self._producer}__{_slug(key)}"
+        digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
+        filename = f"{prefix}-{digest}.json"
+        if not (self._dir / filename).exists() and (self._dir / f"{prefix}.json").exists():
+            return f"{prefix}.json"
+        return filename
 
     def record_upsert_item(
         self,
@@ -355,7 +392,7 @@ class Recorder:
         self._check_shape(section, "item")
         if not key:
             raise ValueError("upsert key must be non-empty")
-        filename = f"{_slug(section)}__{self._producer}__{_slug(key)}.json"
+        filename = self._stable_item_filename(section, key)
         target = self._dir / filename
         merged: dict[str, Any] = {}
         with self._lock:
@@ -403,6 +440,7 @@ class Recorder:
         filename: str,
         operation: str = "write",
         previous: Mapping[str, Any] | None = None,
+        seq: int | None = None,
     ) -> Path:
         """Atomically write one fragment record to ``filename`` in the spool dir.
 
@@ -424,6 +462,9 @@ class Recorder:
             previous (Mapping[str, Any] | None): the payload that was already on
                 disk, so the trace can report what this write changed. ``None``
                 when there was nothing to merge into.
+            seq (int | None): a sequence number already drawn by the caller,
+                for callers that also spend it on the filename. ``None`` draws
+                a fresh one.
 
         Returns:
             Path: the path of the written fragment.
@@ -435,7 +476,7 @@ class Recorder:
         record = {
             "section": section,
             "kind": kind,
-            "seq": self._next_seq(),
+            "seq": self._next_seq() if seq is None else seq,
             "ts": now_iso(timespec="microseconds"),
             "producer": self._producer,
             "payload": dict(payload) if isinstance(payload, Mapping) else payload,
