@@ -3078,12 +3078,8 @@ class FrameworkPhase(PhaseHandler):
         positive gain becomes ``patch IMPROVES arch``; a REVERT becomes
         ``patch REVERTED_ON arch``) so the live link graph reflects the
         decision immediately, instead of only after the next mirror cron.
-
-        Native-only and best-effort: local mode supplies a native filesystem
-        graph client automatically; remote mode requires ``GBRAIN_KG_NATIVE``
-        (otherwise edges would be written as a ``## Facts`` fence that gbrain
-        ingest discards). All failures degrade silently via the ``*_safe``
-        wrappers so a KG hiccup never affects the run.
+        All failures degrade silently via the ``*_safe`` wrappers so a KG
+        hiccup never affects the run.
 
         Args:
             patch_file: The patch identifier (edge subject).
@@ -3098,7 +3094,7 @@ class FrameworkPhase(PhaseHandler):
             from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
 
             kg = get_kg_client()
-            if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
+            if kg is None or not kg.is_available():
                 return
             ss = self.shared_state
             hw = str(getattr(ss, "gpu_type", "") or getattr(ss, "hardware", "") or "")
@@ -3109,7 +3105,6 @@ class FrameworkPhase(PhaseHandler):
                     continue
                 if outcome == "KEEP" and gain_pct > 0:
                     kg.emit_fact_safe(
-                        page_slug="",
                         subject=patch_file,
                         predicate="IMPROVES",
                         object=arch,
@@ -3117,7 +3112,6 @@ class FrameworkPhase(PhaseHandler):
                     )
                 elif outcome == "REVERT":
                     kg.emit_fact_safe(
-                        page_slug="",
                         subject=patch_file,
                         predicate="REVERTED_ON",
                         object=arch,

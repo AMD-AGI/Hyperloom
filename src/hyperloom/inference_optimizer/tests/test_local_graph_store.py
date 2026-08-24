@@ -244,14 +244,13 @@ def test_local_factory_ignores_ambient_gbrain_credentials(tmp_path: Path, monkey
     monkeypatch.setattr(kgmod, "_GbrainMcp", ForbiddenGbrain)
 
     client = kgmod.build_kg_client_from_env()
-    assert client is not None and client._native is True
+    assert client is not None
     assert isinstance(client._mcp, LocalGraphStore)
     assert client._mcp.root == (tmp_path / "hyperloom" / "kg").resolve()
 
 
-@pytest.mark.parametrize("native", ("", "true"))
-def test_remote_factory_preserves_gbrain_native_compatibility(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: str
+def test_remote_factory_constructs_gbrain_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import kg_client as kgmod
 
@@ -267,12 +266,10 @@ def test_remote_factory_preserves_gbrain_native_compatibility(
     monkeypatch.setenv("KB_STORE_TOKEN", "kb-secret")
     monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.example")
     monkeypatch.setenv("GBRAIN_TOKEN", "secret")
-    monkeypatch.setenv("GBRAIN_KG_NATIVE", native)
     monkeypatch.setattr(kgmod, "_GbrainMcp", FakeGbrain)
 
     client = kgmod.build_kg_client_from_env()
     assert client is not None
-    assert client._native is (native == "true")
     assert calls == [("https://gbrain.example", "secret", 2.0)]
 
 
@@ -318,16 +315,14 @@ def test_get_kg_client_caches_build_failure_and_logs_once(
 
 
 def test_t0_enhancement_reads_local_native_edges(tmp_path: Path) -> None:
-    kg = KGClient(LocalGraphStore(tmp_path / "kg"), use_native_kg=True)
+    kg = KGClient(LocalGraphStore(tmp_path / "kg"))
     assert kg.emit_fact(
-        page_slug="",
         subject="bad_patch",
         predicate="REVERTED_ON",
         object="qwen3",
         properties={"error": "regression", "confidence": "0.9"},
     )
     assert kg.emit_fact(
-        page_slug="",
         subject="good_knob",
         predicate="IMPROVES",
         object="qwen3",
@@ -346,7 +341,7 @@ def test_t0_enhancement_reads_local_native_edges(tmp_path: Path) -> None:
 
 
 def test_empty_first_run_graph_leaves_t0_context_unchanged(tmp_path: Path) -> None:
-    kg = KGClient(LocalGraphStore(tmp_path / "kg"), use_native_kg=True)
+    kg = KGClient(LocalGraphStore(tmp_path / "kg"))
     context: dict[str, Any] = {"recipe_result": "still-available"}
     _enhance_warm_start_with_kg(
         context,
@@ -359,9 +354,8 @@ def test_empty_first_run_graph_leaves_t0_context_unchanged(tmp_path: Path) -> No
 
 
 def test_framework_emit_fact_shape_writes_local_edge(tmp_path: Path) -> None:
-    kg = KGClient(LocalGraphStore(tmp_path / "kg"), use_native_kg=True)
+    kg = KGClient(LocalGraphStore(tmp_path / "kg"))
     assert kg.emit_fact_safe(
-        page_slug="",
         subject="framework_patch.py",
         predicate="IMPROVES",
         object="Qwen3",

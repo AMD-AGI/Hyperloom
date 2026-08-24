@@ -10,34 +10,69 @@ from typing import Any
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import _build_warm_start_context
 from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import KGClient
 
-_FACTS_PAGE = """# KG
 
-## Facts
-- qwen3moeforcausallm VARIANT_OF qwen2forcausallm (distance: 1)
-- bad_patch REVERTED_ON qwen3moeforcausallm (loss: -5%, error: oom)
-- fp8_kernel_patch REVERTED_ON qwen2forcausallm (loss: -4.2%, error: perf_regression)
-- aiter_backend IMPROVES qwen3moeforcausallm (gain: +30%, confidence: 0.95, hw: mi300x, fw: sglang)
-"""
+class _NativeLinkMcp:
+    """Minimal native link-graph MCP backed by in-memory edges."""
 
-
-class _FakeMcp:
-    """Fake MCP returning a single facts page for all searches."""
-
-    def __init__(self, pages: dict[str, str]) -> None:
-        self.pages = pages
+    def __init__(self, pages: list[str] | None = None, edges: list[dict[str, Any]] | None = None) -> None:
+        self.pages: set[str] = set(pages or [])
+        self.edges: list[dict[str, Any]] = list(edges or [])
 
     def call(self, tool: str, args: dict[str, Any]) -> Any:
         if tool == "list_pages":
             return [{"slug": s} for s in self.pages]
-        if tool == "search":
-            return [{"slug": s} for s in self.pages]
         if tool == "get_page":
-            return {"content": self.pages.get(args.get("slug"), "")}
+            slug = args.get("slug")
+            return {"slug": slug, "body": "x"} if slug in self.pages else {"error": "page_not_found"}
+        if tool == "put_page":
+            self.pages.add(args["slug"])
+            return {"slug": args["slug"], "status": "created_or_updated"}
+        if tool == "add_link":
+            f, t, lt = args["from"], args["to"], args.get("link_type", "")
+            if f not in self.pages or t not in self.pages:
+                return {"error": "page_not_found"}
+            self.edges.append({"from_slug": f, "to_slug": t, "link_type": lt, "context": args.get("context", "{}")})
+            return {"status": "ok"}
+        if tool == "get_links":
+            return [dict(e) for e in self.edges if e["from_slug"] == args["slug"]]
+        if tool == "get_backlinks":
+            return [dict(e) for e in self.edges if e["to_slug"] == args["slug"]]
+        if tool == "traverse_graph":
+            return self._traverse(args)
         return {}
+
+    def _traverse(self, args: dict[str, Any]) -> list[dict[str, Any]]:
+        start, depth = args["slug"], int(args.get("depth", 5))
+        direction = args.get("direction", "out")
+        out: list[dict[str, Any]] = []
+        frontier = {start}
+        for hop in range(1, depth + 1):
+            nxt: set[str] = set()
+            for e in self.edges:
+                if direction in ("out", "both") and e["from_slug"] in frontier:
+                    out.append({**e, "depth": hop})
+                    nxt.add(e["to_slug"])
+                if direction in ("in", "both") and e["to_slug"] in frontier:
+                    out.append({**e, "depth": hop})
+                    nxt.add(e["from_slug"])
+            frontier = nxt
+            if not frontier:
+                break
+        return out
 
 
 def _kg() -> KGClient:
-    return KGClient(_FakeMcp({"kg": "---\ntype: recipe\n---\n\n" + _FACTS_PAGE}))
+    pages = [
+        "qwen3moeforcausallm", "qwen2forcausallm",
+        "bad_patch", "fp8_kernel_patch", "aiter_backend",
+    ]
+    edges = [
+        {"from_slug": "qwen3moeforcausallm", "to_slug": "qwen2forcausallm", "link_type": "variant_of", "context": '{"distance":"1"}'},
+        {"from_slug": "bad_patch", "to_slug": "qwen3moeforcausallm", "link_type": "reverted_on", "context": '{"loss":"-5%","error":"oom"}'},
+        {"from_slug": "fp8_kernel_patch", "to_slug": "qwen2forcausallm", "link_type": "reverted_on", "context": '{"loss":"-4.2%","error":"perf_regression"}'},
+        {"from_slug": "aiter_backend", "to_slug": "qwen3moeforcausallm", "link_type": "improves", "context": '{"gain":"+30%","confidence":"0.95","hw":"mi300x","fw":"sglang"}'},
+    ]
+    return KGClient(_NativeLinkMcp(pages=pages, edges=edges))
 
 
 def _ctx() -> dict[str, Any]:
@@ -66,7 +101,6 @@ def test_kg_advisory_block_related_arch() -> None:
     adv = ctx.get("advisory_blocked_patches", [])
     fp8 = [b for b in adv if b["patch_file"] == "fp8_kernel_patch"]
     assert len(fp8) == 1
-    # confidence decayed for indirect (related-arch) inference
     assert fp8[0]["confidence"] < 0.95
     assert fp8[0]["block_type"] == "advisory"
 
@@ -96,16 +130,14 @@ def test_current_remote_context_discards_kg_patch_blocks() -> None:
     assert ctx.get("recommended_knobs")
 
 
-_KNOB_FACTS_PAGE = """# KG
-
-## Facts
-- aiter_backend IMPROVES qwen3moeforcausallm (gain: +30%, confidence: 0.95, hw: mi300x, fw: sglang)
-- abc123 KNOB_IMPROVES qwen3moeforcausallm+fp8 (gain: +12%, args: --moe-runner-backend aiter, name: moe-aiter, keep_n: 3, hw: mi300x, fw: sglang)
-"""
-
-
 def _kg_knob() -> KGClient:
-    return KGClient(_FakeMcp({"kg": "---\ntype: recipe\n---\n\n" + _KNOB_FACTS_PAGE}))
+    pages = ["aiter_backend", "qwen3moeforcausallm", "abc123", "qwen3moeforcausallm_fp8"]
+    edges = [
+        {"from_slug": "aiter_backend", "to_slug": "qwen3moeforcausallm", "link_type": "improves", "context": '{"gain":"+30%","confidence":"0.95","hw":"mi300x","fw":"sglang"}'},
+        {"from_slug": "abc123", "to_slug": "qwen3moeforcausallm+fp8", "link_type": "knob_improves", "context": '{"gain":"+12%","args":"--moe-runner-backend aiter","name":"moe-aiter","keep_n":"3","hw":"mi300x","fw":"sglang"}'},
+    ]
+    extra_pages = pages + ["qwen3moeforcausallm+fp8"]
+    return KGClient(_NativeLinkMcp(pages=extra_pages, edges=edges))
 
 
 def _ctx_knob() -> dict[str, Any]:
@@ -162,7 +194,7 @@ def test_filter_warm_patches_keeps_low_confidence_advisory() -> None:
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     patches = [{"patch_file": "maybe.py", "measured_gain_pct": 5}]
-    advisory = [{"patch_file": "maybe.py", "confidence": 0.5}]  # below threshold
+    advisory = [{"patch_file": "maybe.py", "confidence": 0.5}]
     kept = Coordinator._filter_warm_patches_with_kg(SimpleNamespace(), patches, advisory, SimpleNamespace())
     assert [p["patch_file"] for p in kept] == ["maybe.py"]
 
@@ -246,10 +278,9 @@ def test_specialist_prompt_kg_section_placeholder_when_empty() -> None:
 
 
 class _RecordingKG:
-    """Fake native KG client recording emit_fact_safe calls."""
+    """Fake KG recording emit_fact_safe calls."""
 
-    def __init__(self, *, native: bool = True, available: bool = True) -> None:
-        self._native = native
+    def __init__(self, *, available: bool = True) -> None:
         self._available = available
         self.calls: list[dict[str, Any]] = []
 
@@ -309,22 +340,7 @@ def test_emit_kg_decision_revert_emits_reverted_on(monkeypatch: Any) -> None:
     assert kg.calls[0]["properties"]["error"] == "perf"
 
 
-def test_emit_kg_decision_skips_non_native(monkeypatch: Any) -> None:
-    kg = _RecordingKG(native=False)
-    _emit_decision(
-        monkeypatch,
-        kg,
-        patch_file="p",
-        outcome="KEEP",
-        gain_pct=5.0,
-        error_class="",
-        archs=["A"],
-    )
-    assert kg.calls == []
-
-
 def test_emit_kg_decision_keep_zero_gain_no_edge(monkeypatch: Any) -> None:
-    # A KEEP with non-positive gain is not an IMPROVES claim.
     kg = _RecordingKG()
     _emit_decision(
         monkeypatch,
