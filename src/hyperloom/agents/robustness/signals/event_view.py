@@ -3,12 +3,8 @@
 
 """Unified, sorted, deduplicated view over coordinator events and inbox items.
 
-Consumers should call :func:`build_event_view` once per tick and pass the
-resulting list to each detector.  The view is always in chronological
-(ascending seq) order with cross-source duplicates removed; coord rows win
-over inbox rows for the same seq because the coord payload is the raw
-JSON from the DB, while the inbox payload is reconstructed from the
-rendered prompt text and may be lossy.
+Detectors call :func:`build_event_view` once per tick instead of merging the
+two sources themselves.
 """
 
 from __future__ import annotations
@@ -21,16 +17,15 @@ from ..role.prompt_inputs import InboxItem
 
 @dataclass(frozen=True)
 class EventRow:
-    """One event from either the coordinator DB or the rendered inbox.
+    """One bus event, from the coordinator DB or the rendered inbox.
 
     Attributes:
-        seq: Monotonic sequence number from the ``events`` table, or
-            ``None`` when the row comes from a test fixture that does not
-            carry one.
+        seq: ``events.seq`` primary key, or ``None`` when the source supplied
+            none.
         agent: Name of the agent that emitted the event.
         topic: Message topic string.
         payload: Decoded payload dict.
-        ts: Timestamp, or ``None`` when not available.
+        ts: Timestamp, or ``None`` when the source carried none.
     """
 
     seq: int | None
@@ -44,53 +39,54 @@ def build_event_view(
     inbox: list[InboxItem],
     coordinator_events: list[dict[str, Any]],
 ) -> list[EventRow]:
-    """Build a chronological, deduplicated event view for one reactor tick.
+    """Merge both event sources into one chronological, deduplicated list.
 
-    Merges *coordinator_events* (already in ascending seq order after the
-    producer's reverse) and *inbox* items, deduplicates by seq (coord rows
-    win), then sorts so rows with a known seq come first (ascending) and rows
-    without a seq follow in their original input order (coord before inbox).
+    An inbox item is dropped when a coordinator row already carries its seq:
+    both render the same ``events`` row, but the coordinator payload is the
+    stored JSON while the inbox payload is re-parsed from prompt text.
+
+    Rows with a seq sort ascending ahead of rows without one, which keep their
+    input order so a caller supplying no seq still gets coordinator events
+    before inbox items.
 
     Args:
         inbox: Parsed inbox items from the reactor context.
-        coordinator_events: Coordinator event dicts, ascending seq order.
+        coordinator_events: Coordinator event dicts in ascending seq order.
 
     Returns:
-        A stable-sorted list of :class:`EventRow` ready for detector
-        consumption.
+        The merged rows, oldest first.
     """
-    seen_seq: set[int] = set()
     rows: list[EventRow] = []
+    seen: set[int] = set()
 
     for ev in coordinator_events:
         seq = ev.get("id")
         if isinstance(seq, int):
-            seen_seq.add(seq)
-        payload = ev.get("payload") or {}
-        if not isinstance(payload, dict):
-            payload = {}
+            seen.add(seq)
+        else:
+            seq = None
+        payload = ev.get("payload")
         rows.append(
             EventRow(
-                seq=seq if isinstance(seq, int) else None,
-                agent=str(ev.get("agent") or ""),
-                topic=str(ev.get("topic") or ""),
-                payload=payload,
+                seq=seq,
+                agent=ev.get("agent") or "",
+                topic=ev.get("topic") or "",
+                # _maybe_decode_json returns the raw column when it is not JSON.
+                payload=payload if isinstance(payload, dict) else {},
                 ts=ev.get("ts") or ev.get("timestamp"),
             )
         )
 
     for item in inbox:
-        seq = item.seq if isinstance(item.seq, int) else None
-        if seq is not None and seq in seen_seq:
+        if item.seq in seen:
             continue
-        payload = item.payload if isinstance(item.payload, dict) else {}
         rows.append(
             EventRow(
-                seq=seq,
-                agent=str(item.from_agent or ""),
-                topic=str(item.topic or ""),
-                payload=payload,
-                ts=payload.get("ts"),
+                seq=item.seq,
+                agent=item.from_agent,
+                topic=item.topic,
+                payload=item.payload,
+                ts=item.payload.get("ts"),
             )
         )
 
@@ -99,22 +95,18 @@ def build_event_view(
 
 
 def family_of(payload: dict[str, Any]) -> str:
-    """Infer the action family from an event payload.
-
-    Checks ``family`` first, falls back to ``kind``.
+    """Resolve an event payload's action family, falling back to ``kind``.
 
     Args:
         payload: An event payload dict.
 
     Returns:
-        The family string, or ``""`` when neither key is set.
+        The family, or ``""`` when neither key carries one.
     """
-    family = payload.get("family")
-    if isinstance(family, str) and family.strip():
-        return family.strip()
-    kind = payload.get("kind")
-    if isinstance(kind, str) and kind.strip():
-        return kind.strip()
+    for key in ("family", "kind"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return ""
 
 

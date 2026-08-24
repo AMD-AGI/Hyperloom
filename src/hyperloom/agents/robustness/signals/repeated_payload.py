@@ -20,7 +20,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
-from .event_view import build_event_view, family_of as _family_of
+from .event_view import EventRow, build_event_view, family_of
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -120,7 +120,8 @@ def evaluate_repeated_payload_signals(
             possibly empty.
     """
     cfg = config or RepeatedPayloadConfig()
-    events = _gather_events(ctx, data, cfg)
+    view = build_event_view(ctx.inbox, data.coordinator_events)
+    events = _gather_events(view, cfg)
     if not events:
         return []
     out: list[Symptom] = []
@@ -154,7 +155,7 @@ def _walk_streaks(
     by_family: dict[str, list[dict[str, Any]]] = {}
     current_hash: dict[str, str | None] = {}
     for ev in events:
-        family = _family_of(ev)
+        family = family_of(ev)
         if not family:
             continue
         state = str(ev.get("state") or "")
@@ -179,26 +180,18 @@ def _walk_streaks(
 
 
 def _gather_events(
-    ctx: ReactorContext,
-    data: SourceData,
+    view: list[EventRow],
     cfg: RepeatedPayloadConfig,
 ) -> list[dict[str, Any]]:
-    """Build a time-ordered list of ``delegated_result`` rows.
-
-    Filters the shared event view to ``delegated_result`` topics and
-    projects each row into the shape the streak walker expects, trimmed to
-    ``lookback_events``.
+    """Project the view's ``delegated_result`` rows into streak-walker shape.
 
     Args:
-        ctx: Reactor context providing the inbox.
-        data: Collected source data including coordinator events.
+        view: Shared event view for this tick.
         cfg: Repeated-payload configuration (lookback window).
 
     Returns:
-        The filtered, projected, and trimmed list of ``delegated_result``
-        rows, in chronological order.
+        The projected rows, oldest first, trimmed to ``lookback_events``.
     """
-    view = build_event_view(ctx.inbox, data.coordinator_events)
     combined: list[dict[str, Any]] = []
     for ev in view:
         if ev.topic != "delegated_result":

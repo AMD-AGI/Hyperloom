@@ -22,7 +22,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
-from .event_view import build_event_view, EventRow
+from .event_view import EventRow, build_event_view
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -152,11 +152,11 @@ def _unavailable_streak_symptoms(
 ) -> list[Symptom]:
     """Detect a streak of consecutive ``critic_unavailable`` verdicts.
 
-    Walks the shared event view in reverse (newest-first) to count the
-    trailing run of unavailable review verdicts.
+    Walks the view newest-first, counting until a verdict from a live critic
+    breaks the run.
 
     Args:
-        view: Shared event view for this tick in chronological order.
+        view: Shared event view for this tick.
         cfg: Critic-health configuration thresholds.
 
     Returns:

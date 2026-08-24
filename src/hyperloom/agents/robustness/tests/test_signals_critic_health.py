@@ -239,10 +239,7 @@ def test_custom_thresholds_apply():
     assert "critic_prune_stuck" in names
 
 
-# ---------------------------------------------------------------------------
-# Ordering regressions: these tests use explicit id fields so the shared view
-# sorts events by seq before the streak detector runs.
-# ---------------------------------------------------------------------------
+# critic_unavailable_streak ordering (ids route these through the sort path)
 
 
 def _rv(seq: int, source: str) -> dict:
