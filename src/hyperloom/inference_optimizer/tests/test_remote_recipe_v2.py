@@ -53,7 +53,10 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files
+from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    _Files,
+    build_publishable_recipe_config,
+)
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
@@ -119,6 +122,15 @@ def _state(tmp_path: Path) -> SimpleNamespace:
             {
                 "action": "explore",
                 "source_phase": "EXPLORE",
+                "candidate_extra_server_args": "--page-size 32",
+                "candidate_extra_envs": {"VLLM_EXPLORE_TEST": "1"},
+                "recipe_delta": {
+                    "extra_server_args": "--page-size 32",
+                    "extra_envs": {"VLLM_EXPLORE_TEST": "1"},
+                    "remove_args": [],
+                    "unset_envs": [],
+                    "args_mode": "append",
+                },
                 "extra_server_args": "--page-size 32",
                 "extra_envs": {"VLLM_EXPLORE_TEST": "1"},
                 "patch_path": str(explore_patch),
@@ -127,6 +139,15 @@ def _state(tmp_path: Path) -> SimpleNamespace:
             {
                 "action": "integrate_patch",
                 "source_phase": "FRAMEWORK_AGENT",
+                "candidate_extra_server_args": "--enable-foo",
+                "candidate_extra_envs": {"VLLM_FRAMEWORK_TEST": "1"},
+                "recipe_delta": {
+                    "extra_server_args": "--enable-foo",
+                    "extra_envs": {"VLLM_FRAMEWORK_TEST": "1"},
+                    "remove_args": [],
+                    "unset_envs": [],
+                    "args_mode": "append",
+                },
                 "extra_server_args": "--page-size 32 --enable-foo",
                 "extra_envs": {"VLLM_FRAMEWORK_TEST": "1"},
                 "patch_path": str(framework_patch),
@@ -198,6 +219,13 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert bundle.knowledge["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
+    assert value["config"] == {
+        "extra_server_args": "--page-size 32 --enable-foo",
+        "extra_envs": {
+            "VLLM_EXPLORE_TEST": "1",
+            "VLLM_FRAMEWORK_TEST": "1",
+        },
+    }
     assert value["explore"]["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
     assert value["framework"]["extra_envs"] == {"VLLM_FRAMEWORK_TEST": "1"}
     assert "config" not in value["explore"]
@@ -225,6 +253,128 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
+
+
+def test_publishable_config_excludes_runtime_and_enablement_bases() -> None:
+    state = SimpleNamespace(
+        current_best={
+            "effective_extra_server_args": "--hld-only --baseline-only",
+            "extra_envs": {"SGLANG_ENABLEMENT_ONLY": "1"},
+        },
+        warm_replay_outcome={},
+        optimization_stack=[
+            {
+                "action": "integrate_patch",
+                "baseline_enablement": True,
+                "attribution_eligible": False,
+                "recipe_delta": {
+                    "extra_server_args": "--enablement-only",
+                    "extra_envs": {"SGLANG_ENABLEMENT_ONLY": "1"},
+                },
+            },
+            {
+                "action": "explore",
+                "variant_name": "optimized",
+                "candidate_extra_server_args": "--page-size 64",
+                "candidate_extra_envs": {"VLLM_OPTIMIZED": "1"},
+                "recipe_delta": {
+                    "extra_server_args": "--page-size 64",
+                    "extra_envs": {"VLLM_OPTIMIZED": "1"},
+                    "args_mode": "append",
+                },
+            },
+        ],
+    )
+
+    assert build_publishable_recipe_config(state) == {
+        "extra_server_args": "--page-size 64",
+        "extra_envs": {"VLLM_OPTIMIZED": "1"},
+    }
+
+
+def test_publishable_config_flattens_replayed_base_and_new_delta() -> None:
+    state = SimpleNamespace(
+        warm_replay_outcome={"status": "reproduced"},
+        optimization_stack=[
+            {
+                "action": "replay_warm_recipe",
+                "recipe_delta": {
+                    "extra_server_args": "--page-size 32",
+                    "extra_envs": {"VLLM_PRIOR": "1"},
+                    "args_mode": "replace",
+                },
+            },
+            {
+                "action": "explore",
+                "variant_name": "new-keep",
+                "candidate_extra_server_args": "--enable-foo",
+                "candidate_extra_envs": {"VLLM_NEW": "1"},
+                "recipe_delta": {
+                    "extra_server_args": "--enable-foo",
+                    "extra_envs": {"VLLM_NEW": "1"},
+                    "args_mode": "append",
+                },
+            },
+        ],
+    )
+
+    assert build_publishable_recipe_config(state) == {
+        "extra_server_args": "--page-size 32 --enable-foo",
+        "extra_envs": {"VLLM_PRIOR": "1", "VLLM_NEW": "1"},
+    }
+
+
+def test_publishable_config_applies_remove_and_unset_without_dropping_base() -> None:
+    state = SimpleNamespace(
+        warm_replay_outcome={},
+        optimization_stack=[
+            {
+                "action": "explore",
+                "recipe_delta": {
+                    "extra_server_args": "--keep 1 --drop 2",
+                    "extra_envs": {"VLLM_KEEP": "1", "VLLM_DROP": "1"},
+                    "args_mode": "append",
+                },
+            },
+            {
+                "action": "explore",
+                "recipe_delta": {
+                    "extra_server_args": "--new 3",
+                    "extra_envs": {"VLLM_NEW": "1"},
+                    "remove_args": ["--drop"],
+                    "unset_envs": ["VLLM_DROP"],
+                    "args_mode": "append",
+                },
+            },
+        ],
+    )
+
+    assert build_publishable_recipe_config(state) == {
+        "extra_server_args": "--keep 1 --new 3",
+        "extra_envs": {"VLLM_KEEP": "1", "VLLM_NEW": "1"},
+    }
+
+
+def test_publishable_config_rejects_unstructured_framework_args_env() -> None:
+    state = SimpleNamespace(
+        warm_replay_outcome={},
+        optimization_stack=[
+            {
+                "action": "explore",
+                "variant_name": "bad-delta",
+                "recipe_delta": {
+                    "extra_server_args": "",
+                    "extra_envs": {"EXTRA_SGLANG_ARGS": "--page-size 64"},
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(
+        RemoteRecipeValidationError,
+        match="extra_server_args, not envs",
+    ):
+        build_publishable_recipe_config(state)
 
 
 def test_geak_recipe_keeps_kernel_partition_empty(tmp_path: Path) -> None:

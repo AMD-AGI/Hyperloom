@@ -320,17 +320,103 @@ def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _config_from_current_best(state: Any) -> dict[str, Any]:
-    current = _mapping(getattr(state, "current_best", {}))
-    args = str(
-        current.get("effective_extra_server_args")
-        or current.get("extra_server_args")
-        or ""
-    ).strip()
+def _apply_recipe_delta(
+    config: dict[str, Any],
+    delta: Mapping[str, Any],
+) -> dict[str, Any]:
+    from ...actions.executors._grid_server_args import compose_server_args
+    from ...loop.coordinator_helpers import _dedupe_extra_server_args
+
+    mode = str(delta.get("args_mode") or "append").strip().lower()
+    if mode not in {"append", "replace"}:
+        raise RemoteRecipeValidationError(
+            f"unsupported recipe args_mode: {mode!r}"
+        )
+    args = compose_server_args(
+        inherited_args=str(config.get("extra_server_args") or ""),
+        variant_extra_args=str(delta.get("extra_server_args") or ""),
+        remove_args=delta.get("remove_args"),
+        args_mode=mode,
+    )
+    envs = dict(_mapping(config.get("extra_envs")))
+    for key in delta.get("unset_envs") or []:
+        envs.pop(str(key), None)
+    raw_envs = _mapping(delta.get("extra_envs"))
+    framework_arg_envs = sorted(
+        key
+        for key in raw_envs
+        if key.startswith("EXTRA_") and key.endswith("_ARGS")
+    )
+    if framework_arg_envs:
+        raise RemoteRecipeValidationError(
+            "recipe_delta must carry framework arguments in "
+            f"extra_server_args, not envs: {framework_arg_envs!r}"
+        )
+    envs.update(raw_envs)
     return {
-        "extra_server_args": sanitize_publish_server_args(args),
+        "extra_server_args": _dedupe_extra_server_args(args),
+        "extra_envs": envs,
+    }
+
+
+def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
+    """Build the cross-session optimization layer, excluding runtime bases."""
+    config: dict[str, Any] = {
+        "extra_server_args": "",
+        "extra_envs": {},
+    }
+    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
+    for raw in getattr(state, "optimization_stack", []) or []:
+        entry = _mapping(raw)
+        if not entry:
+            continue
+        action = str(entry.get("action") or "").strip().lower()
+        if action == "replay_warm_recipe":
+            if str(outcome.get("status") or "") != "reproduced":
+                raise RemoteRecipeValidationError(
+                    "replay_warm_recipe stack entry was not reproduced"
+                )
+            raw_delta = entry.get("recipe_delta")
+            if not isinstance(raw_delta, Mapping):
+                raise RemoteRecipeValidationError(
+                    "reproduced warm replay is missing recipe_delta"
+                )
+            delta = dict(raw_delta)
+            config = _apply_recipe_delta(
+                {"extra_server_args": "", "extra_envs": {}},
+                delta,
+            )
+            continue
+        if (
+            action in _IGNORED_ACTIONS
+            or entry.get("baseline_enablement")
+            or entry.get("attribution_eligible") is False
+            or entry.get("recipe_publishable") is False
+            or _entry_origin(entry) == "kernel"
+        ):
+            continue
+        delta = _mapping(entry.get("recipe_delta"))
+        config_signal = bool(
+            str(entry.get("candidate_extra_server_args") or "").strip()
+            or _mapping(entry.get("candidate_extra_envs"))
+            or entry.get("remove_args")
+            or entry.get("unset_envs")
+            or str(entry.get("args_mode") or "").strip().lower() == "replace"
+        )
+        if not delta:
+            if config_signal:
+                raise RemoteRecipeValidationError(
+                    "publishable config KEEP is missing recipe_delta: "
+                    f"action={action!r} variant={entry.get('variant_name')!r}"
+                )
+            continue
+        config = _apply_recipe_delta(config, delta)
+    return {
+        "extra_server_args": sanitize_publish_server_args(
+            str(config.get("extra_server_args") or "")
+        ),
         "extra_envs": sanitize_publish_env_mapping(
-            _mapping(current.get("extra_envs"))
+            _mapping(config.get("extra_envs"))
         ),
     }
 
@@ -705,6 +791,8 @@ def has_new_keep(state: Any) -> bool:
         if action in _IGNORED_ACTIONS:
             continue
         if raw.get("baseline_enablement"):
+            continue
+        if raw.get("recipe_publishable") is False:
             continue
         return True
     return False
@@ -1168,7 +1256,7 @@ def build_remote_knowledge(
         }
     )
     value = {
-        "config": _config_from_current_best(state),
+        "config": build_publishable_recipe_config(state),
         "explore": explore_value,
         "framework": framework_value,
         "kernel": kernel_value,
@@ -1362,6 +1450,7 @@ __all__ = [
     "build_kernel_fusion_value",
     "build_kernel_gemm_value",
     "build_kernel_rewrite_value",
+    "build_publishable_recipe_config",
     "build_remote_knowledge",
     "has_replay_material",
     "knowledge_to_warm_recipe",
