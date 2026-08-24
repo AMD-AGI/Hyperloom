@@ -54,6 +54,7 @@ class _FakeRun:
 # supports / registry
 # ---------------------------------------------------------------------------
 
+
 def test_vllm_supports_missing_arch_not_resource_constraint():
     a = VllmRocmAdapter()
     assert a.supports(_gap(MISSING_MODEL_ARCH)) is True
@@ -86,6 +87,7 @@ def test_get_adapter_case_insensitive():
 # ---------------------------------------------------------------------------
 # build_stack_action: ROCm index gating (never PyPI CUDA fallback)
 # ---------------------------------------------------------------------------
+
 
 def test_vllm_no_rocm_index_returns_none(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", raising=False)
@@ -138,6 +140,7 @@ def test_sglang_no_source_no_index_returns_none(monkeypatch):
 # ---------------------------------------------------------------------------
 # provision + ROCm verification (mocked run)
 # ---------------------------------------------------------------------------
+
 
 def _wheel_action() -> "ad.EnablementStackAction":
     from hyperloom.orchestrator.framework.stack_actions import EnablementStackAction
@@ -217,6 +220,7 @@ def test_vllm_provision_requires_index(tmp_path):
 # ---------------------------------------------------------------------------
 # verify helpers
 # ---------------------------------------------------------------------------
+
 
 def test_verify_torch_is_rocm_true_false():
     assert ad.verify_torch_is_rocm("/py", run=_FakeRun(default_rc=0)) is True

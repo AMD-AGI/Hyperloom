@@ -4,7 +4,7 @@ myst:
         "description": "How to optimize your own workload with Hyperloom using --framework custom. Covers the code checkout, the entrypoint contract, the mandatory quality gate, and pinning knobs with --extra-env."
         "keywords": "Hyperloom, custom framework, scriptable workload, quality gate, AMD GPU, ROCm, framework rewrite, host probe, extra-env, optimization"
 ---
-# Optimize your own workload
+# Optimize your own Hyperloom workload
 
 Every other framework in the registry describes a workload Hyperloom knows: its
 upstream, its entrypoint, the knobs worth exploring. `--framework custom`
@@ -125,8 +125,8 @@ margin, then require later legs to stay inside it) is the pattern that holds up.
 `--extra-env` carries the knobs your script reads. Hyperloom interprets none of
 them, but their semantics matter:
 
-> Whatever you pin becomes part of the **measurement contract**. A variant may
-> add keys but may not overwrite a pinned one, because the baseline number was
+> Whatever you pin becomes part of the **measurement contract**. A variant can
+> add keys but must not overwrite a pinned one, because the baseline number was
 > measured with it.
 
 So pin what must not move, and leave the rest for exploration. This is also what
@@ -156,7 +156,7 @@ Because a scriptable framework has no server, the authoring arm dispatches
 optimization surface: an autoregressive video rollout has no scheduler, no
 continuous batching and no KV-cache admission policy, and its wins are the
 redundant work its loop structure creates. The specialist works from the pattern
-catalogue in
+catalog in
 [`framework_rewrite_patterns.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/references/framework_rewrite_patterns.md).
 
 ### Evidence: the host probe

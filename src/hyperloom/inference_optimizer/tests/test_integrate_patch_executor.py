@@ -139,9 +139,9 @@ def test_framework_run_eval_envs_no_force_without_baseline():
 
 def test_framework_run_eval_envs_forces_only_for_eval_origin_enablement():
     # Eval-origin fails closed without a raw accuracy; boot-origin stays provisional.
-    assert IntegratePatchExecutor._framework_run_eval_envs(
-        {"enablement": True, "enablement_origin": "eval"}
-    ) == {"RUN_EVAL": "true"}
+    assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True, "enablement_origin": "eval"}) == {
+        "RUN_EVAL": "true"
+    }
     assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True, "enablement_origin": "launch"}) is None
     assert IntegratePatchExecutor._framework_run_eval_envs({"enablement": True}) is None
 
@@ -666,8 +666,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
     workspace.mkdir(parents=True)
     artifact = workspace / "a8w8_blockscale_tuned_gemm_qwen3_14b.csv"
     artifact.write_text(
-        "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n"
-        + row,
+        "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n" + row,
         encoding="utf-8",
     )
     target = tmp_path / "fw" / "aiter" / "configs" / "model_configs" / artifact.name
@@ -965,9 +964,7 @@ async def test_enablement_eval_origin_keeps_at_or_above_floor(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
-async def test_enablement_eval_origin_reverts_when_accuracy_has_no_task_or_metric(
-    tmp_path: Path, monkeypatch
-):
+async def test_enablement_eval_origin_reverts_when_accuracy_has_no_task_or_metric(tmp_path: Path, monkeypatch):
     """A score with no task/metric did not come from a real eval.
 
     The candidate's own run is the only correctness authority; a bare number

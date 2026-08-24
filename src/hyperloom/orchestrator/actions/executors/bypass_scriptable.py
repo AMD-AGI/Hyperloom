@@ -103,9 +103,7 @@ def resolve_scriptable_script(
     Returns:
         The resolved script path, or None when not found.
     """
-    for candidate in scriptable_script_candidates(
-        framework, runner_type, inferencex_root, bench
-    ):
+    for candidate in scriptable_script_candidates(framework, runner_type, inferencex_root, bench):
         if candidate.is_file():
             return candidate
     return None
@@ -180,9 +178,7 @@ def run_scriptable(
     script = resolve_scriptable_script(framework, runner_type, inferencex_root, bench)
     if script is None:
         name = _scriptable_script_name(framework, runner_type)
-        candidates = scriptable_script_candidates(
-            framework, runner_type, inferencex_root, bench
-        )
+        candidates = scriptable_script_candidates(framework, runner_type, inferencex_root, bench)
         tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
         error = f"scriptable benchmark script not found for {name}"
         # Pre-spawn miss never opens Popen, so there is no child stderr. Write

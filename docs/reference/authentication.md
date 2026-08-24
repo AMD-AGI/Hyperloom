@@ -9,7 +9,7 @@ myst:
 This is the single authoritative reference for credentials and
 environment configuration in Hyperloom. If any other document
 (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`,
-`docs/conceptual/kernel-execution-path.md`,
+`docs/reference/kernel-execution-path.md`,
 `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
 page, this page wins. Open an issue against the contradicting file.
 
@@ -25,7 +25,7 @@ Hyperloom needs at most two classes of configuration:
 
 Hyperloom never borrows one provider's key or endpoint for the other. A side is
 configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, or by
-`OPENAI_BASE_URL` + `OPENAI_API_KEY`, or both. A side you leave unset simply
+`OPENAI_BASE_URL` + `OPENAI_API_KEY`, or both. A side you leave unset
 disables the features that speak its protocol; a half-configured side fails
 preflight rather than being silently completed from the other provider.
 
@@ -156,7 +156,7 @@ export CODEX_MODEL=model-id-on-the-openai-side
 ### Anthropic-side credential forms
 
 The Anthropic side accepts three credentials. When more than one is set, the
-Claude CLI picks the first of these it finds, so a lower one is simply unused:
+Claude CLI picks the first of these it finds, so a lower one is unused:
 
 | Variable                  | Billing                        | Obtained from        |
 |---------------------------|--------------------------------|----------------------|
@@ -165,7 +165,7 @@ Claude CLI picks the first of these it finds, so a lower one is simply unused:
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Max/Pro subscription    | `claude setup-token` |
 
 A subscription token alone is a complete Anthropic side: it implies
-`https://api.anthropic.com`, so `ANTHROPIC_BASE_URL` may stay unset. Hyperloom
+`https://api.anthropic.com`, so `ANTHROPIC_BASE_URL` can stay unset. Hyperloom
 passes it through verbatim and never copies it into either API-key variable or
 into the `~/.claude/config.json` `primaryApiKey` field, because the CLI would
 then bill API credits instead of the subscription. For the same reason preflight
@@ -208,7 +208,7 @@ store structured values.
 `${VAR}` references are expanded by Hyperloom from the same environment, so a
 single copy of the secret is enough. Quote the value so the space and the colon
 survive: use single quotes when exporting in a shell, and double quotes in
-`.env`, which setup and the launch scripts may load with `source`.
+`.env`, which setup and the launch scripts might load with `source`.
 
 ```bash
 export ANTHROPIC_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy
@@ -218,7 +218,7 @@ export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}
 
 The Anthropic side reads only `ANTHROPIC_CUSTOM_HEADERS`. The OpenAI side reads
 `OPENAI_CUSTOM_HEADERS` whenever you set `OPENAI_BASE_URL` explicitly — that
-endpoint may be a different host, whose headers Hyperloom will not guess at. Only
+endpoint might be a different host, whose headers Hyperloom will not guess at. Only
 when the OpenAI base URL was *derived* from `ANTHROPIC_BASE_URL` (one gateway, no
 explicit OpenAI endpoint) does the OpenAI client fall back to
 `ANTHROPIC_CUSTOM_HEADERS`, because then both protocols are the same host and the
@@ -238,9 +238,9 @@ The following credentials are optional and only needed for specific backends.
 ### LLM RCA in robustness-agent
 
 `robustness-agent`'s LLM root-cause-analysis engine activates when the
-discovered provider can actually authenticate a call. For the OpenAI side that
+discovered provider can actually authenticate a call. For the OpenAI side, that
 is a base URL and API key (normally through the aliases above). For the
-Anthropic side it is a usable transport, so a `CLAUDE_CODE_OAUTH_TOKEN` host
+Anthropic side, it's a usable transport, so a `CLAUDE_CODE_OAUTH_TOKEN` host
 qualifies with neither a base URL nor a key — the Claude CLI spends the token
 itself — provided that CLI is installed.
 

@@ -137,7 +137,9 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
     envs = _extract_envs(text)
     line = _find_entrypoint_line(text, framework)
     if not line:
-        log.warning("reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source)
+        log.warning(
+            "reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source
+        )
         return ReferenceRecipe(server_args="", envs=envs, model=None)
 
     server_args, model = _extract_server_args(shlex.split(line), framework)
@@ -379,9 +381,7 @@ def render_reference_script(
 
     if runtime:
         lines.append("")
-        lines.append(
-            f"# NOTE: this enablement round used an isolated attempt venv at {runtime!r}."
-        )
+        lines.append(f"# NOTE: this enablement round used an isolated attempt venv at {runtime!r}.")
         lines.append("# That layer is not archived and cannot be reproduced by this script.")
         lines.append("# The script reproduces only the install commands, patches, and server args.")
 

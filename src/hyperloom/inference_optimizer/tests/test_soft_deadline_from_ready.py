@@ -211,8 +211,7 @@ class TestARoundIsPricedByItsTwoParts:
         assert post_ready is not None
         boot_sec = runtime_sec - post_ready
         assert boot_sec >= 2.5, (
-            f"the stale log timed the boot: read {boot_sec:.2f}s of boot for a round "
-            f"that spent 3s on it"
+            f"the stale log timed the boot: read {boot_sec:.2f}s of boot for a round that spent 3s on it"
         )
 
     def test_the_split_does_not_depend_on_an_unrelated_watchdog(self, tmp_path):
@@ -287,9 +286,7 @@ class TestARoundIsPricedByItsTwoParts:
             runtime_sec=runtime_sec,
         )
         assert agreed is not None
-        assert skewed == pytest.approx(agreed), (
-            f"a five-second clock disagreement moved the boot: {skewed} vs {agreed}"
-        )
+        assert skewed == pytest.approx(agreed), f"a five-second clock disagreement moved the boot: {skewed} vs {agreed}"
 
     def test_a_round_that_never_came_up_is_not_priced(self, tmp_path):
         """No ready marker means no split, reported as unknown rather than guessed."""

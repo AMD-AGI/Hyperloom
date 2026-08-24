@@ -813,9 +813,7 @@ def _session_duration_seconds(
         int: The duration, or ``0`` when it cannot be established.
     """
     duration_s = _measured_duration_seconds(
-        session_section.get("start_ts")
-        or session_section.get("created_at_utc")
-        or manifest.get("created_at_utc"),
+        session_section.get("start_ts") or session_section.get("created_at_utc") or manifest.get("created_at_utc"),
         session_section.get("ended_at_utc"),
         session_section.get("stop_reason"),
     )
@@ -1531,7 +1529,13 @@ def _build_attempt_summary(manifest_entry: dict[str, Any]) -> dict[str, Any]:
     artifacts = manifest_entry.get("built_artifacts") or []
     return {
         "component": str(action.get("component") or manifest_entry.get("component") or ""),
-        "ref": str(installed.get("aiter_ref") or installed.get("vllm_ref") or installed.get("sgl_kernel_ref") or action.get("ref") or ""),
+        "ref": str(
+            installed.get("aiter_ref")
+            or installed.get("vllm_ref")
+            or installed.get("sgl_kernel_ref")
+            or action.get("ref")
+            or ""
+        ),
         "gpu_arch": str(installed.get("arch") or action.get("gpu_arch") or ""),
         "max_jobs": int(action.get("max_jobs") or 0),
         "ok": bool(manifest_entry.get("ok")),
@@ -1591,14 +1595,7 @@ def collect_enablement(
     # Detect eval-origin by active origin OR persisted kind from a completed run.
     have_eval = origin == "eval" or bool(eval_kind)
     engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_actions or have_eval)
-    if not (
-        engaged
-        or mode == "off"
-        or have_active
-        or have_attempts
-        or have_build_manifest
-        or have_last_failure
-    ):
+    if not (engaged or mode == "off" or have_active or have_attempts or have_build_manifest or have_last_failure):
         return {}
 
     out: dict[str, Any] = {
@@ -1667,7 +1664,9 @@ def collect_enablement(
         out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
     setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
     if setting_script_path.is_file():
-        out["setting_script"] = str(_rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh")
+        out["setting_script"] = str(
+            _rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
+        )
     accepted_config = _eg(state, "accepted_config")
     if isinstance(accepted_config, dict) and accepted_config:
         out["accepted_config"] = {

@@ -253,6 +253,7 @@ def stream_events(
     Yields:
         Parsed trace-event dicts.
     """
+
     def _record(message: str) -> None:
         """Append one structural error when the caller requested diagnostics."""
         if errors is not None:
@@ -305,9 +306,7 @@ def stream_events(
                 _record("traceEvents array not found")
                 return
             if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-                _record(
-                    f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters"
-                )
+                _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
                 return
             search_from = max(0, len(buf) - len(key) + 1)
             _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
@@ -318,19 +317,14 @@ def stream_events(
             if eof:
                 break
             if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-                _record(
-                    f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters"
-                )
+                _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
                 return
             _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
         while pos < len(buf) and buf[pos] in " \t\r\n":
             pos += 1
             if pos == len(buf) and not eof:
                 if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-                    _record(
-                        "traceEvents prefix exceeds "
-                        f"{_MAX_TRACE_PREFIX_CHARS} characters"
-                    )
+                    _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
                     return
                 _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
         if pos < len(buf) and buf[pos] == ":":
@@ -347,9 +341,7 @@ def stream_events(
             _record("traceEvents array opener not found")
             return
         if len(buf) >= _MAX_TRACE_PREFIX_CHARS:
-            _record(
-                f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters"
-            )
+            _record(f"traceEvents prefix exceeds {_MAX_TRACE_PREFIX_CHARS} characters")
             return
         _refill(_MAX_TRACE_PREFIX_CHARS - len(buf))
     if buf[pos] != "[":
@@ -413,21 +405,13 @@ def stream_events(
                     break
                 buffered = len(buf) - invalid_start
                 if buffered >= _MAX_EVENT_CHARS:
-                    _record(
-                        "traceEvents element exceeds "
-                        f"{_MAX_EVENT_CHARS} characters after {emitted} event(s)"
-                    )
+                    _record(f"traceEvents element exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
                     return
                 if eof:
-                    _record(
-                        f"traceEvents array unterminated after {emitted} event(s)"
-                    )
+                    _record(f"traceEvents array unterminated after {emitted} event(s)")
                     return
                 _refill(_MAX_EVENT_CHARS - buffered)
-            _record(
-                f"traceEvents element malformed after {emitted} event(s): "
-                "expected an object"
-            )
+            _record(f"traceEvents element malformed after {emitted} event(s): expected an object")
             pos = boundary
             _trim_consumed()
             continue
@@ -462,40 +446,25 @@ def stream_events(
                 break
             buffered = len(buf) - object_start
             if buffered >= _MAX_EVENT_CHARS:
-                _record(
-                    f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters "
-                    f"after {emitted} event(s)"
-                )
+                _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
                 return
             if eof:
-                _record(
-                    f"traceEvents object truncated after {emitted} event(s): "
-                    "unterminated object"
-                )
+                _record(f"traceEvents object truncated after {emitted} event(s): unterminated object")
                 return
             _refill(_MAX_EVENT_CHARS - buffered)
 
         if object_end - object_start > _MAX_EVENT_CHARS:
-            _record(
-                f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters "
-                f"after {emitted} event(s)"
-            )
+            _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
             return
         try:
             obj, decoded_end = _DECODER.raw_decode(buf, object_start)
         except json.JSONDecodeError as exc:
-            _record(
-                f"traceEvents object malformed after {emitted} event(s): "
-                f"{exc.msg}"
-            )
+            _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
             pos = object_end
             _trim_consumed()
             continue
         if decoded_end != object_end or not isinstance(obj, dict):
-            _record(
-                f"traceEvents object malformed after {emitted} event(s): "
-                "invalid object boundary"
-            )
+            _record(f"traceEvents object malformed after {emitted} event(s): invalid object boundary")
             pos = object_end
             _trim_consumed()
             continue

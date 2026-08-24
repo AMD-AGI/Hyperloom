@@ -186,9 +186,7 @@ _RULES: tuple[_Rule, ...] = (
             # installed transformers (or vLLM's ModelConfig validation wrapping
             # it). Captures the model_type token so the bridge can name it. This
             # is the DeepSeek-V4 "brand-new arch on an old stack" signature.
-            re.compile(
-                r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+Transformers\s+does\s+not\s+recognize"
-            ),
+            re.compile(r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+Transformers\s+does\s+not\s+recognize"),
             re.compile(r"does\s+not\s+recognize\s+this\s+architecture"),
             re.compile(r"[Tt]he\s+checkpoint\s+.*?model\s+type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?"),
         ),
@@ -314,7 +312,9 @@ _RULES: tuple[_Rule, ...] = (
         kind=TOKENIZER_ERROR,
         bridge_layer="framework",
         patterns=(
-            re.compile(r"[Tt]okenizer(?:\s+mode)?\s+['\"]?([A-Za-z0-9_]+)['\"]?\s+(?:is\s+)?not\s+(?:supported|found|recognized)"),
+            re.compile(
+                r"[Tt]okenizer(?:\s+mode)?\s+['\"]?([A-Za-z0-9_]+)['\"]?\s+(?:is\s+)?not\s+(?:supported|found|recognized)"
+            ),
             re.compile(r"[Uu]nknown\s+tokenizer\s+(?:class|type|backend):\s*['\"]?([A-Za-z0-9_]+)"),
             re.compile(r"[Ff]ailed\s+to\s+(?:load|initialize)\s+tokenizer"),
             re.compile(r"[Cc]annot\s+(?:load|find|locate)\s+tokenizer"),

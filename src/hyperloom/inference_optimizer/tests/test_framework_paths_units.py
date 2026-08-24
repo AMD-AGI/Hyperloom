@@ -691,24 +691,15 @@ def test_detect_strategy_accepts_dist_packages_vllm_py(
 # but never re-JIT'd -> integrate saw a stale binary and REVERT'd
 # (fault_attempts_exhausted; observed 07.25-07.30 on Qwen3-8B/Llama/Mixtral).
 
-_AITER_META_CU = Path(
-    "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu"
-)
-_AITER_META_CPP_ITFS_CU = Path(
-    "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu"
-)
+_AITER_META_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu")
+_AITER_META_CPP_ITFS_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu")
 
 
 def test_target_is_in_aiter_csrc_matches_aiter_meta(apply_tool) -> None:
     # split-wheel layout must be recognised as an aiter csrc source
     assert apply_tool._target_is_in_aiter_csrc(_AITER_META_CU) is True
     # classic layout still recognised
-    assert (
-        apply_tool._target_is_in_aiter_csrc(
-            Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")
-        )
-        is True
-    )
+    assert apply_tool._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
     # unrelated source stays out
     assert (
         apply_tool._target_is_in_aiter_csrc(
@@ -920,14 +911,10 @@ class TestWarmReplayPatchRootResolution:
         assert resolution.source == "env"
 
     def test_patch_sources_skip_entries_without_path_or_content(self):
-        assert fp.warm_replay_patch_sources(
-            [{"measured_gain_pct": 1.0}, "not-a-dict", {"patch_content": "   "}]
-        ) == ()
+        assert fp.warm_replay_patch_sources([{"measured_gain_pct": 1.0}, "not-a-dict", {"patch_content": "   "}]) == ()
 
     def test_patch_sources_prefer_ref_over_file(self):
-        sources = fp.warm_replay_patch_sources(
-            [{"patch_ref": "/abs/a.patch", "patch_file": "framework/a.patch"}]
-        )
+        sources = fp.warm_replay_patch_sources([{"patch_ref": "/abs/a.patch", "patch_file": "framework/a.patch"}])
         assert [str(source.path) for source in sources] == ["/abs/a.patch"]
 
     def test_kernel_allowlist_miss_is_reported(self, monkeypatch, tmp_path):
@@ -949,4 +936,3 @@ class TestWarmReplayPatchRootResolution:
         resolution = fp.resolve_warm_replay_kernel_root(patch_paths=[patch])
         assert resolution.root == ""
         assert resolution.reason == "kernel_patch_root_not_in_allowlist"
-

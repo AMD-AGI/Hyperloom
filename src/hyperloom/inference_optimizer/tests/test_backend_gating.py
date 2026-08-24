@@ -92,9 +92,7 @@ def test_install_sh_gates_magpie_calls():
     # eval flag from the InferenceX benchmark copies, so it must run AFTER
     # ensure_inferencex (which exports $INFERENCEX_PATH) and is gated on
     # non-bypass by its own guard rather than the first else branch.
-    patch_guard_idx = text.index(
-        'if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then', gate_idx
-    )
+    patch_guard_idx = text.index('if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then', gate_idx)
     patch_idx = text.index("ensure_magpie_atomic_scripts_patch\n", gate_idx)
     patch_fi_idx = text.index("\nfi\n", patch_guard_idx)
     assert inferencex_idx < patch_guard_idx < patch_idx < patch_fi_idx

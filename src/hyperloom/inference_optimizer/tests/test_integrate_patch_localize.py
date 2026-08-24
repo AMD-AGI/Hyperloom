@@ -40,14 +40,13 @@ _PY_DIFF = (
     "+++ b/vllm/model/deepseek_v4.py\n"
     "@@ -1 +1 @@\n-old\n+new\n"
 )
-_CUDA_DIFF = (
-    "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ b/csrc/attn.cu\n@@ -1 +1 @@\n-a\n+b\n"
-)
+_CUDA_DIFF = "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ b/csrc/attn.cu\n@@ -1 +1 @@\n-a\n+b\n"
 
 
 # ---------------------------------------------------------------------------
 # no-op / skip paths
 # ---------------------------------------------------------------------------
+
 
 async def test_no_candidate_is_noop(_executor):
     ctx = _ctx()
@@ -70,14 +69,13 @@ async def test_multi_node_skips(_executor, monkeypatch):
 # python-only -> patch written + staged
 # ---------------------------------------------------------------------------
 
+
 async def test_python_only_writes_patch(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF)
     # Allow the touched path under a broad allowlist so the gate passes.
-    monkeypatch.setattr(
-        ip, "resolve_source_file_allowlist", lambda: ("/",), raising=False
-    )
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: ("/",), raising=False)
     ctx = _ctx()
     out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is None, out
@@ -91,6 +89,7 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
 # ---------------------------------------------------------------------------
 # compiled-closure deferral: reverted, no patch
 # ---------------------------------------------------------------------------
+
 
 async def test_compiled_closure_defers_rung5(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
@@ -119,12 +118,11 @@ async def test_fetch_failure_reverts(_executor, monkeypatch):
 # allowlist gate: path outside allowlist -> reverted (no global env mutation)
 # ---------------------------------------------------------------------------
 
+
 async def test_path_outside_allowlist_reverts(_executor, monkeypatch):
     import hyperloom.agents.framework.sources.github as gh
 
-    outside_diff = (
-        "diff --git a/etc/passwd b/etc/passwd\n--- a/etc/passwd\n+++ b/etc/passwd\n@@ -1 +1 @@\n-a\n+b\n"
-    )
+    outside_diff = "diff --git a/etc/passwd b/etc/passwd\n--- a/etc/passwd\n+++ b/etc/passwd\n@@ -1 +1 @@\n-a\n+b\n"
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: outside_diff)
     # A narrow allowlist that does NOT contain /etc, and no framework root.
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: ("/sgl-workspace/vllm/",), raising=False)
@@ -142,9 +140,7 @@ async def test_attempt_root_added_to_allowlist_only(_executor, monkeypatch, tmp_
     attempt_venv = tmp_path / "attempt" / "venv"
     attempt_venv.mkdir(parents=True, exist_ok=True)
     localized = "attempt/localized.py"  # relative to framework_root = attempt dir parent
-    diff = (
-        f"diff --git a/{localized} b/{localized}\n--- a/{localized}\n+++ b/{localized}\n@@ -1 +1 @@\n-a\n+b\n"
-    )
+    diff = f"diff --git a/{localized} b/{localized}\n--- a/{localized}\n+++ b/{localized}\n@@ -1 +1 @@\n-a\n+b\n"
     monkeypatch.setattr(gh, "pr_patches", lambda slug, num: diff)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: ("/sgl-workspace/vllm/",), raising=False)
     # framework_root under tmp_path so the localized path resolves within it.

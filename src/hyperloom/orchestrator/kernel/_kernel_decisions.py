@@ -178,10 +178,7 @@ def _queue_kernel_keep(
             and str(candidate.get("source_file") or "") == source_file
             and str(candidate.get("artifact_path") or "") == artifact_path
             and dict(candidate.get("artifact_bundle") or {}) == artifact_bundle
-            and (
-                str(candidate.get("task_key") or "") == task_key
-                or bool(artifact_path or artifact_bundle)
-            )
+            and (str(candidate.get("task_key") or "") == task_key or bool(artifact_path or artifact_bundle))
         ),
         "",
     )
@@ -197,9 +194,7 @@ def _queue_kernel_keep(
             "task_key": task_key,
             "task_group_key": str(entry.get("task_group_key") or ""),
             "identity_route": str(entry.get("identity_route") or ""),
-            "legacy_task_group_keys": list(
-                entry.get("legacy_task_group_keys") or []
-            ),
+            "legacy_task_group_keys": list(entry.get("legacy_task_group_keys") or []),
             "kernel_id": str(kernel_id or entry.get("current_kernel_id") or ""),
             "source_file": source_file,
             "artifact_path": artifact_path,
@@ -213,12 +208,8 @@ def _queue_kernel_keep(
             "created_at": str(entry.get("last_ts") or _now_iso()),
             "status": "pending",
             "correctness_source": str(entry.get("last_correctness_source") or ""),
-            "artifact_kind": str(
-                (entry.get("last_framework_applyback") or {}).get("artifact_kind") or ""
-            ),
-            "integration_validation_status": str(
-                entry.get("last_integration_validation_status") or ""
-            ),
+            "artifact_kind": str((entry.get("last_framework_applyback") or {}).get("artifact_kind") or ""),
+            "integration_validation_status": str(entry.get("last_integration_validation_status") or ""),
             "framework_applyback": dict(entry.get("last_framework_applyback") or {}),
         }
     else:
@@ -227,21 +218,11 @@ def _queue_kernel_keep(
         queued = queue[integration_id]
         if isinstance(queued, dict):
             queued["task_key"] = task_key
-            queued["kernel_id"] = str(
-                kernel_id or entry.get("current_kernel_id") or ""
-            )
-            queued["task_group_key"] = str(
-                entry.get("task_group_key") or queued.get("task_group_key") or ""
-            )
-            queued["identity_route"] = str(
-                entry.get("identity_route")
-                or queued.get("identity_route")
-                or ""
-            )
+            queued["kernel_id"] = str(kernel_id or entry.get("current_kernel_id") or "")
+            queued["task_group_key"] = str(entry.get("task_group_key") or queued.get("task_group_key") or "")
+            queued["identity_route"] = str(entry.get("identity_route") or queued.get("identity_route") or "")
             queued["legacy_task_group_keys"] = list(
-                entry.get("legacy_task_group_keys")
-                or queued.get("legacy_task_group_keys")
-                or []
+                entry.get("legacy_task_group_keys") or queued.get("legacy_task_group_keys") or []
             )
             queued["trace_gpu_pct"] = entry.get(
                 "last_gpu_pct",
@@ -262,11 +243,7 @@ def _ensure_kernel_task_state(state) -> None:
         _queue_kernel_keep(
             state,
             task_key=task_key,
-            kernel_id=str(
-                stable_entry.get("current_kernel_id")
-                or stable_entry.get("kernel_id")
-                or ""
-            ),
+            kernel_id=str(stable_entry.get("current_kernel_id") or stable_entry.get("kernel_id") or ""),
             entry=stable_entry,
         )
 
@@ -278,14 +255,12 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict)
-        and entry.get("action") in {"integrate", "collective"}
+        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
     ]
     attempted_entries = [
         entry
         for entry in (state.kernel_integrate_attempts or {}).values()
-        if isinstance(entry, dict)
-        and not (entry.get("retryable") and not entry.get("rejected"))
+        if isinstance(entry, dict) and not (entry.get("retryable") and not entry.get("rejected"))
     ]
     candidates: list[tuple[float, float, str, dict[str, Any]]] = []
     for integration_id, raw_record in state.pending_kernel_integrations.items():
@@ -295,27 +270,13 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         if str(record.get("status") or "pending") != "pending":
             continue
         task_group_key = str(record.get("task_group_key") or "")
-        task_group_aliases = {
-            str(alias)
-            for alias in (record.get("legacy_task_group_keys") or [])
-            if str(alias)
-        }
+        task_group_aliases = {str(alias) for alias in (record.get("legacy_task_group_keys") or []) if str(alias)}
         kernel_id = str(record.get("kernel_id") or "")
         source_file = str(record.get("source_file") or "")
         artifact_path = str(record.get("artifact_path") or "")
-        stable_entry = state.kernel_opt_task_attempts.get(
-            str(record.get("task_key") or "")
-        ) or {}
-        if (
-            kernel_id in set(state.rejected_kernel_ids or [])
-            and (
-                not task_group_key
-                or bool(
-                    stable_entry.get("rejected_reason")
-                    if isinstance(stable_entry, dict)
-                    else ""
-                )
-            )
+        stable_entry = state.kernel_opt_task_attempts.get(str(record.get("task_key") or "")) or {}
+        if kernel_id in set(state.rejected_kernel_ids or []) and (
+            not task_group_key or bool(stable_entry.get("rejected_reason") if isinstance(stable_entry, dict) else "")
         ):
             continue
         if source_file and source_file in integrated_sources:
@@ -339,10 +300,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
                 source_file=source_file,
                 task_group_aliases=task_group_aliases,
             )
-            and (
-                not artifact_path
-                or str(attempted.get("patch_path") or "") in {"", artifact_path}
-            )
+            and (not artifact_path or str(attempted.get("patch_path") or "") in {"", artifact_path})
             for attempted in attempted_entries
         ):
             continue
@@ -356,9 +314,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             micro = float(record.get("micro_speedup") or 0.0)
         except (TypeError, ValueError):
             micro = 0.0
-        record["integration_id"] = str(
-            record.get("integration_id") or integration_id
-        )
+        record["integration_id"] = str(record.get("integration_id") or integration_id)
         candidates.append((impact, micro, integration_id, record))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     claimed_sources: set[str] = set()
@@ -539,16 +495,10 @@ def record_kernel_integrate_result(
         return None
     kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(state, result)
     task_group_key = str(
-        result.get("task_group_key")
-        or (_entry_by_kernel_id(state, kernel_id) or {}).get("task_group_key")
-        or ""
+        result.get("task_group_key") or (_entry_by_kernel_id(state, kernel_id) or {}).get("task_group_key") or ""
     )
     integration_id = str(result.get("integration_id") or "")
-    pending_record = (
-        (state.pending_kernel_integrations or {}).get(integration_id)
-        if integration_id
-        else None
-    )
+    pending_record = (state.pending_kernel_integrations or {}).get(integration_id) if integration_id else None
     if not isinstance(pending_record, dict):
         pending_record = next(
             (
@@ -556,17 +506,9 @@ def record_kernel_integrate_result(
                 for record in (state.pending_kernel_integrations or {}).values()
                 if isinstance(record, dict)
                 and str(record.get("kernel_id") or "") == kernel_id
-                and (
-                    not target_file
-                    or str(record.get("source_file") or "")
-                    in {"", target_file}
-                )
+                and (not target_file or str(record.get("source_file") or "") in {"", target_file})
                 and str(record.get("artifact_path") or "") in {"", patch_path}
-                and (
-                    not task_group_key
-                    or str(record.get("task_group_key") or "")
-                    == task_group_key
-                )
+                and (not task_group_key or str(record.get("task_group_key") or "") == task_group_key)
             ),
             None,
         )
@@ -574,11 +516,7 @@ def record_kernel_integrate_result(
         integration_id = str(pending_record.get("integration_id") or integration_id)
     identity_route = str(
         result.get("identity_route")
-        or (
-            pending_record.get("identity_route")
-            if isinstance(pending_record, dict)
-            else ""
-        )
+        or (pending_record.get("identity_route") if isinstance(pending_record, dict) else "")
         or ""
     )
     is_fault = state._is_integrate_fault(result)
@@ -673,11 +611,7 @@ def record_kernel_integrate_result(
                 # integrate we matched it to, and that is the integrate whose
                 # readings must not be written over by a later one.
                 occurrence=integration_id or None,
-                validation_tier=(
-                    str(result.get("validation_tier") or "integrate_e2e")
-                    if _dec == "KEEP"
-                    else ""
-                ),
+                validation_tier=(str(result.get("validation_tier") or "integrate_e2e") if _dec == "KEEP" else ""),
             )
     except Exception as exc:  # noqa: BLE001
         trace_recording_skipped(
@@ -702,13 +636,7 @@ def record_kernel_integrate_result(
                 state,
                 kernel_id=kernel_id,
                 task_key=str(
-                    (
-                        pending_record.get("task_key")
-                        if isinstance(pending_record, dict)
-                        else ""
-                    )
-                    or task_group_key
-                    or ""
+                    (pending_record.get("task_key") if isinstance(pending_record, dict) else "") or task_group_key or ""
                 ),
                 integration_status=integration_status,
                 validation_tier=validation_tier,
@@ -752,23 +680,11 @@ def record_kernel_integrate_result(
         r for r in state.rejected_kernel_patches if not (isinstance(r, dict) and r.get("key") == key)
     ]
     state.rejected_kernel_patches.append(rejected)
-    if (
-        kernel_id
-        and not task_group_key
-        and kernel_id not in state.rejected_kernel_ids
-    ):
+    if kernel_id and not task_group_key and kernel_id not in state.rejected_kernel_ids:
         state.rejected_kernel_ids.append(kernel_id)
     entry["rejected"] = rejected
     state.kernel_integrate_attempts[key] = entry
-    task_key = str(
-        (
-            pending_record.get("task_key")
-            if isinstance(pending_record, dict)
-            else ""
-        )
-        or task_group_key
-        or ""
-    )
+    task_key = str((pending_record.get("task_key") if isinstance(pending_record, dict) else "") or task_group_key or "")
     if isinstance(pending_record, dict):
         pending_record["status"] = "rejected"
         pending_record["rejected_at"] = _now_iso()
@@ -897,11 +813,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         kernel_id=kernel_id,
         source_file=source_file,
     )
-    task_group_kernel_ids = [
-        str(item)
-        for item in (result.get("task_group_kernel_ids") or [])
-        if str(item)
-    ]
+    task_group_kernel_ids = [str(item) for item in (result.get("task_group_kernel_ids") or []) if str(item)]
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
     # Pure infra failure = backend ladder with no verdict; kept distinct from
@@ -920,11 +832,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     ts = _now_iso()
 
     prior_entry = dict(_entry_by_kernel_id(state, kernel_id) or {})
-    legacy_task_keys = {
-        str(item)
-        for item in (result.get("legacy_task_group_keys") or [])
-        if str(item)
-    }
+    legacy_task_keys = {str(item) for item in (result.get("legacy_task_group_keys") or []) if str(item)}
     stable_prior_entry = state.kernel_opt_task_attempts.get(stable_task_key)
     migrated_stable_key = ""
     if not isinstance(stable_prior_entry, dict):
@@ -946,12 +854,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                             legacy_task_keys
                             & {
                                 str(alias)
-                                for alias in (
-                                    candidate_entry.get(
-                                        "legacy_task_group_keys"
-                                    )
-                                    or []
-                                )
+                                for alias in (candidate_entry.get("legacy_task_group_keys") or [])
                                 if str(alias)
                             }
                         )
@@ -964,16 +867,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         prior_entry = dict(stable_prior_entry)
         if migrated_stable_key and migrated_stable_key != stable_task_key:
             state.kernel_opt_task_attempts.pop(migrated_stable_key, None)
-    prior_task_group_key = (
-        task_group_key
-        if migrated_stable_key
-        else str(prior_entry.get("task_group_key") or "")
-    )
-    task_identity_changed = bool(
-        task_group_key
-        and prior_task_group_key
-        and task_group_key != prior_task_group_key
-    )
+    prior_task_group_key = task_group_key if migrated_stable_key else str(prior_entry.get("task_group_key") or "")
+    task_identity_changed = bool(task_group_key and prior_task_group_key and task_group_key != prior_task_group_key)
     if task_identity_changed:
         stale_member_ids = {
             member_id
@@ -981,18 +876,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 kernel_id,
                 *task_group_kernel_ids,
             ]
-            if str(
-                (_entry_by_kernel_id(state, member_id) or {}).get(
-                    "task_group_key"
-                )
-                or ""
-            )
+            if str((_entry_by_kernel_id(state, member_id) or {}).get("task_group_key") or "")
             not in {"", task_group_key}
         }
         state.rejected_kernel_ids = [
-            member_id
-            for member_id in (state.rejected_kernel_ids or [])
-            if member_id not in stale_member_ids
+            member_id for member_id in (state.rejected_kernel_ids or []) if member_id not in stale_member_ids
         ]
         entry = {}
     else:
@@ -1040,11 +928,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     if legacy_task_keys:
         entry["legacy_task_group_keys"] = sorted(
             {
-                *[
-                    str(alias)
-                    for alias in (entry.get("legacy_task_group_keys") or [])
-                    if str(alias)
-                ],
+                *[str(alias) for alias in (entry.get("legacy_task_group_keys") or []) if str(alias)],
                 *legacy_task_keys,
             }
         )
@@ -1057,12 +941,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # Provenance for how correctness was established and whether the artifact
     # still owes a framework integration verdict.
     entry["last_correctness_source"] = str(verification.get("correctness_source") or "")
-    entry["last_integration_validation_status"] = str(
-        verification.get("integration_validation_status") or ""
-    )
-    entry["last_framework_applyback"] = dict(
-        verification.get("framework_applyback") or {}
-    )
+    entry["last_integration_validation_status"] = str(verification.get("integration_validation_status") or "")
+    entry["last_framework_applyback"] = dict(verification.get("framework_applyback") or {})
     entry["last_ts"] = ts
     entry["history"] = history
     # A vendor-playbook artifact (e.g. mori's dispatch/combine launch-config
@@ -1101,9 +981,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
             "correctness_source": str(verification.get("correctness_source") or ""),
-            "integration_validation_status": str(
-                verification.get("integration_validation_status") or ""
-            ),
+            "integration_validation_status": str(verification.get("integration_validation_status") or ""),
             "framework_applyback": dict(verification.get("framework_applyback") or {}),
             "best_artifact_path": best_artifact_path,
             "best_artifact_bundle": best_artifact_bundle,
@@ -1175,18 +1053,12 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     if task_group_id:
         entry["task_group_id"] = task_group_id
         entry["task_group_key"] = task_group_key
-        entry["task_group_primary_kernel_id"] = str(
-            result.get("task_group_primary_kernel_id") or kernel_id
-        )
+        entry["task_group_primary_kernel_id"] = str(result.get("task_group_primary_kernel_id") or kernel_id)
         entry["task_group_kernel_ids"] = task_group_kernel_ids
         entry["task_group_shape_case_ids"] = [
-            str(item)
-            for item in (result.get("task_group_shape_case_ids") or [])
-            if str(item)
+            str(item) for item in (result.get("task_group_shape_case_ids") or []) if str(item)
         ]
-        entry["task_group_shape_case_count"] = int(
-            result.get("task_group_shape_case_count") or 0
-        )
+        entry["task_group_shape_case_count"] = int(result.get("task_group_shape_case_count") or 0)
     state.kernel_opt_task_attempts[stable_task_key] = dict(entry)
     _queue_kernel_keep(
         state,
@@ -1269,9 +1141,7 @@ def _kernel_ids_in_optimization_stack(state) -> set[str]:
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
-        if isinstance(e, dict)
-        and e.get("action") in {"integrate", "collective"}
-        and e.get("kernel_id")
+        if isinstance(e, dict) and e.get("action") in {"integrate", "collective"} and e.get("kernel_id")
     }
 
 
@@ -1285,10 +1155,7 @@ def _source_files_in_optimization_stack(state) -> set[str]:
     """
     sources: set[str] = set()
     for e in state.optimization_stack or []:
-        if (
-            not isinstance(e, dict)
-            or e.get("action") not in {"integrate", "collective"}
-        ):
+        if not isinstance(e, dict) or e.get("action") not in {"integrate", "collective"}:
             continue
         src = str(e.get("target_file") or e.get("source_file") or "")
         if src:
@@ -1311,9 +1178,7 @@ def _record_matches_task(
         return recorded_key in accepted_keys
     if str(record.get("kernel_id") or "") != kernel_id:
         return False
-    recorded_source = str(
-        record.get("target_file") or record.get("source_file") or ""
-    )
+    recorded_source = str(record.get("target_file") or record.get("source_file") or "")
     if source_file and recorded_source:
         return source_file == recorded_source
     return True
@@ -1560,11 +1425,7 @@ def untried_hot_reusable_kernels(
         group_key = str(g.get("task_group_key") or "")
         aliases = {
             group_key,
-            *[
-                str(alias)
-                for alias in (g.get("legacy_task_group_keys") or [])
-                if str(alias)
-            ],
+            *[str(alias) for alias in (g.get("legacy_task_group_keys") or []) if str(alias)],
         }
         group_key_aliases[group_key] = {alias for alias in aliases if alias}
         for m in members:
@@ -1574,8 +1435,7 @@ def untried_hot_reusable_kernels(
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict)
-        and entry.get("action") in {"integrate", "collective"}
+        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
     ]
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
@@ -1665,9 +1525,7 @@ def untried_hot_reusable_kernels(
                 str(value.get("task_group_primary_kernel_id") or ""),
             }:
                 return value
-            if member_id in {
-                str(m) for m in (value.get("task_group_kernel_ids") or []) if m
-            }:
+            if member_id in {str(m) for m in (value.get("task_group_kernel_ids") or []) if m}:
                 return value
         return {}
 
@@ -1703,9 +1561,7 @@ def untried_hot_reusable_kernels(
 
     for _pct, kid, src, members, group_key, _identity in ranked:
         if members and all(
-            _member_is_rejected(member)
-            and _matches_current_task(member, group_key, src)
-            for member in members
+            _member_is_rejected(member) and _matches_current_task(member, group_key, src) for member in members
         ):
             continue
         if any(
@@ -1731,28 +1587,19 @@ def untried_hot_reusable_kernels(
                 and (
                     str(attempt.get("stable_task_key") or "") == group_key
                     or str(attempt.get("task_group_key") or "") == group_key
-                    or str(attempt.get("stable_task_key") or "")
-                    in (group_key_aliases.get(group_key) or {group_key})
-                    or str(attempt.get("task_group_key") or "")
-                    in (group_key_aliases.get(group_key) or {group_key})
+                    or str(attempt.get("stable_task_key") or "") in (group_key_aliases.get(group_key) or {group_key})
+                    or str(attempt.get("task_group_key") or "") in (group_key_aliases.get(group_key) or {group_key})
                 )
             ),
             None,
         )
-        if stable_attempt is not None and int(
-            stable_attempt.get("attempts", 0)
-        ) > 0:
+        if stable_attempt is not None and int(stable_attempt.get("attempts", 0)) > 0:
             continue
         if not group_key and any(
             _matches_current_task(member, group_key, src)
             and any(
                 isinstance(attempt, dict)
-                and str(
-                    attempt.get("current_kernel_id")
-                    or attempt.get("kernel_id")
-                    or ""
-                )
-                == member
+                and str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or "") == member
                 and int(attempt.get("attempts", 0)) > 0
                 for attempt in attempts.values()
             )

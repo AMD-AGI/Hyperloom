@@ -16,6 +16,7 @@ from hyperloom.orchestrator.framework.stack_actions import (
 # EnablementStackAction round-trip
 # ---------------------------------------------------------------------------
 
+
 def test_stack_action_round_trip():
     a = EnablementStackAction(
         kind="runtime_candidate",
@@ -65,6 +66,7 @@ def test_stack_action_from_state_non_numeric_pr_number_coerced_to_zero():
 # FrameworkRuntime.to_runtime_override
 # ---------------------------------------------------------------------------
 
+
 def test_runtime_to_override_keys_match_apply_runtime_override():
     rt = FrameworkRuntime(
         bin_path="/s/venv/bin",
@@ -111,6 +113,7 @@ def test_runtime_round_trip():
 # FrameworkRuntime — additive build fields
 # ---------------------------------------------------------------------------
 
+
 def test_runtime_extended_round_trip():
     rt = FrameworkRuntime(
         bin_path="/b",
@@ -142,8 +145,13 @@ def test_runtime_extended_override_omitted_when_empty():
     """A runtime without the additive build fields omits them entirely (back-compat)."""
     rt = FrameworkRuntime(bin_path="/s/venv/bin", python_path="/s/venv/bin/python", venv_root="/s/venv")
     ov = rt.to_runtime_override()
-    for key in ("pythonpath_prefixes", "ld_library_path_prefix", "runtime_env", "entrypoint_bin_dir",
-                "runtime_python_exe"):
+    for key in (
+        "pythonpath_prefixes",
+        "ld_library_path_prefix",
+        "runtime_env",
+        "entrypoint_bin_dir",
+        "runtime_python_exe",
+    ):
         assert key not in ov
 
 
@@ -179,6 +187,7 @@ def test_runtime_python_exe_overrides_framework_python_in_envs():
 # ---------------------------------------------------------------------------
 # ProvisionResult
 # ---------------------------------------------------------------------------
+
 
 def test_provision_result_ok_false_propagation():
     r = ProvisionResult(ok=False, error="boom")

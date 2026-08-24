@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Kernel AgentKB prior-column reads."""
+
 from __future__ import annotations
 
 import json
@@ -14,9 +15,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client impo
 
 
 def _kb(tmp_path: Path) -> KernelAgentKB:
-    return KernelAgentKB(
-        KnowledgeSections(tmp_path / "draft", warm_start_dir=tmp_path / "warm")
-    )
+    return KernelAgentKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=tmp_path / "warm"))
 
 
 def _warm_record(tmp_path: Path, value: dict) -> None:
