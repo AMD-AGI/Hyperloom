@@ -10,4 +10,3 @@ DISPATCHABLE_SHAPE_PROVENANCE = frozenset({"torch_trace", "capture_backfill", "t
 
 # Alias used by the kernel-opt predispatch validator.
 ALLOWED_SHAPE_PROVENANCE = DISPATCHABLE_SHAPE_PROVENANCE
-

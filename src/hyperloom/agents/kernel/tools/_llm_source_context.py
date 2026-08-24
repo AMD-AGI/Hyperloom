@@ -150,9 +150,7 @@ _SELECTOR_VALUE_RE = re.compile(
 )
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _URL_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://|[?@]")
-_JWT_VALUE_RE = re.compile(
-    r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+={0,2}"
-)
+_JWT_VALUE_RE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+={0,2}")
 _OPAQUE_VALUE_RE = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
 _NON_FINITE_VALUE_RE = re.compile(r"(?:nan|[+-]?inf(?:inity)?)", re.IGNORECASE)
 
@@ -344,9 +342,7 @@ def build_context_block(
         if value is not None and (cleaned := _redact(name, value)) is not None
     }
     if selection:
-        sections.append(
-            "Runtime selection:\n" + json.dumps(selection, indent=2)
-        )
+        sections.append("Runtime selection:\n" + json.dumps(selection, indent=2))
 
     cfg = model_config_summary(model_path)
     if cfg:

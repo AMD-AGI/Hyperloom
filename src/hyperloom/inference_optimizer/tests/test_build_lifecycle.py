@@ -19,7 +19,10 @@ from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
 
 def _action(cmd, **kw):
     base = dict(
-        gap_id="g", framework="vllm", component="aiter", capability="fp4_moe",
+        gap_id="g",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
         build_command=tuple(cmd),
     )
     base.update(kw)
@@ -28,8 +31,13 @@ def _action(cmd, **kw):
 
 def _real_action(**kw):
     base = dict(
-        gap_id="g", framework="vllm", component="aiter", capability="fp4_moe",
-        ref="v0.1.0", repo_url="https://github.com/ROCm/aiter", gpu_arch="gfx950",
+        gap_id="g",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
+        ref="v0.1.0",
+        repo_url="https://github.com/ROCm/aiter",
+        gpu_arch="gfx950",
     )
     base.update(kw)
     return TargetedBuildAction(**base)
@@ -37,7 +45,10 @@ def _real_action(**kw):
 
 def _fake_action(**kw):
     base = dict(
-        gap_id="g", framework="vllm", component="aiter", capability="fp4_moe",
+        gap_id="g",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
         build_command=(sys.executable, "-c", "print('fake')"),
     )
     base.update(kw)
@@ -59,7 +70,9 @@ async def _enqueue_and_run(build_lifecycle, executor, *, action, session_dir) ->
     )
     lease = await build_lifecycle.locks.try_acquire_many(
         ["build_lane"],
-        holder_id=tid, task_id=tid, action="targeted_build",
+        holder_id=tid,
+        task_id=tid,
+        action="targeted_build",
         ttl_sec=task_obj.lease_ttl_sec or 60,
     )
     assert lease is not None
@@ -70,6 +83,7 @@ async def _enqueue_and_run(build_lifecycle, executor, *, action, session_dir) ->
 # ---------------------------------------------------------------------------
 # Enqueue
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_idempotent_enqueue_no_double_row(build_coord, build_lifecycle):
@@ -87,13 +101,14 @@ async def test_build_lane_serializes_two_builds(build_coord, build_lifecycle):
     a1 = await build_lifecycle.enqueue_targeted_build(
         _action([sys.executable, "-c", "import time; time.sleep(60)"], ref="v1")
     )
-    a2 = await build_lifecycle.enqueue_targeted_build(
-        _action([sys.executable, "-c", "print('two')"], ref="v2")
-    )
+    a2 = await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "print('two')"], ref="v2"))
     assert a1 != a2
     t1 = await build_lifecycle.tasks.get(a1)
     lease = await build_lifecycle.locks.try_acquire_many(
-        ["build_lane"], holder_id=a1, task_id=a1, action="targeted_build",
+        ["build_lane"],
+        holder_id=a1,
+        task_id=a1,
+        action="targeted_build",
         ttl_sec=t1.lease_ttl_sec or 60,
     )
     assert lease is not None
@@ -108,12 +123,13 @@ async def test_build_lane_serializes_two_builds(build_coord, build_lifecycle):
 @pytest.mark.asyncio
 async def test_build_lane_does_not_conflict_with_serving(build_coord, build_lifecycle):
     """build_lane must not mutex the serving/benchmark lanes."""
-    tid = await build_lifecycle.enqueue_targeted_build(
-        _action([sys.executable, "-c", "import time; time.sleep(2)"])
-    )
+    tid = await build_lifecycle.enqueue_targeted_build(_action([sys.executable, "-c", "import time; time.sleep(2)"]))
     t = await build_lifecycle.tasks.get(tid)
     build_lease = await build_lifecycle.locks.try_acquire_many(
-        ["build_lane"], holder_id=tid, task_id=tid, action="targeted_build",
+        ["build_lane"],
+        holder_id=tid,
+        task_id=tid,
+        action="targeted_build",
         ttl_sec=t.lease_ttl_sec or 60,
     )
     assert build_lease is not None
@@ -129,16 +145,19 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord, build_life
 # Executor
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def executor(tmp_path):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
+
     return TargetedBuildExecutor()
 
 
 @pytest.mark.asyncio
 async def test_build_succeeds(build_coord, build_lifecycle, executor, tmp_path):
     task, _ = await _enqueue_and_run(
-        build_lifecycle, executor,
+        build_lifecycle,
+        executor,
         action=_action([sys.executable, "-c", "print('ok')"]),
         session_dir=tmp_path,
     )
@@ -152,7 +171,8 @@ async def test_build_succeeds(build_coord, build_lifecycle, executor, tmp_path):
 @pytest.mark.asyncio
 async def test_nonzero_exit_records_compile_error(build_coord, build_lifecycle, executor, tmp_path):
     task, _ = await _enqueue_and_run(
-        build_lifecycle, executor,
+        build_lifecycle,
+        executor,
         action=_action([sys.executable, "-c", "import sys; sys.exit(2)"]),
         session_dir=tmp_path,
     )
@@ -163,10 +183,13 @@ async def test_nonzero_exit_records_compile_error(build_coord, build_lifecycle, 
 @pytest.mark.asyncio
 async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, tmp_path):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
+
     action = _action([sys.executable, "-c", "import time; time.sleep(600)"], build_budget_sec=1)
     task, _ = await _enqueue_and_run(
-        build_lifecycle, TargetedBuildExecutor(),
-        action=action, session_dir=tmp_path,
+        build_lifecycle,
+        TargetedBuildExecutor(),
+        action=action,
+        session_dir=tmp_path,
     )
     assert task.state == "failed"
     assert build_coord.shared_state.enablement.last_build_failure["failure_class"] == "timeout"
@@ -175,9 +198,7 @@ async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, t
 
 
 @pytest.mark.asyncio
-async def test_cancel_kills_the_compile_before_releasing_the_lane(
-    build_coord, build_lifecycle, executor, tmp_path
-):
+async def test_cancel_kills_the_compile_before_releasing_the_lane(build_coord, build_lifecycle, executor, tmp_path):
     """A cancelled build must not leave the compile running.
 
     The lane is released as this coroutine unwinds, so a surviving process group
@@ -199,7 +220,8 @@ async def test_cancel_kills_the_compile_before_releasing_the_lane(
     try:
         run = asyncio.create_task(
             _enqueue_and_run(
-                build_lifecycle, executor,
+                build_lifecycle,
+                executor,
                 action=_action([sys.executable, "-c", "import time; time.sleep(600)"]),
                 session_dir=tmp_path,
             )
@@ -222,9 +244,7 @@ async def test_cancel_kills_the_compile_before_releasing_the_lane(
 
 
 @pytest.mark.asyncio
-async def test_a_failed_sentinel_write_still_kills_the_compile(
-    build_coord, build_lifecycle, executor, tmp_path
-):
+async def test_a_failed_sentinel_write_still_kills_the_compile(build_coord, build_lifecycle, executor, tmp_path):
     """The spawn is inside the teardown's scope, so a raise cannot orphan it."""
     from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
 
@@ -249,7 +269,8 @@ async def test_a_failed_sentinel_write_still_kills_the_compile(
     type(build_coord.shared_state).save = _fail_first_save
     try:
         task, _ = await _enqueue_and_run(
-            build_lifecycle, executor,
+            build_lifecycle,
+            executor,
             action=_action([sys.executable, "-c", "import time; time.sleep(600)"]),
             session_dir=tmp_path,
         )
@@ -266,6 +287,7 @@ async def test_a_failed_sentinel_write_still_kills_the_compile(
 # ---------------------------------------------------------------------------
 # Driver wiring
 # ---------------------------------------------------------------------------
+
 
 def test_driver_command_real_component_uses_driver_module(tmp_path):
     action = _real_action()
@@ -314,7 +336,8 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, build_l
     try:
         with pytest.raises(RuntimeError, match="captured"):
             ctx = RunnerContext(
-                task=task_obj, lease=None,
+                task=task_obj,
+                lease=None,
                 extra={"shared_state": build_coord.shared_state, "session_dir": str(tmp_path)},
             )
             await executor(ctx)
@@ -350,7 +373,8 @@ async def test_explicit_build_command_passed_verbatim(build_coord, build_lifecyc
     try:
         with pytest.raises(RuntimeError, match="captured"):
             ctx = RunnerContext(
-                task=task_obj, lease=None,
+                task=task_obj,
+                lease=None,
                 extra={"shared_state": build_coord.shared_state, "session_dir": str(tmp_path)},
             )
             await executor(ctx)
@@ -365,8 +389,10 @@ async def test_explicit_build_command_passed_verbatim(build_coord, build_lifecyc
 # Policy gate
 # ---------------------------------------------------------------------------
 
+
 def test_targeted_build_in_coordinator_internal_actions():
     from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
+
     assert "targeted_build" in COORDINATOR_INTERNAL_ACTIONS
 
 
@@ -407,6 +433,7 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
 # P1-12 regression: spawn failure lands row in failed state
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_path):
     """spawn failure via sub_agent_runner writes failed terminal state and releases lane."""
@@ -425,7 +452,10 @@ async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_
         shared_state=build_coord.shared_state,
     )
     lease = await build_lifecycle.locks.try_acquire_many(
-        ["build_lane"], holder_id=tid, task_id=tid, action="targeted_build",
+        ["build_lane"],
+        holder_id=tid,
+        task_id=tid,
+        action="targeted_build",
         ttl_sec=task_obj.lease_ttl_sec or 60,
     )
     await runner.run_task(task_obj, prebound_lease=lease)
@@ -439,9 +469,11 @@ async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_
 # Resume recovery
 # ---------------------------------------------------------------------------
 
+
 def _silent_plan():
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.roles import ScriptedPlan
+
     return ScriptedPlan(
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
@@ -450,15 +482,14 @@ def _silent_plan():
 
 def _build_backends():
     from hyperloom.orchestrator.roles import MockBackend
-    return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "critic", "robustness")
-    }
+
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 @pytest.fixture
 def resume_session_dir(tmp_path, monkeypatch) -> Path:
     from hyperloom.inference_optimizer.session.paths import make_session_dir
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
@@ -466,17 +497,17 @@ def resume_session_dir(tmp_path, monkeypatch) -> Path:
 @pytest.fixture
 def resume_coord(resume_session_dir):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+
     return Coordinator(resume_session_dir, backends=_build_backends())
 
 
 @pytest.mark.asyncio
 async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
     import subprocess
+
     resume_coord._resumed_from["is_resume"] = True
 
-    proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True
-    )
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
     pgid = os.getpgid(proc.pid)
 
     attempt_root = Path(resume_coord.session_dir) / "enablement" / "builds" / "t-orphan"
@@ -488,7 +519,9 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe")
     task, _ = await resume_coord.tasks.create_or_return_existing(
-        kind="targeted_build", params=action.to_state(), idempotency_key="k-orphan",
+        kind="targeted_build",
+        params=action.to_state(),
+        idempotency_key="k-orphan",
         requires_lanes=["build_lane"],
     )
     await resume_coord.tasks.transition(task.task_id, "running")
@@ -521,7 +554,4 @@ async def test_resume_no_pending_is_noop(resume_coord):
     resume_coord._resumed_from["is_resume"] = True
     resume_coord.shared_state.pending_targeted_build = {}
     report = await resume_coord._resume_consistency_pass()
-    assert not any(
-        isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build"
-        for f in report["fixes"]
-    )
+    assert not any(isinstance(f, dict) and f.get("kind") == "reclaimed_pending_targeted_build" for f in report["fixes"])

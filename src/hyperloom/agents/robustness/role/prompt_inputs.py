@@ -58,9 +58,7 @@ _INBOX_LINE_RE = re.compile(
 
 # One ``key=<python literal>`` pair of a tail. Quoted values are matched whole so
 # a ``k=v`` inside a rendered ``error=``/``notes=`` string cannot split it.
-_INBOX_FIELD_RE = re.compile(
-    r"(?P<key>\w+)=(?P<value>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
-)
+_INBOX_FIELD_RE = re.compile(r"(?P<key>\w+)=(?P<value>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\S+)")
 
 _SHARED_HEADER = "=== Shared session state ==="
 _INBOX_HEADER_PREFIX = "=== Inbox for "

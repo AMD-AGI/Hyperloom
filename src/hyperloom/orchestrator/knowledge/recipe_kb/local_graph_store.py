@@ -311,10 +311,7 @@ class LocalGraphStore:
         return slugs
 
     def _all_pages_unlocked(self) -> list[tuple[str, str]]:
-        pages = [
-            (slug, self._page_path(slug).read_text(encoding="utf-8"))
-            for slug in self._all_page_slugs_unlocked()
-        ]
+        pages = [(slug, self._page_path(slug).read_text(encoding="utf-8")) for slug in self._all_page_slugs_unlocked()]
         return pages
 
     def _list_pages(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -256,9 +256,7 @@ def test_find_aiter_baton_wait_returns_bounded_evidence(tmp_path):
     server_log = tmp_path / "warmup" / "server.log"
     server_log.parent.mkdir()
     server_log.write_text(
-        "model loaded\n"
-        "[aiter] waiting for baton release at "
-        "/root/.aiter/build/pa_ragged/lock\n",
+        "model loaded\n[aiter] waiting for baton release at /root/.aiter/build/pa_ragged/lock\n",
         encoding="utf-8",
     )
 

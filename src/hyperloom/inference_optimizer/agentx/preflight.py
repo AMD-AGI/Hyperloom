@@ -155,10 +155,9 @@ def check_aiperf_capability(
         )
 
     runtime_env = os.environ if env is None else env
-    override = (
-        (runtime_env.get("AGENTX_DATASET") or "").strip()
-        or (runtime_env.get("WEKA_LOADER_OVERRIDE") or "").strip()
-    )
+    override = (runtime_env.get("AGENTX_DATASET") or "").strip() or (
+        runtime_env.get("WEKA_LOADER_OVERRIDE") or ""
+    ).strip()
 
     loaders = (loader_probe or _default_loader_probe)(aiperf_bin)
     if loaders is not None:
@@ -214,11 +213,7 @@ def check_aiperf_capability(
         help_text = probe(aiperf_bin)
     except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
         raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
-    missing = [
-        flag
-        for flag in ("weka-trace", "--scenario", "--benchmark-duration")
-        if flag not in (help_text or "")
-    ]
+    missing = [flag for flag in ("weka-trace", "--scenario", "--benchmark-duration") if flag not in (help_text or "")]
     if missing:
         raise AgentXPreflightError(
             f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "

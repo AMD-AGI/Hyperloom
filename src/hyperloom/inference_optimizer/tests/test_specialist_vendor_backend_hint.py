@@ -108,9 +108,7 @@ def test_section_renders_substitution_directive():
 def test_section_omits_directive_without_candidates():
     """No material ATen op → no directive, so the section stays evidence-only."""
     text = "\n".join(
-        _section_roofline_evidence(
-            _inp([{"name": "fmha_v3_fwd_kernel", "gpu_pct": 40.0, "source_file": "x.py"}])
-        )
+        _section_roofline_evidence(_inp([{"name": "fmha_v3_fwd_kernel", "gpu_pct": 40.0, "source_file": "x.py"}]))
     )
     assert "call site" not in text.lower()
 

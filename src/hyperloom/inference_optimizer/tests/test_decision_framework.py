@@ -630,5 +630,3 @@ def test_record_kernel_opt_prompt_summary_surfaces_history():
     assert "kernel_id=k007" in summary
     assert "history=attempts=2/partial=2" in summary
     assert "retired=max_partial_attempts_2_without_keep" in summary
-
-

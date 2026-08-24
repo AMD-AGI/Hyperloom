@@ -54,17 +54,14 @@ def _champion(
         sessions = rollup.get("sessions")
         if isinstance(sessions, list) and not sessions:
             return "", 0.0, {}
-        raise RemoteRecipeValidationError(
-            "candidate rollup has sessions but no champion"
-        )
+        raise RemoteRecipeValidationError("candidate rollup has sessions but no champion")
     if not isinstance(raw_champion, dict):
         raise RemoteRecipeValidationError("candidate rollup champion must be an object")
     champion = dict(raw_champion)
     metric = str(champion.get("metric") or "").strip()
     if validate_metric and metric != expected_metric:
         raise RemoteRecipeValidationError(
-            "cannot compare or replace champion metric "
-            f"{metric!r}; expected {expected_metric!r}"
+            f"cannot compare or replace champion metric {metric!r}; expected {expected_metric!r}"
         )
     session_id = str(champion.get("session_id") or "").strip()
     if not session_id:
@@ -73,19 +70,13 @@ def _champion(
         raise RemoteRecipeValidationError("candidate rollup champion is missing value")
     raw_value = champion.get("value")
     if isinstance(raw_value, bool):
-        raise RemoteRecipeValidationError(
-            f"champion value must be numeric, got {raw_value!r}"
-        )
+        raise RemoteRecipeValidationError(f"champion value must be numeric, got {raw_value!r}")
     try:
         value = float(raw_value)
     except (TypeError, ValueError):
-        raise RemoteRecipeValidationError(
-            f"champion value must be numeric, got {raw_value!r}"
-        ) from None
+        raise RemoteRecipeValidationError(f"champion value must be numeric, got {raw_value!r}") from None
     if not math.isfinite(value):
-        raise RemoteRecipeValidationError(
-            f"champion value must be finite, got {raw_value!r}"
-        )
+        raise RemoteRecipeValidationError(f"champion value must be finite, got {raw_value!r}")
     return session_id, value, champion
 
 
@@ -103,11 +94,7 @@ def flatten_recipe_document(envelope: dict[str, Any]) -> dict[str, Any]:
         "revision": revision,
         "version": envelope.get("version", revision),
         "selected_by": dict(raw_selection) if isinstance(raw_selection, dict) else {},
-        "view": (
-            dict(envelope.get("view") or {})
-            if isinstance(envelope.get("view"), dict)
-            else {}
-        ),
+        "view": (dict(envelope.get("view") or {}) if isinstance(envelope.get("view"), dict) else {}),
     }
     return {**business, **fixed}
 
@@ -123,28 +110,19 @@ def _validate_session_envelope(
         raise RemoteRecipeValidationError("session envelope must be an object")
     schema_version = envelope.get("schema_version")
     if isinstance(schema_version, bool) or schema_version != 2:
-        raise RemoteRecipeValidationError(
-            f"session envelope schema_version must be 2, got {schema_version!r}"
-        )
+        raise RemoteRecipeValidationError(f"session envelope schema_version must be 2, got {schema_version!r}")
     if str(envelope.get("canonical_id") or "") != canonical_id:
-        raise RemoteRecipeValidationError(
-            "session envelope canonical_id does not match the requested identity"
-        )
+        raise RemoteRecipeValidationError("session envelope canonical_id does not match the requested identity")
     if not session_id:
         raise RemoteRecipeValidationError("session envelope session_id is required")
     if str(envelope.get("session_id") or "") != session_id:
-        raise RemoteRecipeValidationError(
-            "session envelope session_id does not match the requested session"
-        )
+        raise RemoteRecipeValidationError("session envelope session_id does not match the requested session")
     if not str(envelope.get("record_id") or "").strip():
         raise RemoteRecipeValidationError("session envelope record_id is required")
-    if (
-        ("revision" not in envelope or envelope.get("revision") is None)
-        and ("version" not in envelope or envelope.get("version") is None)
+    if ("revision" not in envelope or envelope.get("revision") is None) and (
+        "version" not in envelope or envelope.get("version") is None
     ):
-        raise RemoteRecipeValidationError(
-            "session envelope revision or version is required"
-        )
+        raise RemoteRecipeValidationError("session envelope revision or version is required")
     if not isinstance(envelope.get("knowledge"), dict):
         raise RemoteRecipeValidationError("session envelope knowledge must be an object")
     return envelope
@@ -154,23 +132,15 @@ def _validate_hyperloom_view(envelope: dict[str, Any]) -> dict[str, Any]:
     """Require the service-owned replayability decision on normalized reads."""
     view = envelope.get("view")
     if not isinstance(view, dict):
-        raise RemoteRecipeValidationError(
-            "Hyperloom Recipe View is missing top-level view metadata"
-        )
+        raise RemoteRecipeValidationError("Hyperloom Recipe View is missing top-level view metadata")
     source = str(view.get("source") or "")
     if source not in {"current", "legacy_gbrain", "legacy_native"}:
-        raise RemoteRecipeValidationError(
-            f"Hyperloom Recipe View has invalid source: {source!r}"
-        )
+        raise RemoteRecipeValidationError(f"Hyperloom Recipe View has invalid source: {source!r}")
     if not isinstance(view.get("replayable"), bool):
-        raise RemoteRecipeValidationError(
-            "Hyperloom Recipe View replayable must be boolean"
-        )
+        raise RemoteRecipeValidationError("Hyperloom Recipe View replayable must be boolean")
     reason = view.get("replay_disabled_reason")
     if reason is not None and not isinstance(reason, str):
-        raise RemoteRecipeValidationError(
-            "Hyperloom Recipe View replay_disabled_reason must be a string or null"
-        )
+        raise RemoteRecipeValidationError("Hyperloom Recipe View replay_disabled_reason must be a string or null")
     return envelope
 
 
@@ -184,9 +154,7 @@ def _validate_download_listing(
     if not isinstance(raw_files, list):
         raise RemoteRecipeValidationError("session file listing files must be a list")
     if len(raw_files) > MAX_FILES:
-        raise RemoteRecipeValidationError(
-            f"session file count {len(raw_files)} exceeds KB Store limit {MAX_FILES}"
-        )
+        raise RemoteRecipeValidationError(f"session file count {len(raw_files)} exceeds KB Store limit {MAX_FILES}")
     seen: set[str] = set()
     manifest: dict[str, tuple[int, str]] = {}
     for index, entry in enumerate(raw_files):
@@ -198,22 +166,14 @@ def _validate_download_listing(
         seen.add(path)
         digest = entry.get("sha256")
         if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
-            raise RemoteRecipeValidationError(
-                f"session file {path!r} sha256 must be 64 lowercase hex characters"
-            )
+            raise RemoteRecipeValidationError(f"session file {path!r} sha256 must be 64 lowercase hex characters")
         if "size" not in entry:
-            raise RemoteRecipeValidationError(
-                f"session file {path!r} size is required"
-            )
+            raise RemoteRecipeValidationError(f"session file {path!r} size is required")
         raw_size = entry.get("size")
         if isinstance(raw_size, bool) or not isinstance(raw_size, int):
-            raise RemoteRecipeValidationError(
-                f"session file {path!r} size must be an integer when present"
-            )
+            raise RemoteRecipeValidationError(f"session file {path!r} size must be an integer when present")
         if raw_size < 0 or raw_size > MAX_FILE_BYTES:
-            raise RemoteRecipeValidationError(
-                f"session file {path!r} size {raw_size} is outside 0..{MAX_FILE_BYTES}"
-            )
+            raise RemoteRecipeValidationError(f"session file {path!r} size {raw_size} is outside 0..{MAX_FILE_BYTES}")
         manifest[path] = (raw_size, digest)
     return manifest
 
@@ -277,24 +237,14 @@ def _view_artifact_manifest(
     """Validate and return the View-embedded artifact snapshot."""
     artifacts = envelope.get("artifacts")
     if not isinstance(artifacts, dict):
-        raise RemoteRecipeValidationError(
-            "Hyperloom Recipe View artifacts manifest must be an object"
-        )
+        raise RemoteRecipeValidationError("Hyperloom Recipe View artifacts manifest must be an object")
     files = artifacts.get("files")
     if not isinstance(files, list):
-        raise RemoteRecipeValidationError(
-            "Hyperloom Recipe View artifacts.files must be a list"
-        )
+        raise RemoteRecipeValidationError("Hyperloom Recipe View artifacts.files must be a list")
     manifest = _validate_download_listing({"files": files})
     file_count = artifacts.get("file_count")
-    if (
-        isinstance(file_count, bool)
-        or not isinstance(file_count, int)
-        or file_count != len(manifest)
-    ):
-        raise RemoteRecipeValidationError(
-            "Hyperloom Recipe View artifacts.file_count does not match files"
-        )
+    if isinstance(file_count, bool) or not isinstance(file_count, int) or file_count != len(manifest):
+        raise RemoteRecipeValidationError("Hyperloom Recipe View artifacts.file_count does not match files")
     return manifest
 
 
@@ -319,9 +269,7 @@ class RemoteRecipeClient:
             return None
         if not base or not token:
             missing = "KB_STORE_URL" if not base else "KB_STORE_TOKEN"
-            raise RemoteRecipeConfigurationError(
-                f"{missing} is required when Remote Recipe KB V2 is enabled"
-            )
+            raise RemoteRecipeConfigurationError(f"{missing} is required when Remote Recipe KB V2 is enabled")
         return cls(KBStoreClient(base, token))
 
     def get_view(self, canonical_id: str) -> dict[str, Any] | None:
@@ -329,11 +277,7 @@ class RemoteRecipeClient:
         envelope = self.store.get_hyperloom_recipe_view(canonical_id)
         if envelope is None:
             return None
-        session_id = (
-            str(envelope.get("session_id") or "").strip()
-            if isinstance(envelope, dict)
-            else ""
-        )
+        session_id = str(envelope.get("session_id") or "").strip() if isinstance(envelope, dict) else ""
         envelope = _validate_session_envelope(
             envelope,
             canonical_id=canonical_id,
@@ -354,9 +298,7 @@ class RemoteRecipeClient:
         root = Path(destination)
         generation: Path | None = None
         if root.parent.is_dir():
-            for stale_generation in root.parent.glob(
-                f".{root.name}.generation-*"
-            ):
+            for stale_generation in root.parent.glob(f".{root.name}.generation-*"):
                 _deactivate_destination(stale_generation)
         try:
             selected = envelope if envelope is not None else self.get_view(canonical_id)
@@ -381,9 +323,7 @@ class RemoteRecipeClient:
             )
         except (TypeError, ValueError) as exc:
             _deactivate_destination(root)
-            raise RemoteRecipeValidationError(
-                f"downloaded recipe is not strict JSON: {exc}"
-            ) from exc
+            raise RemoteRecipeValidationError(f"downloaded recipe is not strict JSON: {exc}") from exc
         except Exception:
             _deactivate_destination(root)
             raise
@@ -397,8 +337,7 @@ class RemoteRecipeClient:
                 listing_manifest = _validate_download_listing(listing)
                 if listing_manifest != view_manifest:
                     raise RemoteRecipeValidationError(
-                        "session file listing does not match the selected "
-                        "Hyperloom Recipe View artifact manifest"
+                        "session file listing does not match the selected Hyperloom Recipe View artifact manifest"
                     )
                 root.parent.mkdir(parents=True, exist_ok=True)
                 generation = Path(
@@ -418,11 +357,7 @@ class RemoteRecipeClient:
                         *,
                         kind: str = "",
                     ) -> dict[str, Any]:
-                        if (
-                            requested_canonical_id != canonical_id
-                            or requested_session_id != session_id
-                            or kind
-                        ):
+                        if requested_canonical_id != canonical_id or requested_session_id != session_id or kind:
                             return original_listing_method(
                                 requested_canonical_id,
                                 requested_session_id,
@@ -494,9 +429,7 @@ class RemoteRecipeClient:
         only ever compared against a like-for-like reading.
         """
         if not math.isfinite(optimized_throughput):
-            raise RemoteRecipeValidationError(
-                f"optimized_throughput must be finite, got {optimized_throughput!r}"
-            )
+            raise RemoteRecipeValidationError(f"optimized_throughput must be finite, got {optimized_throughput!r}")
         # Defense in depth at the final shared-store boundary. Builders sanitize
         # earlier so their outputs are safe to inspect, but callers can also
         # construct a KnowledgeBundle directly.
@@ -525,9 +458,7 @@ class RemoteRecipeClient:
                     f"missing={sorted(missing)!r} blank={sorted(blank)!r} "
                     f"unexpected={sorted(unexpected)!r}"
                 )
-        self.store.put_knowledge(
-            canonical_id, bundle.knowledge, session_id=session_id, mode="replace"
-        )
+        self.store.put_knowledge(canonical_id, bundle.knowledge, session_id=session_id, mode="replace")
         try:
             self.store.set_champion(
                 canonical_id,

@@ -57,9 +57,7 @@ def test_resolve_source_delegates_to_active_finder(monkeypatch):
         return "/opt/vllm/csrc/act.cu", "symbol_index"
 
     monkeypatch.setattr(source_resolver, "resolve_source", fake_resolve_source)
-    src, method = resolver.resolve_source(
-        "_C::silu_and_mul", framework="vllm", device_kernel_name="act_kernel"
-    )
+    src, method = resolver.resolve_source("_C::silu_and_mul", framework="vllm", device_kernel_name="act_kernel")
     assert src == "/opt/vllm/csrc/act.cu"
     assert method == "symbol_index"
     assert calls["args"] == ("_C::silu_and_mul", "vllm", "act_kernel")
@@ -102,11 +100,7 @@ def repo_dir():
 def test_resolve_triton_py_pins_def_line(repo_dir):
     py = repo_dir / "fused.py"
     py.write_text(
-        "import triton\n"
-        "\n"
-        "@triton.jit\n"
-        "def my_fused_kernel(x):\n"
-        "    return x\n",
+        "import triton\n\n@triton.jit\ndef my_fused_kernel(x):\n    return x\n",
         encoding="utf-8",
     )
     source, line, method = resolver.resolve_triton_py(str(py), symbol="my_fused_kernel")

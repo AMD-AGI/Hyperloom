@@ -10,7 +10,6 @@
 # pytest, coverage, CodeQL, and full-tree Bandit on push.
 #
 # Rollout notes (see CONTRIBUTING.md and docs/contributing/style-guide.md):
-#   - ruff-format: enable after the mechanical format PR lands.
 #   - gitleaks: mirrors secret-scan.yml (Docker-backed hook).
 #   - Full pytest stays in CI only (tests-coverage.yml).
 
@@ -42,8 +41,7 @@ repos:
     hooks:
       - id: ruff
         args: ["--force-exclude"]
-      # Enable after the repo-wide ruff format PR merges:
-      # - id: ruff-format
+      - id: ruff-format
 
   # --- Python: security (production paths; tests excluded) ---
   - repo: https://github.com/PyCQA/bandit
@@ -95,3 +93,14 @@ repos:
           - --ignore-words-list=rocm,hip,aiter,vllm,sglang,triton,jsonl,kwargs,nd,te,ser,crate,assertin
           - --skip=*.json,*.jsonl,*.svg,*.lock,docs/_build,.venv,_audit_artifacts
         exclude: ^(LICENSES/|docs/_build/)
+
+  # Enable once the mypy backlog is manageable (config in pyproject.toml):
+  # - repo: local
+  #   hooks:
+  #     - id: mypy
+  #       name: mypy (src/hyperloom)
+  #       entry: mypy src/hyperloom
+  #       language: system
+  #       types: [python]
+  #       pass_filenames: false
+  #       require_serial: true

@@ -161,8 +161,6 @@ def _classify_pod_role(
     return None
 
 
-
-
 def pod_targets_from_lists(
     pods: list[dict[str, Any]] | None,
     ips: list[str] | None,
@@ -227,8 +225,6 @@ def _parse_lws_ordinal(pod_id: str) -> int | None:
     """
     tail = pod_id.rsplit("-", 1)[-1] if "-" in pod_id else ""
     return int(tail) if tail.isdigit() else None
-
-
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).

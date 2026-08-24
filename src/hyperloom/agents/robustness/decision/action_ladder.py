@@ -320,9 +320,7 @@ class ActionLadder:
                         "force_gpu_cleanup": True,
                         "evidence": evidence,
                     },
-                    idempotency_key=(
-                        f"recover-server-unreachable-tick-{self._last_tick_index}-{target_key}"
-                    ),
+                    idempotency_key=(f"recover-server-unreachable-tick-{self._last_tick_index}-{target_key}"),
                 )
             )
             return intents

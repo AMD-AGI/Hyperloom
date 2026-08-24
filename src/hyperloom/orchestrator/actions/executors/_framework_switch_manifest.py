@@ -122,6 +122,7 @@ def undeclared_switch_gates(
                     found.add(name)
     return sorted(found)
 
+
 # Default value assigned to a switch whose manifest entry omits one. The
 # rewrites are boolean fast paths, so "on" is the only value that matters.
 DEFAULT_SWITCH_VALUE = "1"
@@ -342,11 +343,7 @@ def switch_env(switches: list[dict[str, Any]], *, only: "set[str] | None" = None
         Mapping of switch name to its value.
     """
     wanted = {s.strip().upper() for s in only} if only is not None else None
-    return {
-        entry["switch"]: entry["value"]
-        for entry in switches
-        if wanted is None or entry["switch"] in wanted
-    }
+    return {entry["switch"]: entry["value"] for entry in switches if wanted is None or entry["switch"] in wanted}
 
 
 def dependency_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:

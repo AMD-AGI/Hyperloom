@@ -76,14 +76,22 @@ class TestCallSiteBinding:
         # xdit so the diffusion sidecar (and therefore the helper) is reached.
         rc = bta.main(
             [
-                "--trace-input", str(trace),
-                "--session-id", "binding",
-                "--workspace-path", str(tmp_path / "ws"),
-                "--framework", "xdit",
-                "--target-platform", "MI300X",
-                "--model-name", "m",
-                "--top-k", "4",
-                "--num-denoise-steps", "9",
+                "--trace-input",
+                str(trace),
+                "--session-id",
+                "binding",
+                "--workspace-path",
+                str(tmp_path / "ws"),
+                "--framework",
+                "xdit",
+                "--target-platform",
+                "MI300X",
+                "--model-name",
+                "m",
+                "--top-k",
+                "4",
+                "--num-denoise-steps",
+                "9",
             ]
         )
         capsys.readouterr()
@@ -156,7 +164,6 @@ def test_bypass_cli_default_honours_the_shared_env_var(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_NUM_DENOISE_STEPS", raising=False)
     importlib.reload(bta)
     assert bta._build_arg_parser().parse_args(argv).num_denoise_steps == 0
-
 
 
 def _write_trace(path: Path, names: list[str], gz: bool):

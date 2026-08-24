@@ -35,6 +35,7 @@ def _default_kb_root() -> Path:
 
     return framework_optimization_root()
 
+
 #: Filename for the JSONL append log; stable so the fa CLI can hard-code it
 #: (single POSIX append is atomic).
 LESSONS_FILE: str = "lessons.jsonl"

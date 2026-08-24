@@ -386,7 +386,7 @@ def resolve_served_context(
             if tok == flag and i + 1 < len(toks):
                 value = toks[i + 1]
             elif tok.startswith(prefix):
-                value = tok[len(prefix):]
+                value = tok[len(prefix) :]
             if value is not None:
                 try:
                     parsed = int(value)

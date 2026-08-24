@@ -67,12 +67,7 @@ def test_trustworthy_donor_accepted() -> None:
 
 
 def test_donor_identity_falls_back_to_canonical_id() -> None:
-    donor = _donor(
-        canonical_id=(
-            "inference:checkpoint:mi300x:sglang:qwen2:"
-            "qwen2forcausallm:1.2.5:bf16"
-        )
-    )
+    donor = _donor(canonical_id=("inference:checkpoint:mi300x:sglang:qwen2:qwen2forcausallm:1.2.5:bf16"))
     donor.pop("architectures")
     donor.pop("model_type")
 
