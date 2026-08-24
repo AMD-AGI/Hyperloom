@@ -918,18 +918,6 @@ class ExplorePhase(PhaseHandler):
             params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
         if state.warm_start_lessons and "warm_start_lessons" not in params:
             params["warm_start_lessons"] = list(state.warm_start_lessons)
-        # KG graph-recommended knobs (advisory positive priors).
-        if "kg_recommended_knobs" not in params:
-            wsc = getattr(state, "warm_start_context", None) or {}
-            kg_knobs = wsc.get("recommended_knobs") if isinstance(wsc, dict) else None
-            if kg_knobs:
-                params["kg_recommended_knobs"] = [k for k in kg_knobs if isinstance(k, dict)]
-        # KG graph-guided config knobs (runnable args/envs).
-        if "kg_guided_knobs" not in params:
-            wsc = getattr(state, "warm_start_context", None) or {}
-            guided = wsc.get("graph_guided_knobs") if isinstance(wsc, dict) else None
-            if guided:
-                params["kg_guided_knobs"] = [k for k in guided if isinstance(k, dict)]
         # runtime framework/version for version-mismatch annotation.
         if "framework" not in params:
             fw = str(getattr(state, "framework", "") or "").strip()

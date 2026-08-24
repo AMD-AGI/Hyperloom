@@ -93,7 +93,6 @@ def test_apply_single_patch(fake_repo, output_dir):
                 "repo": "ROCm/vllm",
             }
         ],
-        "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert len(result) == 1
@@ -103,29 +102,9 @@ def test_apply_single_patch(fake_repo, output_dir):
     assert "patched = True" in content
 
 
-def test_blocked_patch_skipped(fake_repo, output_dir):
-    """Patches in blocked_patches should be skipped."""
-    params = {
-        "patches": [
-            {
-                "patch_file": "vllm/fp8.py",
-                "patch_content": VALID_PATCH,
-                "patch_ref": "",
-                "measured_gain_pct": 24.9,
-                "repo": "ROCm/vllm",
-            }
-        ],
-        "blocked_patches": [{"patch_file": "vllm/fp8.py"}],
-    }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
-    assert result == []
-    content = (fake_repo / "vllm" / "fp8.py").read_text()
-    assert "patched = True" not in content
-
-
 def test_no_patches_returns_empty(output_dir):
     """No patches -> empty result, no crash."""
-    params = {"patches": [], "blocked_patches": []}
+    params = {"patches": []}
     result = _apply_warm_patches(params, "/some/path", output_dir)
     assert result == []
 
@@ -314,7 +293,6 @@ def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
                 "repo": "ROCm/vllm",
             }
         ],
-        "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
@@ -334,7 +312,6 @@ def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
                 "repo": "ROCm/vllm",
             }
         ],
-        "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
