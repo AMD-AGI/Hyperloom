@@ -26,6 +26,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The multi-node SSH forward denylist is now the shared
+  `BLOCKED_UNTRUSTED_ENV_NAMES` definition.** `multi_node/_internal/env_safety`
+  previously declared its own nine-name `_DENY_KEYS` set, which was missing
+  thirteen names that `BLOCKED_UNTRUSTED_ENV_NAMES` covers
+  (`CDPATH`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
+  `PYTHONINSPECT`, `PYTHONUSERBASE`, `SHELLOPTS`, and others).  The local symbol
+  is deleted; `is_forward_env_key_allowed` now checks the shared constant.
+  The forwarding logic in `_collect_forward_env` (prefix allowlist +
+  four hardcoded names) produces no names that overlap with the blocked set, so
+  no legitimate forwarding is affected.
+
 - **`BLOCKED_UNTRUSTED_ENV_NAMES` and `BLOCKED_CHILD_ENV_NAMES` no longer list
   `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, or `RUBYOPT`.** This is a
   ROCm/Linux-only repository with no macOS platform code and no Ruby tooling;
