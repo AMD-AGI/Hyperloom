@@ -4422,7 +4422,7 @@ class FrameworkPhase(PhaseHandler):
 
         The build is recorded as accounted for only once there is something to
         account for. A probe the budget refused leaves it unrouted on purpose: it
-        is still a verified build nothing has launched, and the manifest saying
+        is still a probed build nothing has launched, and the manifest saying
         otherwise is what would strand it for the rest of the session.
 
         Args:
@@ -4454,7 +4454,7 @@ class FrameworkPhase(PhaseHandler):
             )
             return
 
-        log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
+        log.info("ENABLEMENT: targeted_build probe-verified → enqueue launch probe task=%s", task_id)
         probe_tid, generation = await self._enqueue_build_launch_probe(
             task_id,
             br,
