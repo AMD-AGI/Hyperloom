@@ -516,7 +516,7 @@ def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_
     harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
     harness.parent.mkdir(parents=True)
     harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
-    monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "aiter"),))
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
     tla._harness_search_bases.cache_clear()
 
     files = tla.find_benchmark_files(
@@ -531,7 +531,7 @@ def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_
 
 def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
     """A hint that resolves nowhere yields nothing, not an unopenable path."""
-    monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "aiter"),))
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
     tla._harness_search_bases.cache_clear()
     files = tla.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
     tla._harness_search_bases.cache_clear()

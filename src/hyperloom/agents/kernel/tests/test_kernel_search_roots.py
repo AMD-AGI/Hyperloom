@@ -7,18 +7,19 @@
 
 """Guards on the framework roots the grep tier searches for kernel source.
 
-``KNOWN_SEARCH_ROOTS`` used to be a literal naming one container's layout
-(``/sgl-workspace/...`` and a python3.10 venv). On a host that installs the
-frameworks anywhere else -- a wheel under ``dist-packages``, a different Python
-minor -- every root was absent, so the grep tier searched nothing, returned no
-hit for any kernel, and the LLM tiers got an empty shortlist and a validation
-gate that rejected every path outside those absent roots. The run still
-succeeded: it reported zero routable kernels, which reads exactly like a trace
-with nothing worth optimizing, and kernel-opt sat idle with no work to dispatch.
+A root list pinned to one container's layout (``/sgl-workspace/...`` and a
+python3.10 venv) fails silently anywhere else: on a host that installs the
+frameworks under ``dist-packages`` or a different Python minor, every root is
+absent, so the grep tier searches nothing, no kernel resolves, and the
+validation gate rejects every path outside those absent roots. The run still
+succeeds -- it reports zero routable kernels, which reads exactly like a trace
+with nothing worth optimizing, and kernel-opt sits idle with no work to
+dispatch.
 
-These tests pin the properties that keep that silent failure from returning:
-roots are discovered at runtime, non-existent ones never survive, and a host
-with nothing installed says so instead of looking healthy.
+These tests pin the properties that keep that failure mode out: roots are
+discovered at runtime, non-existent ones never survive, a host with nothing
+installed says so instead of looking healthy, and the per-run cache can be
+dropped so a long-lived process is not stuck with what it saw at import.
 """
 
 from __future__ import annotations
@@ -55,16 +56,16 @@ class TestDiscoverKernelSearchRoots:
             "_resolve_kernel_search_roots",
             lambda: (f"{present}/", "/gone/aiter/"),
         )
-        tl._discover_kernel_search_roots.cache_clear()
-        assert tl._discover_kernel_search_roots() == (str(present),)
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(present),)
 
     def test_strips_trailing_separator(self, monkeypatch, tmp_path):
         """Callers match these as prefixes without a separator of their own."""
         root = tmp_path / "aiter"
         root.mkdir()
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: (f"{root}/",))
-        tl._discover_kernel_search_roots.cache_clear()
-        assert tl._discover_kernel_search_roots() == (str(root),)
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(root),)
 
     def test_deduplicates_while_preserving_order(self, monkeypatch, tmp_path):
         first = tmp_path / "vllm"
@@ -76,8 +77,8 @@ class TestDiscoverKernelSearchRoots:
             "_resolve_kernel_search_roots",
             lambda: (f"{first}/", f"{second}/", str(first), f"{first}//"),
         )
-        tl._discover_kernel_search_roots.cache_clear()
-        assert tl._discover_kernel_search_roots() == (str(first), str(second))
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(first), str(second))
 
     def test_falls_back_to_local_discovery_without_the_orchestrator(
         self, monkeypatch, tmp_path
@@ -91,8 +92,8 @@ class TestDiscoverKernelSearchRoots:
         monkeypatch.setattr(
             tl, "_installed_package_dir", lambda package: str(located) if package == "aiter" else ""
         )
-        tl._discover_kernel_search_roots.cache_clear()
-        assert tl._discover_kernel_search_roots() == (str(located),)
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(located),)
 
     def test_pinned_layouts_are_a_last_resort_not_a_requirement(
         self, monkeypatch, tmp_path
@@ -105,17 +106,42 @@ class TestDiscoverKernelSearchRoots:
         monkeypatch.setattr(
             tl, "_FALLBACK_SEARCH_ROOTS", (str(checkout), "/sgl-workspace/gone")
         )
-        tl._discover_kernel_search_roots.cache_clear()
-        assert tl._discover_kernel_search_roots() == (str(checkout),)
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(checkout),)
 
     def test_no_searchable_root_is_reported_loudly(self, monkeypatch, caplog):
         """An unsearchable host must not look like a healthy one."""
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: ("/gone/vllm/",))
-        tl._discover_kernel_search_roots.cache_clear()
+        tl.kernel_search_roots.cache_clear()
         with caplog.at_level(logging.WARNING, logger=tl.log.name):
-            assert tl._discover_kernel_search_roots() == ()
+            assert tl.kernel_search_roots() == ()
         assert "no framework source root" in caplog.text
 
     def teardown_method(self):
         """Drop the cached roots so the next test resolves them afresh."""
-        tl._discover_kernel_search_roots.cache_clear()
+        tl.kernel_search_roots.cache_clear()
+
+
+class TestRefreshKernelSearchRoots:
+    """A framework installed after import must still become searchable.
+
+    The orchestrator imports this module and outlives any single analysis run,
+    so a value fixed at import time would keep a run blind to a framework the
+    FRAMEWORK phase installed since.
+    """
+
+    def test_a_root_that_appears_later_is_picked_up(self, monkeypatch, tmp_path):
+        appears = tmp_path / "aiter"
+        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: (str(appears),))
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == ()
+
+        appears.mkdir()
+
+        # Still the cached answer until the run boundary drops it.
+        assert tl.kernel_search_roots() == ()
+        assert tl.refresh_kernel_search_roots() == (str(appears),)
+        assert tl.kernel_search_roots() == (str(appears),)
+
+    def teardown_method(self):
+        tl.kernel_search_roots.cache_clear()

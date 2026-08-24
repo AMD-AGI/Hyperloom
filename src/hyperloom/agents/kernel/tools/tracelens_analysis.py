@@ -1730,7 +1730,7 @@ def _installed_package_dir(package: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _discover_kernel_search_roots() -> tuple[str, ...]:
+def kernel_search_roots() -> tuple[str, ...]:
     """Resolve the framework trees to grep for kernel source, at runtime.
 
     Prefers the orchestrator's centralised resolver so this tool agrees with
@@ -1740,6 +1740,12 @@ def _discover_kernel_search_roots() -> tuple[str, ...]:
 
     Non-existent roots are dropped: grepping them returns nothing and is
     indistinguishable from a kernel that genuinely has no source here.
+
+    Cached for the duration of a run, since every candidate consults it and
+    ``find_spec`` plus a directory probe per package is not free. A process that
+    outlives one run -- the orchestrator imports this module -- calls
+    :func:`refresh_kernel_search_roots` at run entry so a framework installed
+    since the last one is still discoverable.
 
     Returns:
         tuple[str, ...]: Existing roots without trailing separators,
@@ -1775,7 +1781,16 @@ def _discover_kernel_search_roots() -> tuple[str, ...]:
     return tuple(roots)
 
 
-KNOWN_SEARCH_ROOTS = _discover_kernel_search_roots()
+def refresh_kernel_search_roots() -> tuple[str, ...]:
+    """Re-run root discovery, dropping the cached answer.
+
+    Returns:
+        tuple[str, ...]: The freshly discovered roots.
+    """
+    kernel_search_roots.cache_clear()
+    return kernel_search_roots()
+
+
 # Extensions a grep hit may be admitted under. Deliberately narrow, and kept in
 # lockstep with source_type_for(): a suffix admitted here but unclassified there
 # lands as source_type="unknown", which classify_patchability rejects. Worse, it
@@ -2179,7 +2194,7 @@ def locate_source_via_grep(name: str) -> str:
             continue
         tried.add(keyword)
         hits: list[Path] = []
-        for root in KNOWN_SEARCH_ROOTS:
+        for root in kernel_search_roots():
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
             ranked = _rank_paths(hits, keyword=keyword)
@@ -2192,7 +2207,7 @@ def locate_source_via_grep(name: str) -> str:
             continue
         tried.add(keyword)
         hits = []
-        for root in KNOWN_SEARCH_ROOTS:
+        for root in kernel_search_roots():
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
             return str(_prefer_symbol_definition(keyword, hits)[0])
@@ -2617,7 +2632,7 @@ def _harness_search_bases() -> tuple[str, ...]:
     """
     bases: list[str] = []
     seen: set[str] = set()
-    for root in KNOWN_SEARCH_ROOTS:
+    for root in kernel_search_roots():
         trimmed = root.rstrip("/")
         for base in (os.path.dirname(trimmed), trimmed):
             if base and base not in seen and os.path.isdir(base):
@@ -4300,7 +4315,7 @@ def _source_context_block() -> str:
         return build_context_block(
             model_path=_RUNTIME_CONTEXT.get("model_path") or "",
             server_args=_RUNTIME_CONTEXT.get("server_args") or "",
-            framework_roots=tuple(KNOWN_SEARCH_ROOTS),
+            framework_roots=kernel_search_roots(),
             framework=_RUNTIME_CONTEXT.get("framework") or "",
             precision=_RUNTIME_CONTEXT.get("precision") or "",
         )
@@ -6925,7 +6940,7 @@ def _run_candidate_review_stage(
         run_dir=run_dir,
         raw_candidates_path=raw_path,
         reference_paths={k: v for k, v in reference_paths.items() if v},
-        framework_roots=KNOWN_SEARCH_ROOTS,
+        framework_roots=kernel_search_roots(),
         context_block=_source_context_block(),
         log=_forward_to_log,
     )
@@ -6978,7 +6993,7 @@ def _run_candidate_review_stage(
     notes = apply_revisions(
         candidates,
         outcome.revisions,
-        framework_roots=KNOWN_SEARCH_ROOTS,
+        framework_roots=kernel_search_roots(),
         protected_ids=protected_ids,
     )
     changed = 0
@@ -7537,10 +7552,14 @@ def main() -> int:
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
+    # Discovery is cached per run, so re-run it here: a process that outlives a
+    # single run would otherwise keep the roots it saw when it first imported
+    # this module, and miss a framework installed since.
+    search_roots = refresh_kernel_search_roots()
     # Without a single searchable root every kernel resolves to "" and the whole
     # run reports zero routable candidates -- a host misconfiguration that reads
     # exactly like a trace with nothing worth optimizing. Say so up front.
-    if not KNOWN_SEARCH_ROOTS:
+    if not search_roots:
         trace_health_warnings.append(
             {
                 "code": "no_framework_source_root",
