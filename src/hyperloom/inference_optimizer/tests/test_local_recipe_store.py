@@ -113,6 +113,24 @@ def test_cid_to_path_components_rejects_empty_segment() -> None:
         cid_to_path_components("inference:m::fw:v:p:mt:arch")
 
 
+def test_cid_to_path_components_rejects_traversal_segment() -> None:
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        cid_to_path_components("inference:..:hw:fw:mt:arch:fv:prec")
+    assert "unsafe" in ei.value.reason
+
+
+def test_cid_to_path_components_rejects_absolute_segment() -> None:
+    with pytest.raises(InvalidCanonicalIdError) as ei:
+        cid_to_path_components("inference:/abs:hw:fw:mt:arch:fv:prec")
+    assert "unsafe" in ei.value.reason
+
+
+def test_put_recipe_rejects_traversal_cid(tmp_path: Path) -> None:
+    store = LocalRecipeStore(root=tmp_path)
+    with pytest.raises(InvalidCanonicalIdError):
+        store.put_recipe(canonical_id="inference:..:hw:fw:mt:arch:fv:prec")
+
+
 def test_canonical_id_for_path_inverse_of_cid_decomposition(
     tmp_path: Path,
 ) -> None:

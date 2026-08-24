@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ._path_safety import SLUG_PART_RE as _SLUG_PART_RE
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_ARCHITECTURES_SLUG,
     DEFAULT_FRAMEWORK_SLUG,
@@ -116,6 +117,12 @@ def cid_to_path_components(
             raw,
             "empty segment(s) detected — every dimension must be non-empty",
         )
+    for seg in parts[1:]:
+        if not _SLUG_PART_RE.fullmatch(seg):
+            raise InvalidCanonicalIdError(
+                raw,
+                f"segment {seg!r} contains characters that are unsafe in a filesystem path",
+            )
     return (model, hardware, framework_name, model_type, architectures, framework_version, precision)
 
 

@@ -121,7 +121,7 @@ def test_traverse_and_search(tmp_path: Path) -> None:
 )
 def test_unsafe_slugs_are_rejected(tmp_path: Path, slug: str) -> None:
     store = LocalGraphStore(tmp_path / "kg")
-    with pytest.raises(ValueError, match="unsafe graph slug"):
+    with pytest.raises(ValueError, match="unsafe slug"):
         store.call("get_page", {"slug": slug})
 
 
