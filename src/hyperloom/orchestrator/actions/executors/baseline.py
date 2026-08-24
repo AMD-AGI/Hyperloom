@@ -1261,9 +1261,9 @@ def _apply_warm_patches(
     """Apply warm-replay code patches to the Session's active framework root.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
-    patch_ref). Applies each patch
-    via ``git apply`` when the target is a git work-tree, otherwise via the
-    shared nogit ``patch`` CLI path used by integrate_patch.
+    patch_ref). Applies each patch via ``git apply`` when the target is a git
+    work-tree, otherwise via the shared nogit ``patch`` CLI path used by
+    integrate_patch.
 
     Legacy patch lists return the list of successfully applied patch metadata
     dicts (best-effort skip semantics). Current-contract timelines set

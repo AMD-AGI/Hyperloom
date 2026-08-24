@@ -2336,7 +2336,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     The system prompt carries the immutable contract (identity, output
     protocol, iron rules) and the user prompt carries the per-task context
     (hardware, optional PD-disaggregation, execution budget, gap, KB,
-    roofline, recipe, lessons, pitfalls, KG knobs, PR feed, source hint and
+    roofline, recipe, lessons, pitfalls, PR feed, source hint and
     orchestration notes). The split lets the LLM backend cache the system
     prompt across specialists.
 
@@ -2354,9 +2354,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     ]
     if inp.domain.key == "enablement_specialist":
         # Pre-baseline enablement: the perf context (roofline / recipe / lessons /
-        # pitfalls / KG knobs / KB subgraph) is noise when the server cannot boot
-        # or the baseline fails its accuracy eval. Carry only the failure, the
-        # tiered playbook, and the tools to discover + navigate a fix.
+        # pitfalls / KB subgraph) is noise when the server cannot boot or the
+        # baseline fails its accuracy eval. Carry only the failure, the tiered
+        # playbook, and the tools to discover + navigate a fix.
         user_sections = [
             _section_mandate(inp),
             _section_hardware(inp),
