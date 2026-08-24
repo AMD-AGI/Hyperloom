@@ -1941,6 +1941,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix
         )
 
+    def append_phase_history_event(
+        self,
+        *,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+        ts: str | None = None,
+        ts_unix: float | None = None,
+    ) -> dict[str, Any]:
+        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
+        from ..phases import machine_state as _m
+
+        return _m.append_phase_history_event(
+            self,
+            reason=reason,
+            evidence=evidence,
+            ts=ts,
+            ts_unix=ts_unix,
+        )
+
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` ("" when none).
 
