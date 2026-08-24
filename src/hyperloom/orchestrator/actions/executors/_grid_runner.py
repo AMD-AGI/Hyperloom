@@ -2487,6 +2487,17 @@ async def run_grid(
                     f"{estimated_tput:.1f}tok/s"
                     f"(n={ok_estimate.get('num_samples')})"
                 )
+            overtime_error = (
+                f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
+                f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
+            )
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="killed_overtime",
+                error_summary=overtime_error,
+                extra_args=variant.extra_server_args,
+            )
             results.append(
                 VariantResult(
                     name=variant.name,
@@ -2497,10 +2508,8 @@ async def run_grid(
                     killed_overtime=True,
                     runtime_sec=variant_runtime_sec,
                     estimated_output_throughput=estimated_tput,
-                    error=(
-                        f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
-                        f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
-                    ),
+                    error=overtime_error,
+                    error_class="killed_overtime",
                     server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=ok_warnings,
@@ -2579,8 +2588,6 @@ async def run_grid(
             settle_seconds=REPORT_SETTLE_SECONDS if rc == 0 else 0.0,
         )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
-        if rc != 0:
-            warnings.append("magpie_nonzero_after_valid_measurement")
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
         if warmup_tput is not None:
@@ -2653,6 +2660,47 @@ async def run_grid(
                 break
             continue
 
+        if rc != 0:
+            nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
+            if not nonzero_error.strip():
+                nonzero_error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
+            _write_variant_abort_marker(
+                slot,
+                variant_name=variant.name,
+                error_class="magpie_nonzero_after_valid_measurement",
+                error_summary=nonzero_error,
+                extra_args=variant.extra_server_args,
+            )
+            log.warning(
+                "grid_runner: variant %d/%d name=%s aborted: magpie_nonzero_after_valid_measurement (rc=%d)",
+                i + 1,
+                len(grid),
+                variant.name,
+                rc,
+            )
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    workspace=str(workspace),
+                    report_path=str(report_path) if report_path.exists() else None,
+                    raw_result_path=measurement.get("raw_result_path"),
+                    reported_success=measurement.get("reported_success"),
+                    returncode=rc,
+                    nonfatal_warnings=warnings,
+                    error=nonzero_error,
+                    error_class="magpie_nonzero_after_valid_measurement",
+                    server_log_path=_existing_log_path(server_log),
+                    note=variant.note,
+                )
+            )
+            await _report_finished_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
         results.append(
             VariantResult(
                 name=variant.name,
@@ -2673,7 +2721,6 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
-                error=redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else None,
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),
