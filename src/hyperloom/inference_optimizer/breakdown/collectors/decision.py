@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.timeutil import iso_z
+from hyperloom.orchestrator.phases.machine_state import is_phase_transition_row
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
@@ -274,9 +275,9 @@ def _build_phase_windows(
     for row in history:
         if not isinstance(row, dict):
             continue
-        to_phase = str(row.get("to_phase") or "").strip()
-        if not to_phase:
+        if not is_phase_transition_row(row):
             continue
+        to_phase = str(row.get("to_phase") or "").strip()
         ts_unix = row.get("ts_unix")
         if ts_unix is None:
             ts_unix = _parse_iso_unix(row.get("ts"))

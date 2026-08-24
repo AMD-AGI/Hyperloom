@@ -1063,6 +1063,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_enqueue_specialist_requested_build": "phase_framework",
         "_maybe_route_build_outcomes": "phase_framework",
         "_route_succeeded_build": "phase_framework",
+        "_route_failed_build": "phase_framework",
         "_build_routing_record": "phase_framework",
         "_note_build_routed": "phase_framework",
         "_build_probe_was_cancelled": "phase_framework",

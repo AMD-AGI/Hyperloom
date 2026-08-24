@@ -81,6 +81,11 @@ class _StateStub:
     def save(self, _session_dir: Path) -> None:
         self._saves += 1
 
+    def append_phase_history_event(self, **kwargs: Any) -> dict[str, Any]:
+        from hyperloom.orchestrator.phases import machine_state as _ms
+
+        return _ms.append_phase_history_event(self, **kwargs)
+
 
 class _TasksStub:
     """Mimics the parts of ``Coordinator.tasks`` the pump touches."""
@@ -340,13 +345,23 @@ def test_pump_retries_empty_discover_before_marking_phase_done(
         assert stub.shared_state.framework_agent_phase_done is False
         assert stub.shared_state.framework_agent_empty_discoveries == i + 1
         assert _framework_agent_pendings(stub) == []
-        assert [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"] == []
+        assert [
+            r
+            for r in stub.shared_state.phase_history
+            if isinstance(r.get("evidence"), dict)
+            and r["evidence"].get("event") == "framework_agent_phase_done"
+        ] == []
 
     # The limit-th consecutive empty batch ends the phase with a summary row.
     _pump(stub)
     assert stub.shared_state.framework_agent_phase_done is True
     assert _framework_agent_pendings(stub) == []
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"]
+    rows = [
+        r
+        for r in stub.shared_state.phase_history
+        if isinstance(r.get("evidence"), dict)
+        and r["evidence"].get("event") == "framework_agent_phase_done"
+    ]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"
 
