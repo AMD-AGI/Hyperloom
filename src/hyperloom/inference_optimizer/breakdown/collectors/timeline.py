@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.timeutil import iso_z
+from hyperloom.orchestrator.phases.machine_state import (
+    is_phase_transition_row as _is_phase_transition_row,
+    phase_history_event_name,
+)
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
@@ -601,8 +605,9 @@ def collect_phase_segments(
 ) -> list[dict[str, Any]]:
     """Group action events into phase segments using ``phase_history`` boundaries.
 
-    Only rows with a non-empty ``to_phase`` are transitions (segment
-    boundaries); other rows are folded in as sub-events. Each segment's
+    Only rows with a real phase change (``to_phase != from_phase``) are
+    transitions (segment boundaries); marker rows and legacy rows without
+    ``to_phase`` are folded in as sub-events. Each segment's
     exit comes from the next transition. Actions are attributed by their
     own ``phase`` when present, else by the ``[entered_ts, exit_ts)``
     window. Empty when ``phase_history`` is missing (readers fall back to
@@ -625,8 +630,8 @@ def collect_phase_segments(
         return []
 
     rows = [r for r in history if isinstance(r, dict)]
-    transitions = [r for r in rows if str(r.get("to_phase") or "")]
-    sub_events = [r for r in rows if not str(r.get("to_phase") or "")]
+    transitions = [r for r in rows if _is_phase_transition_row(r)]
+    sub_events = [r for r in rows if not _is_phase_transition_row(r)]
 
     def _unix(row: dict[str, Any]) -> float | None:
         """Return a row's timestamp as a Unix epoch float.
@@ -708,7 +713,7 @@ def collect_phase_segments(
         if s is not None:
             s["events"].append(
                 {
-                    "event": str(ev.get("event") or ev.get("reason") or ""),
+                    "event": phase_history_event_name(ev),
                     "reason": str(ev.get("reason") or ""),
                     "ts": ev_ts,
                     "evidence": ev_evidence,
