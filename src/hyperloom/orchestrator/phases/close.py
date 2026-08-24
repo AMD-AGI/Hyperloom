@@ -104,9 +104,10 @@ class ClosePhase(PhaseHandler):
     async def _maybe_run_close_post_opt_roofline(self) -> None:
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated.
 
-        Profiles the final optimized service once and writes
-        reports/kernel_roofline_opt.json, giving the before/after kernel roofline
-        chart its optimized snapshot. No-op for sessions without an
+        Profiles the final optimized service once. The optimization-progress
+        chart reads the snapshot this lands in ``state.json#roofline_snapshots``;
+        the separate ``reports/kernel_roofline_opt.json`` sidecar keeps it from
+        overwriting the PRELUDE baseline report. No-op for sessions without an
         integrate-class optimization; wrapped by the caller so a failure never
         blocks close.
         """
@@ -127,15 +128,16 @@ class ClosePhase(PhaseHandler):
             self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
         )
         # Hard timeout so a slow profile+TraceLens can't stall the close
-        # sequence; on timeout the chart degrades to baseline-only.
+        # sequence; on timeout no post-opt snapshot lands and the chart degrades
+        # to baseline-only.
         try:
             result = await asyncio.wait_for(
-                self.sub.run_task(task),
+                self.run_task_registered(task),
                 timeout=self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
             log.warning(
-                "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (kernel_roofline_opt.json absent)",
+                "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (no post-opt snapshot)",
                 self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
             )
             try:
@@ -471,7 +473,6 @@ class ClosePhase(PhaseHandler):
                 params=params,
                 idempotency_key=key,
                 requires_lanes=[],
-                allowed_tools=["Read"],
                 side_effects=["writes_results"],
                 lease_ttl_sec=120,
             )
@@ -673,8 +674,8 @@ class ClosePhase(PhaseHandler):
     async def _run_close_task(self, task: Task, *, step: str) -> str | None:
         """Run one close-step task and return the state it ended in.
 
-        ``run_task`` transitions ``queued -> running``, which the registry
-        refuses for a row that is already terminal or already running — and
+        ``run_task_registered`` transitions ``queued -> running``, which the
+        registry refuses for a row that is already terminal or running — and
         refuses correctly: the rejection is the double-spawn guard. So such a
         row is reported or waited on here instead of run, which keeps one row
         the sequencer did not create from taking down the step that was
@@ -712,7 +713,9 @@ class ClosePhase(PhaseHandler):
 
         A fresh report used to be awaited with no timeout, so a wedged writer
         held the process open after the session budget was already gone. The
-        bound is the step's typical cost, not the closing reserve.
+        bound is the step's typical cost, not the closing reserve. Cancelling it
+        lands on the runner's ``CancelledError`` path, which writes the row
+        terminal before this returns.
 
         Args:
             task: The queued (or otherwise runnable) close-step task.
@@ -730,7 +733,7 @@ class ClosePhase(PhaseHandler):
             bound_sec,
         )
         try:
-            result = await asyncio.wait_for(self.sub.run_task(task), timeout=bound_sec)
+            result = await asyncio.wait_for(self.run_task_registered(task), timeout=bound_sec)
         except asyncio.TimeoutError:
             log.warning(
                 "CLOSE step %s: task_id=%s still running after %.0fs; recording the step as failed",
@@ -832,7 +835,6 @@ class ClosePhase(PhaseHandler):
             },
             idempotency_key=idempotency_key,
             requires_lanes=[],
-            allowed_tools=["Read"],
             side_effects=["writes_results"],
             lease_ttl_sec=120,
         )

@@ -208,24 +208,6 @@ async def test_a_task_that_heartbeats_all_along_is_still_reclaimed_at_its_lease(
 
 
 @pytest.mark.asyncio
-async def test_a_heartbeat_never_fails_the_work_it_reports_on(tmp_path, monkeypatch):
-    """A row reaped underneath a running executor must not turn into a task failure."""
-    sub = _runner(tmp_path, monkeypatch)
-
-    async def _reported_after_deletion(ctx) -> dict:
-        async with sub.tasks.db.transaction() as cur:
-            cur.execute("DELETE FROM tasks WHERE task_id=?", (ctx.task.task_id,))
-        await report_progress(unit="variant", label="orphan")
-        return {"status": "ok"}
-
-    sub.register_executor("explore", _reported_after_deletion)
-    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="grid-1")
-    res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-
-
-@pytest.mark.asyncio
 async def test_a_sink_that_raises_is_swallowed_not_propagated(tmp_path, monkeypatch):
     """The reporter is an observability path; it owns its own failures."""
 

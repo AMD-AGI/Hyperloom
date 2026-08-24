@@ -30,8 +30,8 @@ patch *files*; this action produces *outcomes*.
 
 ## Who delegates this action
 
-* **Orchestration** only. Robustness can REVERT via existing
-  `kill_task` / `recover`; it does not directly integrate patches.
+* **Orchestration** only. Robustness can trigger recovery via
+  `delegate(recover)`; it does not directly integrate patches.
 
 ## Inputs (task.params)
 

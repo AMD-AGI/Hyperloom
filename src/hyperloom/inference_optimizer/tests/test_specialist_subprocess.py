@@ -24,7 +24,6 @@ import pytest
 from .conftest import init_git_repo
 
 from hyperloom.orchestrator.specialists.runner import (
-    DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
@@ -291,33 +290,17 @@ def test_runner_accepts_subprocess_config_only():
     assert runner.backend_factory is None
 
 
-def test_default_tools_include_write_capabilities():
-    """Edit/Write/MultiEdit are lifted out of the denylist for worktree patch authoring."""
-    for tool in ("Edit", "Write", "MultiEdit"):
-        assert tool in DEFAULT_SPECIALIST_TOOLS
-        assert tool not in SPECIALIST_TOOL_DENYLIST
+def test_denylist_blocks_dangerous_process_tools():
+    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule
+    against global process cleanup that could kill the serving / benchmark process."""
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
 
 
-def test_kb_write_tools_not_in_default_specialist_tools():
-    """KB lifecycle stays Coordinator-owned; the specialist KB MCP was removed.
-
-    Asserted by shape rather than by a fixed tool name, so re-introducing a KB
-    MCP server under any name is caught (the old ``mcp__cortex_kb__*`` names no
-    longer exist to assert against).
-    """
-    kb_mcp_tools = [t for t in DEFAULT_SPECIALIST_TOOLS if t.startswith("mcp__") and "kb" in t.lower()]
-    assert kb_mcp_tools == [], f"specialist toolset exposes KB MCP tools: {kb_mcp_tools}"
+def test_kb_mcp_tools_not_in_denylist():
+    """KB MCP server names must not appear in the denylist."""
     denylisted_kb_mcp = [t for t in SPECIALIST_TOOL_DENYLIST if t.startswith("mcp__") and "kb" in t.lower()]
     assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
-
-
-def test_task_allowed_tools_override_default_patch_tools():
-    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig())
-    tools = runner._resolve_tools(["Read", "Grep", "Glob", "Write"])
-    assert tools == ("Read", "Grep", "Glob", "Write")
-    assert "Edit" not in tools
-    assert "MultiEdit" not in tools
-    assert "Bash" not in tools
 
 
 def test_pick_worktree_base_picks_first_git_root(
@@ -397,12 +380,12 @@ async def test_subprocess_path_harvests_done_file(
 
 
 @pytest.mark.asyncio
-async def test_local_specialist_spawn_uses_devnull_stdin(
+async def test_local_specialist_spawn_uses_file_stdin(
     tmp_path: Path,
     fake_framework_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The local specialist path must never inherit Coordinator stdin."""
+    """The local specialist path feeds the user prompt via stdin."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="done_only")
     session_dir = tmp_path / "session"
@@ -428,10 +411,11 @@ async def test_local_specialist_spawn_uses_devnull_stdin(
         default_max_turns=2,
     )
 
-    result = await runner.run(_make_runner_ctx("t-spec-devnull"))
+    result = await runner.run(_make_runner_ctx("t-spec-stdin"))
 
     assert result.status == "succeeded"
-    assert seen_stdin == [subprocess.DEVNULL]
+    assert len(seen_stdin) == 1
+    assert seen_stdin[0] is not subprocess.DEVNULL
 
 
 @pytest.mark.asyncio
@@ -539,10 +523,9 @@ async def test_readonly_research_scout_skips_worktree(
         {
             "domain": "research_scout_specialist",
             "gap_canonical_id": "gap.research_scout.round0",
-            "readonly": True,
+            "mode": "research",
         }
     )
-    ctx.task.allowed_tools = ["Read", "Grep", "Glob", "Write"]
 
     result = await runner.run(ctx)
 
@@ -1047,7 +1030,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0, 1),
         wall_budget_sec=60.0,
@@ -1097,7 +1080,7 @@ async def test_run_clears_stale_wall_budget_extension(
         worktree_base=None,
         system_prompt="sys",
         user_prompt="usr",
-        allowed_tools=(),
+        disallowed_tools=frozenset(),
         max_turns=1,
         wall_budget_sec=60.0,
         gpu_lease=lease,
@@ -1158,8 +1141,9 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     framework = tmp_path / "framework"
     for path in (workspace, worktree, framework):
         path.mkdir(parents=True, exist_ok=True)
-    prompt = workspace / "prompt.md"
-    prompt.write_text("prompt", encoding="utf-8")
+    user_prompt = workspace / "prompt.md"
+    user_prompt.write_text("user-prompt", encoding="utf-8")
+    system_prompt_file = workspace / "system_prompt.md"
 
     cfg = SpecialistSubprocessConfig(
         model="claude-test",
@@ -1169,15 +1153,23 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
         leaf_agents_json='{"researcher": {"description": "test"}}',
     )
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
-        prompt_file=prompt,
+        system_prompt_file=system_prompt_file,
+        system_prompt="SYSTEM",
+        user_prompt_file=user_prompt,
         workspace=workspace,
         worktree=worktree,
-        allowed_tools=("Read", "Task", "emit_intent"),
+        disallowed_tools=frozenset({"KillShell", "SlashCommand"}),
     )
 
     assert cmd[cmd.index("--model") + 1] == "claude-test"
-    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Task"
-    assert "emit_intent" not in cmd
+    assert cmd[cmd.index("--system-prompt-file") + 1] == str(system_prompt_file)
+    assert system_prompt_file.read_text() == "SYSTEM"
+    assert "--allowedTools" not in cmd
+    assert "-p" not in cmd
+    deny_idx = cmd.index("--disallowedTools") + 1
+    denied = set(cmd[deny_idx].split(","))
+    assert "KillShell" in denied
+    assert "SlashCommand" in denied
     assert cmd[cmd.index("--agents") + 1] == cfg.leaf_agents_json
     assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/mcp.json"
     assert cmd[-1] == "--debug"

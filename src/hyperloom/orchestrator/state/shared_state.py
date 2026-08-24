@@ -657,6 +657,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
+    # Operator-supplied custom-workload paths. Fresh launch publishes them as
+    # env from ``--framework-path`` / ``--benchmark-scripts-dir``; a resume
+    # that does not re-pass those flags must re-export them from here or the
+    # scriptable runner cannot find the entrypoint (rc=2, no measurement).
+    bypass_scripts_dir: str = ""
+    framework_repo_path: str = ""
+    # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
+    benchmark_backend: str = ""
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
@@ -944,11 +952,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # session start. The dataclass default is a placeholder for tests/direct
     # construction; the CLI/manifest default is whole-machine GPU detection.
     gpu_specialist_capacity: int = 0
-    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it once acted on.
+    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
     pending_escalate_hint: str = ""
-    # last cleared escalate hint (audit only) for the breakdown.
+    # last hint that actually drove a phase transition (audit only) for the breakdown.
     last_consumed_escalate_hint: str = ""
     last_consumed_escalate_hint_ts: str = ""
+    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown. Distinct from last_consumed_escalate_hint: that field means "this drove a transition", which a discarded hint never did.
+    last_discarded_escalate_hint: str = ""
+    last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
@@ -1882,7 +1893,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return text
 
     def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint (recording consumption in audit fields) so the next tick doesn't re-trigger; returns cleared hint.
+        """Pop the pending hint because it drove a phase transition; returns cleared hint.
+
+        Records the hint into ``last_consumed_escalate_hint`` — an audit field
+        that specifically means "this hint drove a transition". A hint that
+        was thrown away without acting on it is a different event and must go
+        through :meth:`discard_pending_escalate_hint` instead, or a discard
+        would misreport itself as a consumption in the breakdown.
 
         Returns:
             str: The consumed hint (``""`` when none was pending).
@@ -1893,6 +1910,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.pending_escalate_hint = ""
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = _now_iso()
+        return hint
+
+    def discard_pending_escalate_hint(self) -> str:
+        """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint.
+
+        Records the hint into ``last_discarded_escalate_hint`` rather than
+        ``last_consumed_escalate_hint`` — the hint never drove anything, so
+        recording it as consumed would tell the breakdown the opposite of
+        what happened.
+
+        Returns:
+            str: The discarded hint (``""`` when none was pending).
+        """
+        hint = (self.pending_escalate_hint or "").strip()
+        if not hint:
+            return ""
+        self.pending_escalate_hint = ""
+        self.last_discarded_escalate_hint = hint
+        self.last_discarded_escalate_hint_ts = _now_iso()
         return hint
 
     def enablement_close_guard_active(self) -> bool:
@@ -1982,8 +2018,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "requires_e2e_validation": result[
                 "requires_e2e_validation"
             ],
-            "integration_status": str(
-                result.get("integration_status") or ""
+            "patch_cleanup_status": str(
+                result.get("patch_cleanup_status")
+                or result.get("integration_status")
+                or ""
             ),
             "integration_decision": str(
                 result.get("integration_decision") or ""
@@ -2023,11 +2061,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Build the integration fields stored on a collective campaign."""
         revert = result.get("revert_result")
         finalize = result.get("finalize_result")
+        # Fall back to legacy field names for --resume compat with older sessions.
+        patch_cleanup_status = str(
+            result.get("patch_cleanup_status") or result.get("integration_status") or ""
+        )
+        patch_cleanup_action = str(
+            result.get("patch_cleanup_action") or result.get("integration_recovery_action") or ""
+        )
         return {
-            "integration_status": str(result["integration_status"]),
-            "integration_recovery_action": str(
-                result.get("integration_recovery_action") or ""
-            ),
+            "patch_cleanup_status": patch_cleanup_status,
+            "patch_cleanup_action": patch_cleanup_action,
             "integration_decision": str(result["decision"]).strip().upper(),
             "integration_result_status": str(result.get("status") or ""),
             "integration_gain_pct": result.get("gain_pct"),
@@ -2110,7 +2153,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     f"Collective result has invalid {field_name}"
                 )
         recorded.setdefault(
-            "integration_status",
+            "patch_cleanup_status",
             "pending"
             if requires_e2e
             else "complete",
@@ -2160,23 +2203,28 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             raise ValueError(
                 f"Invalid collective integration decision: {decision!r}"
             )
-        integration_status = str(
-            integration.get("integration_status") or ""
+        # Fall back to legacy field names for --resume compat with older sessions.
+        patch_cleanup_status = str(
+            integration.get("patch_cleanup_status")
+            or integration.get("integration_status")
+            or ""
         ).strip()
-        if integration_status not in {"complete", "recovery_required"}:
+        if patch_cleanup_status not in {"complete", "recovery_required"}:
             raise ValueError(
-                "Collective integration_status must be complete or "
+                "Collective patch_cleanup_status must be complete or "
                 "recovery_required"
             )
         recovery_action = str(
-            integration.get("integration_recovery_action") or ""
+            integration.get("patch_cleanup_action")
+            or integration.get("integration_recovery_action")
+            or ""
         ).strip()
-        if integration_status == "complete" and recovery_action:
+        if patch_cleanup_status == "complete" and recovery_action:
             raise ValueError(
                 "Completed collective integration cannot require recovery"
             )
         if (
-            integration_status == "recovery_required"
+            patch_cleanup_status == "recovery_required"
             and recovery_action not in {"finalize", "revert"}
         ):
             raise ValueError(
@@ -2195,7 +2243,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     f"Collective integration has invalid {field_name}"
                 )
         integration["decision"] = decision
-        integration["integration_status"] = integration_status
+        integration["patch_cleanup_status"] = patch_cleanup_status
+        integration["patch_cleanup_action"] = recovery_action
         if not isinstance(self.last_collective, dict):
             raise ValueError("last_collective must be a mapping")
         last = dict(self.last_collective)

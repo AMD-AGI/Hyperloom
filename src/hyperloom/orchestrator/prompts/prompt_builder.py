@@ -21,6 +21,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ActionMetadata,
+    COORDINATOR_INTERNAL_ACTIONS,
     FULL_ENABLED_ACTIONS,
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -213,9 +214,9 @@ def _section_phase_semantics(
     lines.extend(
         [
             "",
-            "roofline, profile, replay_warm_recipe, conc_sweep and framework_agent",
-            "are never in the sets above: the Coordinator auto-manages them and",
-            "PolicyGate denies any attempt to propose them. Denial of any action",
+            f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
+            "sets above: the Coordinator auto-manages them and PolicyGate denies",
+            "any attempt to propose them. Denial of any action",
             "lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",

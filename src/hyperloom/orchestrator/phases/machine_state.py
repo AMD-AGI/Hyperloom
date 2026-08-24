@@ -1825,9 +1825,9 @@ def compute_kernel_progress_fingerprint(
                 "collective_attempt_id",
                 "status",
                 "decision",
-                "integration_status",
+                "patch_cleanup_status",
                 "integration_decision",
-                "integration_recovery_action",
+                "patch_cleanup_action",
                 "integration_revert_status",
                 "integration_finalize_status",
             )
@@ -1850,7 +1850,9 @@ def collective_integration_pending(state: Any) -> bool:
         raise ValueError("collective E2E flags must be boolean")
     if kept != requires_e2e:
         raise ValueError("collective E2E flags are inconsistent")
-    return kept and str(last.get("integration_status") or "") != "complete"
+    # Fall back to legacy field name for --resume compat.
+    cleanup = str(last.get("patch_cleanup_status") or last.get("integration_status") or "")
+    return kept and cleanup != "complete"
 
 
 def kernel_work_pending(state: Any) -> bool:
@@ -2513,10 +2515,18 @@ def exit_normal_explore(
 
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
-        return "plateau_explore", {
-            "evidence": "llm_escalation",
-            "hint": hint,
-        }
+        # A skip_to_kernel hint that arrives before EXPLORE has actually
+        # dispatched a specialist round this cycle must not end the phase
+        # with zero validated work (the direct cause of a prior
+        # cumulative_gain_validated=0.00% session) -- leave it pending so it
+        # fires once a round has actually run, instead of honoring it
+        # unconditionally ahead of compute_plateau_explore's own evidence
+        # requirement.
+        if _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state):
+            return "plateau_explore", {
+                "evidence": "llm_escalation",
+                "hint": hint,
+            }
     if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "explore_no_more_leverage", {
             "evidence": "explore_no_more_leverage",

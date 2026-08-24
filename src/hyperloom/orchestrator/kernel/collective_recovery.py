@@ -19,6 +19,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .patch_lifecycle import (
+    finalize_settled as patch_finalize_settled,
+    lifecycle_complete as patch_lifecycle_complete,
+)
+
 
 #: Manifest states an interrupted apply can still be resumed from.
 _RESUMABLE_MANIFEST_STATES = frozenset({"applied"})
@@ -52,11 +57,6 @@ class RecoveredApply(NamedTuple):
     preapplied: dict[str, Any] | None
     integ: dict[str, Any] | None
     uncertain: bool
-
-
-def patch_lifecycle_complete(result: Any) -> bool:
-    """Return whether patch cleanup reached a terminal state."""
-    return isinstance(result, dict) and result.get("status") in {"ok", "partial"}
 
 
 def load_apply_checkpoint(
@@ -208,9 +208,9 @@ async def recover_apply_state(
 ) -> RecoveredApply:
     """Decide how an interrupted collective apply should continue.
 
-    ``result['integration_recovery_action']`` records what the previous session
-    still owed, so a resumed run replays that step rather than re-deriving it
-    from the manifest alone.
+    ``result['patch_cleanup_action']`` (or legacy ``integration_recovery_action``)
+    records what the previous session still owed, so a resumed run replays that
+    step rather than re-deriving it from the manifest.
     """
     from .request_handlers import (
         _maybe_finalize_kernel_patch,
@@ -228,7 +228,9 @@ async def recover_apply_state(
     if recovered is None:
         return RecoveredApply(None, None, False)
 
-    recovery_action = str(result.get("integration_recovery_action") or "").strip()
+    recovery_action = str(
+        result.get("patch_cleanup_action") or result.get("integration_recovery_action") or ""
+    ).strip()
 
     if recovery_action == "revert":
         if manifest_status in _REVERTED_MANIFEST_STATES:
@@ -263,16 +265,19 @@ async def recover_apply_state(
     )
     if resumable_finalize:
         if manifest_status in _FINALIZED_MANIFEST_STATES:
+            # Terminal manifest: finalize already ran and cannot run again, so
+            # the cleanup it owed is closed even on a partial sweep.
             finalize_result = {
                 "status": "ok" if manifest_status == "finalized" else "partial",
                 "reason": "manifest already finalized",
+                "settled": True,
             }
         else:
             finalize_result = await asyncio.to_thread(
                 _maybe_finalize_kernel_patch,
                 recovered,
             )
-        finalize_complete = patch_lifecycle_complete(finalize_result)
+        finalize_complete = patch_finalize_settled(finalize_result)
         return RecoveredApply(
             None,
             {
@@ -287,10 +292,10 @@ async def recover_apply_state(
                 "target_file": target_file,
                 "apply_result": recovered,
                 "finalize_result": finalize_result,
-                "integration_status": (
+                "patch_cleanup_status": (
                     "complete" if finalize_complete else "recovery_required"
                 ),
-                "integration_recovery_action": (
+                "patch_cleanup_action": (
                     "" if finalize_complete else "finalize"
                 ),
             },
@@ -363,6 +368,7 @@ __all__ = [
     "IntegrationInputs",
     "RecoveredApply",
     "load_apply_checkpoint",
+    "patch_finalize_settled",
     "patch_lifecycle_complete",
     "recover_apply_state",
     "validate_integration_inputs",

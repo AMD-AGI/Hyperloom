@@ -1735,6 +1735,56 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
+def _rayjob_topology_fingerprint(args: argparse.Namespace, nnodes: int) -> dict[str, Any]:
+    """Every field that changes what the RayJob launcher spawns, as one record.
+
+    The resume fast path compares this record as a whole, so any field that
+    reaches the launcher belongs here: one left out lets a round that changed
+    it resume the previous launch and benchmark the previous topology under
+    this round's config.
+
+    ``--pd-prefill-ep`` / ``--pd-decode-ep`` and the per-role extra-args are
+    deliberately absent: ``_build_multinode_launch_entrypoint`` does not
+    forward them, so on this backend they change nothing that gets spawned.
+    Infera compares them (``_infera_restart_config_matches``) because its
+    launch path does serve them. Forwarding any of them here means adding it
+    to this record in the same change, or a round that changed only that flag
+    resumes the previous launch again.
+
+    Args:
+        args (argparse.Namespace): Parsed ``restart-server`` arguments.
+        nnodes (int): Node count this launch targets.
+
+    Returns:
+        dict[str, Any]: The comparable topology record.
+    """
+    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
+    fingerprint: dict[str, Any] = {
+        "framework": str(args.framework),
+        "model": str(args.model),
+        "tp": int(args.tp),
+        "ep": int(getattr(args, "ep", 1) or 1),
+        "nnodes": int(nnodes),
+        "pd_mode": pd_mode,
+        "extra_args": _normalize_extra_args(getattr(args, "extra_args", "")),
+    }
+    if pd_mode == "disaggregated":
+        # Only meaningful under PD; leaving them out when aggregated keeps a
+        # stale value from an earlier PD run out of the comparison.
+        fingerprint.update(
+            {
+                "pd_prefill_nodes": int(getattr(args, "pd_prefill_nodes", 0) or 0),
+                "pd_decode_nodes": int(getattr(args, "pd_decode_nodes", 0) or 0),
+                "pd_prefill_tp": int(getattr(args, "pd_prefill_tp", 0) or 0),
+                "pd_decode_tp": int(getattr(args, "pd_decode_tp", 0) or 0),
+                "pd_transfer_backend": (getattr(args, "pd_transfer_backend", "") or "").strip(),
+                "pd_ib_device": (getattr(args, "pd_ib_device", "") or "").strip(),
+                "pd_bootstrap_port": int(getattr(args, "pd_bootstrap_port", 0) or 0),
+            }
+        )
+    return fingerprint
+
+
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
@@ -1800,20 +1850,12 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             "off",
         )
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
-        # Normalize live args to match the stored (normalized) extra_args so
-        # whitespace differences don't miss the resume fast path. extra_args must
-        # be compared: it carries every variant flag, and ignoring it would
-        # resume sglang with the previous variant's args.
-        prev_match = bool(prev_sub) and (
-            str(state.get("last_restart_framework") or "") == str(args.framework)
-            and str(state.get("last_restart_model") or "") == str(args.model)
-            and int(state.get("last_restart_tp") or 0) == int(args.tp)
-            and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
-            and str(state.get("last_restart_pd_mode") or "aggregated")
-            == (getattr(args, "pd_mode", "") or "aggregated").lower()
-            and _normalize_extra_args(state.get("last_restart_extra_args"))
-            == _normalize_extra_args(getattr(args, "extra_args", ""))
-        )
+        # The whole topology record must match. extra_args is normalized on both
+        # sides so whitespace alone does not miss the fast path, and it is part
+        # of the record because it carries every variant flag. A state file
+        # holding no record does not match and takes the full KILL+LAUNCH.
+        topology = _rayjob_topology_fingerprint(args, nnodes)
+        prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
         if resume_enabled and prev_match:
             _prev_status = ""
             try:
@@ -1884,6 +1926,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
             state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
             state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
+            # A poll-timeout retry resumes from this checkpoint, so it carries
+            # the topology record as well; the per-field pd_* keys below are
+            # written only once the poll returns.
+            state["last_restart_topology"] = topology
             _save_state(state)
 
             def _fetch_launch():
@@ -1991,7 +2037,11 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_model"] = args.model
         state["last_restart_tp"] = args.tp
         state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-        # Persist PD state so later invocations can fall back when a flag is omitted.
+        state["last_restart_topology"] = topology
+        # Persist PD state so later invocations can fall back when a flag is
+        # omitted. The orchestrator's PD arg resolution
+        # (_multi_node_server_lifecycle) reads these per-field keys, so they are
+        # kept alongside the topology record rather than folded into it.
         pd_mode_persist = (getattr(args, "pd_mode", "") or "aggregated").lower()
         state["last_restart_pd_mode"] = pd_mode_persist
         if pd_mode_persist == "disaggregated":

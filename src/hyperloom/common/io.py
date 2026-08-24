@@ -19,8 +19,6 @@ Sites intentionally NOT delegated here (kept local by design):
 * ``orchestrator/actions/executors/_magpie_patcher.atomic_write_text`` — returns ``bool``,
   takes keyword args, ``chmod``-mirrors the target, and relies on
   module-global ``os``/``tempfile`` being monkeypatched by its tests.
-* ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
-  ``shutil.copystat`` preserves the target's mode.
 * ``multi_node/scripts/patch_path_safety.atomic_write_bytes`` — shipped to remote
   nodes and run standalone, so it must not gain a ``hyperloom`` import dependency.
 """

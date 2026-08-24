@@ -251,6 +251,8 @@ class SweepPhase(PhaseHandler):
             kind="sweep",
             params=params,
             idempotency_key=f"internal-sweep-{reason}{self._cycle_idem_suffix()}",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("sweep")[1],
         )
         if was_existing:
             log.info(

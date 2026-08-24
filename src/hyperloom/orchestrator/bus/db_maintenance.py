@@ -7,13 +7,10 @@ The ``events`` and ``tasks`` tables are otherwise append-only and would grow
 without bound over a multi-day run (no process restart clears them). These
 helpers bound them while preserving the two correctness invariants:
 
-* **Resume safety** — ``events`` are replayed at resume via
-  :meth:`MessageBus.replay_for(after_seq=cursor)`. An event is only deletable
-  once *every* agent cursor has advanced past it (``seq <= min(cursor)``) AND it
-  falls outside a recent-window margin (so ``lookup_by_id`` of a fresh
-  ``in_reply_to`` still resolves). The prune watermark is therefore
-  ``min(min_processed_seq, max_seq - keep_recent)`` — strictly below the resume
-  anchor.
+* **Resume safety** — ``replay_for_resume`` rebuilds the undecided proposals
+  from the event log, so an event is deletable only once it falls outside the
+  ``keep_recent`` window AND is not a proposal still awaiting a
+  ``review_verdict`` on its ``msg_id``.
 * **In-flight safety** — ``tasks`` pruning never touches ``queued`` / ``running``
   / ``failed`` rows; only truly-done (``succeeded`` / ``cancelled``) rows beyond
   a keep-recent count are removed.
@@ -23,12 +20,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cursor_store import CursorStore
 from .storage.connection import SqliteConnection
 
 
-# Keep at least this many most-recent events regardless of cursor watermark, so
-# a recently-emitted reply is still resolvable by ``lookup_by_id``.
+# Keep at least this many most-recent events so a recently-emitted reply is
+# still resolvable by ``lookup_by_id``.
 DEFAULT_EVENTS_KEEP_RECENT: int = 5000
 # Keep at least this many most-recent done tasks (succeeded/cancelled).
 DEFAULT_TASKS_KEEP_DONE: int = 2000
@@ -53,25 +49,6 @@ class RetentionResult:
         return self.events_deleted + self.tasks_deleted
 
 
-async def _min_processed_seq(cursors: CursorStore) -> int | None:
-    """Lowest ``last_processed_seq`` across all agent cursors.
-
-    ``None`` when no cursor exists yet (nothing is safe to prune — every event
-    may still need replay).
-
-    Args:
-        cursors: Cursor store holding each agent's processing watermark.
-
-    Returns:
-        The minimum ``last_processed_seq`` across all cursors, or ``None`` when
-        no cursor exists yet.
-    """
-    states = await cursors.all()
-    if not states:
-        return None
-    return min(int(s.last_processed_seq) for s in states.values())
-
-
 # A ``proposal`` event is semantically pending until a ``review_verdict`` targets
 # its ``msg_id``; pruning a pending proposal's row would lose the only durable
 # record a post-resume late verdict can attach to. Canonical form of that set;
@@ -93,32 +70,25 @@ _PENDING_PROPOSAL_SEQS_SQL = """
 
 async def prune_events(
     db: SqliteConnection,
-    cursors: CursorStore,
     *,
     keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
 ) -> int:
-    """Delete fully-processed events below the resume anchor + recent margin.
+    """Delete old events outside the recent window, protecting pending proposals.
 
     Returns the number of rows deleted.
 
     Args:
         db: Open SQLite connection to prune the ``events`` table on.
-        cursors: Cursor store used to compute the resume anchor watermark.
-        keep_recent: Minimum number of most-recent events to retain regardless
-            of the cursor watermark.
+        keep_recent: Minimum number of most-recent events to retain.
 
     Returns:
         The number of event rows deleted.
     """
-    min_cursor = await _min_processed_seq(cursors)
-    if min_cursor is None or min_cursor <= 0:
-        return 0
     row = await db.fetchone("SELECT MAX(seq) AS m FROM events")
     max_seq = int(row["m"]) if row and row["m"] is not None else 0
     if max_seq <= 0:
         return 0
-    # Deletable iff processed by all agents AND outside the recent window.
-    delete_below = min(min_cursor, max_seq - max(0, int(keep_recent)))
+    delete_below = max_seq - max(0, int(keep_recent))
     if delete_below <= 0:
         return 0
     # Never prune a ``proposal`` row still semantically pending; the anti-join
@@ -180,7 +150,6 @@ async def prune_tasks(
 
 async def run_db_retention(
     db: SqliteConnection,
-    cursors: CursorStore,
     *,
     events_keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
     tasks_keep_done: int = DEFAULT_TASKS_KEEP_DONE,
@@ -189,7 +158,6 @@ async def run_db_retention(
 
     Args:
         db: Open SQLite connection to run retention on.
-        cursors: Cursor store used to compute the event prune watermark.
         events_keep_recent: Minimum number of most-recent events to retain.
         tasks_keep_done: Minimum number of most-recent done tasks to retain.
 
@@ -198,7 +166,6 @@ async def run_db_retention(
     """
     events_deleted = await prune_events(
         db,
-        cursors,
         keep_recent=events_keep_recent,
     )
     tasks_deleted = await prune_tasks(db, keep_done=tasks_keep_done)

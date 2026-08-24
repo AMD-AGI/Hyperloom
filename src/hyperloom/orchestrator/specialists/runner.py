@@ -77,41 +77,12 @@ def _extra_focus_tags(
     return tuple(t for t in tags if t and t != primary_anchor)
 
 
-# Re-export the external tool registries defined in :mod:`policy`.
-from ..policy.gate import (
-    PR_MONITOR_TOOL_NAMES as _PR_MONITOR,
-    WEB_TOOL_NAMES as _WEB,
+SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
+    {
+        "KillShell",
+        "SlashCommand",
+    }
 )
-
-#: Tuple alias for the PR Monitor MCP readonly tools.
-PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
-
-DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
-    (
-        "emit_intent",
-        "Read",
-        "Grep",
-        "Glob",
-        # Patch authoring tools, confined to the specialist worktree.
-        "Edit",
-        "Write",
-        "MultiEdit",
-        # Bash is granted unfiltered — there is no per-call filter. Safety rests
-        # on the isolated git worktree, this allowlist, and Critic + PolicyGate
-        # review of everything the specialist emits.
-        "Bash",
-        # Scratch planning surface (no side effects).
-        "TodoWrite",
-        # Single-layer fan-out of leaf sub-agents; leaves inherit the parent's GPU lease.
-        "Task",
-    )
-    + tuple(sorted(_WEB))
-    + PR_MONITOR_MCP_TOOLS
-)
-
-
-# Tools explicitly denied even if the operator extends the whitelist.
-SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset()
 
 
 _now_iso = now_iso
@@ -278,7 +249,6 @@ class _PreparedRun:
     system_prompt: str = ""
     user_prompt: str = ""
     notes: list[str] = field(default_factory=list)
-    resolved_tools: tuple[str, ...] = ()
     # When set, the caller returns this verbatim and skips execute.
     early_return: "SpecialistRunResult | None" = None
 
@@ -426,27 +396,18 @@ class SpecialistRunner:
         *,
         subprocess_config: SpecialistSubprocessConfig | None = None,
         session_dir: Path | None = None,
-        default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
-        knowledge_plane: Any = None,
-        forced_mcp_servers: tuple[str, ...] | None = None,
     ):
         """Create a runner.
 
         Exactly one of ``backend_factory`` (in-process, tests) /
-        ``subprocess_config`` (PR-A2 ``claude`` subprocess, production) must
-        be supplied. ``knowledge_plane`` gates ``mcp__pr_monitor__*`` tools.
+        ``subprocess_config`` (subprocess, production) must be supplied.
 
         Args:
             backend_factory: In-process backend factory (tests path).
             subprocess_config: Subprocess spawn config (production path).
             session_dir: Session output directory.
-            default_tools: Default tool whitelist for specialists.
             default_max_turns: Default per-task max turn budget.
-            knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
-            forced_mcp_servers: MCP server names from an operator-supplied
-                config. ``None`` means use KnowledgePlane gating; a tuple means
-                the explicit config is authoritative for MCP tool availability.
 
         Raises:
             ValueError: If neither or both of ``backend_factory`` and
@@ -464,43 +425,8 @@ class SpecialistRunner:
             SpecialistSubprocessDispatcher(subprocess_config) if subprocess_config is not None else None
         )
         self.session_dir = Path(session_dir) if session_dir else None
-        self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
-        self.knowledge_plane = knowledge_plane
-        self.forced_mcp_servers = (
-            None if forced_mcp_servers is None else frozenset(str(name) for name in forced_mcp_servers)
-        )
 
-    def _resolve_tools(
-        self,
-        task_allowed_tools: list[str] | tuple[str, ...] | None = None,
-    ) -> tuple[str, ...]:
-        """Return the per-task tool whitelist.
-
-        Strips ``mcp__pr_monitor__*`` when PR Monitor is disabled; honors a
-        narrower ``Task.allowed_tools``; enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
-
-        GPU specialists run their real serving / benchmark / autotune loops via
-        the broad ``Bash``/``Write``/``Edit`` grant on their leased cards (the
-        retired ``run_bench`` micro-bench tool is no longer granted).
-
-        Args:
-            task_allowed_tools: Narrower per-task tool whitelist override.
-
-        Returns:
-            The resolved per-task tool whitelist.
-        """
-        tools = list(task_allowed_tools) if task_allowed_tools else list(self.default_tools)
-        plane = self.knowledge_plane
-        forced = self.forced_mcp_servers
-        if forced is not None:
-            if "pr_monitor" not in forced:
-                tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
-        elif plane is not None:
-            if not bool(plane.pr_monitor_enabled):
-                tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
-        tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
-        return tuple(tools)
 
     # Public entry point — dispatches to in-process or subprocess path
     async def run(
@@ -708,9 +634,6 @@ class SpecialistRunner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             notes=notes,
-            resolved_tools=self._resolve_tools(
-                getattr(ctx.task, "allowed_tools", None),
-            ),
         )
 
     @staticmethod
@@ -989,7 +912,7 @@ class SpecialistRunner:
                 turn_result = await backend.run(
                     prompt=prep.user_prompt if turn_idx == 1 else combined_prompt,
                     system_prompt=prep.system_prompt,
-                    tools=list(prep.resolved_tools),
+                    disallowed_tools=list(SPECIALIST_TOOL_DENYLIST),
                     max_turns=1,
                 )
                 _turn_latency_ms = int((time.perf_counter() - _t0) * 1000)
@@ -1171,7 +1094,7 @@ class SpecialistRunner:
             worktree_base=prep.worktree_base,
             system_prompt=prep.system_prompt,
             user_prompt=prep.user_prompt,
-            allowed_tools=prep.resolved_tools,
+            disallowed_tools=SPECIALIST_TOOL_DENYLIST,
             max_turns=prep.max_turns,
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             wall_budget_sec=wall_budget_sec,
@@ -1512,19 +1435,17 @@ class SpecialistRunner:
         Args:
             ctx: The runner context for this specialist task.
             workspace: The task workspace the worktree is created under.
-            profile: Resolved dispatch profile; read-only mode skips worktree.
+            profile: Resolved dispatch profile; non-patch mode skips worktree.
 
         Returns:
             A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
-            is ``None`` in in-process/readonly mode or on git failure.
+            is ``None`` in in-process mode or on git failure.
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        elif bool((ctx.task.params or {}).get("readonly")):
-            return None, None, ""
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
             preferred=_framework_checkout(str((ctx.task.params or {}).get("framework") or "")),
@@ -1750,8 +1671,6 @@ class SpecialistRunner:
 
 
 __all__ = [
-    "DEFAULT_SPECIALIST_TOOLS",
-    "PR_MONITOR_MCP_TOOLS",
     "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistFailureType",

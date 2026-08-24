@@ -45,12 +45,15 @@ from .mcp_context_tools import (
     ContextProvider,
     build_context_tools_server,
 )
+from hyperloom.inference_optimizer.protocol.intent import IntentType
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
     EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
     build_emit_intent_server,
+    constraints_sentence,
+    payload_contract,
 )
 
 
@@ -88,8 +91,15 @@ def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
     return total // num_turns if num_turns > 1 else total
 
 
-# Prompt suffix appended to every Claude turn so the model knows the tool contract.
-_OUTPUT_INSTRUCTIONS = f"""
+def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
+    """Render the output-format suffix for a role's allowed intent set."""
+    import json as _json
+
+    contract = payload_contract(allowed_intents)
+    constraints = constraints_sentence(allowed_intents)
+    constraints_line = f"\n-{constraints}" if constraints else ""
+    heartbeat = _json.dumps({"topic": "heartbeat", "body_md": "ok"})
+    return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
 tool. Each call carries exactly one intent; call multiple times to emit
@@ -98,15 +108,13 @@ several intents in the same turn. Free-text replies are dropped.
 Tool input shape:
 
   {{
-    "intent_type": "<one of send_message|delegate|propose_action|request|"
-                   "response|review_verdict|update_state|"
-                   "alert|kill_task|extend_lease|"
-                   "prune_branch|escalate_strategy_change>",
+    "intent_type": "<one of {', '.join(sorted(t.value for t in allowed_intents))}>",
     "payload": {{ /* per-intent fields — see tool description */ }}
   }}
 
-If you have nothing to say, call once with intent_type=send_message and
-payload={{"topic":"heartbeat","body_md":"ok"}}.
+- Required keys per intent_type: {contract}.{constraints_line}
+- If you have nothing to say, call once with intent_type=send_message and
+  payload={heartbeat}.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only
@@ -182,18 +190,12 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`.
 
     Args:
-        model: Claude model id (e.g. ``"claude-opus-5"``); defaults to
-            ``ANTHROPIC_MODEL`` env or library default.
-        api_key_env: env var checked at construction (``ANTHROPIC_API_KEY``
-            by default). Missing key is recorded as a soft warning — SDK
-            may still authenticate via Bedrock / Vertex.
-        max_turns_default: agent-loop budget when caller doesn't override;
-            ``run()`` floors it at 8 (12 conversational), so lower values
-            never reach the SDK.
-        enable_mcp_emit_intent: if True (default), registers the
-            in-process MCP ``emit_intent`` tool.
-        capture_turn_diagnostics: Capture full turn diagnostics for durable
-            orchestration tracing.
+        model: Claude model id; defaults to ``ANTHROPIC_MODEL`` env or library default.
+        api_key_env: Env var checked at construction (``ANTHROPIC_API_KEY`` by default).
+        max_turns_default: Agent-loop budget when caller doesn't override; floored at 8.
+        enable_mcp_emit_intent: Registers the in-process MCP ``emit_intent`` tool.
+        capture_turn_diagnostics: Capture full turn diagnostics for orchestration tracing.
+        allowed_intents: Role's permitted intent set; drives the output-format suffix.
     """
 
     model: str | None = None
@@ -209,6 +211,8 @@ class ClaudeBackend:
     # Raw single-shot completion mode: skips the emit_intent server + suffix,
     # disallows all tools, and returns ``raw_text`` without an emitted intent.
     raw_completion: bool = False
+    # Role's allowed intent set for the output-format suffix. None = all IntentType values.
+    allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
     # streamed SDK messages before the turn is aborted. Env override:
     # ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
@@ -317,6 +321,7 @@ class ClaudeBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
         allow_no_intent: bool = False,
     ) -> BackendTurnResult:
@@ -326,6 +331,8 @@ class ClaudeBackend:
             prompt: User prompt for this turn.
             system_prompt: Optional system prompt override.
             tools: Tool names to enable for the turn.
+            disallowed_tools: Tool names to remove from the available set.
+                Applied additively on top of any ``raw_completion`` denylist.
             max_turns: Maximum agent turns; falls back to the backend
                 default when falsy.
             allow_no_intent: When ``True``, relax the guard that requires
@@ -353,6 +360,7 @@ class ClaudeBackend:
         try:
             options = self._build_options(
                 tools=tools or [],
+                disallowed_tools=disallowed_tools or [],
                 max_turns=max_turns_use,
                 system_prompt=system_prompt,
                 resume_session_id=resume_session,
@@ -527,6 +535,9 @@ class ClaudeBackend:
     def _compose_prompt(self, prompt: str) -> str:
         """Append the emit_intent output-format suffix unless in raw mode.
 
+        The suffix is rendered from :attr:`allowed_intents` so only the
+        intents this role may emit are listed.
+
         Args:
             prompt (str): The base turn prompt.
 
@@ -536,7 +547,8 @@ class ClaudeBackend:
         """
         if self.raw_completion:
             return prompt
-        return f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
+        intents = self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
+        return f"{prompt}\n\n{_build_output_instructions(intents)}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
         """Attach (or clear) the read-only context-pull MCP server.
@@ -712,6 +724,7 @@ class ClaudeBackend:
         self,
         *,
         tools: list[str],
+        disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
         resume_session_id: str | None = None,
@@ -725,6 +738,8 @@ class ClaudeBackend:
 
         Args:
             tools (list[str]): Caller-provided allowed tool names.
+            disallowed_tools (list[str] | None): Additional tool names to deny.
+                Merged with the ``raw_completion`` denylist when both apply.
             max_turns (int): Agent-loop budget to pass through to the SDK.
             system_prompt (str | None): Optional system prompt for the turn.
             resume_session_id (str | None): SDK session token to resume; set
@@ -746,7 +761,10 @@ class ClaudeBackend:
         if self.raw_completion:
             # Single text turn: no MCP tools, all built-ins disallowed.
             kwargs["allowed_tools"] = []
-            kwargs["disallowed_tools"] = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+            deny = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+            if disallowed_tools:
+                deny = list(dict.fromkeys(deny + disallowed_tools))
+            kwargs["disallowed_tools"] = deny
             kwargs["stderr"] = self._stderr_sink
             return self._instantiate_options(kwargs)
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the
@@ -761,6 +779,8 @@ class ClaudeBackend:
                     allowed.append(qname)
         if allowed:
             kwargs["allowed_tools"] = allowed
+        if disallowed_tools:
+            kwargs["disallowed_tools"] = disallowed_tools
         mcp_servers: dict[str, Any] = {}
         if self.mcp_server_config is not None:
             mcp_servers[MCP_SERVER_NAME] = self.mcp_server_config
