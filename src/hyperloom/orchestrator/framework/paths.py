@@ -614,8 +614,20 @@ class WarmReplayPatchSource(NamedTuple):
     content: str
 
 
-def warm_replay_patch_sources(entries: Iterable[Any]) -> tuple[WarmReplayPatchSource, ...]:
-    """Collect patch files and inline diffs from warm-replay patch entries."""
+def warm_replay_patch_sources(
+    entries: Iterable[Any] | None = None,
+    patch_paths: Sequence[Path] | None = None,
+) -> tuple[WarmReplayPatchSource, ...]:
+    """Collect patch files and inline diffs from warm-replay patch entries.
+
+    Args:
+        entries: Warm-recipe patch rows, each naming a file and/or an inline
+            diff. Rows carrying neither are skipped.
+        patch_paths: Additional patch files with no row of their own.
+
+    Returns:
+        One source per usable patch, entries first.
+    """
     sources: list[WarmReplayPatchSource] = []
     for entry in entries or ():
         if not isinstance(entry, dict):
@@ -630,6 +642,11 @@ def warm_replay_patch_sources(entries: Iterable[Any]) -> tuple[WarmReplayPatchSo
         if path is None and not content.strip():
             continue
         sources.append(WarmReplayPatchSource(path=path, content=content))
+    sources.extend(
+        WarmReplayPatchSource(path=Path(str(path)), content="")
+        for path in (patch_paths or ())
+        if str(path).strip()
+    )
     return tuple(sources)
 
 
@@ -682,26 +699,12 @@ def _patch_source_diff(source: WarmReplayPatchSource) -> str:
     return source.path.read_text(encoding="utf-8", errors="replace")
 
 
-def _warm_replay_patch_sources(
-    patch_paths: Sequence[Path] | None,
-    patch_entries: Iterable[Any] | None,
-) -> tuple[WarmReplayPatchSource, ...]:
-    sources = list(warm_replay_patch_sources(patch_entries or ()))
-    sources.extend(
-        WarmReplayPatchSource(path=Path(str(path)), content="")
-        for path in (patch_paths or ())
-        if str(path).strip()
-    )
-    return tuple(sources)
-
-
 def _resolve_warm_replay_patch_root(
     *,
     patch_sources: Sequence[WarmReplayPatchSource],
     allowlist: tuple[str, ...],
     missing_patch_reason: str,
     missing_allowlist_reason: str,
-    use_session_root: bool,
 ) -> WarmReplayRootResolution:
     from hyperloom.orchestrator.specialists.patch_safety import (
         resolve_patch_apply_root,
@@ -712,7 +715,7 @@ def _resolve_warm_replay_patch_root(
         for diff in (_patch_source_diff(source) for source in patch_sources)
         if diff.strip()
     ]
-    env_root = resolve_session_framework_root() if use_session_root else ""
+    env_root = resolve_session_framework_root()
     resolution = resolve_patch_apply_root(
         diffs,
         explicit_root=Path(env_root.rstrip("/")) if env_root else None,
@@ -744,11 +747,10 @@ def resolve_warm_replay_framework_root(
 ) -> WarmReplayRootResolution:
     """Resolve the framework patch root for warm replay (env first, then allowlist)."""
     return _resolve_warm_replay_patch_root(
-        patch_sources=_warm_replay_patch_sources(patch_paths, patch_entries),
+        patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
         allowlist=_warm_replay_framework_patch_roots(),
         missing_patch_reason="active_framework_root_missing",
         missing_allowlist_reason="framework_patch_root_not_in_allowlist",
-        use_session_root=True,
     )
 
 
@@ -759,11 +761,10 @@ def resolve_warm_replay_kernel_root(
 ) -> WarmReplayRootResolution:
     """Resolve the kernel patch root for warm replay (env first, then allowlist)."""
     return _resolve_warm_replay_patch_root(
-        patch_sources=_warm_replay_patch_sources(patch_paths, patch_entries),
+        patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
         allowlist=_warm_replay_kernel_patch_roots(),
         missing_patch_reason="active_kernel_patch_root_missing",
         missing_allowlist_reason="kernel_patch_root_not_in_allowlist",
-        use_session_root=True,
     )
 
 

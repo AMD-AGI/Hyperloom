@@ -104,11 +104,33 @@ class ParsedPatchTargets:
 
 @dataclass(frozen=True)
 class PatchRootResolution:
-    """One unambiguous checkout selected from Patch pre-image targets."""
+    """One unambiguous checkout selected from Patch pre-image targets.
+
+    Attributes:
+        root: The resolved checkout, or ``None`` when the set fails closed.
+        reason: Why resolution failed; one of :data:`PATCH_ROOT_FAIL_REASONS`.
+            Empty on success.
+        matches: Every candidate that held the whole set. Populated only for
+            ``ambiguous_root``, where naming the collision is the diagnosis.
+    """
 
     root: Path | None
     reason: str = ""
     matches: tuple[Path, ...] = ()
+
+
+#: Why :func:`resolve_patch_apply_root` refused to name a root. Callers map
+#: these onto their own vocabulary (warm replay rewrites two of them into
+#: allowlist-flavoured reasons) and persist them, so they are a wire contract.
+PATCH_ROOT_FAIL_REASONS: tuple[str, ...] = (
+    "explicit_root_invalid",  # declared root is unreadable or not a directory
+    "explicit_root_target_mismatch",  # declared root lacks a pre-image target
+    "patch_targets_invalid",  # a diff names no safe target path
+    "patch_content_missing",  # no readable diff text to match a root against
+    "pure_create_requires_explicit_root",  # no pre-image can identify a root
+    "no_matching_root",  # no candidate holds every pre-image
+    "ambiguous_root",  # more than one candidate holds every pre-image
+)
 
 
 def _safe_patch_path(raw: str) -> str:
@@ -250,12 +272,32 @@ def resolve_patch_apply_root(
     *,
     explicit_root: Path | None,
     candidate_roots: Sequence[Path] = (),
+    default_root: Path | None = None,
 ) -> PatchRootResolution:
     """Resolve one checkout under the shared Enablement/warm-replay rules.
 
-    An explicit root is authoritative and permits create-only diffs. Without
-    one, at least one pre-image must identify exactly one candidate root; zero
-    or multiple complete matches fail closed.
+    The whole set resolves together, so a set split across two checkouts is
+    refused rather than half-applied. An explicit root is authoritative. Failing
+    that, the pre-images must single out exactly one candidate: zero and several
+    both fail closed, because guessing here mutates a checkout the patch was
+    never written against.
+
+    A create-only set carries no pre-image, so no candidate can be matched and
+    only a root the caller already knows will do -- an explicit one, or the
+    ``default_root`` a caller supplies when it has independent grounds for it,
+    such as the checkout a specialist's worktree was cut from.
+
+    Args:
+        patch_texts: The diffs to place. Blank entries are ignored.
+        explicit_root: The checkout the caller declared, if any.
+        candidate_roots: Checkouts to match the pre-images against when no
+            explicit root is declared.
+        default_root: The checkout to use for a create-only set. Never
+            consulted while a pre-image can pick a candidate.
+
+    Returns:
+        A :class:`PatchRootResolution` naming the checkout, or carrying one of
+        :data:`PATCH_ROOT_FAIL_REASONS`.
     """
     texts = tuple(str(text or "") for text in patch_texts if str(text or "").strip())
     resolved_explicit: Path | None = None
@@ -283,7 +325,15 @@ def resolve_patch_apply_root(
             return PatchRootResolution(None, "explicit_root_target_mismatch")
         return PatchRootResolution(resolved_explicit)
     if not has_existing:
-        return PatchRootResolution(None, "pure_create_requires_explicit_root")
+        if default_root is None:
+            return PatchRootResolution(None, "pure_create_requires_explicit_root")
+        try:
+            resolved_default = Path(default_root).resolve()
+        except (OSError, RuntimeError):
+            return PatchRootResolution(None, "pure_create_requires_explicit_root")
+        if not resolved_default.is_dir():
+            return PatchRootResolution(None, "pure_create_requires_explicit_root")
+        return PatchRootResolution(resolved_default)
 
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -604,6 +654,7 @@ def ground_patch_text(
         (patch_text,),
         explicit_root=explicit_root,
         candidate_roots=candidates,
+        default_root=base_checkout,
     )
     if resolution.root is None:
         detail = resolution.reason
@@ -739,17 +790,20 @@ def vet_patches(
     candidate_roots: tuple[Path, ...] = (),
     explicit_root: Path | None = None,
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str]]:
-    """Ground one Patch set against the same resolved checkout.
+    """Ground one Patch set against a single checkout resolved for the set.
 
-    Stale-but-valid patches are kept (integrate_patch + Critic adjudicate)
-    with a grounding note.
+    Structural rejects (unreadable / non-diff / path escape) are dropped per
+    patch first, then the survivors resolve one root together: if they do not
+    agree on one, every one of them is dropped, since applying the half that
+    agrees would leave the tree in a state no round asked for. Stale-but-valid
+    patches are kept (integrate_patch + Critic adjudicate) with a note.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.
-        base_checkout: Primary clean git checkout to ground against, or
-            ``None``.
-        candidate_roots: Further checkouts to try for patches whose targets
-            are absent from ``base_checkout``.
+        base_checkout: The checkout the specialist worktree was cut from. It
+            is offered to root resolution first and is the root a create-only
+            set lands in.
+        candidate_roots: Further checkouts offered to root resolution.
         explicit_root: Authoritative target checkout, when declared.
 
     Returns:
@@ -800,6 +854,7 @@ def vet_patches(
         [text for _path, text in readable],
         explicit_root=explicit_root,
         candidate_roots=candidates,
+        default_root=base_checkout,
     )
     if resolution.root is None:
         detail = resolution.reason
@@ -843,6 +898,7 @@ __all__ = [
     "GROUND_PATH_ESCAPE",
     "GROUND_STALE",
     "GROUND_UNCHECKED",
+    "PATCH_ROOT_FAIL_REASONS",
     "PatchGroundingResult",
     "PatchRootResolution",
     "PatchSafetyReport",
