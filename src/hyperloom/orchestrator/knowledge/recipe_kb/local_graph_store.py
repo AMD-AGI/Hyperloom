@@ -38,8 +38,10 @@ try:
 except ImportError:  # pragma: no cover - Linux production path
     fcntl = None  # type: ignore[assignment]
 
+from ._path_safety import SLUG_PART_RE as _SLUG_PART_RE
+from ._path_safety import assert_within_root as _assert_within_root
+from ._path_safety import validated_slug as _validated_slug
 
-_SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _ROOT_LOCKS_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, threading.RLock] = {}
 
@@ -59,21 +61,6 @@ def _thread_lock_for(root: Path) -> threading.RLock:
             _ROOT_LOCKS[key] = lock
         return lock
 
-
-def _validated_slug(value: Any) -> str:
-    """Validate a slug before it can participate in a filesystem path."""
-
-    if not isinstance(value, str):
-        raise ValueError("graph slug must be a string")
-    slug = value.strip()
-    if not slug or len(slug) > 512:
-        raise ValueError("graph slug must be non-empty and at most 512 characters")
-    if slug.startswith("/") or slug.endswith("/") or "\\" in slug or "\x00" in slug:
-        raise ValueError(f"unsafe graph slug: {value!r}")
-    parts = slug.split("/")
-    if any(part in ("", ".", "..") or not _SLUG_PART_RE.fullmatch(part) for part in parts):
-        raise ValueError(f"unsafe graph slug: {value!r}")
-    return slug
 
 
 def _edge_key(edge: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -167,7 +154,7 @@ class LocalGraphStore:
         parts = _validated_slug(slug).split("/")
         path = base.joinpath(*parts[:-1], parts[-1] + suffix)
         try:
-            path.resolve(strict=False).relative_to(base.resolve())
+            _assert_within_root(path, base)
         except ValueError as exc:
             raise ValueError(f"unsafe graph slug path: {slug!r}") from exc
         return path
@@ -221,7 +208,7 @@ class LocalGraphStore:
             raise LocalGraphStoreError("invalid local graph transaction target")
         candidate = self.root.joinpath(*relative.split("/"))
         try:
-            candidate.resolve(strict=False).relative_to(self.root)
+            _assert_within_root(candidate, self.root)
         except ValueError as exc:
             raise LocalGraphStoreError("local graph transaction target escaped root") from exc
         allowed = (

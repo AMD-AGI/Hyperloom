@@ -47,6 +47,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
+from ._path_safety import assert_within_root as _assert_within_root
 from .canonical_id import (
     InvalidCanonicalIdError,
     canonical_id_for_path,
@@ -266,9 +267,21 @@ class LocalRecipeStore:
 
         Returns:
             Path: ``root`` joined with the cid's 7 path components.
+
+        Raises:
+            InvalidCanonicalIdError: If any path component is unsafe or the
+                resolved path would escape the store root.
         """
         components = cid_to_path_components(canonical_id)
-        return self.root.joinpath(*components)
+        recipe_dir = self.root.joinpath(*components)
+        try:
+            _assert_within_root(recipe_dir, self.root)
+        except ValueError as exc:
+            raise InvalidCanonicalIdError(
+                canonical_id,
+                f"canonical_id resolves outside the store root: {exc}",
+            ) from exc
+        return recipe_dir
 
     def _live_path(self, canonical_id: str) -> Path:
         """Return the path to a cid's live ``recipe.json``.

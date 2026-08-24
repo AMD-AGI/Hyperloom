@@ -97,7 +97,9 @@ def _slug(value: str, default: str) -> str:
     cleaned = raw.lower()
     for ch in (" ", "\t", "/"):
         cleaned = cleaned.replace(ch, "_")
-    return cleaned or default
+    if not cleaned or all(ch == "." for ch in cleaned):
+        return default
+    return cleaned
 
 
 def _architectures_slug(value: "str | list[str]") -> str:
