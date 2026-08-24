@@ -116,19 +116,20 @@ def test_mark_reviewed_requires_msg_and_verdict(sm):
         sm.mark_reviewed("s1", "m1", "")
 
 
-def test_reviewed_helpers_tolerate_non_dict_top_level(sm):
+def test_reviewed_helpers_reject_non_dict_top_level(sm):
     sm._ensure_session_dir("s1")
     path = sm._reviewed_path("s1")
     path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
-    assert sm.filter_unreviewed("s1", ["m1"]) == ["m1"]
+    with pytest.raises(SessionMemoryError):
+        sm.filter_unreviewed("s1", ["m1"])
 
 
-def test_mark_reviewed_resets_non_dict_data(sm):
+def test_mark_reviewed_rejects_non_dict_data(sm):
     sm._ensure_session_dir("s1")
     path = sm._reviewed_path("s1")
     path.write_text(json.dumps(["corrupt"]), encoding="utf-8")
-    sm.mark_reviewed("s1", "m1", "reject")
-    assert json.loads(path.read_text("utf-8"))["m1"]["verdict"] == "reject"
+    with pytest.raises(SessionMemoryError):
+        sm.mark_reviewed("s1", "m1", "reject")
 
 
 def test_read_json_corrupt_raises(sm):
