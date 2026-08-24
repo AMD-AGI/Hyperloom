@@ -2449,3 +2449,69 @@ def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
     assert ledger["entries"] == []
     assert ledger["validation"]["ledger_total_gain_pct"] == 0.0
     assert ledger["attempts"][0]["adopted"] is False
+
+
+def test_replay_admitted_without_a_score_is_unscored_not_validated(tmp_path):
+    """An eval that ran but returned no score is adopted, not accuracy-validated.
+
+    ``_warm_replay_accuracy_ok`` admits a replay whose eval ran but produced no
+    usable number (``eval_ran`` true, ``replay_accuracy`` None). ``eval_ran``
+    alone must not be read as a passed gate: the step is adopted on the keep
+    verdict alone and has to record ``keep_verdict_unscored`` rather than dress
+    up an absent score as ``accuracy_pass``.
+    """
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    # Reproduced, but the accuracy eval ran without yielding a score.
+    coord.shared_state.warm_replay_outcome = {
+        "status": "reproduced",
+        "actual_gain_pct": 10.0,
+        "baseline_tput_anchor": 600.0,
+        "throughput_after": 660.0,
+        "keep_threshold_pct": 0.0,
+        "eval_ran": True,
+        "replay_accuracy": None,
+    }
+    task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
+    result = {"status": "succeeded", "output_throughput": 660.0}
+
+    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
+
+    ledger = _warm_replay_ledger(tmp_path)
+    attempt = ledger["attempts"][0]
+    assert attempt["adopted"] is True
+    assert attempt["validation_basis"] == "keep_verdict_unscored"
+    assert ledger["entries"][0]["gain_pct"] == pytest.approx(10.0, abs=0.01)
+    assert ledger["validation"]["unscored_keep_count"] == 1
+
+
+def test_replay_with_a_passing_score_is_accuracy_validated(tmp_path):
+    """A scored, passing replay records ``accuracy_pass`` -- the counterpart.
+
+    The unscored path must not swallow the case where a real score exists: a
+    numeric ``replay_accuracy`` that reached ``reproduced`` cleared the gate and
+    has to read as validated.
+    """
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "reproduced",
+        "actual_gain_pct": 10.0,
+        "baseline_tput_anchor": 600.0,
+        "throughput_after": 660.0,
+        "keep_threshold_pct": 0.0,
+        "eval_ran": True,
+        "replay_accuracy": 0.87,
+    }
+    task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
+    result = {"status": "succeeded", "output_throughput": 660.0}
+
+    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
+
+    ledger = _warm_replay_ledger(tmp_path)
+    attempt = ledger["attempts"][0]
+    assert attempt["adopted"] is True
+    assert attempt["validation_basis"] == "accuracy_pass"
+    assert ledger["validation"]["unscored_keep_count"] == 0

@@ -3311,9 +3311,14 @@ class WritebackCollaborator:
                     # A replayed recipe is measured against the session
                     # baseline, so the gain it moved is its own to claim.
                     "attribution_eligible": True,
-                    # An accuracy gate that never ran must not be recorded as
-                    # one that passed; ``eval_ran`` is what separates them.
-                    "validated": True if outcome.get("eval_ran") else None,
+                    # Only a scored, passing verdict is "validated". A replay
+                    # can be admitted when its eval ran but returned no usable
+                    # score (``eval_ran`` true, ``replay_accuracy`` None); that
+                    # is adopted on the keep verdict alone and must record
+                    # ``keep_verdict_unscored``, not a passed accuracy gate.
+                    "validated": (
+                        True if outcome.get("replay_accuracy") is not None else None
+                    ),
                 }
             )
             if gain is not None:
