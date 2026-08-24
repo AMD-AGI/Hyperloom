@@ -4,10 +4,10 @@ myst:
         "description": "Submit Hyperloom optimization jobs to a Slurm cluster on AMD Instinct GPUs. Covers credentials, cluster setup, job submission, monitoring, and troubleshooting."
         "keywords": "Hyperloom, Slurm, cluster, AMD Instinct, MI300X, MI355X, sbatch, SGLang, vLLM, job submission, batch scheduler, ROCm"
 ---
-# Slurm Installation Instructions
+# Slurm installation instructions
 
 Slurm mode submits Hyperloom optimization jobs to a **Slurm** cluster, where each
-job launches a ROCm serving container (sglang / vllm) on one node and runs the
+job launches a ROCm serving container (sglang or vllm) on one node and runs the
 `inference_optimizer` CLI inside it. It is the batch-scheduler counterpart to the
 Kubernetes layout in the [self-hosting and operations guide](../reference/operations.md),
 and suits teams whose AMD GPU fleet is managed by Slurm rather than Kubernetes.
@@ -38,7 +38,7 @@ The following table lists the prerequisites and their implications for running H
 |---|---|---|
 | Scheduler | Slurm (`sbatch` / `srun` / `sinfo` / `squeue` available) | — |
 | Container runtime | pyxis/enroot **or** docker | Auto-detected; override with `HL_CONTAINER_RUNTIME`. |
-| GPU | AMD Instinct (for example MI355X `gfx950` or MI300X), 8 per node | Image and `--gpu-type` must match the hardware variant. |
+| GPU | AMD Instinct™ (for example MI355X `gfx950` or MI300X), 8 per node | Image and `--gpu-type` must match the hardware variant. |
 | Slurm GPU gres | GPUs might or might not be registered as gres | If **not** registered you cannot use `--gpus`; see [Clusters without GPU gres](#clusters-without-gpu-gres). |
 | Shared filesystem | A cross-node mount (WekaFS, VAST/NFS, ...) | Holds source, artifacts, and the CA bundle. |
 | LLM gateway | Reachable directly or through a jump host | Might need a host alias plus an internal CA. |
@@ -204,15 +204,14 @@ utilization ramp up only after the model-load step.
 
 ## LLM model-name constraints
 
-The job calls the gateway for orchestration and (via GEAK subprocess) for kernel
+The job calls the gateway for orchestration and (through the GEAK subprocess) for kernel
 optimization. Model names must exist in your key's catalog:
 
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
-| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
+| Orchestration | `CLAUDE_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
 | GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Forge (fusion / rewrite / collective) | `FORGE_CLAUDE_MODEL` / `FORGE_CODEX_MODEL` | for example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` or `CODEX_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
-| Codex / external | `CODEX_MODEL` | Any model in the gateway catalog; `gpt-5.6-sol` preferred, with `gpt-5.5` / `gpt-5.4` as fallbacks | WARN-only: preflight steps down that ladder when the gateway lacks the chosen id, but never aborts. |
+| Forge (fusion / rewrite / collective) | `FORGE_CLAUDE_MODEL` | for example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
 
 - Do *not* append effort/thinking suffixes (for example
   `claude-opus-4-7-thinking-xhigh`); the gateway returns `Invalid model name`

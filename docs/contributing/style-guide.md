@@ -1,3 +1,10 @@
+---
+myst:
+    html_meta:
+        "description": "Coding conventions for contributors to Hyperloom. Covers Python formatting, linting, type checking, shell scripts, YAML, documentation, and REUSE licensing requirements."
+        "keywords": "Hyperloom, contributing, coding style, Python, Ruff, mypy, Bandit, pytest, REUSE, license, AMD GPU, ROCm"
+---
+
 # Hyperloom coding style guide
 
 This document describes the conventions contributors should follow when changing
@@ -48,7 +55,7 @@ ruff format --check .   # or `ruff format .` to apply
 
 ### Module structure
 
-Follow patterns in existing packages (e.g. `hyperloom.orchestrator`):
+Follow patterns in existing packages (for example, `hyperloom.orchestrator`):
 
 ```python
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
