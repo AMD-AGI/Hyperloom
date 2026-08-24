@@ -579,67 +579,6 @@ def _shell_safe_dedupe(args: str) -> str:
     return rendered if rendered != normalized else normalized
 
 
-def canonical_args_pairs(args_text: str) -> list[list[str]]:
-    """Return a sorted, last-wins canonical representation of server-arg pairs.
-
-    Each element is ``[flag, value]`` for a flag with a single value token, or
-    ``[flag]`` for a bare flag with no value.  Positional (non-``--``) tokens
-    are kept as ``[token]`` entries.  Repeated flags collapse to the last
-    occurrence.  The list is sorted by the first element of each pair so the
-    result is order-independent across distinct flags.
-
-    When ``tokenize_server_args_preserving_json`` cannot safely parse the input
-    (whitespace inside tokens, unbalanced JSON, etc.) the function falls back to
-    plain ``shlex.split`` with the same pairing logic; if even that fails the
-    individual whitespace-split tokens are each wrapped as bare ``[token]``
-    entries and sorted.
-
-    Args:
-        args_text: The server-arg string to normalize.
-
-    Returns:
-        Sorted list of ``[flag]`` or ``[flag, value]`` lists, suitable for
-        JSON serialization into a fingerprint payload.
-    """
-    text = args_text.strip()
-    if not text:
-        return []
-
-    def _pairs_from_tokens(tokens: list[str]) -> list[list[str]]:
-        last: dict[str, list[str]] = {}
-        i = 0
-        while i < len(tokens):
-            t = tokens[i]
-            if t.startswith("--"):
-                if "=" in t:
-                    flag, _, val = t.partition("=")
-                    last[flag] = [flag, val]
-                    i += 1
-                else:
-                    flag = t
-                    i += 1
-                    if i < len(tokens) and not tokens[i].startswith("--"):
-                        last[flag] = [flag, tokens[i]]
-                        i += 1
-                    else:
-                        last[flag] = [flag]
-            else:
-                last[t] = [t]
-                i += 1
-        return sorted(last.values(), key=lambda p: p[0])
-
-    parsed = tokenize_server_args_preserving_json(text)
-    if parsed is not None:
-        _, tokens = parsed
-        return _pairs_from_tokens(tokens)
-
-    try:
-        tokens = shlex.split(text)
-        return _pairs_from_tokens(tokens)
-    except ValueError:
-        return sorted([t] for t in text.split())
-
-
 # sglang scheduler watchdog timeout injection: the first request's JIT compile
 # can exceed sglang's default watchdog, firing SIGQUIT mid-warmup. Inject a
 # longer timeout unless the user already pinned one.
