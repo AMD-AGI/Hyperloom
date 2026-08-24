@@ -219,3 +219,48 @@ def test_inbox_and_coordinator_events_combined():
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Ordering regressions: explicit id fields route through the sort path.
+# ---------------------------------------------------------------------------
+
+
+def _dr(seq: int, state: str, grid: str = "g1") -> dict:
+    return {
+        "id": seq,
+        "agent": "coordinator",
+        "topic": "delegated_result",
+        "payload": {
+            "kind": "sweep",
+            "family": "sweep",
+            "state": state,
+            "task_id": f"t{seq}",
+            "params": {"grid": grid, "extra_envs": {}, "config_path": "/c"},
+        },
+        "ts": None,
+    }
+
+
+def _ctx_plain() -> ReactorContext:
+    return ReactorContext(tick_index=1, shared_state=SharedStateSnapshot(), inbox=[], now_unix=1.0)
+
+
+def test_same_payload_loop_fires_for_active_failure_streak():
+    coord = [_dr(1, "succeeded"), _dr(2, "failed"), _dr(3, "failed"), _dr(4, "failed")]
+    out = evaluate_repeated_payload_signals(
+        _ctx_plain(),
+        SourceData(coordinator_events=coord),
+        config=RepeatedPayloadConfig(streak_threshold=3),
+    )
+    assert any(s.name == "same_payload_loop" for s in out)
+
+
+def test_same_payload_loop_silent_after_family_succeeded():
+    coord = [_dr(1, "failed"), _dr(2, "failed"), _dr(3, "failed"), _dr(4, "succeeded")]
+    out = evaluate_repeated_payload_signals(
+        _ctx_plain(),
+        SourceData(coordinator_events=coord),
+        config=RepeatedPayloadConfig(streak_threshold=3),
+    )
+    assert all(s.name != "same_payload_loop" for s in out)

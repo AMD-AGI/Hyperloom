@@ -536,3 +536,63 @@ def test_classifier_config_map_covers_every_registry_slot():
 
     classifier = Classifier()
     assert set(classifier.signal_configs) == expected_slots
+
+
+# ---------------------------------------------------------------------------
+# Ordering regressions for recover_unsuccessful and repeated_failure dedup.
+# ---------------------------------------------------------------------------
+
+
+def _rec(seq: int, state: str) -> dict:
+    return {
+        "id": seq,
+        "agent": "coordinator",
+        "topic": "delegated_result",
+        "payload": {
+            "kind": "recover",
+            "state": state,
+            "task_id": f"t{seq}",
+            "force_gpu_cleanup": True,
+            "mid_free_mb_per_gpu": [],
+        },
+        "ts": None,
+    }
+
+
+def _dr_fail(seq: int, kind: str = "sweep") -> dict:
+    return {
+        "id": seq,
+        "agent": "coordinator",
+        "topic": "delegated_result",
+        "payload": {"kind": kind, "family": kind, "state": "failed", "task_id": f"t{seq}"},
+        "ts": None,
+    }
+
+
+def test_recover_unsuccessful_uses_latest_when_given_as_newest_event():
+    coord = [_rec(1, "succeeded"), _rec(2, "needs_review")]
+    out = evaluate_event_signals(_ctx(), SourceData(coordinator_events=coord))
+    sym = next((s for s in out if s.name == "recover_unsuccessful"), None)
+    assert sym is not None
+    assert sym.evidence["task_id"] == "t2"
+
+
+def test_recover_unsuccessful_silent_when_newest_recover_succeeded():
+    coord = [_rec(1, "needs_review"), _rec(2, "succeeded")]
+    out = evaluate_event_signals(_ctx(), SourceData(coordinator_events=coord))
+    assert all(s.name != "recover_unsuccessful" for s in out)
+
+
+def test_repeated_failure_dedup_same_message_in_coord_and_inbox():
+    coord = [_dr_fail(7)]
+    inbox_item = InboxItem(
+        seq=7,
+        msg_id="m-7",
+        from_agent="coordinator",
+        topic="delegated_result",
+        payload={"kind": "sweep", "family": "sweep", "state": "failed", "task_id": "t7"},
+    )
+    ctx = _ctx(inbox=[inbox_item])
+    out = evaluate_event_signals(ctx, SourceData(coordinator_events=coord))
+    failure_syms = [s for s in out if s.name == "repeated_failure"]
+    assert not failure_syms, "a single unique failure must not cross the threshold of 2"
