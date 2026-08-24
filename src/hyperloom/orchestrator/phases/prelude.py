@@ -2178,12 +2178,30 @@ class PreludePhase(PhaseHandler):
                 state.warm_replay_outcome = outcome
                 state.save(self.session_dir)
                 return
+            recipe_args = str(
+                params["recipe_extra_server_args"]
+                if "recipe_extra_server_args" in params
+                else warm_args
+            ).strip()
+            recipe_envs = dict(
+                params["recipe_extra_envs"]
+                if "recipe_extra_envs" in params
+                else warm_envs
+            )
             self._lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
                     "name": "warm_replay",
                     "candidate_extra_server_args": warm_args,
+                    "candidate_extra_envs": recipe_envs,
+                    "recipe_delta": {
+                        "extra_server_args": recipe_args,
+                        "extra_envs": recipe_envs,
+                        "remove_args": [],
+                        "unset_envs": [],
+                        "args_mode": "replace",
+                    },
                     "extra_envs": warm_envs,
                     "source_phase": "PRELUDE",
                     "task_id": str(getattr(task, "task_id", "") or ""),
