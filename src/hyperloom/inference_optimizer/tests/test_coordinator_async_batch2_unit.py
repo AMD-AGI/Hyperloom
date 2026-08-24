@@ -2308,14 +2308,9 @@ async def test_materialize_integrate_patch_rejects_missing_owner(
 
     await coord._materialize_approved_proposal(pending)
 
-    assert not [
-        task for task in await coord.tasks.queued() if task.kind == "integrate_patch"
-    ]
+    assert not [task for task in await coord.tasks.queued() if task.kind == "integrate_patch"]
     observations = await coord.bus.tail(topic="observation", n=10)
-    assert any(
-        message.payload.get("reason") == "integrate_patch_owner_missing"
-        for message in observations
-    )
+    assert any(message.payload.get("reason") == "integrate_patch_owner_missing" for message in observations)
 
 
 @pytest.mark.asyncio

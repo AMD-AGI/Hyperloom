@@ -2179,15 +2179,9 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return
             recipe_args = str(
-                params["recipe_extra_server_args"]
-                if "recipe_extra_server_args" in params
-                else warm_args
+                params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
             ).strip()
-            recipe_envs = dict(
-                params["recipe_extra_envs"]
-                if "recipe_extra_envs" in params
-                else warm_envs
-            )
+            recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
             self._lift_to_current_best(
                 "replay_warm_recipe",
                 float(single_round_tput),

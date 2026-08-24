@@ -40,10 +40,7 @@ def agent_from_phase(value: Any) -> str:
 def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     """Resolve the immutable authoring phase from recorded ownership evidence."""
     evidence = evidence or {}
-    if (
-        evidence.get("framework_agent_authoring")
-        or evidence.get("framework_agent_candidate_id")
-    ):
+    if evidence.get("framework_agent_authoring") or evidence.get("framework_agent_candidate_id"):
         return "FRAMEWORK_AGENT"
     phase = str(evidence.get("source_phase") or "").strip().upper()
     if phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:

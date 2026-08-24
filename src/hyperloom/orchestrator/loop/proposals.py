@@ -491,9 +491,7 @@ class ProposalsCollaborator:
                         "proposal_msg_id": pending.proposal_msg_id,
                         "action_name": pending.action_name,
                         "from_agent": pending.from_agent,
-                        "specialist_task_id": str(
-                            params.get("specialist_task_id") or ""
-                        ),
+                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
                     },
                 )
                 return
