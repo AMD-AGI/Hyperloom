@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
@@ -914,8 +915,7 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     if unmerged:
         ok, err = _git_quarantine_unmerged(framework_root, unmerged)
         log.warning(
-            "integrate_patch: %s had %d path(s) in an unresolved merge (%s); "
-            "moved to a '%s' stash entry%s",
+            "integrate_patch: %s had %d path(s) in an unresolved merge (%s); moved to a '%s' stash entry%s",
             framework_root,
             len(unmerged),
             ", ".join(unmerged[:5]),
@@ -973,8 +973,7 @@ def _git_restore_stash_if_needed(
     if unmerged:
         ok, err = _git_restore_to_head(framework_root, unmerged)
         log.warning(
-            "integrate_patch: %s did not merge back into %s; restored %d path(s) to "
-            "HEAD and kept the stash%s",
+            "integrate_patch: %s did not merge back into %s; restored %d path(s) to HEAD and kept the stash%s",
             ref,
             framework_root,
             len(unmerged),
@@ -1281,9 +1280,7 @@ def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
     target = spec.target.as_posix().lower()
     filename = spec.target.name.lower()
     is_aiter_model_config = "/aiter/configs/model_configs/" in target
-    return is_aiter_model_config and (
-        kind == "model_config" or "_tuned_gemm" in filename
-    )
+    return is_aiter_model_config and (kind == "model_config" or "_tuned_gemm" in filename)
 
 
 def _validate_aiter_gemm_artifacts(
@@ -1340,10 +1337,7 @@ def _validate_aiter_gemm_artifacts(
                 return False
 
         target_rows = [
-            row
-            for row in rows
-            if str(row.get("gfx") or "").strip().lower() == expected_gfx
-            and _cu_num_matches(row)
+            row for row in rows if str(row.get("gfx") or "").strip().lower() == expected_gfx and _cu_num_matches(row)
         ]
         if not target_rows:
             errors.append({**base_error, "error": "no_target_gpu_rows"})
@@ -1545,9 +1539,7 @@ class IntegratePatchExecutor:
         # to ``ctx`` as it becomes real, because that is all the handler can see
         # when the stop arrives mid-stage.
         try:
-            apply_result = await self._stage_apply(
-                ctx, params, extra, specialist_task_id, shared_state, done_payload
-            )
+            apply_result = await self._stage_apply(ctx, params, extra, specialist_task_id, shared_state, done_payload)
             if apply_result is not None:
                 return apply_result
 
@@ -1561,6 +1553,7 @@ class IntegratePatchExecutor:
             config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
             extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
             extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
+            dropped_env_overrides: list[str] = getattr(ctx, "_ip_dropped_env_overrides", [])
             setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
             return await self._stage_gate(
@@ -1579,6 +1572,7 @@ class IntegratePatchExecutor:
                 config_changes_applied=config_changes_applied,
                 extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                dropped_env_overrides=dropped_env_overrides,
                 setup_result=setup_result,
             )
         except BaseException:
@@ -1731,7 +1725,11 @@ class IntegratePatchExecutor:
 
         action = EnablementStackAction.from_state(raw)
         attempt_dir = (
-            self.session_dir / "enablement" / "stacks" / (action.framework or "unknown") / (specialist_task_id or "attempt")
+            self.session_dir
+            / "enablement"
+            / "stacks"
+            / (action.framework or "unknown")
+            / (specialist_task_id or "attempt")
         )
 
         from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
@@ -1792,9 +1790,7 @@ class IntegratePatchExecutor:
 
         # Record the attempt venv root on the action so KEEP can persist it and
         # resume/GC can find it.
-        action = EnablementStackAction.from_state(
-            {**action.to_state(), "attempt_venv_root": result.runtime.venv_root}
-        )
+        action = EnablementStackAction.from_state({**action.to_state(), "attempt_venv_root": result.runtime.venv_root})
         ctx._ip_provision_result = result  # type: ignore[attr-defined]
         ctx._ip_stack_action = action  # type: ignore[attr-defined]
         ctx._ip_attempt_venv_root = result.runtime.venv_root  # type: ignore[attr-defined]
@@ -1987,6 +1983,15 @@ class IntegratePatchExecutor:
         raw_extra_envs = params.get("extra_envs")
         if isinstance(raw_extra_envs, dict):
             proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
+        proposal_extra_envs, _dropped_env_overrides = filter_untrusted_env_mapping(
+            proposal_extra_envs,
+            allow_predicate=is_allowed_variant_env_key,
+        )
+        if _dropped_env_overrides:
+            log.warning(
+                "integrate_patch: dropping unsafe env override keys: %s",
+                ", ".join(sorted(_dropped_env_overrides)),
+            )
 
         # Framework-rewrite switches. Every rewrite in such a patch sits behind
         # a switch that defaults OFF, so the applied patch is inert and benching
@@ -2065,10 +2070,7 @@ class IntegratePatchExecutor:
             done_payload=done_payload,
         )
         target_gpu_type = str(
-            getattr(shared_state, "gpu_type", "")
-            or params.get("gpu_type")
-            or params.get("target_platform")
-            or ""
+            getattr(shared_state, "gpu_type", "") or params.get("gpu_type") or params.get("target_platform") or ""
         ).strip()
         artifact_runtime_errors = _validate_aiter_gemm_artifacts(
             artifact_specs,
@@ -2370,6 +2372,7 @@ class IntegratePatchExecutor:
                     "config_changes_applied": config_changes_applied,
                     "extra_server_args_applied": extra_server_args_applied,
                     "extra_envs_applied": extra_envs_applied,
+                    "dropped_env_overrides": sorted(_dropped_env_overrides),
                     "reason": "apply_only=True; benchmark skipped",
                     "workspace": str(output_root),
                 },
@@ -2381,6 +2384,7 @@ class IntegratePatchExecutor:
         ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
         ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
+        ctx._ip_dropped_env_overrides = sorted(_dropped_env_overrides)  # type: ignore[attr-defined]
         ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
         return None
 
@@ -2402,6 +2406,7 @@ class IntegratePatchExecutor:
         config_changes_applied: dict[str, str],
         extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        dropped_env_overrides: list[str],
         setup_result: dict[str, Any],
     ) -> dict[str, Any]:
         """Bench + enablement/perf KEEP/REVERT gate.
@@ -2509,6 +2514,7 @@ class IntegratePatchExecutor:
             config_changes_applied=config_changes_applied,
             extra_server_args_applied=extra_server_args_applied,
             extra_envs_applied=extra_envs_applied,
+            dropped_env_overrides=dropped_env_overrides,
             bench_result=bench_result,
             gate_evidence=gate_evidence,
             ctx=ctx,
@@ -2852,6 +2858,7 @@ class IntegratePatchExecutor:
         config_changes_applied: dict[str, str],
         extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        dropped_env_overrides: list[str],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
         ctx: Any,
@@ -2969,13 +2976,9 @@ class IntegratePatchExecutor:
                 from ...knowledge import kb_writeback as _kb
 
                 inconclusive = bool(parity.get("inconclusive"))
-                error_class = (
-                    "switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed"
-                )
+                error_class = "switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed"
                 kb_outcome = (
-                    _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE
-                    if inconclusive
-                    else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
+                    _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
                 )
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
@@ -3145,7 +3148,7 @@ class IntegratePatchExecutor:
                     tps_delta_pct=float(delta_pct or 0.0),
                     extra=extra,
                     accuracy_delta_pct=acc_delta_pct,
-                config_fingerprint=cfg_fingerprint,
+                    config_fingerprint=cfg_fingerprint,
                 )
                 return _with_stash_restore(
                     framework_root,
@@ -3240,9 +3243,7 @@ class IntegratePatchExecutor:
                 if snap:
                     source_snapshot_dir = str(snap.get("snapshot_dir") or "")
                     if source_snapshot_dir:
-                        source_manifest_path = str(
-                            Path(source_snapshot_dir) / MANIFEST_NAME
-                        )
+                        source_manifest_path = str(Path(source_snapshot_dir) / MANIFEST_NAME)
                     source_target_files = [
                         str(item.get("rel") or "")
                         for item in (snap.get("files") or [])
@@ -3261,21 +3262,18 @@ class IntegratePatchExecutor:
                 # Proposal ownership must survive delegated-result persistence
                 # so resume replay cannot replace it with the then-current phase.
                 "source_phase": str(params.get("source_phase") or ""),
-                "domain": str(
-                    params.get("domain") or params.get("source_domain") or ""
-                ),
+                "domain": str(params.get("domain") or params.get("source_domain") or ""),
                 "provenance": str(params.get("provenance") or ""),
                 "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
                 "gap_layer": str(params.get("gap_layer") or ""),
-                "framework_agent_authoring": bool(
-                    params.get("framework_agent_authoring")
-                ),
+                "framework_agent_authoring": bool(params.get("framework_agent_authoring")),
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
                 "config_changes_applied": config_changes_applied,
                 "extra_server_args_applied": extra_server_args_applied,
                 "extra_envs_applied": extra_envs_applied,
+                "dropped_env_overrides": dropped_env_overrides,
                 "output_throughput": new_tput,
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,

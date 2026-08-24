@@ -36,6 +36,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Specialist `config_changes` and `extra_envs` overrides are now filtered at
+  the point they enter `integrate_patch`, not only when they reach the benchmark
+  subprocess.** Previously the raw LLM-supplied mapping was assembled into
+  `proposal_extra_envs` with no key validation, then branched in two directions:
+  the gate-bench path passed it through `GridVariant` (which applies
+  `is_allowed_variant_env_key`) while the `status="advanced"` path persisted the
+  unfiltered mapping into `accepted_config` and ultimately into the revalidation
+  baseline. That divergence meant the configuration that was benchmarked and the
+  configuration that was recorded as KEEP differed silently. Applying
+  `filter_untrusted_env_mapping` with `is_allowed_variant_env_key` at assembly
+  time collapses both paths to the same filtered value. Dropped key names are
+  logged, returned in `dropped_env_overrides` on every result dict that carries
+  `extra_envs_applied`, and written to the enablement `round.json`.
+
 - **`best_result.json` is read again.** `_validated_forge_best_result` gated on
   `schema_version == 1`; KernelForge has stamped `2` into that file since
   2026-08-13. Every published best was therefore rejected and the kernel
