@@ -14,6 +14,8 @@ import os
 import pathlib
 import sys
 
+from hyperloom.common import rocm_smi
+
 
 STALE_PROCESS_PATTERNS = (
     "hyperloom.inference_optimizer.cli",
@@ -62,40 +64,29 @@ def _print_torch_visibility() -> bool:
 
 
 def _check_gpu_occupancy() -> bool:
-    """Check VRAM occupancy via rocm-smi and return whether all GPUs are clean.
+    """Print per-GPU VRAM usage and report whether every GPU is idle.
 
-    A GPU is considered busy when its used VRAM exceeds ``VRAM_BUSY_FRACTION``
-    of its total capacity. rocm-smi absent or non-zero exit is treated as an
-    unknown and reported as failure so the caller aborts rather than launching
-    into an unverified state.
+    A GPU is busy once its used VRAM exceeds :data:`VRAM_BUSY_FRACTION` of its
+    own capacity. An unreadable GPU state counts as a failure, so an
+    unverifiable launch aborts instead of proceeding.
 
     Returns:
-        ``True`` when every GPU's used VRAM is within the allowed fraction,
-        ``False`` on any occupancy violation or when the GPU state is unknown.
+        ``True`` when every GPU is under the fraction, ``False`` otherwise.
     """
-    from hyperloom.common.rocm_smi import gpu_vram_usage
-
-    snapshots = gpu_vram_usage()
+    snapshots = rocm_smi.gpu_vram_usage()
     if snapshots is None:
-        print("rocm_smi=unavailable")
+        print("gpu_vram=unreadable")
         return False
 
-    clean = True
+    idle = True
     for idx, snap in enumerate(snapshots):
-        if snap.total_mib is None or snap.total_mib == 0.0:
-            print(f"gpu{idx}_vram=unknown (no total reported)")
-            clean = False
-            continue
-        pct = snap.used_mib / snap.total_mib
-        threshold_mib = snap.total_mib * VRAM_BUSY_FRACTION
+        busy = snap.used_mib > snap.total_mib * VRAM_BUSY_FRACTION
         print(
-            f"gpu{idx}_vram_used={snap.used_mib:.1f} MiB  "
-            f"total={snap.total_mib:.1f} MiB  "
-            f"pct={pct:.3%}  threshold={threshold_mib:.1f} MiB"
+            f"gpu{idx}_vram_used={snap.used_mib:.1f}/{snap.total_mib:.1f} MiB"
+            f" ({snap.used_mib / snap.total_mib:.2%}) {'BUSY' if busy else 'idle'}"
         )
-        if snap.used_mib > threshold_mib:
-            clean = False
-    return clean
+        idle = idle and not busy
+    return idle
 
 
 def _find_stale_processes() -> list[tuple[str, str]]:
