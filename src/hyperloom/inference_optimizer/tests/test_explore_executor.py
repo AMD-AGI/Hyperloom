@@ -2461,6 +2461,7 @@ def test_grid_variants_from_payload_carries_removal_controls():
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
     from hyperloom.orchestrator.actions.executors._grid_runner import (
         _on_disk_stderr_tail,
+        _report_errors_summary,
     )
 
     (tmp_path / "benchmark_stderr.log").write_text(
@@ -2470,6 +2471,14 @@ def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
     assert "unrecognized arguments" in tail
     # Empty dir → empty string (caller keeps its original blank error).
     assert _on_disk_stderr_tail(tmp_path / "nope") == ""
+    assert _report_errors_summary(None) == ""
+    assert _report_errors_summary({"errors": []}) == ""
+    assert (
+        _report_errors_summary(
+            {"errors": ["scriptable benchmark script not found for custom_mi355x.sh"]}
+        )
+        == "scriptable benchmark script not found for custom_mi355x.sh"
+    )
 
 
 @pytest.mark.asyncio

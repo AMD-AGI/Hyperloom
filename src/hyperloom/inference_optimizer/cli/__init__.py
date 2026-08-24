@@ -156,7 +156,9 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
     benchmark, half an hour in. The benchmark backend is checked for the same
     reason: it defaults to Magpie, which cannot run an operator's script at all,
     and nothing downstream rejects the combination — the run would simply take
-    the wrong executor and fail somewhere less obvious.
+    the wrong executor and fail somewhere less obvious. Resume re-invokes this
+    after restoring archived paths so a re-passed ``--benchmark-scripts-dir``
+    is not silently dropped.
     """
     fatal: list[str] = []
     if framework == "custom":
@@ -201,6 +203,110 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
         for line in fatal:
             print(f"ERROR: {line}", file=sys.stderr)
         sys.exit(2)
+
+
+def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
+    """Fill custom-workload env from persisted state when this resume omitted it.
+
+    Priority is CLI flag > already-exported env > archived SharedState. The
+    CLI flag is not written here: :func:`_apply_operator_supplied_paths`
+    publishes it, and must see a vacant env for the flag to win. Archive is
+    therefore applied only when neither the flag nor the env is set, matching
+    how ``--server-args`` / ``--extra-env`` resume. ``benchmark_backend`` has
+    no CLI flag (env / install.sh only), so the env check alone is the full
+    precedence chain for that field.
+
+    Args:
+        args: Parsed CLI namespace (reads ``framework_path`` /
+            ``benchmark_scripts_dir``).
+        state: Resumed session state.
+    """
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        BENCHMARK_BACKEND_ENV,
+    )
+
+    cli_repo = str(getattr(args, "framework_path", None) or "").strip()
+    cli_scripts = str(getattr(args, "benchmark_scripts_dir", None) or "").strip()
+    if not cli_repo and not os.environ.get("FRAMEWORK_REPO_PATH", "").strip():
+        archived = str(getattr(state, "framework_repo_path", "") or "").strip()
+        if archived:
+            os.environ["FRAMEWORK_REPO_PATH"] = archived
+    if not cli_scripts and not os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip():
+        archived = str(getattr(state, "bypass_scripts_dir", "") or "").strip()
+        if archived:
+            os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] = archived
+    if not os.environ.get(BENCHMARK_BACKEND_ENV, "").strip():
+        archived = str(getattr(state, "benchmark_backend", "") or "").strip()
+        if archived:
+            os.environ[BENCHMARK_BACKEND_ENV] = archived
+
+
+def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
+    """Fail at launch when ``--framework custom`` cannot resolve its script.
+
+    Walks the same chain the bypass runner uses (``apply_scriptable_runtime_defaults``
+    then :func:`resolve_scriptable_script`) so a missing ``custom_{runner}.sh``
+    (or lone operator script) exits in seconds with the candidate list, instead
+    of looping ``magpie_nonzero_invalid_measurement`` until robustness stops
+    the session.
+
+    No-op for shipped frameworks. Must run after GPU_TYPE is resolved: the
+    runner suffix is part of the filename.
+
+    Side effect: publishes ``CUSTOM_REPO_PATH`` / ``CUSTOM_DIR`` into
+    ``os.environ`` via ``apply_scriptable_runtime_defaults``, which PolicyGate
+    needs anyway to allowlist the custom checkout.
+
+    Args:
+        framework: Resolved session framework.
+        gpu_type: Magpie runner GPU type (e.g. ``mi355x``).
+    """
+    if str(framework or "").strip().lower() != "custom":
+        return
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_scriptable_runtime_defaults,
+    )
+    from hyperloom.orchestrator.actions.executors.bypass_scriptable import (
+        resolve_scriptable_script,
+        scriptable_script_candidates,
+    )
+
+    bench: dict[str, Any] = {"framework": "custom"}
+    envs: dict[str, Any] = {}
+    apply_scriptable_runtime_defaults(
+        bench,
+        envs,
+        gpu_type=gpu_type,
+        explicit_benchmark_script=False,
+    )
+    runner_type = str(bench.get("runner_type") or "mi355x")
+    inferencex_root = (
+        os.environ.get("INFERENCEX_PATH", "").strip()
+        or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
+    )
+    script = resolve_scriptable_script("custom", runner_type, inferencex_root, bench)
+    if script is not None:
+        return
+    name = f"custom_{runner_type}.sh"
+    candidates = scriptable_script_candidates("custom", runner_type, inferencex_root, bench)
+    tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
+    print(
+        f"ERROR: --framework custom could not resolve a benchmark entrypoint "
+        f"({name}). Tried:\n{tried}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def _persist_operator_supplied_paths(state: SharedState) -> None:
+    """Mirror the live custom-workload env back onto ``state`` for the next resume."""
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        BENCHMARK_BACKEND_ENV,
+    )
+
+    state.framework_repo_path = os.environ.get("FRAMEWORK_REPO_PATH", "").strip()
+    state.bypass_scripts_dir = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    state.benchmark_backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
 
 
 def _enforce_expected_framework(
@@ -1839,6 +1945,24 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported server_args   : {_resume_server_args}")
         if _resume_extra_env:
             print(f"  re-exported extra_env     : {','.join(sorted(_resume_extra_env))}")
+        # Custom-workload paths: an explicit --framework-path /
+        # --benchmark-scripts-dir on this resume wins, else the persisted
+        # value. Without this, a fresh-shell resume leaves
+        # HYPERLOOM_BYPASS_SCRIPTS_DIR unset and every grid variant exits
+        # rc=2 before spawn (magpie_nonzero_invalid_measurement, blank error).
+        _restore_operator_supplied_paths_from_state(args, state)
+        _apply_operator_supplied_paths(args, state.framework or "sglang")
+        _require_custom_entrypoint(
+            state.framework,
+            gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
+        )
+        _persist_operator_supplied_paths(state)
+        if state.framework_repo_path:
+            print(f"  re-exported FRAMEWORK_REPO_PATH: {state.framework_repo_path}")
+        if state.bypass_scripts_dir:
+            print(f"  re-exported HYPERLOOM_BYPASS_SCRIPTS_DIR: {state.bypass_scripts_dir}")
+        if state.benchmark_backend:
+            print(f"  re-exported HYPERLOOM_BENCHMARK_BACKEND: {state.benchmark_backend}")
         # Feeds the robustness defaults and the IR-8 check only. ``nodes_resolved``
         # was fixed from argv at the top of this function, so the cluster hand-off
         # is already settled and a multi-node resume must re-pass --nodes.
@@ -2057,6 +2181,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ.pop("GPU_TYPE", None)
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
+        _require_custom_entrypoint(framework, gpu_type=runner_gpu_type or gpu_type)
 
         # Runs here, not in _preflight, because the question it asks -- will
         # provenance be able to name the ISA? -- is unanswerable until
