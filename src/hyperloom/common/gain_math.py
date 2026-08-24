@@ -50,7 +50,6 @@ def conc_pair_comparison(
         A tuple of ``(per_conc_rows, summary_dict)``.
     """
     def _norm_conc(p: dict[str, Any]) -> int | float | str:
-        """Return a comparable, hashable concurrency key, coercing bool to int."""
         raw = p.get("conc")
         if isinstance(raw, bool):
             return int(raw)

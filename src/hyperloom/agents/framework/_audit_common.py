@@ -107,11 +107,8 @@ def _strip_diff_path(token: str) -> str:
 def _resolve_local_file(path: str, roots: list[Path]) -> Path | None:
     """Resolve a diff path to an existing file under one of ``roots``.
 
-    Tries strip levels 0..3 (the diff path often carries the package dir as its
-    leading component while the root *is* that package dir), across all roots.
-    Absolute paths and path components that would escape the root via ``..``
-    are rejected before the join so attacker-controlled diff paths cannot reach
-    outside the declared source roots.
+    Tries strip levels 0..3 across all roots; rejects absolute paths and ``..``
+    components and confirms containment with ``relative_to``.
 
     Args:
         path: The diff's file path (e.g. ``vllm/model_executor/models/x.py``).

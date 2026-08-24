@@ -16,12 +16,7 @@ _EMPTY_UNSET = object()
 
 
 def _first_json_object(text: str) -> dict[str, Any] | None:
-    """Return the first JSON object decoded from *text* using raw_decode.
-
-    Scans left-to-right for the first ``{`` and tries to decode a JSON object
-    from that position.  Unlike a greedy regex, raw_decode handles nested
-    braces and trailing content correctly.
-    """
+    """Return the first JSON object in *text*, or ``None``."""
     decoder = json.JSONDecoder()
     idx = text.find("{")
     while idx != -1:
@@ -246,7 +241,6 @@ def iter_sse_objects(raw: str) -> Iterator[Any]:
         try:
             yield json.loads(text)
         except json.JSONDecodeError:
-            # Malformed non-SSE payload: yield nothing.
             return
         return
     for block in re.split(r"\r?\n\r?\n", raw):
@@ -261,7 +255,6 @@ def iter_sse_objects(raw: str) -> Iterator[Any]:
         try:
             yield json.loads(payload)
         except json.JSONDecodeError:
-            # Skip a malformed SSE event block.
             continue
 
 
