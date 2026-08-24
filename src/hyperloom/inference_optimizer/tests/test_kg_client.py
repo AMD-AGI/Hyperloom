@@ -268,8 +268,8 @@ def test_emit_fact_retries_a_lost_update() -> None:
     assert any(f.subject == "torch_compile" for f in facts)
 
 
-def test_emit_fact_stops_when_the_page_never_changes() -> None:
-    """An unchanged page after the put is a stale read, not a lost update."""
+def test_emit_fact_reports_an_unconfirmable_write_as_failure() -> None:
+    """A put the reads never reflect is reported as not written, not as success."""
 
     class _StaleReadMcp(_FakeMcp):
         def call(self, tool: str, args: dict[str, Any]) -> Any:
@@ -287,9 +287,41 @@ def test_emit_fact_stops_when_the_page_never_changes() -> None:
             predicate="IMPROVES",
             object="qwen2forcausallm",
         )
+        is False
+    )
+    assert sum(1 for tool, _ in mcp.calls if tool == "put_page") == 3
+
+
+def test_emit_fact_retries_an_in_band_put_error() -> None:
+    """gbrain reports some write failures in-band; those are retried, not trusted."""
+
+    class _InBandErrorMcp(_FakeMcp):
+        def __init__(self, pages: dict[str, str]) -> None:
+            super().__init__(pages)
+            self.puts = 0
+
+        def call(self, tool: str, args: dict[str, Any]) -> Any:
+            if tool == "put_page":
+                self.puts += 1
+                self.calls.append((tool, dict(args)))
+                if self.puts == 1:
+                    return {"error": "page locked"}
+                self.pages[args["slug"]] = args["content"]
+                return {"ok": True}
+            return super().call(tool, args)
+
+    mcp = _InBandErrorMcp({"recipe/x": _page(_RECIPE_BODY)})
+    kg = KGClient(mcp)
+    assert (
+        kg.emit_fact(
+            page_slug="recipe/x",
+            subject="torch_compile",
+            predicate="IMPROVES",
+            object="qwen2forcausallm",
+        )
         is True
     )
-    assert sum(1 for tool, _ in mcp.calls if tool == "put_page") == 1
+    assert mcp.puts == 2
 
 
 def test_emit_fact_reports_failure_when_every_write_is_lost() -> None:
@@ -330,6 +362,10 @@ class _StructuredMcp:
             return {"frontmatter": dict(self.frontmatter), "body": self.body}
         if tool == "put_page":
             self.put_content = args["content"]
+            # Reads reflect the write, so emit_fact can confirm it. The written
+            # page carries its own frontmatter block; keeping it in ``body`` is
+            # harmless here because only the fact fence is parsed back.
+            self.body = args["content"]
             return {"ok": True}
         return {}
 

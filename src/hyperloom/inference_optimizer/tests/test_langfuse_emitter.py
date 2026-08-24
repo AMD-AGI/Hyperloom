@@ -558,6 +558,87 @@ def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
     assert len(client.generations) == 1
 
 
+def test_flush_is_not_final_until_client_flush_succeeds(tmp_path, monkeypatch):
+    """Everything above only fills the SDK buffer, so a failed flush is not done."""
+    _enable_env(monkeypatch)
+
+    class _FlakyFlushClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.flush_attempts = 0
+
+        def flush(self):
+            self.flush_attempts += 1
+            if self.flush_attempts == 1:
+                raise RuntimeError("langfuse ingest unreachable")
+            super().flush()
+
+    client = _FlakyFlushClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+
+    em.flush_session()
+    assert em._flushed is False
+    assert "client_flush" not in em._flush_steps_done
+    assert lfe.read_receipt(sd)["counts_final"] is False
+
+    em.flush_session()
+    assert client.flush_attempts == 2
+    assert em._flushed is True
+    assert lfe.read_receipt(sd)["counts_final"] is True
+
+
+def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
+    """A swallowed send failure must not drop the call out of the trace."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(call_id="c-1"))
+
+    real_emit = em._emit_generation
+    attempts = {"n": 0}
+
+    def _flaky_emit(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return False  # mirrors a swallowed SDK failure
+        return real_emit(**kwargs)
+
+    monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
+
+    em.flush_session()
+    # The step reported itself unfinished and the row is still buffered.
+    assert em._flushed is False
+    assert "pending_halves" not in em._flush_steps_done
+    assert client.generations == []
+
+    monkeypatch.setattr(em, "_emit_generation", real_emit)
+    em.flush_session()
+    assert len(client.generations) == 1
+    assert em._flushed is True
+
+
+def test_read_receipt_ignores_a_corrupted_payload(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert lfe.read_receipt(sd) is not None
+
+    path = sd / "reports" / "trace" / "langfuse_receipt.json"
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["counts"]["generations_sent"] = 999
+    path.write_text(json.dumps(tampered, indent=2, sort_keys=True), encoding="utf-8")
+
+    # The stamped hash no longer matches, so the receipt is not trusted for the
+    # one-shot push decisions that read it.
+    assert lfe.read_receipt(sd) is None
+
+
 def test_receipt_is_written_atomically_with_payload_hash(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

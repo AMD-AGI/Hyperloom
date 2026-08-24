@@ -47,6 +47,28 @@ def test_cid_lock_mutex_is_shared_per_path(tmp_path):
     assert ls._cid_mutex(path) is not ls._cid_mutex(tmp_path / "other.lock")
 
 
+def test_cid_lock_releases_the_mutex_when_setup_fails(tmp_path, monkeypatch):
+    """A failed open must not leave the shared mutex held for the process."""
+    path = tmp_path / ".lock"
+    real_open = ls.os.open
+    calls = {"n": 0}
+
+    def _flaky_open(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("transient NFS failure")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(ls.os, "open", _flaky_open)
+    with pytest.raises(OSError):
+        with ls._CidLock(path):
+            pass
+    assert ls._cid_mutex(path).locked() is False
+    # The next acquisition still works rather than blocking forever.
+    with ls._CidLock(path):
+        assert ls._cid_mutex(path).locked() is True
+
+
 def test_cid_lock_serialises_threads_on_the_same_path(tmp_path):
     path = tmp_path / ".lock"
     entered = threading.Event()

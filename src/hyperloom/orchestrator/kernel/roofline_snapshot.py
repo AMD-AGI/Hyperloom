@@ -694,6 +694,69 @@ def _ceiling_lines(
     ]
 
 
+#: Snapshot key holding the uncapped achieved/ceiling ratio.
+_UNCAPPED_KEY = "within_roofline_pct_uncapped"
+
+
+def _ceiling_exceeded(snapshot: dict[str, Any]) -> bool:
+    """Whether a snapshot measured above its own modelled ceiling.
+
+    Reads the persisted flag and falls back to the uncapped ratio, so a snapshot
+    written before the flag existed still reports its overshoot.
+
+    Args:
+        snapshot: A roofline snapshot dict.
+
+    Returns:
+        ``True`` when the measured throughput exceeded the ceiling.
+    """
+    if snapshot.get("roofline_ceiling_exceeded"):
+        return True
+    uncapped = snapshot.get(_UNCAPPED_KEY)
+    return isinstance(uncapped, (int, float)) and float(uncapped) > 100.0
+
+
+def _ceiling_exceeded_lines(
+    baseline: dict[str, Any],
+    latest: dict[str, Any],
+    *,
+    mode: str,
+) -> list[str]:
+    """Render the warning for a snapshot that measured above its ceiling.
+
+    Capping ``within`` at 100 keeps the gap from going negative, but on its own
+    it hides the reason: the modelled ceiling is understated (a stale dtype /
+    quantization / GPU-spec input), which makes every saturation number on that
+    side unusable. That has to be said in the report, not only in the snapshot.
+
+    Args:
+        baseline: The baseline snapshot.
+        latest: The latest snapshot (``{}`` in single-snapshot mode).
+        mode: ``single_snapshot`` or ``before_after``.
+
+    Returns:
+        The markdown lines, or ``[]`` when neither side overshot.
+    """
+    sides: list[str] = []
+    if _ceiling_exceeded(baseline):
+        sides.append("Base" if mode == "before_after" else "this snapshot")
+    if _ceiling_exceeded(latest):
+        sides.append("Opt")
+    if not sides:
+        return []
+    ratios = " / ".join(
+        _fmt_pct_cell(snap.get(_UNCAPPED_KEY)) for snap in (baseline, latest) if _ceiling_exceeded(snap)
+    )
+    return [
+        f"> **Ceiling model exceeded ({', '.join(sides)}):** measured throughput reached "
+        f"{ratios} of the modelled ceiling, so **Within roofline %** is capped at 100% and "
+        f"**Gap to roofline %** at 0%. The theoretical peak is understated — check the "
+        f"runtime dtype / quantization / GPU spec behind it before reading the saturation "
+        f"numbers.",
+        "",
+    ]
+
+
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
 
@@ -750,7 +813,10 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         )
         lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
         lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
+        if _ceiling_exceeded(snap):
+            lines.append(f"| Within roofline % (uncapped) | {_fmt_pct_cell(snap.get(_UNCAPPED_KEY))} |")
         lines.append("")
+        lines.extend(_ceiling_exceeded_lines(snap, {}, mode=mode))
         return lines
 
     lines.extend(
@@ -795,7 +861,14 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | "
         f"{_fmt_delta(delta.get('gap_to_roofline_pct'))} |"
     )
+    if _ceiling_exceeded(baseline) or _ceiling_exceeded(latest):
+        lines.append(
+            f"| Within roofline % (uncapped) | "
+            f"{_fmt_pct_cell(baseline.get(_UNCAPPED_KEY))} | "
+            f"{_fmt_pct_cell(latest.get(_UNCAPPED_KEY))} | — |"
+        )
     lines.append("")
+    lines.extend(_ceiling_exceeded_lines(baseline, latest, mode=mode))
     return lines
 
 

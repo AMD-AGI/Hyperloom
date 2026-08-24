@@ -608,7 +608,8 @@ class LangfuseEmitter:
             half: Which half this row represents (``"llm"`` or ``"conv"``).
         """
         if half == "llm" and lfmap.generation_level(row) == lfmap.LEVEL_ERROR:
-            self._emit_generation(token_row=row, conv_row=None)
+            if not self._emit_generation(token_row=row, conv_row=None):
+                self._requeue_parts(lfmap.pair_key(row), {"llm": row})
             return
         key = lfmap.pair_key(row)
         emit_parts: dict[str, dict[str, Any]] | None = None
@@ -617,11 +618,13 @@ class LangfuseEmitter:
             parts[half] = row
             if "llm" in parts and "conv" in parts:
                 emit_parts = self._pending.pop(key)
-        if emit_parts is not None:
-            self._emit_generation(
-                token_row=emit_parts.get("llm"),
-                conv_row=emit_parts.get("conv"),
-            )
+        if emit_parts is not None and not self._emit_generation(
+            token_row=emit_parts.get("llm"),
+            conv_row=emit_parts.get("conv"),
+        ):
+            # The send failed and was swallowed; keep the halves so session-end
+            # reconcile can retry them rather than losing the call.
+            self._requeue_parts(key, emit_parts)
 
     def record_kb_span(
         self,
@@ -673,13 +676,18 @@ class LangfuseEmitter:
         *,
         token_row: dict[str, Any] | None,
         conv_row: dict[str, Any] | None,
-    ) -> None:
+    ) -> bool:
         """Emit one Generation, nested under its phase -> agent span.
 
         Args:
             token_row: the token-half row, or ``None`` when only text is in.
             conv_row: the conversation-half row, or ``None`` when only tokens
                 are in.
+
+        Returns:
+            ``True`` when the Generation was handed to the SDK. ``False`` on a
+            swallowed send failure, so the caller can keep the rows for a retry
+            instead of dropping the call from the trace.
         """
         base = token_row or conv_row or {}
         phase = lfmap.phase_of(base)
@@ -716,9 +724,11 @@ class LangfuseEmitter:
                 self._counts["generations_text_only"] += 1
             else:
                 self._counts["generations_token_only"] += 1
+            return True
         except Exception:  # noqa: BLE001
             self._counts["errors"] += 1
             log.debug("langfuse: emit generation failed", exc_info=True)
+            return False
 
     # -- session-end reconcile ------------------------------------------
     def flush_session(self) -> None:
@@ -748,6 +758,10 @@ class LangfuseEmitter:
             ("gemm_tuning", self._flush_gemm_tuning),
             ("decision_scores", self._flush_decision_scores),
             ("close_spans", self._close_spans),
+            # Last, and a step like any other: everything above only hands
+            # observations to the SDK's buffer, so a failed final flush means
+            # nothing reached Langfuse and has to be retried.
+            ("client_flush", self._flush_client),
         )
         for name, step in steps:
             if name in self._flush_steps_done:
@@ -759,13 +773,16 @@ class LangfuseEmitter:
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
                 continue
             self._flush_steps_done.add(name)
-        try:
-            self._client.flush()
-        except Exception:  # noqa: BLE001
-            self._counts["errors"] += 1
-            log.debug("langfuse: client.flush failed", exc_info=True)
         self._flushed = len(self._flush_steps_done) == len(steps)
         self._write_receipt()
+
+    def _flush_client(self) -> None:
+        """Hand the SDK's buffered observations to the network.
+
+        Raises rather than swallowing, so :meth:`flush_session` records the step
+        as unfinished and a later call retries it.
+        """
+        self._client.flush()
 
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins.
@@ -970,15 +987,45 @@ class LangfuseEmitter:
             log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
-        """Emit any buffered call that only ever got one half (token XOR text)."""
+        """Emit any buffered call that only ever got one half (token XOR text).
+
+        A row is only dropped once its Generation was sent: a swallowed SDK
+        failure puts the halves back so a later flush can retry them, and this
+        step reports itself unfinished instead of losing the call.
+
+        Raises:
+            RuntimeError: When at least one buffered call could not be sent.
+        """
         with self._lock:
-            leftovers = list(self._pending.values())
+            leftovers = list(self._pending.items())
             self._pending.clear()
-        for parts in leftovers:
-            self._emit_generation(
+        requeued = 0
+        for key, parts in leftovers:
+            if self._emit_generation(
                 token_row=parts.get("llm"),
                 conv_row=parts.get("conv"),
-            )
+            ):
+                continue
+            requeued += 1
+            self._requeue_parts(key, parts)
+        if requeued:
+            raise RuntimeError(f"{requeued} buffered generation(s) could not be sent")
+
+    def _requeue_parts(self, key: tuple, parts: dict[str, dict[str, Any]]) -> None:
+        """Put unsent generation halves back on the pending map.
+
+        Only fills halves the map does not already hold, so a live row that
+        arrived while the flush was running is never overwritten by the older
+        copy being returned.
+
+        Args:
+            key: The ``pair_key`` the halves were buffered under.
+            parts: The halves that failed to send.
+        """
+        with self._lock:
+            current = self._pending.setdefault(key, {})
+            for half, row in parts.items():
+                current.setdefault(half, row)
 
     def _flush_ext_shards(self) -> None:
         """Backfill out-of-process children's token rows from ext/*.jsonl.
@@ -1305,28 +1352,25 @@ class LangfuseEmitter:
     def _write_receipt(self) -> None:
         """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.
 
-        Written atomically (temp file + rename, then fsync) and stamped with a
-        ``payload_sha256`` of the receipt body: the file doubles as the
-        cross-process idempotency record for ``session_start`` / breakdown
-        pushes, so a torn or half-written receipt would either replay a push or
-        suppress one forever. Best-effort: a failed write must never break
-        shutdown. The breakdown collector prefers this file over a live read of
-        the singleton.
-        """
-        import hashlib
-        import json
+        The file doubles as the cross-process idempotency record for
+        ``session_start`` / breakdown pushes, so a torn receipt would either
+        replay a push or suppress one forever. It is written atomically (temp
+        file + rename, both the file and the parent directory fsynced) and
+        stamped with a ``payload_sha256`` that :func:`read_receipt` verifies, so
+        a truncated or corrupted file is ignored rather than trusted.
 
+        Best-effort: a failed write must never break shutdown. The breakdown
+        collector prefers this file over a live read of the singleton.
+        """
         try:
-            payload = self.receipt()
-            body = json.dumps(payload, indent=2, sort_keys=True)
-            payload["payload_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
             atomic_write_json(
                 _receipt_path(self.session_dir),
-                payload,
+                _stamp_receipt_hash(self.receipt()),
                 indent=2,
                 sort_keys=True,
                 make_parents=True,
                 fsync=True,
+                fsync_dir=True,
             )
         except Exception:  # noqa: BLE001
             log.debug("langfuse: receipt write failed", exc_info=True)
@@ -1417,22 +1461,71 @@ def record_status(
     get_emitter(session_dir).record_status(status, min_refresh_sec=min_refresh_sec)
 
 
+#: Receipt key holding the SHA-256 of the receipt body (excluding itself).
+_RECEIPT_HASH_KEY = "payload_sha256"
+
+
+def _receipt_body_hash(payload: dict[str, Any]) -> str:
+    """Return the SHA-256 of a receipt payload, excluding the hash field itself.
+
+    Args:
+        payload: A receipt dict, with or without its hash stamped.
+
+    Returns:
+        The hex digest of the canonical JSON body.
+    """
+    import hashlib
+    import json
+
+    body = {k: v for k, v in payload.items() if k != _RECEIPT_HASH_KEY}
+    return hashlib.sha256(json.dumps(body, indent=2, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _stamp_receipt_hash(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return ``payload`` with its body hash stamped in.
+
+    Args:
+        payload: The receipt dict to stamp.
+
+    Returns:
+        The same dict, carrying :data:`_RECEIPT_HASH_KEY`.
+    """
+    payload[_RECEIPT_HASH_KEY] = _receipt_body_hash(payload)
+    return payload
+
+
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
 
     Returns the post-flush receipt dict (preferred by the breakdown collector
     since its counts are final) or ``None`` if no receipt was written.
 
+    A receipt whose stamped ``payload_sha256`` does not match its body is
+    treated as absent: the callers use it to decide whether a one-shot push
+    already happened, and acting on a corrupted receipt either replays that
+    push or suppresses it forever. A receipt with no hash at all is accepted —
+    those were written before the field existed.
+
     Args:
         session_dir: Session directory whose persisted receipt is read.
 
     Returns:
         dict[str, Any] | None: the post-flush receipt dict, or ``None`` when no
-            receipt was written or it is unreadable.
+            receipt was written, it is unreadable, or its hash does not match.
     """
     from hyperloom.common.jsonio import read_json
 
-    return read_json(_receipt_path(session_dir), default=None, require_dict=True)
+    payload = read_json(_receipt_path(session_dir), default=None, require_dict=True)
+    if payload is None:
+        return None
+    stamped = payload.get(_RECEIPT_HASH_KEY)
+    if stamped is not None and stamped != _receipt_body_hash(payload):
+        log.warning(
+            "langfuse: ignoring receipt at %s — payload hash mismatch",
+            _receipt_path(session_dir),
+        )
+        return None
+    return payload
 
 
 __all__ = [

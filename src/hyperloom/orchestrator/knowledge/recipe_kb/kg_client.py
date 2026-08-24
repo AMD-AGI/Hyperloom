@@ -63,6 +63,11 @@ _MAX_FACTS_PER_PAGE = 50
 _PAGE_MUTEXES: dict[str, threading.Lock] = {}
 _PAGE_MUTEX_REGISTRY_LOCK = threading.Lock()
 _EMIT_FACT_MAX_ATTEMPTS = 3
+# Confirmation re-reads per write attempt, and the linear backoff between them,
+# so a page store that serves a moment-stale read is not mistaken for a lost
+# write. Kept small: this only runs on the unconfirmed path.
+_EMIT_FACT_CONFIRM_READS = 3
+_EMIT_FACT_CONFIRM_BACKOFF_S = 0.05
 
 
 def _page_mutex(slug: str) -> threading.Lock:
@@ -907,12 +912,14 @@ class KGClient:
         duplicate ``(subject, predicate, object)`` line is a no-op.
 
         The page backend has no compare-and-set, so the whole read-modify-write
-        runs under a per-slug mutex and the result is verified by re-reading the
-        page: when the re-read shows a *different* page without our fact, a
-        concurrent writer overwrote us and the write is retried (up to
-        :data:`_EMIT_FACT_MAX_ATTEMPTS`) instead of being reported as written.
-        An unchanged page means the read has not caught up, which a retry cannot
-        fix, so the write is reported as made.
+        runs under a per-slug mutex and every write is confirmed by re-reading
+        the page (with a short backoff, so an eventually-consistent read gets a
+        chance to catch up). A write that cannot be confirmed — an in-band RPC
+        error, an unreadable page, or a page that came back without our fact
+        because a concurrent writer replaced it — is retried up to
+        :data:`_EMIT_FACT_MAX_ATTEMPTS` and then reported as **not** written.
+        Reporting an unconfirmed write as done is the silent failure this guards
+        against.
 
         Args:
             page_slug: Target page slug.
@@ -922,9 +929,9 @@ class KGClient:
             properties: Optional fact properties.
 
         Returns:
-            ``True`` when the fact is on the page because of this call,
-            ``False`` on a no-op (already present) or when it could not be
-            persisted.
+            ``True`` only when the fact was confirmed on the page by this call;
+            ``False`` on a no-op (already present) or when the write could not
+            be confirmed.
         """
         if self._native:
             return self._native_emit_fact(subject, predicate, object, properties)
@@ -934,6 +941,7 @@ class KGClient:
             for attempt in range(_EMIT_FACT_MAX_ATTEMPTS):
                 content = self._page_content_raw(page_slug)
                 if content is None:
+                    log.warning("kg emit_fact %s: page %s unreadable", triple, page_slug)
                     return False
                 if triple in self._page_triples(content):
                     # Present already: our own retry landing counts as a write,
@@ -944,29 +952,55 @@ class KGClient:
                 else:
                     sep = "" if content.endswith("\n") else "\n"
                     new_content = f"{content}{sep}\n## Facts\n{line}\n"
-                self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
+                res = self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
                 self._search_cache.clear()
-                verify = self._page_content_raw(page_slug)
-                if verify is None or triple in self._page_triples(verify):
-                    return True
-                if verify == content:
-                    # The page is byte-identical to what we read before writing,
-                    # so this is a read that has not caught up rather than a
-                    # concurrent page replacing ours. Re-issuing the same put
-                    # would not change that, so report the write.
-                    log.debug(
-                        "kg emit_fact %s on %s could not be confirmed (stale read)",
-                        triple,
+                if _rpc_failed(res):
+                    log.warning(
+                        "kg put_page %s error: %s (attempt %d/%d)",
                         page_slug,
+                        res.get("error") if isinstance(res, dict) else res,
+                        attempt + 1,
+                        _EMIT_FACT_MAX_ATTEMPTS,
                     )
+                    continue
+                if self._fact_confirmed(page_slug, triple):
                     return True
                 log.warning(
-                    "kg emit_fact %s lost on %s (attempt %d/%d); retrying",
+                    "kg emit_fact %s on %s unconfirmed (attempt %d/%d)",
                     triple,
                     page_slug,
                     attempt + 1,
                     _EMIT_FACT_MAX_ATTEMPTS,
                 )
+        log.warning(
+            "kg emit_fact %s on %s could not be confirmed after %d attempts",
+            triple,
+            page_slug,
+            _EMIT_FACT_MAX_ATTEMPTS,
+        )
+        return False
+
+    def _fact_confirmed(self, page_slug: str, triple: tuple[str, str, str]) -> bool:
+        """Re-read a page until the triple shows up, with a bounded backoff.
+
+        A page store that serves a slightly stale read is not the same failure
+        as a lost write, but from one read they look identical — so the read is
+        repeated a few times before the write is called unconfirmed.
+
+        Args:
+            page_slug: The page just written.
+            triple: The ``(subject, predicate, object)`` that must be present.
+
+        Returns:
+            ``True`` as soon as a read shows the triple, ``False`` once the
+            reads are exhausted.
+        """
+        for read_idx in range(_EMIT_FACT_CONFIRM_READS):
+            if read_idx:
+                time.sleep(_EMIT_FACT_CONFIRM_BACKOFF_S * read_idx)
+            content = self._page_content_raw(page_slug)
+            if content is not None and triple in self._page_triples(content):
+                return True
         return False
 
     @staticmethod

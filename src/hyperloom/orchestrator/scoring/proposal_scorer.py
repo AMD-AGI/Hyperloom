@@ -38,6 +38,7 @@ from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from ..trace.parse_usage import reasoning_output_tokens
 
 log = logging.getLogger(__name__)
 
@@ -449,6 +450,10 @@ class ProposalScorer:
                 phase=phase,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                # A scoring model with a reasoning split bills it separately;
+                # reading it here keeps the ledger consistent with the backends
+                # that report it on their turn metadata.
+                reasoning_output_tokens=reasoning_output_tokens(usage),
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)

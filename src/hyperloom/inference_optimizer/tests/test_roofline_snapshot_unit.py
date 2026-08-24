@@ -354,6 +354,62 @@ def test_format_table_before_after():
     assert "single-source ceiling" in body
 
 
+def test_format_table_single_snapshot_surfaces_ceiling_overshoot():
+    """The capped 100% / 0% must not hide that the ceiling model is understated."""
+    cmp = {
+        "mode": "single_snapshot",
+        "baseline": {
+            "theoretical_peak_tok_per_sec": 100.0,
+            "achieved_tok_per_sec": 130.0,
+            "within_roofline_pct": 100.0,
+            "gap_to_roofline_pct": 0.0,
+            "within_roofline_pct_uncapped": 130.0,
+            "roofline_ceiling_exceeded": True,
+        },
+    }
+    body = "\n".join(rs.format_roofline_metrics_table(cmp))
+    assert "| Within roofline % (uncapped) | 130.0% |" in body
+    assert "Ceiling model exceeded" in body
+
+
+def test_format_table_before_after_surfaces_ceiling_overshoot():
+    cmp = {
+        "mode": "before_after",
+        "baseline": {
+            "theoretical_peak_tok_per_sec": 100.0,
+            "within_roofline_pct": 80.0,
+            "gap_to_roofline_pct": 20.0,
+        },
+        "latest": {
+            "theoretical_peak_tok_per_sec": 100.0,
+            "within_roofline_pct": 100.0,
+            "gap_to_roofline_pct": 0.0,
+            "within_roofline_pct_uncapped": 142.0,
+            "roofline_ceiling_exceeded": True,
+        },
+        "delta": {"within_roofline_pct": 20.0},
+    }
+    body = "\n".join(rs.format_roofline_metrics_table(cmp))
+    assert "| Within roofline % (uncapped) | — | 142.0% | — |" in body
+    assert "Ceiling model exceeded (Opt)" in body
+
+
+def test_format_table_omits_overshoot_row_when_within_ceiling():
+    cmp = {
+        "mode": "single_snapshot",
+        "baseline": {
+            "theoretical_peak_tok_per_sec": 100.0,
+            "within_roofline_pct": 80.0,
+            "gap_to_roofline_pct": 20.0,
+            "within_roofline_pct_uncapped": 80.0,
+            "roofline_ceiling_exceeded": False,
+        },
+    }
+    body = "\n".join(rs.format_roofline_metrics_table(cmp))
+    assert "uncapped" not in body
+    assert "Ceiling model exceeded" not in body
+
+
 def test_format_table_reports_both_ceilings_when_incomparable():
     cmp = {
         "mode": "before_after",

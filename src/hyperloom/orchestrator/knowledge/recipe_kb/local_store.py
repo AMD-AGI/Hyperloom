@@ -216,23 +216,33 @@ class _CidLock:
         the same process serialise) and then takes an exclusive
         ``fcntl.flock`` on the ``.lock`` file (so processes serialise).
 
+        Every step after the mutex is taken runs under one handler: the mutex is
+        shared per path and process-lived, so leaking it on a failed ``mkdir`` /
+        ``os.open`` (a permission error, a transient NFS fault) would block
+        every later write to that cid for the life of the process.
+
         Returns:
             _CidLock: This lock instance, for use as a context manager.
 
         Raises:
-            OSError: If the underlying ``flock`` fails; the mutex and
-                file descriptor are released before propagating.
+            OSError: If the directory, the open, or the ``flock`` fails; the
+                mutex and file descriptor are released before propagating.
         """
         self._mutex = _cid_mutex(self.path)
         self._mutex.acquire()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
-        except OSError:
-            os.close(self._fd)
-            self._fd = None
+        except BaseException:
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
             self._mutex.release()
+            self._mutex = None
             raise
         return self
 

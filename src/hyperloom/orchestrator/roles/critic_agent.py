@@ -42,6 +42,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from ..trace.parse_usage import reasoning_output_tokens
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -76,6 +77,26 @@ _ANTHROPIC_USAGE_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+
+
+def _accumulate_reasoning_tokens(acc: dict[str, int], usage: Any) -> None:
+    """Fold a reply's reasoning-output tokens into the accumulator, when reported.
+
+    The key is only created when the provider reported a count, so a model
+    without a reasoning split still writes ``None`` (not ``0``) to the ledger —
+    the documented difference between "no reasoning concept" and "no reasoning
+    tokens spent".
+
+    Args:
+        acc: The running accumulator, updated in place.
+        usage: A provider usage payload (mapping or SDK object).
+    """
+    count = reasoning_output_tokens(usage)
+    if count is None:
+        return
+    acc["reasoning_output_tokens"] = acc.get("reasoning_output_tokens", 0) + count
+
+
 # HTTP client timeout defaults for critic review calls. A completion is not
 # streamed, so the read half is what bounds generation: the server holds the
 # connection open until the whole reply exists.
@@ -1284,6 +1305,7 @@ class CriticAgentBackend:
                 acc[key] = acc.get(key, 0) + int(usage.get(key, 0) or 0)
             except (TypeError, ValueError):
                 continue
+        _accumulate_reasoning_tokens(acc, usage)
 
     @staticmethod
     def _accumulate_usage(
@@ -1311,6 +1333,7 @@ class CriticAgentBackend:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
+        _accumulate_reasoning_tokens(acc, usage)
 
     def set_trace_context(
         self,
@@ -1369,6 +1392,7 @@ class CriticAgentBackend:
                 output_tokens=usage_acc.get("output_tokens"),
                 cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
                 cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
+                reasoning_output_tokens=usage_acc.get("reasoning_output_tokens"),
                 latency_ms=latency_ms,
                 reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
