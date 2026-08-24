@@ -1021,6 +1021,40 @@ class TestRederiveAfterReview:
         tla._rederive_after_review(item)
         assert item["benchmark_files"] == [str(source)]
 
+    def test_an_all_missing_harness_proposal_leaves_the_curated_one(self, tmp_path):
+        """An empty verified list says the proposal was wrong, not the table.
+
+        ``_verified_harnesses`` returns ``[]`` when the session named harnesses
+        and none of them exist. Adopting that would empty ``benchmark_files``,
+        which is what ``has_benchmark`` and the invocation spec's benchmark
+        evidence are built from -- so a review that guessed badly would strip a
+        runnable harness the deterministic table had already found.
+        """
+        harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
+        harness.parent.mkdir(parents=True)
+        harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
+        monkey_roots = (str(tmp_path / "aiter"),)
+        original_roots = tla.kernel_search_roots
+        tla.kernel_search_roots = lambda: monkey_roots
+        tla._harness_search_bases.cache_clear()
+        try:
+            name = "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv"
+            source = "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu"
+            deterministic = {"name": name, "source_file": source}
+            tla._accept_review_proposals(deterministic)
+            assert deterministic["benchmark_files"] == [str(harness)]
+
+            reviewed = {
+                "name": name,
+                "source_file": source,
+                "review_benchmark_files": [],
+            }
+            tla._accept_review_proposals(reviewed)
+            assert reviewed["benchmark_files"] == [str(harness)]
+        finally:
+            tla.kernel_search_roots = original_roots
+            tla._harness_search_bases.cache_clear()
+
 
 class TestAdoptReviewedShapes:
     def test_dims_are_taken_where_the_trace_recorded_none(self, tmp_path):

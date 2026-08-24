@@ -6810,8 +6810,12 @@ def _accept_review_proposals(
     _stamp_candidate_metadata(item, op_cat_map)
     # Stamping recomputes benchmark_files from the curated marker table, which
     # is coarser than a session that went and looked. Its verified answer wins.
+    # Only a non-empty one: an empty list means the session named harnesses and
+    # none of them exist, which says its proposal was wrong, not that the
+    # curated table's answer is. Letting it through would strip a runnable
+    # harness from the invocation spec the backend is handed.
     reviewed_harnesses = item.get("review_benchmark_files")
-    if isinstance(reviewed_harnesses, list):
+    if isinstance(reviewed_harnesses, list) and reviewed_harnesses:
         item["benchmark_files"] = list(reviewed_harnesses)
     # A restrictive hint is honoured, a permissive one is not. The reviewer can
     # veto a kernel it knows is not worth a tuning session, but it cannot talk
