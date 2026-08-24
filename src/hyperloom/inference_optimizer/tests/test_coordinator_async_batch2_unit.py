@@ -1699,7 +1699,10 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
         seen.append(dict(intent.payload.get("params") or {}))
 
     monkeypatch.setattr(coord, "_handle_delegate", _fake_delegate)
-    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "wave"})
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"idempotency_key": "wave", "action_name": "specialist"},
+    )
     await coord._fan_out_specialist_wave(
         "orchestration",
         intent,
