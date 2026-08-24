@@ -17,6 +17,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`BLOCKED_UNTRUSTED_ENV_NAMES` and `BLOCKED_CHILD_ENV_NAMES` no longer list
+  `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, or `RUBYOPT`.** This is a
+  ROCm/Linux-only repository with no macOS platform code and no Ruby tooling;
+  those three entries were copied from a generic checklist and blocked nothing
+  real. Every name that remains corresponds to a process this repository
+  actually spawns: bash benchmark wrappers, Python subprocesses, the glibc
+  dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT` is
+  retained because `moreutils` (`ts`) is a perl program that the benchmark
+  wrapper's timestamped logging shim pipes through.
+
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
   already used, and `forge-fuse` rejects an unknown option outright rather than
