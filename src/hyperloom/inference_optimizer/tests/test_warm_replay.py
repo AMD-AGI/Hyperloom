@@ -2092,12 +2092,8 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
 
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
-    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(
-        checkout.resolve()
-    )
-    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(
-        checkout.resolve()
-    )
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(checkout.resolve())
+    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(checkout.resolve())
     entry = coord.shared_state.optimization_stack[-1]
     assert entry["recipe_delta"] == {
         "extra_server_args": "--recipe",

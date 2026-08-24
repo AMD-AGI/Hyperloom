@@ -227,9 +227,7 @@ class IntentRouter:
                         "reason": "integrate_patch_owner_missing",
                         "from_agent": source,
                         "action_name": action_name,
-                        "specialist_task_id": str(
-                            params.get("specialist_task_id") or ""
-                        ),
+                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
                     },
                 )
                 return
@@ -589,9 +587,7 @@ class IntentRouter:
                         "reason": "integrate_patch_owner_missing",
                         "from_agent": source,
                         "action_name": action_name,
-                        "specialist_task_id": str(
-                            params.get("specialist_task_id") or ""
-                        ),
+                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
                     },
                 )
                 return

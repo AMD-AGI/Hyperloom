@@ -306,9 +306,7 @@ def _apply_recipe_delta(
 
     mode = str(delta.get("args_mode") or "append").strip().lower()
     if mode not in {"append", "replace"}:
-        raise RemoteRecipeValidationError(
-            f"unsupported recipe args_mode: {mode!r}"
-        )
+        raise RemoteRecipeValidationError(f"unsupported recipe args_mode: {mode!r}")
     args = compose_server_args(
         inherited_args=str(config.get("extra_server_args") or ""),
         variant_extra_args=str(delta.get("extra_server_args") or ""),
@@ -319,15 +317,10 @@ def _apply_recipe_delta(
     for key in delta.get("unset_envs") or []:
         envs.pop(str(key), None)
     raw_envs = _mapping(delta.get("extra_envs"))
-    framework_arg_envs = sorted(
-        key
-        for key in raw_envs
-        if key.startswith("EXTRA_") and key.endswith("_ARGS")
-    )
+    framework_arg_envs = sorted(key for key in raw_envs if key.startswith("EXTRA_") and key.endswith("_ARGS"))
     if framework_arg_envs:
         raise RemoteRecipeValidationError(
-            "recipe_delta must carry framework arguments in "
-            f"extra_server_args, not envs: {framework_arg_envs!r}"
+            f"recipe_delta must carry framework arguments in extra_server_args, not envs: {framework_arg_envs!r}"
         )
     envs.update(raw_envs)
     return {
@@ -350,14 +343,10 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
         action = str(entry.get("action") or "").strip().lower()
         if action == "replay_warm_recipe":
             if str(outcome.get("status") or "") != "reproduced":
-                raise RemoteRecipeValidationError(
-                    "replay_warm_recipe stack entry was not reproduced"
-                )
+                raise RemoteRecipeValidationError("replay_warm_recipe stack entry was not reproduced")
             raw_delta = entry.get("recipe_delta")
             if not isinstance(raw_delta, Mapping):
-                raise RemoteRecipeValidationError(
-                    "reproduced warm replay is missing recipe_delta"
-                )
+                raise RemoteRecipeValidationError("reproduced warm replay is missing recipe_delta")
             delta = dict(raw_delta)
             config = _apply_recipe_delta(
                 {"extra_server_args": "", "extra_envs": {}},
@@ -389,12 +378,8 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
             continue
         config = _apply_recipe_delta(config, delta)
     return {
-        "extra_server_args": sanitize_publish_server_args(
-            str(config.get("extra_server_args") or "")
-        ),
-        "extra_envs": sanitize_publish_env_mapping(
-            _mapping(config.get("extra_envs"))
-        ),
+        "extra_server_args": sanitize_publish_server_args(str(config.get("extra_server_args") or "")),
+        "extra_envs": sanitize_publish_env_mapping(_mapping(config.get("extra_envs"))),
     }
 
 
