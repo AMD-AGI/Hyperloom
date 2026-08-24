@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,31 @@ log = logging.getLogger(__name__)
 # Cap the number of fact lines parsed per page (mirrors the mirror-side
 # write cap) so a malformed/oversized page never blows up a query tick.
 _MAX_FACTS_PER_PAGE = 50
+
+# ``emit_fact`` on the page backend is a read-modify-write over a whole markdown
+# page, so two concurrent emits can each write a page that lacks the other's
+# fact. Threads are serialised per slug, and the write is verified by re-reading
+# the page so a lost update is retried instead of silently dropped.
+_PAGE_MUTEXES: dict[str, threading.Lock] = {}
+_PAGE_MUTEX_REGISTRY_LOCK = threading.Lock()
+_EMIT_FACT_MAX_ATTEMPTS = 3
+
+
+def _page_mutex(slug: str) -> threading.Lock:
+    """Return the process-wide mutex guarding mutations of one page slug.
+
+    Args:
+        slug: The page slug being mutated.
+
+    Returns:
+        threading.Lock: The mutex shared by every writer of that slug.
+    """
+    with _PAGE_MUTEX_REGISTRY_LOCK:
+        mutex = _PAGE_MUTEXES.get(slug)
+        if mutex is None:
+            mutex = threading.Lock()
+            _PAGE_MUTEXES[slug] = mutex
+        return mutex
 # Hard ceiling on BFS breadth to bound client-side traversal cost.
 _MAX_TRAVERSE_NODES = 200
 # Default TTL for the per-client search cache (seconds). One warm-start
@@ -883,6 +909,14 @@ class KGClient:
         ``## Facts`` header (or creates the fence), and writes it back. A
         duplicate ``(subject, predicate, object)`` line is a no-op.
 
+        The page backend has no compare-and-set, so the whole read-modify-write
+        runs under a per-slug mutex and the result is verified by re-reading the
+        page: when the re-read shows a *different* page without our fact, a
+        concurrent writer overwrote us and the write is retried (up to
+        :data:`_EMIT_FACT_MAX_ATTEMPTS`) instead of being reported as written.
+        An unchanged page means the read has not caught up, which a retry cannot
+        fix, so the write is reported as made.
+
         Args:
             page_slug: Target page slug.
             subject: Subject entity.
@@ -891,25 +925,64 @@ class KGClient:
             properties: Optional fact properties.
 
         Returns:
-            ``True`` when the page was written, ``False`` on no-op.
+            ``True`` when the fact is on the page because of this call,
+            ``False`` on a no-op (already present) or when it could not be
+            persisted.
         """
         if self._native:
             return self._native_emit_fact(subject, predicate, object, properties)
-        content = self._page_content_raw(page_slug)
-        if content is None:
-            return False
+        triple = (_entity(subject), str(predicate).strip().upper(), _entity(object))
         line = format_fact_line(subject, predicate, object, properties)
-        existing = {(f.subject, f.predicate, f.object) for f in parse_facts_fence(content)}
-        if (_entity(subject), str(predicate).strip().upper(), _entity(object)) in existing:
-            return False
-        if "## Facts" in content:
-            new_content = content.replace("## Facts\n", f"## Facts\n{line}\n", 1)
-        else:
-            sep = "" if content.endswith("\n") else "\n"
-            new_content = f"{content}{sep}\n## Facts\n{line}\n"
-        self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
-        self._search_cache.clear()
-        return True
+        with _page_mutex(page_slug):
+            for attempt in range(_EMIT_FACT_MAX_ATTEMPTS):
+                content = self._page_content_raw(page_slug)
+                if content is None:
+                    return False
+                if triple in self._page_triples(content):
+                    # Present already: our own retry landing counts as a write,
+                    # a first-pass hit is the documented no-op.
+                    return attempt > 0
+                if "## Facts" in content:
+                    new_content = content.replace("## Facts\n", f"## Facts\n{line}\n", 1)
+                else:
+                    sep = "" if content.endswith("\n") else "\n"
+                    new_content = f"{content}{sep}\n## Facts\n{line}\n"
+                self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
+                self._search_cache.clear()
+                verify = self._page_content_raw(page_slug)
+                if verify is None or triple in self._page_triples(verify):
+                    return True
+                if verify == content:
+                    # The page is byte-identical to what we read before writing,
+                    # so this is a read that has not caught up rather than a
+                    # concurrent page replacing ours. Re-issuing the same put
+                    # would not change that, so report the write.
+                    log.debug(
+                        "kg emit_fact %s on %s could not be confirmed (stale read)",
+                        triple,
+                        page_slug,
+                    )
+                    return True
+                log.warning(
+                    "kg emit_fact %s lost on %s (attempt %d/%d); retrying",
+                    triple,
+                    page_slug,
+                    attempt + 1,
+                    _EMIT_FACT_MAX_ATTEMPTS,
+                )
+        return False
+
+    @staticmethod
+    def _page_triples(content: str) -> set[tuple[str, str, str]]:
+        """Return the ``(subject, predicate, object)`` triples already on a page.
+
+        Args:
+            content: Raw page markdown.
+
+        Returns:
+            The set of triples parsed from the page's ``## Facts`` fence.
+        """
+        return {(f.subject, f.predicate, f.object) for f in parse_facts_fence(content)}
 
     def _native_emit_fact(
         self,

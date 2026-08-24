@@ -482,6 +482,97 @@ def test_start_obs_reraises_when_even_minimal_signature_fails():
         lfe._start_obs(_Hostile(), name="gen", as_type="span")
 
 
+def test_call_id_pairs_across_a_second_boundary(tmp_path, monkeypatch):
+    """With a call_id the halves pair even when their ts land in different seconds."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(_llm_row(call_id="c-1", ts="2026-06-09T15:14:54.980000+00:00"))
+    em.record_conversation(_conv_row(call_id="c-1", ts="2026-06-09T15:14:55.020000+00:00"))
+
+    assert len(client.generations) == 1
+    assert em._counts["generations_paired"] == 1
+
+
+def test_distinct_call_ids_in_one_second_do_not_cross_pair(tmp_path, monkeypatch):
+    """Two calls inside one second stay apart when each carries its own call_id."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(_llm_row(call_id="c-1"))
+    em.record_conversation(_conv_row(call_id="c-2", response="OTHER CALL"))
+    # Neither half found its partner yet.
+    assert client.generations == []
+
+    em.record_conversation(_conv_row(call_id="c-1"))
+    assert len(client.generations) == 1
+    assert client.generations[0].kwargs["output"] == "RESPONSE TEXT"
+
+
+def test_reasoning_tokens_reach_usage_details(tmp_path, monkeypatch):
+    """A reasoning model's hidden output tokens are reported, not dropped."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(_llm_row(reasoning_output_tokens=2048))
+    em.flush_session()
+
+    usage = client.generations[0].kwargs["usage_details"]
+    assert usage["reasoning_output"] == 2048
+    assert usage["output"] == 40
+
+
+def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
+    """A partial reconcile is not marked flushed; the retry re-runs only what failed."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())  # leftover half, emitted by the first step
+
+    calls = {"scores": 0}
+
+    def _flaky_scores():
+        calls["scores"] += 1
+        if calls["scores"] == 1:
+            raise RuntimeError("decision_trace unreadable")
+
+    monkeypatch.setattr(em, "_flush_decision_scores", _flaky_scores)
+
+    em.flush_session()
+    assert em._flushed is False
+    assert "decision_scores" not in em._flush_steps_done
+    assert len(client.generations) == 1
+
+    em.flush_session()
+    assert calls["scores"] == 2
+    assert em._flushed is True
+    # The step that already succeeded did not re-emit its generation.
+    assert len(client.generations) == 1
+
+
+def test_receipt_is_written_atomically_with_payload_hash(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts_final"] is True
+    assert len(persisted["payload_sha256"]) == 64
+    # No temp file left behind by the atomic write.
+    assert [p.name for p in (sd / "reports" / "trace").glob("*.tmp")] == []
+
+
 def test_conversation_first_then_token_also_pairs(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

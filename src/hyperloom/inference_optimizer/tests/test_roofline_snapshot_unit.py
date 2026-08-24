@@ -126,6 +126,27 @@ def test_compute_within_and_gap():
     assert gap == 20.0
 
 
+def test_compute_within_and_gap_clamps_overshoot():
+    """Beating the modelled ceiling caps ``within`` instead of reporting a negative gap."""
+    within, gap = rs._compute_within_and_gap(peak=100, achieved=120)
+    assert within == 100.0
+    assert gap == 0.0
+
+
+def test_build_roofline_snapshot_reports_ceiling_overshoot():
+    snap = rs.build_roofline_snapshot(
+        snapshot_id=1,
+        ts="t0",
+        analysis_md_path="",
+        theoretical_peak_tok_per_sec=100.0,
+        achieved_tok_per_sec=130.0,
+    )
+    assert snap["within_roofline_pct"] == 100.0
+    assert snap["gap_to_roofline_pct"] == 0.0
+    assert snap["within_roofline_pct_uncapped"] == 130.0
+    assert snap["roofline_ceiling_exceeded"] is True
+
+
 def test_direction_saturation_threshold(monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SATURATION_WITHIN_PCT", raising=False)
     snap = {
@@ -237,6 +258,45 @@ def test_comparison_from_history_before_after():
     assert out["mode"] == "before_after"
     assert out["delta"]["compute_pct"] == 10.0
     assert out["delta"]["top_kernel_efficiency_pct"] == 15.0
+    assert out["ceilings_comparable"] is True
+
+
+def test_ceilings_comparable_detects_moved_ceiling():
+    same = {"theoretical_peak_tok_per_sec": 1000.0}
+    close = {"theoretical_peak_tok_per_sec": 1005.0}
+    moved = {"theoretical_peak_tok_per_sec": 1400.0}
+    other_unit = {"roofline_ideal_ms": 12.0}
+    assert rs.ceilings_comparable(same, close) is True
+    assert rs.ceilings_comparable(same, moved) is False
+    assert rs.ceilings_comparable(same, other_unit) is False
+    # No ceiling on one side: nothing was derived from it.
+    assert rs.ceilings_comparable(same, {}) is True
+
+
+def test_comparison_withholds_saturation_delta_across_moved_ceiling():
+    """A dtype change moves the denominator, so the within/gap Δ is not reported."""
+    snaps = [
+        {
+            "snapshot_id": 1,
+            "theoretical_peak_tok_per_sec": 1000.0,
+            "within_roofline_pct": 50.0,
+            "gap_to_roofline_pct": 50.0,
+            "compute_pct": 50.0,
+        },
+        {
+            "snapshot_id": 2,
+            "theoretical_peak_tok_per_sec": 2000.0,
+            "within_roofline_pct": 40.0,
+            "gap_to_roofline_pct": 60.0,
+            "compute_pct": 60.0,
+        },
+    ]
+    out = rs.build_roofline_comparison_from_history(snaps)
+    assert out["ceilings_comparable"] is False
+    assert out["delta"]["within_roofline_pct"] is None
+    assert out["delta"]["gap_to_roofline_pct"] is None
+    # Ceiling-independent metrics still get their delta.
+    assert out["delta"]["compute_pct"] == 10.0
 
 
 # ---- formatters ----
@@ -291,3 +351,19 @@ def test_format_table_before_after():
     assert "| Metric | Base | Opt | Δ |" in body
     assert "+10.0" in body
     assert "`a`" in body and "`b`" in body
+    assert "single-source ceiling" in body
+
+
+def test_format_table_reports_both_ceilings_when_incomparable():
+    cmp = {
+        "mode": "before_after",
+        "baseline": {"theoretical_peak_tok_per_sec": 1000.0, "within_roofline_pct": 50.0},
+        "latest": {"theoretical_peak_tok_per_sec": 2000.0, "within_roofline_pct": 40.0},
+        "delta": {"within_roofline_pct": None},
+        "ceilings_comparable": False,
+    }
+    body = "\n".join(rs.format_roofline_metrics_table(cmp))
+    assert "1000.0 tok/s" in body
+    assert "2000.0 tok/s" in body
+    assert "single-source ceiling" not in body
+    assert "Ceilings differ" in body

@@ -917,6 +917,18 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "(see `Coordinator._maybe_enqueue_watermark_roofline`)."
     )
     lines.append("")
+    # The ceiling is normally a session constant, but a runtime dtype /
+    # quantization change moves it — and then the two sides' Within % have
+    # different denominators, which the caveat has to say out loud.
+    anchor_note = (
+        "The ceiling is a session-level constant "
+        "(hardware + model + isl/osl don't change), so baseline and "
+        "latest are compared against the same anchor."
+        if cmp.get("ceilings_comparable", True)
+        else "The two snapshots model different ceilings (the runtime dtype / "
+        "quantization changed), so each Within % is measured against its own "
+        "anchor and the Δ column is withheld."
+    )
     lines.append(
         "_The **Theoretical peak** below is the decode "
         "memory-roofline ceiling derived from the GPU's HBM "
@@ -926,9 +938,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "stays under it because of comm overhead, kernel "
         "efficiency < 100%, and KV-cache fragmentation. **Within "
         "roofline %** = measured / peak; **Gap to roofline %** = "
-        "100 − Within. The ceiling is a session-level constant "
-        "(hardware + model + isl/osl don't change), so baseline and "
-        "latest are compared against the same anchor._"
+        f"100 − Within. {anchor_note}_"
     )
     lines.append("")
     lines.extend(format_roofline_metrics_table(cmp))

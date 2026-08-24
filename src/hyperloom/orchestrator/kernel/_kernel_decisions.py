@@ -752,6 +752,11 @@ def record_kernel_integrate_result(
         r for r in state.rejected_kernel_patches if not (isinstance(r, dict) and r.get("key") == key)
     ]
     state.rejected_kernel_patches.append(rejected)
+    # A grouped task's members stay out of ``rejected_kernel_ids``: the ids are
+    # synthetic per trace and a member can be re-dispatched under another task.
+    # The task-level rejection below is the terminal fact, so consumers must
+    # read the ledger row (``integration_status`` /
+    # ``integration_rejected_reason``) rather than this set alone.
     if (
         kernel_id
         and not task_group_key

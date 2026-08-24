@@ -44,6 +44,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
+from ..trace.llm_trace import new_call_id
 from .agent_role import DEFAULT_CODEX_MODEL
 from .base import (
     BackendError,
@@ -359,6 +360,8 @@ class CodexBackend:
         metadata: dict[str, Any] = {
             "model": self.model,
             "thread_id": sdk_result.thread_id,
+            # Pairs this turn's token row with its conversation row.
+            "call_id": new_call_id(),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": 0,

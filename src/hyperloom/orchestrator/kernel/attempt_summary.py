@@ -364,6 +364,27 @@ def _relative_to_session(p: Path, session_dir: Path) -> str:
         return str(p)
 
 
+def _rejected_reason_of(entry: dict[str, Any]) -> str:
+    """Return the rejection reason recorded on a ledger row (``""`` when none).
+
+    A grouped kernel's rejection is stamped on the task row as
+    ``integration_rejected_reason``; a single-kernel rejection uses
+    ``rejected_reason``. Both are the same fact and the summary must read either.
+
+    Args:
+        entry: The kernel's attempts ledger row.
+
+    Returns:
+        The rejection reason, or ``""`` when the row records none.
+    """
+    return str(entry.get("rejected_reason") or entry.get("integration_rejected_reason") or "").strip()
+
+
+def _entry_integration_status(entry: dict[str, Any]) -> str:
+    """Return the row's terminal integration status, lowercased (``""`` when unset)."""
+    return str(entry.get("integration_status") or "").strip().lower()
+
+
 def _classify_attempted(
     entry: dict[str, Any],
     *,
@@ -372,6 +393,11 @@ def _classify_attempted(
     kernel_id: str,
 ) -> str:
     """Decide the category for a kernel that has an attempts ledger row.
+
+    The row's own terminal decision is authoritative alongside the id sets: a
+    rejected *group* task deliberately stays out of ``rejected_kernel_ids`` (its
+    members can be re-dispatched under another task), so a summary keyed only on
+    that set reports a terminally rejected kernel as ``IN_FLIGHT``.
 
     Args:
         entry: The kernel's attempts ledger row.
@@ -383,9 +409,10 @@ def _classify_attempted(
         The outcome category constant.
     """
     last_decision = str(entry.get("last_decision") or "").upper()
-    if kernel_id in integrated_ids:
+    integration_status = _entry_integration_status(entry)
+    if kernel_id in integrated_ids or integration_status == "integrated":
         return CATEGORY_INTEGRATED
-    if kernel_id in rejected_ids:
+    if kernel_id in rejected_ids or integration_status == "rejected" or _rejected_reason_of(entry):
         return CATEGORY_ATTEMPTED_REJECTED
     if last_decision == "KEEP":
         return CATEGORY_KEEP_PENDING
@@ -558,7 +585,7 @@ def _summary_attempted_rejected(
             f"usable patch; verification: {artifact_error or 'no usable artifact'}"
         )
     decision = str(entry.get("last_decision") or "").upper() or "rejected"
-    return f"{decision}; rejected_reason={entry.get('rejected_reason') or 'n/a'}"
+    return f"{decision}; rejected_reason={_rejected_reason_of(entry) or 'n/a'}"
 
 
 def _summary_in_flight(
@@ -1005,7 +1032,7 @@ def build_kernel_optimization_summary(
         )
         counts[_category_count_key(category)] += 1
         if category == CATEGORY_ATTEMPTED_REJECTED:
-            rej_reason = str(attempt.get("rejected_reason") or "").strip()
+            rej_reason = _rejected_reason_of(attempt)
             bucket = rej_reason if rej_reason in KNOWN_REJECTION_REASONS else None
             if bucket is None:
                 # Collapse threshold-encoding reason strings onto canonical keys.
@@ -1207,7 +1234,7 @@ def _render_attempted_row(
         "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
         "category": category,
         "outcome_class": _kernel_outcome_class(category, ladder),
-        "rejected_reason": str(attempt.get("rejected_reason") or ""),
+        "rejected_reason": _rejected_reason_of(attempt),
         "summary": summary_text,
         "attempts_total": int(attempt.get("attempts") or 0),
         "partial_count": int(attempt.get("partial_count") or 0),

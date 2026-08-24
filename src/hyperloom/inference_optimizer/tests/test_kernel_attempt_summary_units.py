@@ -172,6 +172,43 @@ def test_classify_attempted():
     )
 
 
+def test_classify_attempted_reads_task_terminal_rejection():
+    """A rejected group task is out of ``rejected_kernel_ids`` by design, not in flight."""
+    grouped = {
+        "last_decision": "REVERT",
+        "task_group_key": "grp-1",
+        "integration_status": "rejected",
+        "integration_rejected_reason": "revert_decision",
+    }
+    assert (
+        kas._classify_attempted(
+            grouped,
+            integrated_ids=set(),
+            rejected_ids=set(),
+            kernel_id="k001",
+        )
+        == kas.CATEGORY_ATTEMPTED_REJECTED
+    )
+    # The reason travels under either spelling.
+    assert kas._rejected_reason_of(grouped) == "revert_decision"
+    assert kas._rejected_reason_of({"rejected_reason": "max_e2e_attempts_3_without_keep"}) == (
+        "max_e2e_attempts_3_without_keep"
+    )
+
+
+def test_classify_attempted_reads_task_terminal_integration():
+    """A KEEP already integrated on the task row is not left pending."""
+    assert (
+        kas._classify_attempted(
+            {"last_decision": "KEEP", "integration_status": "integrated"},
+            integrated_ids=set(),
+            rejected_ids=set(),
+            kernel_id="k001",
+        )
+        == kas.CATEGORY_INTEGRATED
+    )
+
+
 def _eligible(gpu_pct: float) -> dict:
     """A top-list entry that clears every gate except the GPU-share threshold."""
     return {

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import threading
 
 import pytest
 
@@ -30,6 +31,36 @@ class _ToDictItem:
 
     def to_dict(self):
         return self._p
+
+
+# ---- _CidLock ----
+
+
+def test_cid_lock_mutex_is_shared_per_path(tmp_path):
+    """Every lock instance on one path must contend on the same mutex.
+
+    Each store operation builds a fresh ``_CidLock``, so an instance-owned mutex
+    would be uncontended and give two threads no mutual exclusion at all.
+    """
+    path = tmp_path / ".lock"
+    assert ls._cid_mutex(path) is ls._cid_mutex(tmp_path / "." / ".lock")
+    assert ls._cid_mutex(path) is not ls._cid_mutex(tmp_path / "other.lock")
+
+
+def test_cid_lock_serialises_threads_on_the_same_path(tmp_path):
+    path = tmp_path / ".lock"
+    entered = threading.Event()
+
+    def _worker():
+        with ls._CidLock(path):
+            entered.set()
+
+    with ls._CidLock(path):
+        worker = threading.Thread(target=_worker)
+        worker.start()
+        assert entered.wait(0.3) is False
+    worker.join(5)
+    assert entered.is_set()
 
 
 # ---- _coerce_dict ----

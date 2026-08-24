@@ -30,6 +30,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
     forge_steps_path,
@@ -409,6 +410,9 @@ class LangfuseEmitter:
             "errors": 0,  # swallowed send failures
         }
         self._flushed = False
+        # Reconcile steps that already succeeded, so a retry after a partial
+        # flush neither re-emits them nor loses the ones still owed.
+        self._flush_steps_done: set[str] = set()
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a
         # snapshot is sent only on-change or after a slow refresh interval.
         self._last_status_sig: tuple | None = None
@@ -721,8 +725,11 @@ class LangfuseEmitter:
         """Emit leftover halves + audit spans + decision Scores, then flush.
 
         Run once at session end. Safe to call when disabled (no-op) and
-        idempotent: a second call only re-writes the receipt, avoiding duplicate
-        audit spans / Scores in Langfuse.
+        idempotent: every reconcile step runs at most once, so a second call
+        re-attempts only the steps that failed and never duplicates audit spans
+        / Scores in Langfuse. ``_flushed`` (which suppresses further reconcile
+        work) is only set once every step has succeeded — marking a partial
+        reconcile as flushed would strand whatever it never got to.
         """
         if not self._enabled:
             # Still drop a receipt so the breakdown can report why nothing was pushed.
@@ -732,26 +739,33 @@ class LangfuseEmitter:
             log.debug("langfuse: flush_session already ran; skipping re-emit")
             self._write_receipt()
             return
+        steps: tuple[tuple[str, Any], ...] = (
+            ("pending_halves", self._flush_pending_halves),
+            ("ext_shards", self._flush_ext_shards),
+            ("recipe_kb_audit", self._flush_recipe_kb_audit),
+            ("specialist_intel", self._flush_specialist_intel),
+            ("forge_steps", self._flush_forge_steps),
+            ("gemm_tuning", self._flush_gemm_tuning),
+            ("decision_scores", self._flush_decision_scores),
+            ("close_spans", self._close_spans),
+        )
+        for name, step in steps:
+            if name in self._flush_steps_done:
+                continue
+            try:
+                step()
+            except Exception:  # noqa: BLE001 — one failed step must not skip the rest
+                self._counts["errors"] += 1
+                log.debug("langfuse: flush step %s failed", name, exc_info=True)
+                continue
+            self._flush_steps_done.add(name)
         try:
-            self._flush_pending_halves()
-            self._flush_ext_shards()
-            self._flush_recipe_kb_audit()
-            self._flush_specialist_intel()
-            self._flush_forge_steps()
-            self._flush_gemm_tuning()
-            self._flush_decision_scores()
-            self._close_spans()
+            self._client.flush()
         except Exception:  # noqa: BLE001
             self._counts["errors"] += 1
-            log.debug("langfuse: flush_session reconcile failed", exc_info=True)
-        finally:
-            try:
-                self._client.flush()
-            except Exception:  # noqa: BLE001
-                self._counts["errors"] += 1
-                log.debug("langfuse: client.flush failed", exc_info=True)
-            self._flushed = True
-            self._write_receipt()
+            log.debug("langfuse: client.flush failed", exc_info=True)
+        self._flushed = len(self._flush_steps_done) == len(steps)
+        self._write_receipt()
 
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins.
@@ -1283,22 +1297,36 @@ class LangfuseEmitter:
             ),
             "counts": dict(self._counts),
             "counts_final": self._flushed,
+            # Which reconcile steps have completed, so a receipt written after a
+            # partial flush says what is still owed instead of reading as final.
+            "flush_steps_done": sorted(self._flush_steps_done),
         }
 
     def _write_receipt(self) -> None:
         """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.
 
-        Best-effort: a failed receipt write must never break shutdown. The
-        breakdown collector prefers this file over a live read of the singleton.
+        Written atomically (temp file + rename, then fsync) and stamped with a
+        ``payload_sha256`` of the receipt body: the file doubles as the
+        cross-process idempotency record for ``session_start`` / breakdown
+        pushes, so a torn or half-written receipt would either replay a push or
+        suppress one forever. Best-effort: a failed write must never break
+        shutdown. The breakdown collector prefers this file over a live read of
+        the singleton.
         """
+        import hashlib
         import json
 
         try:
-            path = _receipt_path(self.session_dir)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(self.receipt(), indent=2, sort_keys=True),
-                encoding="utf-8",
+            payload = self.receipt()
+            body = json.dumps(payload, indent=2, sort_keys=True)
+            payload["payload_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            atomic_write_json(
+                _receipt_path(self.session_dir),
+                payload,
+                indent=2,
+                sort_keys=True,
+                make_parents=True,
+                fsync=True,
             )
         except Exception:  # noqa: BLE001
             log.debug("langfuse: receipt write failed", exc_info=True)

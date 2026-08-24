@@ -10,7 +10,8 @@ on by default; disable via ``--no-enable-conc-sweep``); a LLM-proposed
 ``conc_sweep`` delegate is denied by PolicyGate.
 
 Inputs (``task.params``): ``concs`` (CONC ladder), ``variant_timeout_sec``,
-``total_budget_sec`` (0 disables the gate).
+``total_budget_sec`` (``None`` disables the gate; ``<=0`` means no time is left
+and the sweep skips without booting a server).
 
 Reloads ``SharedState`` from ``ctx.extra['session_dir']`` to pick up the
 live current_best / baseline_tput / isl / osl / baseline_config_path,
@@ -67,7 +68,10 @@ class ConcSweepExecutor:
             concs = [int(c) for c in concs_raw]
 
         variant_timeout = int(params.get("variant_timeout_sec") or state.conc_sweep_variant_timeout_sec or 1800)
-        total_budget = int(params.get("total_budget_sec", state.conc_sweep_total_budget_sec))
+        # An explicit ``None`` means "no budget gate" and must survive as None:
+        # coercing it to 0 would instead read as "no time left" and skip.
+        budget_raw = params.get("total_budget_sec", state.conc_sweep_total_budget_sec)
+        total_budget = None if budget_raw is None else int(budget_raw)
 
         payload = await run_conc_sweep(
             state,

@@ -84,10 +84,14 @@ class SweepPhase(PhaseHandler):
             )
             return
         if task is None:
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="enqueue_returned_none",
-                auto_conc_sweep_error="enqueue_returned_none",
-            )
+            # The enqueue helper declines with its own terminal skip when the
+            # session clock leaves nothing to spend; don't overwrite that reason.
+            last = getattr(state, "last_conc_sweep", None) or {}
+            if not str(last.get("status") or "").strip():
+                self._record_terminal_conc_sweep_skip(
+                    skip_reason="enqueue_returned_none",
+                    auto_conc_sweep_error="enqueue_returned_none",
+                )
             return
         log.info(
             "SWEEP entry (from=%s): auto-enqueued conc_sweep task=%s (concs=%s total_budget_sec=%s)",
@@ -122,19 +126,29 @@ class SweepPhase(PhaseHandler):
         configured_budget = int(state.conc_sweep_total_budget_sec or 0)
         # Clamp total_budget_sec to the remaining session wall-clock budget so
         # a long conc_sweep cannot outlive --max-hours.  A 120 s reserve is kept
-        # for the CLOSE phase.  When remaining_minutes() returns None (or the
-        # state stub lacks it) the session has no wall-clock cap and we use the
-        # configured value as-is.
+        # for the CLOSE phase.  ``None`` is the wire value for "no budget gate"
+        # (no wall-clock cap, or a non-positive configured budget); a clamp that
+        # leaves no time declines the task instead, because a 0 would read
+        # downstream as an unbounded budget and run the whole ladder.
         _CLOSE_RESERVE_SEC = 120
         _rem_fn = getattr(state, "remaining_minutes", None)
         session_rem = _rem_fn() if callable(_rem_fn) else None
+        clamped_budget: int | None
         if session_rem is not None:
             session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)
-            clamped_budget = (
-                min(configured_budget, max(0, session_rem_sec)) if configured_budget > 0 else max(0, session_rem_sec)
-            )
+            if session_rem_sec <= 0:
+                log.info(
+                    "conc_sweep: session clock leaves %ds after the %ds CLOSE reserve; not enqueueing.",
+                    session_rem_sec,
+                    _CLOSE_RESERVE_SEC,
+                )
+                self._record_session_budget_conc_sweep_skip(
+                    denied=f"remaining_after_close_reserve={session_rem_sec}s",
+                )
+                return None
+            clamped_budget = min(configured_budget, session_rem_sec) if configured_budget > 0 else session_rem_sec
         else:
-            clamped_budget = configured_budget
+            clamped_budget = configured_budget if configured_budget > 0 else None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),

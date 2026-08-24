@@ -923,6 +923,51 @@ async def test_on_enter_sweep_none_records_terminal_skip(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
+    """A clamp that leaves nothing declines: a 0 budget would read as unbounded."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
+    coord.shared_state.remaining_minutes = lambda: 1.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is None
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
+    """A non-positive configured budget means "no gate" and travels as None."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is not None
+    assert task.params["total_budget_sec"] is None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
+    """With a session cap, the budget is the remaining time minus the CLOSE reserve."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 9000
+    coord.shared_state.remaining_minutes = lambda: 5.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is not None
+    assert task.params["total_budget_sec"] == 180  # 5 min - 120 s reserve
+
+
+@pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_conc_sweep_disabled(coord):
     """If conc_sweep is disabled, SWEEP records a terminal skip instead of idling."""
     coord.shared_state.conc_sweep_enabled = False

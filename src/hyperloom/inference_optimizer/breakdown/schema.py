@@ -1632,8 +1632,10 @@ class RooflineSnapshot(TypedDict, total=False):
     ts: str
     achieved_tok_per_sec: float
     theoretical_peak_tok_per_sec: float  # ceiling, vendor peak (unreachable)
-    within_roofline_pct: float  # achieved / peak * 100
+    within_roofline_pct: float  # achieved / peak * 100, capped at 100
     gap_to_roofline_pct: float
+    within_roofline_pct_uncapped: float | None  # uncapped ratio; >100 = wrong ceiling
+    roofline_ceiling_exceeded: bool
     compute_pct: float
     idle_pct: float
     comm_pct: float

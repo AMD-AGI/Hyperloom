@@ -639,11 +639,45 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     assert calls["n"] < 8
 
 
-def test_run_conc_sweep_zero_budget_disables_gate(
+def test_run_conc_sweep_none_budget_disables_gate(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """``total_budget_sec <= 0`` disables the gate; every variant is launched."""
+    """``total_budget_sec=None`` disables the gate; every variant is launched."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch(
+            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            side_effect=_fake_run_grid,
+        ) as mock_run,
+        patch(
+            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
+            side_effect=_fake_materialize,
+        ),
+    ):
+        payload = asyncio.run(
+            run_conc_sweep(
+                state,
+                session_dir,
+                concs=[1, 4],
+                total_budget_sec=None,
+            )
+        )
+
+    assert payload["budget_exhausted"] is False
+    assert payload["total_budget_sec"] is None
+    assert mock_run.call_count == 4  # 2 arms × 2 concs
+
+
+def test_run_conc_sweep_zero_budget_skips_without_running(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    """``total_budget_sec=0`` is "no time left": skip, never run the ladder."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
@@ -668,9 +702,13 @@ def test_run_conc_sweep_zero_budget_disables_gate(
             )
         )
 
-    assert payload["budget_exhausted"] is False
-    assert payload["total_budget_sec"] is None
-    assert mock_run.call_count == 4  # 2 arms × 2 concs
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "no_time_budget_remaining"
+    assert payload["total_budget_sec"] == 0
+    assert mock_run.call_count == 0
+    # Nothing ran, so this reads as a sweep that declined rather than one that
+    # spent its budget.
+    assert conc_sweep_declined_to_run({**payload, "was_skipped": True}) is True
 
 
 def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
@@ -846,6 +884,41 @@ def test_conc_sweep_executor_task_params_override_state(
 
     assert result["status"] == "succeeded"
     assert captured == {"concs": [2, 8], "timeout": 45, "budget": 120}
+
+
+def test_conc_sweep_executor_keeps_none_budget_unbounded(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    """An explicit ``None`` budget stays None: coercing it to 0 would skip the sweep."""
+    from hyperloom.orchestrator.actions.executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.conc_sweep_total_budget_sec = 9000
+    state.save(session_dir)
+
+    class _Task:
+        params = {"total_budget_sec": None}
+
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": str(session_dir)}
+
+    captured: dict = {}
+
+    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+        captured["budget"] = total_budget_sec
+        return {"status": "succeeded", "summary": {"successful_pairs": 1}}
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.conc_sweep.run_conc_sweep",
+        side_effect=_fake_run,
+    ):
+        asyncio.run(ConcSweepExecutor()(_Ctx()))
+
+    assert captured["budget"] is None
 
 
 def test_conc_sweep_executor_remaps_skip_to_succeeded(
