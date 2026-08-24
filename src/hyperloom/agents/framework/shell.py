@@ -72,7 +72,11 @@ def render_template(
     *,
     shell_quote: bool = False,
 ) -> str:
-    """Render known ``{var}`` placeholders, raise on unknown placeholders.
+    """Render known ``{var}`` placeholders in a single pass, raise on unknowns.
+
+    Each placeholder is replaced exactly once regardless of what the
+    substituted value contains, so a value like ``{other_key}`` is never
+    re-interpreted in a subsequent substitution.
 
     Leaves JSON-style ``{...}`` braces that don't match the
     ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern untouched.
@@ -89,13 +93,20 @@ def render_template(
     Raises:
         ValueError: If any ``{identifier}`` placeholder is left unresolved.
     """
-    rendered = template
-    for key, value in variables.items():
-        replacement = shlex.quote(value) if shell_quote else value
-        rendered = rendered.replace("{" + key + "}", replacement)
-    unknown = sorted(set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", rendered)))
+    _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    unknown: list[str] = []
+
+    def _replace(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name not in variables:
+            unknown.append(name)
+            return m.group(0)
+        value = variables[name]
+        return shlex.quote(value) if shell_quote else value
+
+    rendered = _PLACEHOLDER.sub(_replace, template)
     if unknown:
         raise ValueError(
-            "command template references unknown variable(s): " + ", ".join(repr(item) for item in unknown)
+            "command template references unknown variable(s): " + ", ".join(repr(item) for item in sorted(set(unknown)))
         )
     return rendered
