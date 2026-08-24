@@ -34,7 +34,7 @@ from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
-    valid_env_key,
+    is_allowed_variant_env_key,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
@@ -1291,10 +1291,10 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         extra_envs,
-        allow_predicate=valid_env_key,
+        allow_predicate=is_allowed_variant_env_key,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
+        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────
