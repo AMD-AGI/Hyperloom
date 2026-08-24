@@ -1661,7 +1661,14 @@ def _export_partition_lever(
     Returns:
         The canonical modes, empty when the lever is off.
     """
-    from hyperloom.common.gpu_partition import PartitionError, parse_modes
+    from hyperloom.common.gpu_partition import (
+        PARTITION_SUDO_ENV,
+        PartitionError,
+        parse_modes,
+        partition_count_conflicts,
+        supported_modes,
+        unsupported_modes,
+    )
 
     budget = float(max_latency_ms or 0.0)
     if budget > 0:
@@ -1686,6 +1693,49 @@ def _export_partition_lever(
             file=sys.stderr,
         )
         sys.exit(2)
+
+    # Scope the request to what this card says it can do. The name being one of
+    # the four known modes does not mean this board offers it, and the
+    # alternative to checking here is discovering it at the apply site -- a
+    # privileged mutation partway through a session, which is the whole reason
+    # the rest of this validation happens at launch.
+    #
+    # A card that reports nothing is the ordinary unprivileged case, not an
+    # error: the profile query needs the same elevation as the set. So an
+    # unanswerable query warns and proceeds rather than blocking a session that
+    # may be perfectly able to run -- and says so, because "not validated" and
+    # "validated as fine" must not look alike in a log.
+    available = supported_modes(0)
+    if not available:
+        print(
+            "WARN: could not read this card's supported partition profiles, so "
+            f"{','.join(modes)} is unvalidated. amd-smi reports profiles only when "
+            f"elevated; set {PARTITION_SUDO_ENV}=1 to check the request here rather "
+            "than at the first mode change.",
+            file=sys.stderr,
+        )
+    else:
+        rejected = unsupported_modes(modes)
+        if rejected:
+            print(
+                f"ERROR: this card does not support {','.join(rejected)}. "
+                f"It reports: {','.join(available)}.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # The card is also the authority on how many partitions a mode makes,
+        # and that number drives the CU arithmetic device selection matches on.
+        # A disagreement means the sizing is wrong, so it stops the session here
+        # rather than surfacing as a benchmark that finds no device.
+        conflicts = partition_count_conflicts(0)
+        if conflicts:
+            print(
+                "ERROR: this card's partition ladder disagrees with the built-in "
+                "table, so partition sizing would be wrong:\n  " + "\n  ".join(conflicts),
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(f"Compute partitioning : {','.join(modes)} (card reports {','.join(available)})")
     if budget <= 0:
         # Not fatal: maximizing offline throughput regardless of per-request
         # latency is a legitimate goal. But it is not usually what someone

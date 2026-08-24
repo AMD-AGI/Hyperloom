@@ -298,7 +298,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "and pays only in aggregate throughput at concurrency -- see "
         "--streams-per-partition. Requires a privileged amd-smi on the "
         "host: the mode is a property of the card, not of the process, so a "
-        "session confined to an unprivileged container cannot set it. The "
+        "session confined to an unprivileged container cannot set it. When "
+        "elevated, the request is checked against the profiles the card "
+        "actually reports and a mode it does not offer is refused at launch; "
+        "unelevated, the check is skipped with a warning because amd-smi "
+        "reports profiles only to root. The "
         "session restores the mode it found on the way out. Pair with "
         "--max-latency-ms; without a budget the search picks the narrowest "
         "partition on offer, which is the slowest one per request.",

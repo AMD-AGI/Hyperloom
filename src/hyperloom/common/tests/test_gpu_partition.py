@@ -309,3 +309,187 @@ def test_permission_failure_that_exits_zero_is_still_caught(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake)
     with pytest.raises(PartitionError, match="returned success but the mode did not change"):
         set_partition_mode(0, "CPX")
+
+
+#: Verbatim shape of ``amd-smi partition -a --json`` on an MI355X, trimmed to
+#: two profiles. The sparse continuation rows are the point: a profile's first
+#: row names it and carries its XCC count, and the rows after it describe the
+#: same profile's other resources under blank identity fields. A parser that
+#: treats every row as a profile invents four per mode.
+PROFILE_PAYLOAD = {
+    "partition_profiles": [
+        {
+            "gpu_id": 0,
+            "profile_index": 0,
+            "memory_partition_caps": "NPS1",
+            # amd-smi marks the live profile with a trailing asterisk.
+            "accelerator_type": "SPX*",
+            "num_partitions": 1,
+            "resource_index": 0,
+            "resource_type": "XCC",
+            "resource_instances": 8,
+        },
+        {
+            "gpu_id": "",
+            "profile_index": "",
+            "memory_partition_caps": "",
+            "accelerator_type": "",
+            "num_partitions": "",
+            "resource_index": 1,
+            "resource_type": "DECODER",
+            "resource_instances": 4,
+        },
+        {
+            "gpu_id": "",
+            "profile_index": 3,
+            "memory_partition_caps": "NPS1,NPS2",
+            "accelerator_type": "CPX",
+            "num_partitions": 8,
+            "resource_index": 4,
+            "resource_type": "XCC",
+            "resource_instances": 1,
+        },
+        {
+            "gpu_id": "",
+            "profile_index": "",
+            "memory_partition_caps": "",
+            "accelerator_type": "",
+            "num_partitions": "",
+            "resource_index": 5,
+            "resource_type": "JPEG",
+            "resource_instances": 20,
+        },
+    ]
+}
+
+#: What the same command returns without privilege: the shape is there and every
+#: value is gone. This is the reason the query reports "unknown" rather than
+#: raising -- and the reason it must not read as "supports nothing".
+PROFILE_PAYLOAD_UNPRIVILEGED = {
+    "partition_profiles": [
+        {
+            "gpu_id": 0,
+            "profile_index": "N/A",
+            "memory_partition_caps": "N/A",
+            "accelerator_type": "N/A",
+            "num_partitions": "N/A",
+            "resource_type": "N/A",
+            "resource_instances": "N/A",
+        }
+    ]
+}
+
+
+def _profiles(monkeypatch, payload):
+    """Install a fake amd-smi answering the profile query with ``payload``."""
+
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+class TestCapabilityQuery:
+    def test_reads_the_profiles_the_card_reports(self, monkeypatch):
+        _profiles(monkeypatch, PROFILE_PAYLOAD)
+        profiles = gpu_partition.read_partition_profiles(0)
+        assert [p.mode for p in profiles] == ["SPX", "CPX"]
+        assert [p.partitions for p in profiles] == [1, 8]
+        assert [p.xcc_per_partition for p in profiles] == [8, 1]
+        # The pairing constraint is captured even though nothing acts on it yet:
+        # SPX is NPS1-only here while CPX accepts NPS2.
+        assert profiles[0].memory_modes == ("NPS1",)
+        assert profiles[1].memory_modes == ("NPS1", "NPS2")
+
+    def test_strips_the_current_profile_marker(self, monkeypatch):
+        _profiles(monkeypatch, PROFILE_PAYLOAD)
+        assert gpu_partition.supported_modes(0) == ("SPX", "CPX")
+
+    def test_unprivileged_query_is_unknown_not_empty_support(self, monkeypatch):
+        _profiles(monkeypatch, PROFILE_PAYLOAD_UNPRIVILEGED)
+        assert gpu_partition.supported_modes(0) == ()
+        # The distinction that matters: an unanswerable query must not reject
+        # every mode, or an unprivileged session cannot ask for anything.
+        assert gpu_partition.unsupported_modes(["DPX", "CPX"]) == ()
+
+    def test_a_missing_amd_smi_is_unknown_rather_than_fatal(self, monkeypatch):
+        def missing(cmd, **kwargs):
+            raise FileNotFoundError("amd-smi")
+
+        monkeypatch.setattr(subprocess, "run", missing)
+        assert gpu_partition.read_partition_profiles(0) == ()
+        assert gpu_partition.supported_modes(0) == ()
+
+    def test_names_the_modes_the_card_does_not_offer(self, monkeypatch):
+        _profiles(monkeypatch, PROFILE_PAYLOAD)
+        assert gpu_partition.unsupported_modes(["SPX", "DPX", "QPX"]) == ("DPX", "QPX")
+        assert gpu_partition.unsupported_modes(["spx", "cpx"]) == ()
+
+    def test_profile_query_is_routed_through_sudo_when_opted_in(self, monkeypatch):
+        seen: list[list[str]] = []
+
+        def run(cmd, **kwargs):
+            seen.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(PROFILE_PAYLOAD), "")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        monkeypatch.setenv("HYPERLOOM_PARTITION_SUDO", "1")
+        gpu_partition.read_partition_profiles(0)
+        assert seen[0][:2] == ["sudo", "-n"]
+        assert "amd-smi" in seen[0]
+
+        seen.clear()
+        monkeypatch.delenv("HYPERLOOM_PARTITION_SUDO")
+        gpu_partition.read_partition_profiles(0)
+        assert seen[0][0] == "amd-smi"
+
+
+class TestStaticTableIsVerifiedNotTrusted:
+    def test_no_conflict_when_the_card_agrees(self, monkeypatch):
+        _profiles(monkeypatch, PROFILE_PAYLOAD)
+        assert gpu_partition.partition_count_conflicts(0) == ()
+
+    def test_conflict_is_reported_when_the_ladder_differs(self, monkeypatch):
+        payload = {
+            "partition_profiles": [
+                {
+                    "gpu_id": 0,
+                    "profile_index": 3,
+                    "accelerator_type": "CPX",
+                    # A board with six XCDs would land here.
+                    "num_partitions": 6,
+                    "memory_partition_caps": "NPS1",
+                    "resource_type": "XCC",
+                    "resource_instances": 1,
+                }
+            ]
+        }
+        _profiles(monkeypatch, payload)
+        conflicts = gpu_partition.partition_count_conflicts(0)
+        assert len(conflicts) == 1
+        assert "card reports 6" in conflicts[0] and "table says 8" in conflicts[0]
+
+    def test_unqueryable_card_reports_no_conflict(self, monkeypatch):
+        _profiles(monkeypatch, PROFILE_PAYLOAD_UNPRIVILEGED)
+        assert gpu_partition.partition_count_conflicts(0) == ()
+
+
+def test_layout_refuses_a_cu_count_that_does_not_divide(monkeypatch):
+    # Flooring would be silent, and then fatal much later and for an apparently
+    # unrelated reason: device selection matches the per-partition CU count
+    # exactly, so a floored value matches no device at all.
+    monkeypatch.setitem(
+        gpu_partition.AMD_GPU_DISPATCH_IDENTITIES, "oddboard", ("gfx950", 300, "x")
+    )
+    with pytest.raises(PartitionError, match="does not divide"):
+        layout_for("oddboard", "CPX")
+    # The same board is fine in a mode its CU count does divide by.
+    assert layout_for("oddboard", "QPX").cu_per_partition == 75
+
+
+def test_every_shipped_board_divides_across_every_mode():
+    """Guards the assumption the divisibility check exists to catch."""
+    for board in gpu_partition.AMD_GPU_DISPATCH_IDENTITIES:
+        for mode in gpu_partition.MODE_PARTITION_COUNTS:
+            layout = layout_for(board, mode)
+            assert layout.cu_per_partition > 0

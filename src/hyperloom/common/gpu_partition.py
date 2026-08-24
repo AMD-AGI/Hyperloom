@@ -31,6 +31,14 @@ Two invariants this module exists to enforce:
   devices 7 and 8, not 0 and 1. Selecting by index measures a full card and
   reports it as a partition -- a wrong number with no error attached. Callers
   get :func:`partition_device_predicate` for a CU-count test instead.
+* **The card decides what it supports, not this table.** A mode's name being one
+  of the four known ones says nothing about whether this board offers it, and
+  :data:`MODE_PARTITION_COUNTS` is an assumption about the ladder's width.
+  ``amd-smi partition -a`` states both, so :func:`read_partition_profiles` asks
+  and :func:`partition_count_conflicts` checks the assumption against the
+  answer. The query needs the same privilege as the set and degrades to *no
+  answer* -- never to *supports nothing* -- so an unelevated session stays
+  usable and is told its request went unvalidated.
 """
 
 from __future__ import annotations
@@ -58,8 +66,10 @@ MODE_PARTITION_COUNTS: dict[str, int] = {
     "CPX": 8,
 }
 
-#: Mode a session is restored to. SPX is the only mode every board supports and
-#: the only one compatible with NPS1, so it is the safe terminal state.
+#: Mode a session is restored to. SPX is the only mode every board supports, and
+#: on MI355X it is the only profile whose memory-partition caps are NPS1 alone
+#: (the split modes accept NPS1 or NPS2), so it is the safe terminal state under
+#: the NPS1 this optimizer assumes.
 DEFAULT_MODE = "SPX"
 
 _SET_TIMEOUT_S = 120.0
@@ -128,6 +138,156 @@ class PartitionLayout:
         return f"{self.mode} ({self.partitions} x {self.cu_per_partition} CU{mem})"
 
 
+@dataclass(frozen=True)
+class PartitionProfile:
+    """One compute-partition profile the card reports it can enter.
+
+    This is the card's own answer, not a derivation. ``partitions`` and
+    ``xcc_per_partition`` come from ``num_partitions`` and the profile's ``XCC``
+    resource count, so a board whose ladder is not the usual 1/2/4/8 over eight
+    XCDs describes itself correctly without an edit here.
+
+    Attributes:
+        mode: Canonical mode name, with amd-smi's "current" asterisk stripped.
+        index: The card's own profile index.
+        partitions: Devices the card presents in this profile.
+        xcc_per_partition: XCC (compute die) instances each partition gets.
+        memory_modes: NPS modes this profile can be combined with. Captured
+            because the card reports it and the pairing is a real constraint --
+            on MI355X, SPX is NPS1-only while the split modes accept NPS2 --
+            but nothing here acts on it yet: memory partitioning is not a lever,
+            and switching NPS needs a driver reload.
+    """
+
+    mode: str
+    index: int
+    partitions: int
+    xcc_per_partition: int
+    memory_modes: tuple[str, ...] = ()
+
+
+def read_partition_profiles(gpu_id: int) -> tuple[PartitionProfile, ...]:
+    """Read the compute-partition profiles a card reports it supports.
+
+    Needs the same privilege as the set: ``amd-smi partition -a`` fills every
+    field with ``"N/A"`` when run unprivileged, so an unelevated caller gets an
+    empty tuple rather than a wrong answer. That is why this returns "unknown"
+    instead of raising -- a session that cannot query capabilities is the normal
+    case, not an error, and the caller decides whether to proceed unvalidated.
+
+    Args:
+        gpu_id: GPU to interrogate.
+
+    Returns:
+        The profiles the card reports, or ``()`` when it reported none.
+    """
+    try:
+        payload = _amd_smi_json(
+            ["partition", "-a", "-g", str(gpu_id)],
+            _READ_TIMEOUT_S,
+            privileged=True,
+        )
+    except PartitionError as exc:
+        log.debug("could not read partition profiles for GPU %d: %s", gpu_id, exc)
+        return ()
+
+    rows: list[dict] = []
+    if isinstance(payload, dict):
+        raw = payload.get("partition_profiles")
+        if isinstance(raw, list):
+            rows = [r for r in raw if isinstance(r, dict)]
+    elif isinstance(payload, list):
+        rows = [r for r in payload if isinstance(r, dict)]
+
+    profiles: list[PartitionProfile] = []
+    for row in rows:
+        # The report is sparse: a profile's first row names it and carries its
+        # XCC count, and the rows after it continue the same profile with its
+        # other resources (DECODER/DMA/JPEG) under blank identity fields. Only
+        # the named rows describe a profile, so the blanks are skipped rather
+        # than carried forward.
+        mode = str(row.get("accelerator_type") or "").strip().upper().rstrip("*")
+        if not mode or mode == "N/A" or mode not in MODE_PARTITION_COUNTS:
+            continue
+        try:
+            index = int(row.get("profile_index"))
+            partitions = int(row.get("num_partitions"))
+        except (TypeError, ValueError):
+            continue
+        if partitions < 1:
+            continue
+        xcc = 0
+        if str(row.get("resource_type") or "").strip().upper() == "XCC":
+            try:
+                xcc = int(row.get("resource_instances"))
+            except (TypeError, ValueError):
+                xcc = 0
+        caps = tuple(
+            part.strip().upper()
+            for part in str(row.get("memory_partition_caps") or "").split(",")
+            if part.strip() and part.strip().upper() != "N/A"
+        )
+        profiles.append(
+            PartitionProfile(
+                mode=mode,
+                index=index,
+                partitions=partitions,
+                xcc_per_partition=xcc,
+                memory_modes=caps,
+            )
+        )
+    return tuple(profiles)
+
+
+def supported_modes(gpu_id: int) -> tuple[str, ...]:
+    """Return the compute-partition modes a card reports, or ``()`` if unknown."""
+    return tuple(p.mode for p in read_partition_profiles(gpu_id))
+
+
+def unsupported_modes(modes: Sequence[str], gpu_id: int = 0) -> tuple[str, ...]:
+    """Return which of ``modes`` the card says it cannot enter.
+
+    Empty when the card reported no profile table, because "the query failed"
+    and "the card supports everything asked" must not collapse into the same
+    answer. Callers distinguish the two with :func:`supported_modes`.
+
+    Args:
+        modes: Canonical modes the session wants to evaluate.
+        gpu_id: GPU whose capabilities decide.
+
+    Returns:
+        The requested modes the card does not list, in the order given.
+    """
+    available = supported_modes(gpu_id)
+    if not available:
+        return ()
+    return tuple(m for m in modes if str(m).strip().upper() not in available)
+
+
+def partition_count_conflicts(gpu_id: int = 0) -> tuple[str, ...]:
+    """Return modes where the card contradicts :data:`MODE_PARTITION_COUNTS`.
+
+    The table drives every CU calculation in this module, and partition devices
+    are then found by matching that CU count exactly. If a board's real ladder
+    differs, nothing downstream disagrees loudly -- the benchmark simply finds
+    no device of the expected width. Now that the card states its own
+    ``num_partitions``, the assumption is checkable, so it gets checked.
+
+    Args:
+        gpu_id: GPU whose profiles to compare.
+
+    Returns:
+        Descriptions of each disagreement, empty when the card agrees or could
+        not be queried.
+    """
+    conflicts: list[str] = []
+    for profile in read_partition_profiles(gpu_id):
+        expected = MODE_PARTITION_COUNTS.get(profile.mode)
+        if expected is not None and expected != profile.partitions:
+            conflicts.append(f"{profile.mode}: card reports {profile.partitions} partitions, table says {expected}")
+    return tuple(conflicts)
+
+
 def parse_modes(raw: str | Sequence[str] | None) -> tuple[str, ...]:
     """Parse an operator-supplied mode list into canonical order-preserving modes.
 
@@ -187,6 +347,18 @@ def layout_for(gpu_type: str | None, mode: str, hbm_gib: float | None = None) ->
     if identity is None:
         raise PartitionError(f"unknown gpu_type {gpu_type!r}; cannot size partitions without the board's CU count")
     cu_total = identity[1]
+    if cu_total % partitions:
+        # Flooring here would be silent and then fatal much later: partition
+        # devices are selected by matching this exact CU count, so a floored
+        # value matches nothing and the benchmark reports "mode did not take
+        # effect" -- true, but about the wrong cause. Every board in the
+        # identity table divides evenly today; this is what catches the one
+        # that does not.
+        raise PartitionError(
+            f"{gpu_type} has {cu_total} CU, which does not divide into {partitions} "
+            f"{canonical} partitions; the per-partition CU count would be wrong and "
+            f"device selection matches on it exactly"
+        )
     return PartitionLayout(
         mode=canonical,
         partitions=partitions,
@@ -250,9 +422,17 @@ def fits_in_partition(
     return required_gib * max(1, int(streams_per_partition)) <= layout.gib_per_partition
 
 
-def _amd_smi_json(args: Sequence[str], timeout_s: float) -> object:
-    """Run an ``amd-smi`` subcommand with ``--json`` and parse its output."""
-    cmd = ["amd-smi", *args, "--json"]
+def _amd_smi_json(args: Sequence[str], timeout_s: float, privileged: bool = False) -> object:
+    """Run an ``amd-smi`` subcommand with ``--json`` and parse its output.
+
+    Args:
+        args: Subcommand and its flags.
+        timeout_s: Per-call timeout.
+        privileged: Route through the opt-in sudo prefix. Needed for the
+            accelerator-profile query, which silently degrades every field to
+            ``"N/A"`` rather than failing when it lacks privilege.
+    """
+    cmd = [*(_set_prefix() if privileged else []), "amd-smi", *args, "--json"]
     try:
         proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
             cmd,
@@ -451,6 +631,7 @@ __all__ = [
     "PARTITION_SUDO_ENV",
     "PartitionError",
     "PartitionLayout",
+    "PartitionProfile",
     "fits_in_partition",
     "layout_for",
     "parse_modes",
@@ -458,5 +639,8 @@ __all__ = [
     "partitioned",
     "read_partition_mode",
     "read_partition_modes",
+    "read_partition_profiles",
     "set_partition_mode",
+    "supported_modes",
+    "unsupported_modes",
 ]
