@@ -657,14 +657,12 @@ def _geak_reconstruct_from_disk(
         return None
 
     def _load_json(p: Path) -> dict[str, Any]:
-        if not p.is_file():
-            return {}
-        obj = read_json(
+        return read_json(
             p,
             default={},
+            require_dict=True,
             on_error=lambda exc: warnings.append(f"geak: reconstruct read failed for {p.name}: {exc}"),
         )
-        return obj if isinstance(obj, dict) else {}
 
     stages: list[str] = []
     recon: dict[str, Any] = {}

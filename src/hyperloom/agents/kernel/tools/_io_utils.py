@@ -66,18 +66,23 @@ def append_jsonl(path: Path, row: Any, *, sort_keys: bool = True, ensure_ascii: 
         fh.write(json.dumps(row, sort_keys=sort_keys, ensure_ascii=ensure_ascii) + "\n")
 
 
-def read_json(path: str | Path | None, default: Any = None) -> Any:
+def read_json(path: str | Path | None, default: Any = None, *, require_dict: bool = False) -> Any:
     """Parse JSON from ``path``; return ``default`` on missing/malformed input.
 
     Kernel-local, stdlib-only mirror of ``common.jsonio.read_json`` tolerant
     mode: a falsy path or an ``OSError`` / ``JSONDecodeError`` yields ``default``.
+    When ``require_dict`` is True a top-level non-object payload also returns
+    ``default`` instead of the raw value.
     """
     if not path:
         return default
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+    if require_dict and not isinstance(data, dict):
+        return default
+    return data
 
 
 def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
