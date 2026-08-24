@@ -1084,9 +1084,9 @@ class DispatcherCollaborator:
     ) -> None:
         """Charge a failure for each task reclaimed from a dead lease holder.
 
-        A holder killed from outside this process (lease reaped,
-        ``lease_dead_holder_reaped``) never returns a result, so without this
-        the per-action streak counters never see the death and the streak-based
+        A holder killed from outside this process (its lease reaped by
+        ``reap_dead_holders``) never returns a result, so without this the
+        per-action streak counters never see the death and the streak-based
         auto-terminate stays blind to the whole failure mode.
 
         Args:

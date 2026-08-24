@@ -281,7 +281,6 @@ def build_reactor_components(
         "state_integrity": StateIntegrityConfig(
             wal_bytes_warn_threshold=config.state_wal_bytes_warn_threshold,
             wal_bytes_critical_threshold=(config.state_wal_bytes_critical_threshold),
-            stale_lease_min_age_s=config.state_stale_lease_min_age_s,
             inbox_bloat_warn_bytes=config.state_inbox_bloat_warn_bytes,
             inbox_bloat_critical_bytes=(config.state_inbox_bloat_critical_bytes),
         ),

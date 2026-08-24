@@ -17,6 +17,7 @@ from hyperloom.agents.robustness.sources.local_probe import (
     LocalProbeSource,
     _probe_gateway_health,
 )
+from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
 @pytest.fixture()
@@ -26,68 +27,41 @@ def session_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _seed_coordinator_db(
-    session_dir: Path,
-    rows: list[dict],
-    *,
-    schema: str = "v6",
-) -> Path:
+def _seed_coordinator_db(session_dir: Path, rows: list[dict]) -> Path:
+    """Seed ``events`` in a DB built by the production ``ensure_schema()``."""
     db = session_dir / "storage" / "coordinator.db"
     conn = sqlite3.connect(db)
-    if schema == "v6":
-        conn.execute(
-            "CREATE TABLE events ("
-            "  seq INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  msg_id TEXT,"
-            "  from_agent TEXT,"
-            "  to_agent TEXT,"
-            "  topic TEXT,"
-            "  payload TEXT,"
-            "  ts TEXT"
-            ")"
-        )
-        for row in rows:
+    try:
+        ensure_schema(conn)
+        for i, row in enumerate(rows):
             conn.execute(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
+                "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
                 (
-                    row.get("msg_id", ""),
-                    row.get("agent", ""),
-                    row.get("to_agent", ""),
-                    row.get("topic", ""),
-                    json.dumps(row.get("payload", {})),
-                    row.get("ts", ""),
+                    f"msg-{i}",
+                    row["agent"],
+                    "*",
+                    row["topic"],
+                    None,
+                    json.dumps(row["payload"]),
+                    2,
+                    "",
                 ),
             )
-    else:
-        conn.execute(
-            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, "
-            "intent_type TEXT, payload TEXT, timestamp REAL, topic TEXT)"
-        )
-        for row in rows:
-            conn.execute(
-                "INSERT INTO events (agent, intent_type, payload, timestamp, topic) VALUES (?, ?, ?, ?, ?)",
-                (
-                    row.get("agent", ""),
-                    row.get("intent_type", ""),
-                    json.dumps(row.get("payload", {})),
-                    row.get("timestamp", 0.0),
-                    row.get("topic", ""),
-                ),
-            )
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
     return db
 
 
 @pytest.mark.asyncio
-async def test_local_probe_reads_v6_events_schema(session_dir: Path):
+async def test_local_probe_reads_events_from_real_schema(session_dir: Path):
     _seed_coordinator_db(
         session_dir,
         [
             {"agent": "orchestration", "topic": "heartbeat", "payload": {"x": 1}},
             {"agent": "kernel_agent", "topic": "alert", "payload": {"y": 2}},
         ],
-        schema="v6",
     )
     cfg = LocalProbeConfig(session_dir=session_dir, disk_mountpoints=())
     probe = LocalProbeSource(cfg)
@@ -1264,36 +1238,14 @@ def test_sample_state_integrity_empty_session_dir():
     assert _sample_state_integrity(None, "optimizer_runs") == {}
 
 
-def test_probe_leases_via_full_probe(tmp_path):
-    """Write a fake leases table and verify the probe reads it."""
-    db_path = tmp_path / "storage" / "coordinator.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("""
-            CREATE TABLE leases (
-                task_id TEXT,
-                holder_pid INTEGER,
-                lane TEXT,
-                acquired_at REAL
-            )
-        """)
-        conn.execute(
-            "INSERT INTO leases VALUES ('tsk-a', ?, 'lane-1', 1700000000.0)",
-            (os.getpid(),),
-        )
-        conn.execute(
-            "INSERT INTO leases VALUES ('tsk-b', 9999999, 'lane-2', 1700000000.0)",
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    out = _sample_state_integrity(tmp_path, "optimizer_runs")
-    leases = out["leases"]
-    assert len(leases) == 2
-    by_task = {row["task_id"]: row for row in leases}
-    assert by_task["tsk-a"]["alive"] is True
-    assert by_task["tsk-b"]["alive"] is False
+def test_state_integrity_payload_slots(tmp_path):
+    """The payload carries exactly the four slots the I1-I4 rules read."""
+    assert set(_sample_state_integrity(tmp_path, "optimizer_runs")) == {
+        "state_json",
+        "wal",
+        "agents",
+        "coordinator",
+    }
 
 
 def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
@@ -1608,3 +1560,35 @@ def test_task_progress_survives_a_db_without_the_expected_columns(tmp_path):
     conn.close()
     assert local_probe._read_task_progress(tmp_path / "coordinator.db") == {}
     assert local_probe._read_task_progress(tmp_path / "missing.db") == {}
+
+
+def test_probe_queries_resolve_against_the_real_coordinator_schema(tmp_path):
+    """Both coordinator.db queries must resolve against the production DDL.
+
+    A column the real table lacks degrades to ``[]``, which is
+    indistinguishable from an idle session, so the rows must come back.
+    """
+    db = tmp_path / "coordinator.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO tasks (task_id, kind, state, params, idempotency_key, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("tsk-a", "run_benchmark", "running", "{}", "idem-a", "t0", "t1"),
+        )
+        conn.execute(
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
+            "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
+            ("m-1", "orchestration", "*", "heartbeat", None, '{"n": 1}', 2, "t1"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert local_probe._read_task_progress(db) == {"running": 1}
+
+    events = local_probe._read_coordinator_events(db, 10)
+    assert [e["topic"] for e in events] == ["heartbeat"]
+    assert events[0]["agent"] == "orchestration"
+    assert events[0]["payload"] == {"n": 1}

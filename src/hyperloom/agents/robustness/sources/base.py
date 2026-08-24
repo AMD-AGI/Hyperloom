@@ -86,8 +86,8 @@ class SourceData:
     # Critic health: ``recent_judges`` + ``workdir_count`` (subdirs under critic-workdir/).
     local_critic_health: dict[str, Any] = field(default_factory=dict)
     # State-integrity slots: ``state_json``, ``wal`` {wal_bytes, db_bytes, db_path},
-    # ``leases`` (pid liveness), ``agents`` {<role>: {inbox_bytes, outbox_bytes}},
-    # ``coordinator`` {recorded_pid, alive, pid_file}.
+    # ``agents`` {<role>: {inbox_bytes, outbox_bytes}}, ``coordinator``
+    # {recorded_pid, alive, pid_file}.
     local_state_integrity: dict[str, Any] = field(default_factory=dict)
     # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for
     # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
