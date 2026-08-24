@@ -274,7 +274,7 @@ async def run_one_attempt(
     kwargs: dict[str, Any] = {
         "max_turns": max_turns,
         "system_prompt": system_prompt,
-        "allowed_tools": allowed_tools or DEFAULT_ALLOWED_TOOLS,
+        "allowed_tools": DEFAULT_ALLOWED_TOOLS if allowed_tools is None else allowed_tools,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
         "env": _quark_py310_compat_env(workspace),
     }

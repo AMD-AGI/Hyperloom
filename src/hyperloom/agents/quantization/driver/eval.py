@@ -31,6 +31,7 @@ Threshold resolution priority:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -130,6 +131,8 @@ def decide(
 
     try:
         gap = float(eval_report["relative_gap"])
+        src = float(eval_report["source_score"])
+        qtd = float(eval_report["quantized_score"])
     except (TypeError, ValueError):
         return EvalDecision(
             status="missing",
@@ -137,6 +140,26 @@ def decide(
             threshold=threshold,
             threshold_source=source,
         )
+
+    if not math.isfinite(gap) or not math.isfinite(src) or not math.isfinite(qtd):
+        return EvalDecision(
+            status="missing",
+            relative_gap=None,
+            threshold=threshold,
+            threshold_source=source,
+        )
+
+    # Cross-check the LLM-authored relative_gap against the two raw scores.
+    # SKILL.md §5.3 formula: (source - quantized) / source, clamped to 0 for negative gaps.
+    if src > 0:
+        expected_gap = max(0.0, (src - qtd) / src)
+        if abs(gap - expected_gap) > 0.02:
+            return EvalDecision(
+                status="missing",
+                relative_gap=None,
+                threshold=threshold,
+                threshold_source=source,
+            )
 
     status = "within" if gap <= threshold else "exceeded"
     return EvalDecision(

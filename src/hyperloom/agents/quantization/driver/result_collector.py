@@ -192,6 +192,8 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
 
     try:
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return None, True, f"io_error: {exc}"
     except yaml.YAMLError as exc:
         return None, True, f"yaml_error: {exc}"
 
@@ -227,18 +229,20 @@ def _has_any(directory: Path, names: Iterable[str]) -> bool:
 
 
 def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
-    """Return whether any glob pattern matches a file in ``directory``.
+    """Return whether any glob pattern matches a regular file in ``directory``.
 
     Args:
         directory: Directory to search.
         patterns: Glob patterns to test.
 
     Returns:
-        ``True`` if at least one pattern matches an entry, otherwise ``False``.
+        ``True`` if at least one pattern matches a regular file, otherwise
+        ``False``. Directories whose names match a pattern are excluded.
     """
     for pat in patterns:
-        for _ in directory.glob(pat):
-            return True
+        for match in directory.glob(pat):
+            if match.is_file():
+                return True
     return False
 
 
