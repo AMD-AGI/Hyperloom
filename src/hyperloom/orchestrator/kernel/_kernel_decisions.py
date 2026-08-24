@@ -49,6 +49,26 @@ log = logging.getLogger(__name__)
 #: independent reference implementation in the generated driver.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
+#: Batch-filter skip reasons that mean no backend ever saw the kernel. Two
+#: readers depend on the same answer -- the dispatcher reports such a skip
+#: instead of falling through to its validation guards, and
+#: :func:`record_kernel_opt` leaves the attempt ledger alone -- so they read one
+#: table. ``not_live`` is deliberately absent: it covers in-flight, rejected,
+#: terminal and attempt-cap-exhausted alike, and only the first of those is
+#: unattempted.
+_UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
+    "below_min_gpu_pct",
+    "group_exhausted",
+    "group_in_flight",
+    "group_task_complete",
+    "opfanout_merged_into",
+)
+
+
+def unattempted_skip_reason(reason: str) -> bool:
+    """Whether ``reason`` means the kernel was never handed to a backend."""
+    return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
+
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).
@@ -794,6 +814,16 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     kernel_id = str(result.get("kernel_id") or "")
     if not kernel_id:
         # Metadata-less failure: preserve prior streaming-record KEEP.
+        return
+    # The batch filter dropped this kernel before any backend ran, and it named
+    # the kernel so the report can say which one. Writing a ledger row for it
+    # would spend the one dispatch this kernel gets on a decision nobody made:
+    # the row drops it out of untried_hot_reusable_kernels(), which is what the
+    # KERNEL-entry dispatch and the phase-advance gate both ask, and the summary
+    # reads a row with no decision as IN_FLIGHT and reports it as a failure.
+    if str(result.get("status") or "").lower() == "skipped" and unattempted_skip_reason(
+        str(result.get("reason") or "")
+    ):
         return
     _ensure_kernel_task_state(state)
 

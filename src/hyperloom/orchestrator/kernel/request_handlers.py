@@ -79,6 +79,8 @@ from ._kernel_decisions import (
     kernel_opt_attempts_count as kernel_opt_attempts_count,
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
     is_collective_candidate as is_collective_candidate,
+    unattempted_skip_reason as unattempted_skip_reason,
+    _UNATTEMPTED_SKIP_PREFIXES as _UNATTEMPTED_SKIP_PREFIXES,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
 )
 from ..state.kernel_decision_settings import (
@@ -6170,18 +6172,6 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
 #: recording an attempt for it spends the source's retry quota on a decision no
 #: backend ever made, and reads in the report as a technical failure when the
 #: cause was a threshold or a sibling already holding the task.
-_UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
-    "below_min_gpu_pct",
-    "group_exhausted",
-    "opfanout_merged_into",
-)
-
-
-def unattempted_skip_reason(reason: str) -> bool:
-    """Whether ``reason`` means the kernel was never handed to a backend."""
-    return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
-
-
 def _batch_kernel_candidates(
     payload: dict,
     *,

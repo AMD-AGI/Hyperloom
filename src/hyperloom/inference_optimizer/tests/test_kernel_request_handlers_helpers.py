@@ -300,9 +300,34 @@ def test_unattempted_skip_reason_covers_the_bookkeeping_reasons() -> None:
     """Only reasons meaning "no backend ran" count as unattempted."""
     assert krh.unattempted_skip_reason("below_min_gpu_pct=5.0")
     assert krh.unattempted_skip_reason("group_exhausted")
+    assert krh.unattempted_skip_reason("group_in_flight")
+    assert krh.unattempted_skip_reason("group_task_complete")
     assert krh.unattempted_skip_reason("opfanout_merged_into=k002")
     assert not krh.unattempted_skip_reason("")
     assert not krh.unattempted_skip_reason("non_reusable_kernel")
+    # ``not_live`` covers in-flight, rejected, terminal and cap-exhausted
+    # alike; only the first is unattempted, so it cannot be classified here.
+    assert not krh.unattempted_skip_reason("not_live")
+
+
+def test_the_skip_whitelist_covers_every_reason_the_filter_emits() -> None:
+    """A reason the filter can emit but nothing classifies falls through the
+    dispatcher's early return into its validation guards, which report a
+    technical failure no backend produced.
+    """
+    emitted = {
+        "below_min_gpu_pct=5.0",
+        "group_exhausted",
+        "group_in_flight",
+        "group_task_complete",
+        "not_live",
+        "opfanout_merged_into=k002",
+    }
+    unclassified = {r for r in emitted if not krh.unattempted_skip_reason(r)}
+    assert unclassified == {"not_live"}, (
+        "either whitelist the reason or decide it means a real attempt: "
+        f"{sorted(unclassified)}"
+    )
 
 
 def test_batch_candidates_reports_its_skip_reasons(tmp_path: Path) -> None:
@@ -369,3 +394,64 @@ def test_gate_rejected_named_kernel_is_skipped_not_failed(tmp_path: Path) -> Non
     assert out["status"] == "skipped"
     assert out["reason"].startswith("below_min_gpu_pct")
     assert out["kernel_id"] == "k001"
+
+
+def _state_owing_one_attempt():
+    """SharedState whose trace still owes ``k001`` a kernel_opt attempt."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(session_id="skip-accounting")
+    state.last_trace_analyze = {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "gqa_decode_kernel",
+                "gpu_pct": 8.5,
+                "reusable_native_kernel": True,
+                "source_file": "/pkg/aiter/gqa.py",
+            }
+        ],
+        "task_groups": [],
+    }
+    return state
+
+
+def test_an_unattempted_skip_leaves_the_attempt_ledger_alone() -> None:
+    """The kernel still owes an attempt, so it must stay in the queue.
+
+    A ledger row is what removes it: ``untried_hot_reusable_kernels`` drops a
+    kernel whose recorded source is empty once ``attempts`` is above zero, and
+    that queue is what both the KERNEL-entry dispatch and the phase-advance gate
+    ask. The row also reads as a decision-less attempt, which the summary
+    reports as a failure that never happened.
+    """
+    for reason in (
+        "below_min_gpu_pct=5.0",
+        "group_exhausted",
+        "group_in_flight",
+        "group_task_complete",
+        "opfanout_merged_into=k002",
+    ):
+        state = _state_owing_one_attempt()
+        krh.record_kernel_opt(
+            state,
+            {"status": "skipped", "reason": reason, "kernel_id": "k001"},
+        )
+        assert state.kernel_opt_task_attempts == {}, reason
+        assert state.untried_hot_reusable_kernels() == ["k001"], reason
+
+
+def test_a_real_failure_still_spends_its_attempt() -> None:
+    """The exemption is scoped to skips; a backend that ran and failed counts."""
+    state = _state_owing_one_attempt()
+    krh.record_kernel_opt(
+        state,
+        {
+            "status": "failed",
+            "kernel_id": "k001",
+            "error_class": "CompileError",
+            "source_file": "/pkg/aiter/gqa.py",
+        },
+    )
+    assert state.kernel_opt_task_attempts
+    assert state.untried_hot_reusable_kernels() == []

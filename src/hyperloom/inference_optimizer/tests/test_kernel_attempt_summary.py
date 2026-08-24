@@ -16,6 +16,8 @@ from hyperloom.orchestrator.kernel.attempt_summary import (
     CATEGORY_IN_FLIGHT,
     CATEGORY_KEEP_PENDING,
     CATEGORY_UNATTEMPTED,
+    OUTCOME_SKIP,
+    UNATTEMPTED_BELOW_MIN_GPU_PCT,
     UNATTEMPTED_NOT_REUSABLE,
     UNATTEMPTED_NO_BACKEND,
     UNATTEMPTED_NO_SOURCE,
@@ -148,6 +150,34 @@ def test_unattempted_no_backend_when_reusable_but_empty_recs(tmp_path: Path) -> 
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NO_BACKEND
+
+
+def test_a_kernel_the_filter_skipped_reads_as_unattempted(tmp_path: Path) -> None:
+    """A dispatch gate is not a failure, and the summary must not call it one.
+
+    The classification keys on the presence of a ledger row, so a row written
+    for a kernel no backend ever saw lands in ``attempted`` with no decision --
+    IN_FLIGHT, whose empty backend ladder rolls up to ``fail``. Recording the
+    skip is what has to be avoided; this pins the report the absence produces.
+    """
+    from hyperloom.orchestrator.kernel.request_handlers import record_kernel_opt
+
+    state = _make_state(
+        top15=[_top15_entry("k001", source_file="/pkg/aiter/gqa.py", gpu_pct=1.0)],
+    )
+    record_kernel_opt(
+        state,
+        {"status": "skipped", "reason": "below_min_gpu_pct=5.0", "kernel_id": "k001"},
+    )
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["totals"]["attempted"] == 0
+    assert out["totals"]["unattempted"] == 1
+    row = out["by_kernel"][0]
+    assert row["category"] == CATEGORY_UNATTEMPTED
+    assert row["unattempted_reason"] == UNATTEMPTED_BELOW_MIN_GPU_PCT
+    assert row["outcome_class"] == OUTCOME_SKIP
 
 
 def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
