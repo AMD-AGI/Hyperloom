@@ -71,11 +71,16 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             current.is_deleted = True
             continue
         if raw.startswith("+++ "):
-            current.path = _strip_diff_path(raw[4:].strip())
+            new_path = _strip_diff_path(raw[4:].strip())
+            if new_path == "/dev/null":
+                current.is_deleted = True
+            else:
+                current.path = new_path
             continue
         if raw.startswith("--- "):
-            if not current.path:
-                current.path = _strip_diff_path(raw[4:].strip())
+            old_path = _strip_diff_path(raw[4:].strip())
+            if old_path and old_path != "/dev/null" and not current.path:
+                current.path = old_path
             continue
         if raw.startswith("@@"):
             continue
@@ -104,6 +109,9 @@ def _resolve_local_file(path: str, roots: list[Path]) -> Path | None:
 
     Tries strip levels 0..3 (the diff path often carries the package dir as its
     leading component while the root *is* that package dir), across all roots.
+    Absolute paths and path components that would escape the root via ``..``
+    are rejected before the join so attacker-controlled diff paths cannot reach
+    outside the declared source roots.
 
     Args:
         path: The diff's file path (e.g. ``vllm/model_executor/models/x.py``).
@@ -112,10 +120,20 @@ def _resolve_local_file(path: str, roots: list[Path]) -> Path | None:
     Returns:
         The first existing local path, or ``None``.
     """
-    parts = Path(path).parts
+    p = Path(path)
+    if p.is_absolute():
+        return None
+    parts = p.parts
     for root in roots:
         for strip in range(0, min(4, len(parts))):
-            cand = root.joinpath(*parts[strip:])
+            relative_parts = parts[strip:]
+            if any(part == ".." for part in relative_parts):
+                continue
+            cand = root.joinpath(*relative_parts)
+            try:
+                cand.relative_to(root.resolve())
+            except ValueError:
+                continue
             if cand.is_file():
                 return cand
     return None
