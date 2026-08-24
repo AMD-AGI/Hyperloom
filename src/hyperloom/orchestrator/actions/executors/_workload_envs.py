@@ -227,6 +227,7 @@ def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
     )
 
 
+
 def _sync_repo_aliases(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -254,6 +255,7 @@ def _sync_repo_aliases(
     if repo_path:
         envs[f"{prefix}_REPO_PATH"] = repo_path
         envs[f"{prefix}_DIR"] = repo_path
+
 
 
 def _publish_scriptable_repo_root(framework: str, repo_path: str) -> None:
@@ -323,6 +325,8 @@ def _resolve_framework_repo_path(
         if value:
             return value
     return ""
+
+
 
 
 def _custom_script_path(runner_type: str) -> str:
@@ -464,7 +468,6 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
 
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
-
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.
@@ -807,7 +810,8 @@ def materialize_config_with_envs(
         config_path: Path to the source Magpie YAML to render.
         output_dir: Directory the materialized YAML is written into.
         extra_server_args: Extra framework server args merged into the env.
-        extra_envs: Overrides applied last over any computed env values.
+        extra_envs: Overrides applied last over any computed env values;
+            shell/loader hijack names and credentials are dropped.
         remove_args: Inherited framework server args to remove before launch.
         unset_envs: Inherited env names to remove before applying
             ``extra_envs``; workload pins are refused.
