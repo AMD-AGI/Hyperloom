@@ -35,7 +35,7 @@ from .kb import read_pr_ledger
 from .keywords import extract_keywords
 from .logging_setup import get_logger, stage_log
 from .models import Candidate, CandidateResult, ExploreRequest, Finding, PrFilter
-from .runtime.tools_api import _metric_float
+from hyperloom.common.coerce import first_float as _first_float
 from .shell import render_template, run_command
 from .sources import primus_cortex
 from .sources._shared import _repo_slug
@@ -576,8 +576,8 @@ def _evaluate_candidate(req: ExploreRequest, variables: dict[str, str]) -> tuple
     accuracy_template = req.outputs.get("accuracy_json", "{candidate_dir}/accuracy.json")
     benchmark = read_json(_resolve_output_path(benchmark_template, variables), default={}, require_dict=True)
     accuracy = read_json(_resolve_output_path(accuracy_template, variables), default={}, require_dict=True)
-    throughput = _metric_float(benchmark, ("throughput", "output_throughput"))
-    acc = _metric_float(accuracy, ("accuracy", "gsm8k", "exact_match", "score"))
+    throughput = _first_float(*(benchmark.get(k) for k in ("throughput", "output_throughput")))
+    acc = _first_float(*(accuracy.get(k) for k in ("accuracy", "gsm8k", "exact_match", "score")))
     completed = str(benchmark.get("completed") or benchmark.get("Completed") or "")
     return throughput, acc, completed
 
