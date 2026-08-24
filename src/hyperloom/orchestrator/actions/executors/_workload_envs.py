@@ -1168,7 +1168,8 @@ def materialize_config_with_envs(
             import json as _json
 
             try:
-                extra_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
+                _raw_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
+                extra_body = _raw_body if isinstance(_raw_body, dict) else {}
             except (ValueError, TypeError):
                 extra_body = {}
             # Always override start_step/num_steps (the template has CONC=8

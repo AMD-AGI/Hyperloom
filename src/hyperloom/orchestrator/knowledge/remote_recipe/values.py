@@ -742,6 +742,8 @@ def _adopt_replayed_prior(
         import json
 
         document = json.loads(recipe_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
     except (OSError, ValueError) as exc:
         raise RemoteRecipeValidationError(
             f"cannot read replayed prior recipe: {exc}"

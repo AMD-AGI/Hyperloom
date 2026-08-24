@@ -121,7 +121,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        return read_json(path, strict=True)
+        return read_json(path, strict=True, require_dict=True)
     except FileNotFoundError:
         # Race: file disappeared between is_file() and open(); treat as missing.
         return None

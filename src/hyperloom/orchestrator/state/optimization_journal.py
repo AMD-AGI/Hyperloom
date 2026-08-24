@@ -220,18 +220,13 @@ class Journal:
             The loaded or newly created ``Journal`` instance.
         """
         path = cls._journal_path(session_dir)
+        blob: dict[str, Any] = {}
         if path.exists():
-            try:
-                blob = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                log.warning(
-                    "optimization_journal: failed to parse %s (%s); recreating fresh",
-                    path,
-                    exc,
-                )
-                blob = {}
-        else:
-            blob = {}
+            from hyperloom.common.jsonio import read_json as _rj  # local import keeps top-level deps minimal
+            result = _rj(path, default=None, require_dict=True, on_error=lambda exc: log.warning(
+                "optimization_journal: failed to parse %s (%s); recreating fresh", path, exc,
+            ))
+            blob = result if result is not None else {}
 
         entries_raw = blob.get("entries") or []
         entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]

@@ -1369,9 +1369,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not path.exists():
             inst = cls()
         else:
-            with path.open(encoding="utf-8") as f:
-                raw = json.load(f)
-            inst = cls.from_dict(raw)
+            from hyperloom.common.jsonio import read_json as _rj
+            raw = _rj(path, default=None, require_dict=True)
+            inst = cls.from_dict(raw) if raw is not None else cls()
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
