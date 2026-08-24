@@ -4333,7 +4333,6 @@ class FrameworkPhase(PhaseHandler):
                 # Skip rows already accounted for (tracked by enablement_build_manifest),
                 # unless what they were routed to was cancelled before it ran, which
                 # leaves the build no more launched than an unrouted one.
-                state = self.shared_state
                 routed = self._build_routing_record(task_id)
                 if routed is not None and not await self._build_probe_was_cancelled(routed):
                     continue
