@@ -704,82 +704,119 @@ token counter 接受 bool/负数。
 
 - 锚点：`src/hyperloom/agents/framework/shell.py:69-101`（已修复）
 
-#### P2-11 · Critic 多 verdict 提交不是事务，且 target 未绑定本轮 proposal
+#### ~~P2-11~~ → P1 · Critic 多 verdict 提交不是事务，且 target 未绑定本轮 proposal（已修复）
 
-前一 verdict 已写 session/metrics/KB 后，后一条失败会留下部分副作用；
-重复或任意 msg_id 也没有被拒绝。
+**重定级 P1**：实测第一条 verdict `mark_reviewed` 落盘后第二条抛 `ReviewValidationError`，
+intent_envelope 为空、下一轮 `filter_unreviewed` 过滤掉已标记 msg_id——判决永久丢失，属"报告被遗漏"。
 
-- 锚点：`src/hyperloom/agents/critic/runtime/decision_reviewer.py:964-1011`
-- 建议：提交前验证完整 verdict set；以事务/暂存文件一次落盘。
+**处置（收敛）**：拆成两趟：第一趟只做校验+构建 intent，全部通过后第二趟统一落盘副作用。
+同批内重复 `target_proposal_msg_id` 被拒绝。
 
-#### P2-12 · Critic prior cache key 漏 `kind/filter/limit`
+- 锚点（修正）：`src/hyperloom/agents/critic/runtime/decision_reviewer.py:889-938`（原 `964-1011` 指向另一函数 `_commit_decision_request`）
 
-只按 scope/topic 缓存，不同查询会错误复用结果。
+#### ~~P2-12~~ → P3 · Critic prior cache key 漏 `kind/limit`（已修复）
 
-- 锚点：`src/hyperloom/agents/critic/runtime/kb_writer.py:203-208,235-242`
-- 建议：cache key 包含全部语义参数及 schema version。
+**降 P3**：生产路径两个 `list_priors` 调用点显式传 `kind=None`、`limit=prior_limit`（同一常量），
+缓存冲突只在 `CRITIC_KB_CLIENT_MODE=live` 且 operator 用 `hyperloom-critic list-priors --kind` 命令时可达。
 
-#### P2-13 · SessionMemory 合法非 object JSON 会破坏调用方
+**处置（删除死形参 + 收敛）**：删掉 `metadata_filter`（零调用方传递），把 `kind` 与 `limit` 折进
+`scope_cache_key`（`scope_builder.py:183-199`），`list_priors` 不再传 `metadata_filter` 给 KB 客户端。
 
-`null`/list 可被 load 返回，随后 `.get()`、merge 或 cache 操作抛出不一致异常。
+- 锚点（修正）：`src/hyperloom/agents/critic/runtime/scope_builder.py:183-199`；`src/hyperloom/agents/critic/runtime/kb_writer.py:200-208`
 
-- 锚点：`src/hyperloom/agents/critic/runtime/session_memory.py:506-524`
-- 建议：空文件与错误 top-level shape 分开处理；后者抛统一 `SessionMemoryError`。
+#### P2-13 · SessionMemory 合法非 object JSON 会破坏调用方（已修复）
 
-#### P2-14 · Dead-letter replay 对合法非 object JSON 整批崩溃
+**补充**：条目说"`null`/list"，实测零字节文件是最常见触发（`_read_json` 透传 `empty_value=None`，
+随后 `merge_context` 对 `None` 迭代抛 `TypeError`）。五个落点三种不同待遇。
 
-`json.loads()` 成功后直接 `record.get()`；list/string 不进入 decode-error 分支。
+**处置（删除重复 helper + 接线）**：删除本地 `_read_json`，改用
+`jsonio.read_json(path, default={}, require_dict=True, strict=True)`，
+捕获 `ValueError` 包成 `SessionMemoryError`。删掉 `mark_reviewed` / `filter_unreviewed` 的冗余 `isinstance` 守卫。
 
-- 锚点：`src/hyperloom/agents/critic/runtime/dead_letter.py:168-186`
-- 建议：逐行要求 object，坏行写回 DLQ 错误而不是终止整批。
+- 锚点（修正）：`src/hyperloom/agents/critic/runtime/session_memory.py:471-489`（原 `506-524` 超出文件末尾）+ 落点 `244,375,407`
 
-#### P2-15 · TraceLens composite route 丢失 `aiter_asm` 等路由元数据
+#### ~~P2-14~~ → P3 · Dead-letter replay 对合法非 object JSON 整批崩溃（已修复）
 
-composite direct match 没复制 `kernel_kind`、`prebuilt_binary`、`runtime_backend`，
-真实 AITER ASM kernel 可被误判为可源码改写。
+**降 P3**：DLQ 文件只由 `DeadLetter.append()` 写入（永远是 object 行），触发需手工编辑队列文件。
+`CRITIC_KB_CLIENT_MODE=live` 默认不启用，DLQ 实际生产中很少填满。
 
-- 锚点：`src/hyperloom/agents/kernel/tools/tracelens_analysis.py:609-617,1746-1758`
-- 建议：route result 使用完整 dataclass，不复制字段子集。
+**处置（接线）**：把 object 判定移进 try、非 object 行走既有的"失败行保留"路径，与畸形 JSON 一致。
 
-#### P2-16 · TraceLens `--top-k <= 0` 与 CLI help 语义相反
+- 锚点：`src/hyperloom/agents/critic/runtime/dead_letter.py:168-186`（不变）
 
-help 声称非正数表示无限，直接参数却让 0 返回空、负数丢尾项。
+#### ~~P2-15~~ · TraceLens composite route 丢失路由元数据（STALE）
 
-- 锚点：`src/hyperloom/agents/kernel/tools/tracelens_analysis.py:5474,6716-6723`
-- 建议：所有入口先走同一 `_default_top_k()`。
+**STALE**：`OpResolution.leaf_resolutions()` 用 `replace(self, target_index=i)` 整体复制，
+原描述的"子集复制"形态不存在。而且 `fanout`/`kernel_kinds`/`prebuilt_binaries`/`runtime_backends`
+四个字段从未被生产路径填充（两个构造点都是 `kind="single"` + 空 list），已整体删除。
 
-#### P2-17 · TraceLens 目录会把任意 JSON 当 trace，且只探测首文件
+- 处置：STALE，随 `remove(kernel): drop inert OpResolution per-source metadata` 删除死字段。
 
-普通 metadata/config JSON 可排在有效 trace 前，产生假 CPU-only 诊断。
+#### ~~P2-16~~ → P3 · TraceLens `--top-k` flag 与 CLI help 语义不符（已修复，降 P3）
 
-- 锚点：`src/hyperloom/agents/kernel/tools/tracelens_analysis.py:1395-1405,7017-7031`
-- 建议：按 trace schema 探测每个候选，选择首个有效 trace。
+**降 P3**：`--top-k` flag 从未被 `request_handlers.py` 转发（转发条件 `payload["top_k"] is not None`，
+而全仓无任何编排代码写该键）。生产唯一入口是 `HYPERLOOM_KERNEL_CANDIDATES_TOP_K` 环境变量，
+其 `_default_top_k()` 实现已正确映射 `0/负数 → 1_000_000`。
 
-#### P2-18 · Forge backend 修改 git config/info-exclude 且不恢复
+**处置（删除）**：删掉 `--top-k` argparse 定义和 `request_handlers.py:5382-5384` 的转发分支；
+四个内部使用点改为直接调用 `_default_top_k()`。
 
-linked worktree/in-place 都可能持久修改 user.name/email 和共享 exclude；
-原 staged/unstaged 区分也会丢失。
+#### ~~P2-17~~ · TraceLens 目录把任意 JSON 当 trace，且只探测首文件（STALE）
 
-- 锚点：`src/hyperloom/agents/kernel/tools/backends/forge_submit.py:507-509,990-1008,1244-1302,4013-4130`
-- 建议：只使用命令级 `git -c` 配置；保存并恢复 index/worktree/exclude 状态。
+**STALE**：已由两处改动覆盖：（1）`discover_trace_inputs` 按 size 降级 splitter 碎片和 annotation
+sidecar，使真实 capture 排首位；（2）`_KERNEL_PROBE_LIMIT = 8` 候选探测循环选取首个真带 GPU kernel
+的文件。定向测试 `test_a_non_trace_sidecar_does_not_lead_discovery`（前失败后通过）已在仓库中。
 
-#### P2-19 · GEAK/Ray backend 对 JSON、端口和恢复状态缺少值域校验
+- 修正锚点：`discover_trace_inputs:1211-1247`；`probe loop:7557-7592`
 
-非 dict result 可裸崩；负 grace、0/超范围端口、旧 `RAY_ADDRESS` 和 start 后未探活均未处理。
+#### P2-18 · Forge backend 修改 git config/info-exclude 且不恢复（已修复）
 
-- 锚点：`src/hyperloom/agents/kernel/tools/backends/geak_runner.py:91-151`
-- 锚点：`src/hyperloom/agents/kernel/tools/backends/ray_runtime.py:97-102,294-304,484-506`
-- 建议：统一 typed result；所有 timeout/port/address 入口做 closed validation。
+**撤回子 claim**："staged/unstaged 区分丢失"是刻意取舍——
+`test_forge_long_horizon_cli.py:608-616` 注释明确写着 deliberately collapsed。
 
-#### P2-20 · Quantization driver 对 manifest、eval 和工具列表的边界不完整
+**实际缺陷**：`user.name/email` 永久写进活仓库 `.git/config`；`info/exclude` 恢复只在
+`if inplace:` 分支调用，linked worktree 路径从不恢复，而 `--git-common-dir` 指向主仓库。
 
-manifest OSError 不捕获，目录可冒充权重；`allowed_tools=[]` 会回落默认工具集；
-eval 只检查 key 存在，不验证数值和 gap 一致性。
+**处置（消除写入）**：给 forge-loop 子进程 env 注入
+`GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME`（已被 `forge_collective.py:87-90` 使用的现有机制）；
+Hyperloom 侧唯一提交改用 `git -c user.name=forge-bot -c user.email=forge-bot@local commit`；
+`_restore_generated_driver_exclude` 调用移到 `_finalize_forge_workspace` 的 `if inplace:` 之外。
 
-- 锚点：`src/hyperloom/agents/quantization/driver/result_collector.py:193-242`
-- 锚点：`src/hyperloom/agents/quantization/driver/runner.py:293`
-- 锚点：`src/hyperloom/agents/quantization/driver/eval.py:122-141`
-- 建议：显式区分 unspecified 与 empty；artifact 要求 regular file；eval 使用 typed schema。
+- 锚点（修正）：`forge_submit.py:589-590`（已删）、`:1101-1102`（已改）、`:3609`（恢复调用提前）
+
+#### P2-19 · GEAK/Ray backend 对 JSON、端口和恢复状态缺少值域校验（已修复）
+
+**补充实测**：`GEAK_FLUSH_GRACE_S` 无人设置；负值让 `inner_timeout` 反超外层硬杀，
+且 `communicate(timeout=负数)` 立即超时，result.json 来不及刷写。
+非 dict `result.json`（合法 JSON list/string）让 `result.update()` 抛 `AttributeError`（实测）。
+
+**处置**：
+- `geak_runner.py:91`：`GEAK_FLUSH_GRACE_S` 解析失败或非正时回落默认 180。
+- `geak_runner.py:130-135`：非 dict `result.json` 走既有的 `status=error` 分支。
+- `ray_runtime.py:98`：`HL_RAY_HEAD_PORT` 加 1-65535 值域判定，越界回落 `_free_tcp_port()`。
+- `ray_runtime.py:278-282`：`ray start` 返回 0 后补 `ray_status_ok()` 探活。
+- `ray_runtime.py:460-465`：版本不匹配重试改为 `address="auto"` 连本地 head，不复用 stale `RAY_ADDRESS`。
+
+- 锚点（修正）：`geak_runner.py:91,130-135`；`ray_runtime.py:97-100,278-282,460-465`
+
+#### P2-20 · Quantization driver 对 manifest、eval 和工具列表的边界不完整（已修复）
+
+**补充发现**：`_has_glob` 用 `directory.glob(pat)` 不过滤目录，名为 `model.safetensors`
+的目录实测让 `has_weights=True`（`_has_any` 已用 `.is_file()`，同文件待遇不一致）。
+
+`allowed_tools` 潜在而非活跃：生产路径 `retry.py` 从不传 `allowed_tools` 参数（永远 `None`），
+`or` 短路永远走 `DEFAULT_ALLOWED_TOOLS`；但 `allowed_tools=[]` 语义仍需修正。
+
+`eval.py` 只解析 `relative_gap`，不读 `source_score`/`quantized_score`，而 SKILL.md §5.3
+明确让 LLM 自己计算该值。`-inf` 实测判 `within`（fail open）。
+
+**处置**：
+- `result_collector.py:240`：`_has_glob` 加 `.is_file()` 过滤，对齐 `_has_any`。
+- `result_collector.py:193`：`manifest.read_text()` 的 `OSError` 并入 except 子句。
+- `runner.py:277`：`allowed_tools or DEFAULT` 改为 `None` 哨兵判定。
+- `eval.py`：拒绝非 finite 值；用原始分数复算 `relative_gap`（容差 0.02），不一致判 `missing`。
+
+- 锚点（修正）：`result_collector.py:193-211,229-245`；`runner.py:277`；`eval.py:131-147`
 
 #### P2-21 · Robustness state view 浅拷贝/no-op 语义误导
 
