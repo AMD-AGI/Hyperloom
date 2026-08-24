@@ -675,11 +675,13 @@ async def test_route_failed_build_not_acked_when_rearm_raises(coord):
 
     await Coordinator._maybe_route_build_outcomes(coord)
     assert Coordinator._build_routing_record(coord, task_id) is None
+    assert coord.shared_state.enablement.build_novelty == []
 
     await Coordinator._maybe_route_build_outcomes(coord)
     assert Coordinator._build_routing_record(coord, task_id) is not None
     assert attempts["n"] == 2
     assert len(coord._rearm_calls) == 1
+    assert coord._rearm_calls[-1]["status"] == "advanced"
 
 
 @pytest.mark.asyncio

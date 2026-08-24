@@ -4378,6 +4378,7 @@ class FrameworkPhase(PhaseHandler):
         # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
         # has not been seen before (novel), reverted when it is a repeat.
         time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
+        novelty_key: list[Any] | None = None
         if fc in time_classes:
             new_log = str(state.enablement.launch_log or "")
             res = {
@@ -4395,10 +4396,9 @@ class FrameworkPhase(PhaseHandler):
             _key = list(_bnk(_action))
             ledger = list(state.enablement.build_novelty or [])
             is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
-            ledger.append(_key)
-            state.enablement.build_novelty = ledger[-20:]
             if is_repeat:
                 res = {"enablement": True, "status": "reverted"}
+                novelty_key = None
             else:
                 new_log = str(state.enablement.launch_log or "")
                 res = {
@@ -4408,15 +4408,20 @@ class FrameworkPhase(PhaseHandler):
                     "patches_applied": [],
                     "enablement_launch_log": new_log,
                 }
+                novelty_key = _key
         log.info(
             "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
             res["status"],
             task_id,
             fc,
         )
-        # A failed build is accounted for only after the rearm outcome is applied:
-        # marking it routed first would hide the row if rearm aborts early.
+        # Rearm, ledger append, and manifest ack must stay together: a failed
+        # rearm leaves the build unrouted and the novelty ledger unchanged.
         self._maybe_rearm_enablement(res)
+        if novelty_key is not None:
+            ledger = list(state.enablement.build_novelty or [])
+            ledger.append(novelty_key)
+            state.enablement.build_novelty = ledger[-20:]
         self._note_build_routed(task_id)
 
     async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
