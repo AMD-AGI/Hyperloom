@@ -49,15 +49,12 @@ Exception: **Phase 2** adds structured promotion fields at write time in the Coo
 - `build()` / `write_breakdown_json()` — numbers and paths only; failures → `warnings[]`.
 - `render_session_report()` — markdown report; LLM optional; deterministic blocks preserved.
 
-### 4. Size control via `detail_level`
+### 4. Size control via `detail_level` (removed)
 
-Renderer-internal only, and always `standard` in practice: nothing emits a
-`detail_level` key, so the `verbose` branch is unreachable.
-
-| Mode | Behavior |
-|------|----------|
-| `standard` | `decision_journal`: all promoted/rejected + top 30 tested by \|gain\|; report caps rounds |
-| `verbose` | all variants; TraceLens CLI log tail (40 lines max) in kernel_profiling report |
+Renderer-internal, and always `standard` in practice: nothing ever emitted a
+`detail_level` key and the CLI flag never shipped, so the `verbose` branch was
+unreachable. It has since been deleted along with the log-tail read it gated;
+the renderers now only cap list lengths, and none of them open files.
 
 ## Architecture
 
@@ -127,7 +124,7 @@ Never inline `.trace.json.gz` blobs.
 |-------|-------|--------|
 | 1 | Schema + collectors + exporter; no Coordinator changes | done |
 | 2 | Coordinator `audit_extras` promotion fields | done |
-| 3 | Report renderers + `--detail-level` CLI | renderers done; the CLI flag was never shipped |
+| 3 | Report renderers + `--detail-level` CLI | renderers done; the CLI flag was never shipped, and the knob was later removed |
 | 4 | wekafs replay on real sessions | done (2/3 sessions; see below) |
 
 ## Validation criteria
