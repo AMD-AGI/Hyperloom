@@ -21,7 +21,7 @@ import json
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
@@ -49,9 +49,6 @@ from ..policy.gate import (
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
-
-if TYPE_CHECKING:
-    from .coordinator import Coordinator, PendingProposal
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -85,7 +82,7 @@ _KERNEL_HEARTBEAT_SEC: float = 150.0
 class IntentRouter:
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
-    def __init__(self, coordinator: "Coordinator") -> None:  # noqa: F821 - deferred ref, not imported to avoid an import cycle (see note above)
+    def __init__(self, coordinator: Any) -> None:
         self._coord = coordinator
 
     def __getattr__(self, name: str) -> Any:
@@ -415,7 +412,7 @@ class IntentRouter:
         self,
         *,
         source: str,
-        pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
+        pending: Any,
         verdict: str,
         reasoning: str,
         authored_verdict: str = "",
