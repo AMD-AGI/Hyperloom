@@ -487,7 +487,8 @@ def _read_coordinator_events(
 
     Returns:
         list[dict[str, Any]]: Event rows projected to
-        ``{id, agent, topic, payload, ts}``, newest first, or ``[]``.
+        ``{id, agent, topic, payload, ts}``, in chronological (ascending seq)
+        order, or ``[]``.
     """
     if db_path is None or not db_path.exists():
         return []
@@ -520,6 +521,7 @@ def _read_coordinator_events(
                     "ts": row["ts"] if "ts" in row.keys() else None,
                 }
             )
+        out.reverse()
         return out
     finally:
         conn.close()

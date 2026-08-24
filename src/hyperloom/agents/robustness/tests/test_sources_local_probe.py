@@ -1592,3 +1592,26 @@ def test_probe_queries_resolve_against_the_real_coordinator_schema(tmp_path):
     assert [e["topic"] for e in events] == ["heartbeat"]
     assert events[0]["agent"] == "orchestration"
     assert events[0]["payload"] == {"n": 1}
+
+
+def test_read_coordinator_events_returns_newest_window_in_asc_order(tmp_path: Path):
+    db = tmp_path / "coordinator.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        ensure_schema(conn)
+        for i, topic in enumerate(["e1", "e2", "e3"], start=1):
+            conn.execute(
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
+                "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
+                (f"m-{i}", "orchestration", "*", topic, None, "{}", 2, f"t{i}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    events = local_probe._read_coordinator_events(db, 2)
+    assert len(events) == 2
+    ids = [e["id"] for e in events]
+    assert ids == sorted(ids), "events must be in ascending seq order"
+    topics = [e["topic"] for e in events]
+    assert topics == ["e2", "e3"], "limit=2 must keep the two newest events"
