@@ -520,6 +520,49 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     assert coord._gemm_tuning_required_before_kernel_opt() is False
 
 
+def test_only_forge_can_reach_the_gemm_gate(monkeypatch) -> None:
+    """The backend order decides the phase before the gate is consulted.
+
+    ``_on_enter_kernel`` hands the whole phase to GEAK and returns without
+    calling the gate whenever GEAK owns the order, so the gate is reachable
+    only under forge. A backend branch inside it was therefore dead, and its
+    comment ("legacy FP8 + SGLang only") read as a live precision filter --
+    which invites reading a skipped model as precision-filtered when GEMM
+    tuning was in fact never reached at all.
+    """
+    from hyperloom.orchestrator.kernel.request_handlers import (
+        _resolve_gemm_tuning_backend,
+        geak_selected,
+    )
+
+    for order, forge_owns in (("forge", True), ("geak", False), ("", False),
+                              ("forge,geak", False), ("FORGE", True)):
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", order)
+        # GEAK owning the phase and forge owning it are exact complements.
+        assert geak_selected() is not forge_owns, order
+        if forge_owns:
+            # ... and where the gate is reachable, the backend is always forge,
+            # so no branch on it can do anything.
+            assert _resolve_gemm_tuning_backend({}) == "forge", order
+
+
+def test_the_gemm_gate_does_not_filter_on_precision(coord: Coordinator, monkeypatch) -> None:
+    """Every precision forge supports must clear the gate.
+
+    Filtering here would silently drop a category that can optimize: real
+    end-to-end KEEPs span bf16/fp16/fp8/fp4/mxfp4, and bf16 dense alone was
+    worth +11.1%.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    ss = coord.shared_state
+    ss.last_gemm_tuning = {}
+    ss.framework = "sglang"
+    for precision in ("bf16", "fp16", "fp8", "fp4", "mxfp4", "", "int8"):
+        ss.precision = precision
+        assert coord._gemm_tuning_required_before_kernel_opt() is True, precision
+
+
 def test_should_continue_kernel_after_gemm(coord: Coordinator) -> None:
     coord.shared_state.continue_kernel_after_gemm = False
     assert coord._should_continue_kernel_after_gemm() is False

@@ -1672,9 +1672,23 @@ class DispatcherCollaborator:
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
 
-        When using the forge-gemm-tune backend: eligible on any supported
-        framework (sglang / vllm / vllm-aiter), with no precision or MoE
-        pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
+        Only forge reaches here. ``_on_enter_kernel`` hands the whole phase to
+        GEAK and returns before calling this whenever GEAK owns the order, and
+        the order is ``["forge"]`` exactly when ``KERNEL_OPT_BACKEND_ORDER`` is
+        ``forge`` and ``["geak"]`` otherwise -- so the two are complements and
+        arriving here means forge.
+
+        This used to branch on the backend and apply a legacy FP8 + SGLang
+        filter for GEAK. That branch could not execute, and its comment read as
+        if a precision filter were live, which is misleading in the one
+        direction that matters: it invites the conclusion that a model was
+        skipped for its precision when in fact GEMM tuning was never reached.
+
+        Eligibility is therefore a supported framework and nothing else. No
+        precision or MoE pre-filter: real e2e KEEPs span bf16/fp16/fp8/fp4/mxfp4
+        and dense as well as MoE -- bf16 *dense* alone was worth +11.1% -- so
+        filtering here silently blocks a category that can optimize. forge
+        itself reports ``no_improvement`` when a shape cannot be beaten.
 
         Returns:
             bool: ``True`` when GEMM tuning should run before source-level
@@ -1683,26 +1697,9 @@ class DispatcherCollaborator:
         if self._skip_gemm_tuning():
             return False
         ss = self.shared_state
-        precision = str(getattr(ss, "precision", "") or "").strip().lower()
         framework = str(getattr(ss, "framework", "") or "").strip().lower()
 
-        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
-
-        backend = _resolve_gemm_tuning_backend({})
-
-        if backend == "forge":
-            # forge-gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
-            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
-            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
-            # precision/MoE here, or a category that can optimize gets silently
-            # blocked. Gate only on a supported framework and let forge itself
-            # return no_improvement when a shape can't be beaten.
-            eligible = framework in ("sglang", "vllm", "vllm-aiter")
-        else:
-            # GEAK: legacy FP8 + SGLang only.
-            eligible = precision == "fp8" and framework == "sglang"
-
-        if not eligible:
+        if framework not in ("sglang", "vllm", "vllm-aiter"):
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
