@@ -1272,6 +1272,14 @@ def test_create_only_kernel_target_requires_known_kernel_root(tmp_path, monkeypa
         "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
         lambda: "",
     )
+    # Pinned to the shape a clean CI host has: the allowlist names roots, so the
+    # operator still sees them, but none of them exists, so nothing survives as a
+    # candidate. Leaving this to the host let a real tree such as /opt/flydsl
+    # stand in as a candidate and mask the reason under test.
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths._warm_replay_kernel_patch_roots",
+        lambda: (str(tmp_path / "absent_kernel_root"),),
+    )
 
     entry = {"patch_path": str(patch)}
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
