@@ -256,12 +256,10 @@ One agent session may audit the finished candidate table when
 `--analysis-route agent` is used. The `deterministic` route never runs it, and
 keeps its no-model guarantee by not reaching the stage at all.
 
-It replaced two tool-free completion tiers — a per-kernel fallback that picked a
-path off a grep shortlist, and a whole-table pass that audited the result. Both
-were shown a prompt assembled in advance, so neither could see what a kernel
-actually *is*; the deterministic tiers' real failure mode is not coming up empty
-but coming up confidently wrong, and a model ranking paths by keyword cannot
-tell the difference.
+The stage is tool-enabled rather than a completion call because the deterministic
+tiers' real failure mode is not coming up empty but coming up confidently wrong,
+and a model ranking paths by keyword off a prompt assembled in advance cannot
+tell the difference — it never sees what a kernel actually *is*.
 
 **What it is handed: paths, not contents.** The raw table, the resolution audit,
 the TraceLens report, the model directory and the framework source roots — as
@@ -295,7 +293,11 @@ computed from those.
   openable path plus line and function metadata, and an unverifiable path is
   rejected with the original left standing.
 - A candidate the active finder already resolved is not overridable: reading the
-  tree cannot beat knowing which symbol the binary exports.
+  tree cannot beat knowing which symbol the binary exports. Nor is one matched to
+  a vendor operator playbook, whatever tier resolved the path the playbook anchor
+  replaced — its `source_file` points at a task bundle, and pointing it back at
+  framework source would route the candidate to a backend with nothing to
+  rewrite there.
 - A restrictive routability hint is honoured, a permissive one is not —
   `classify_patchability` stays the only gate that admits a kernel, so a hint
   cannot talk it into dispatching something the deterministic rules rejected. A
