@@ -1102,6 +1102,64 @@ def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
     ) == str(deploy_root)
 
 
+def test_resolve_deploy_repo_root_anchors_on_the_traced_source(tmp_path):
+    """A tie between two ancestors is broken by the source the trace resolved.
+
+    aiter ships the same relative path under both ``ops/triton`` and
+    ``ops/triton/_triton_kernels``, holding two different files, and forge roots
+    its worktree at the deeper one -- so the exported entry ``gemm/basic/k.py``
+    exists under two ancestors of the traced source. The walk alone finds two
+    matches and refuses, reporting a correct rewrite as an unresolvable
+    artifact. Which of the two defines the kernel is not a guess: it is what
+    ``target_file`` says.
+    """
+    pkg = tmp_path / "site-packages" / "aiter" / "ops" / "triton"
+    shallow = pkg / "gemm" / "basic" / "k.py"
+    deep = pkg / "_triton_kernels" / "gemm" / "basic" / "k.py"
+    for path, body in ((shallow, "shallow\n"), (deep, "deep\n")):
+        path.parent.mkdir(parents=True)
+        path.write_text(body)
+    descriptors = [
+        {"op": "write", "path": "gemm/basic/k.py", "is_new": False},
+        {"op": "write", "path": "graph_harness.py", "is_new": True},
+    ]
+
+    # Both ancestors carry the relative path, so the walk cannot decide.
+    assert shallow.exists() and deep.exists()
+    assert ko.resolve_deploy_repo_root(str(deep), descriptors) == str(
+        pkg / "_triton_kernels"
+    )
+    # The shallower copy anchors on its own root, not on whichever comes first.
+    assert ko.resolve_deploy_repo_root(str(shallow), descriptors) == str(pkg)
+
+
+def test_resolve_deploy_repo_root_anchor_still_requires_the_preimage(tmp_path):
+    """The anchor concludes nothing the preimage check would not confirm.
+
+    Stripping a descriptor off the traced path is only a candidate root. A
+    descriptor set that does not belong to that tree has to fall through, or the
+    anchor would hand a backend a root it never verified.
+    """
+    deploy_root = tmp_path / "site-packages"
+    source = deploy_root / "pkg" / "ops" / "k.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("kernel\n")
+
+    # Tail matches the traced path, but the sibling preimage is absent, so the
+    # derived root fails the check and no ancestor satisfies it either.
+    descriptors = [
+        {"op": "write", "path": "ops/k.py", "is_new": False},
+        {"op": "write", "path": "ops/missing_sibling.py", "is_new": False},
+    ]
+    assert ko.resolve_deploy_repo_root(str(source), descriptors) == ""
+
+    # A traversal entry is refused rather than resolved by subtraction.
+    assert ko.resolve_deploy_repo_root(
+        str(source),
+        [{"op": "write", "path": "../etc/passwd", "is_new": False}],
+    ) == ""
+
+
 def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
     """If any write path can't be made byte-exact (no worktree file, no base to
     reconstruct from), the attempt is non-deployable -> None (hard fail)."""

@@ -2979,9 +2979,26 @@ def resolve_deploy_repo_root(
     """Resolve the consumer repo root for repo-relative patch paths.
 
     Producer worktree paths are not portable to installed framework trees.
-    Resolve against an explicit root when supplied; otherwise walk ancestors
-    of the traced absolute source and require exactly one root whose existing
-    preimage files match every non-new patch entry.
+    Resolve against an explicit root when supplied; then anchor on the traced
+    source, whose absolute path already names the root once the entry that
+    describes it is stripped off its tail; and only then fall back to walking
+    ancestors and requiring exactly one whose existing preimage files match
+    every non-new patch entry.
+
+    The anchor exists because the ancestor walk cannot break a tie it has no
+    information about. A producer rooted below the consumer's package -- aiter
+    puts a copy of the same file under both ``ops/triton`` and
+    ``ops/triton/_triton_kernels``, and forge's worktree sits at the deeper one
+    -- exports ``gemm/basic/<kernel>.py``, which then resolves under two
+    ancestors of the traced source. The walk finds two matches, refuses, and a
+    correct rewrite is reported as an unresolvable artifact. Refusing was right:
+    the two files differ, and deploying to the wrong one measures nothing at a
+    full re-baseline's cost. But the tie was never real -- the trace resolved
+    which of them defines the kernel, and that answer is in ``target_file``.
+
+    The anchor concludes nothing the walk would not have to confirm anyway: the
+    derived root still has to satisfy the same preimage check, so a descriptor
+    set that does not belong to the traced tree falls through to the walk.
     """
 
     def _matches(root: Path, *, require_preimage: bool) -> bool:
@@ -3008,6 +3025,30 @@ def resolve_deploy_repo_root(
         target = Path(target_file).resolve()
     except OSError:
         return ""
+
+    # Anchor on the traced source: the descriptor that names it is a tail of its
+    # absolute path, so removing that tail leaves the root the producer was
+    # rooted at. Longest tail first, so a descriptor that is merely a basename
+    # collision cannot claim the anchor ahead of the full relative path.
+    anchors = sorted(
+        (
+            Path(str(desc.get("path") or ""))
+            for desc in descriptors
+            if str(desc.get("path") or "")
+        ),
+        key=lambda rel: len(rel.parts),
+        reverse=True,
+    )
+    for rel in anchors:
+        if rel.is_absolute() or ".." in rel.parts:
+            continue
+        depth = len(rel.parts)
+        if depth >= len(target.parts) or target.parts[-depth:] != rel.parts:
+            continue
+        anchored = Path(*target.parts[:-depth])
+        if anchored.is_dir() and _matches(anchored, require_preimage=True):
+            return str(anchored)
+
     matches: list[Path] = []
     for root in target.parents:
         if _matches(root, require_preimage=True):
