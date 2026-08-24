@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from .config import KnowledgeConfig, KnowledgeStoreMode
@@ -71,29 +70,9 @@ class KnowledgePlane:
 
     @property
     def status(self) -> dict[str, Any]:
-        """Return secret-free Recipe, graph, and KernelForge status."""
+        """Return secret-free Recipe and KernelForge status."""
 
         config = self.config or KnowledgeConfig.from_env()
-        gbrain_configured = bool(
-            config.gbrain_base_url and config.gbrain_token
-        )
-        graph_status = {
-            "mode": config.mode.value,
-            "backend": (
-                "local-filesystem"
-                if config.mode is KnowledgeStoreMode.LOCAL
-                else ("gbrain" if gbrain_configured else "disabled")
-            ),
-            "root": (
-                str(Path(config.local_root) / "hyperloom" / "kg")
-                if config.mode is KnowledgeStoreMode.LOCAL
-                else ""
-            ),
-            "remote_configured": (
-                config.mode is KnowledgeStoreMode.REMOTE
-                and gbrain_configured
-            ),
-        }
         return {
             "recipe": {
                 **config.public_dict(),
@@ -111,7 +90,6 @@ class KnowledgePlane:
                     "degraded_kb" if self.kb_disabled else ""
                 ),
             },
-            "kg": graph_status,
             "kernel_experience": (
                 self.kernel_experience.status.to_dict()
                 if self.kernel_experience is not None
