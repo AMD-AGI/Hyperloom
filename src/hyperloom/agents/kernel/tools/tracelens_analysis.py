@@ -1946,55 +1946,6 @@ def _candidate_keywords(name: str) -> list[str]:
     return raw[:3]
 
 
-def _relaxed_candidate_keywords(name: str) -> list[str]:
-    """Extract bounded short identifiers used only for the LLM shortlist.
-
-    The deterministic tier requires identifiers at least five characters long.
-    Mangled kernels composed of shorter identifiers therefore produce no strict
-    keyword at all. This lowers the floor to three characters and caps the
-    result at six keywords. It feeds the shortlist only, so the deterministic
-    winner-selection contract is unchanged.
-    """
-    cleaned = _normalize_profiler_op_name(name)
-    tokens: list[str] = []
-    if cleaned.startswith("_Z"):
-        pos = 0
-        while pos < len(cleaned):
-            match = re.match(r"(\d+)", cleaned[pos:])
-            if match is None:
-                pos += 1
-                continue
-            length = int(match.group(1))
-            start = pos + match.end()
-            ident = cleaned[start : start + length]
-            if ident and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", ident):
-                tokens.append(ident)
-                pos = start + length
-            else:
-                pos = start + 1
-    else:
-        plain = _strip_template_args(cleaned)
-        tokens.append(plain.split("::")[-1])
-
-    seen: set[str] = set()
-    relaxed: list[str] = []
-    for token in tokens:
-        token = token.strip("_")
-        if len(token) < 3 or token in seen or token in _TYPE_BLOCKLIST:
-            continue
-        seen.add(token)
-        relaxed.append(token)
-    relaxed.sort(
-        key=lambda token: (
-            token in _NAMESPACE_BLOCKLIST,
-            -token.count("_"),
-            -len(token),
-            token,
-        )
-    )
-    return relaxed[:6]
-
-
 _GREP_CACHE: dict[tuple[str, str], list[Path]] = {}
 
 
@@ -2503,54 +2454,6 @@ def _inject_collective_candidates(
     return existing + appended
 
 
-def collect_source_candidates_via_grep(name: str, limit: int = 8) -> list[str]:
-    """Shortlist every plausible source for ``name``, ranked, without deciding.
-
-    Where :func:`locate_source_via_grep` commits to the top hit of the first
-    keyword that matches, this widens the net -- every keyword and every trailing
-    sub-window -- and returns the union. It feeds the LLM tier, which needs
-    several options to choose between; on its own it decides nothing.
-
-    Args:
-        name (str): Kernel symbol/name to locate.
-        limit (int): Maximum paths to return.
-
-    Returns:
-        list[str]: Ranked, deduplicated candidate paths (possibly empty).
-    """
-    if is_runtime_api_name(name):
-        return []
-    hits: list[Path] = []
-    seen_keywords: set[str] = set()
-    for keyword in [
-        *_candidate_keywords(name),
-        *_compound_subwindow_keywords(name),
-        *_relaxed_candidate_keywords(name),
-    ]:
-        if not keyword or keyword in seen_keywords:
-            continue
-        seen_keywords.add(keyword)
-        for root in KNOWN_SEARCH_ROOTS:
-            hits.extend(_grep_for_keyword(keyword, Path(root)))
-    if not hits:
-        return []
-    ordered: list[str] = []
-    seen_paths: set[str] = set()
-    # Definition sites first: a file that merely mentions the symbol is the
-    # exact confusion the LLM tier is meant to resolve, not inherit.
-    primary = _candidate_keywords(name)
-    ranked = _prefer_symbol_definition(primary[0], hits) if primary else _rank_paths(hits)
-    for path in ranked:
-        text = str(path)
-        if text in seen_paths:
-            continue
-        seen_paths.add(text)
-        ordered.append(text)
-        if len(ordered) >= max(1, limit):
-            break
-    return ordered
-
-
 def find_repo_root(source_file: str) -> str:
     """Walk upward from source_file until we find a .git/ dir; return the dir.
 
@@ -2835,11 +2738,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                 p = Path(line)
                 if not p.exists():
                     continue
-                base = p.name.lower()
-                if any(tag in base for tag in ("test_", "_test.", "bench", "benchmark")):
-                    found.append(p)
-                else:
-                    found.append(p)
+                found.append(p)
     seen: set[str] = set()
     unique: list[str] = []
     for p in found:
@@ -6865,26 +6764,18 @@ def _adopt_reviewed_shapes(item: dict[str, Any]) -> None:
         item.pop(key, None)
 
 
-def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
-    """Recompute everything that follows from ``source_file`` after a revision.
+def _accept_review_proposals(
+    item: dict[str, Any],
+    op_cat_map: dict[str, str] | None = None,
+) -> None:
+    """Take what the review supplied for a candidate whose source did not move.
 
-    The review returns a location, not a verdict. Re-running the deterministic
-    stamping keeps :func:`classify_patchability` the only gate that decides
-    routability, so the vendor-binary, dispatch-wrapper and runtime-generated
-    rejections still apply to a path the model supplied.
+    Restamping is still required, because the alternate shape representations
+    are rebuilt from ``shapes`` and adopting reviewed dims invalidates the ones
+    describing the old set. What it must not do is disturb the source judgments:
+    they describe the same path they were computed from, so there is nothing to
+    recompute and nothing stale to clear.
     """
-    new_source = str(item.get("source_file") or "")
-    for key in _SOURCE_DERIVED_METADATA:
-        item.pop(key, None)
-    item["source_path"] = new_source
-    item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
-    item["source_type"] = source_type_for(item.get("name", ""), new_source)
-    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
-        item.get("name", ""), new_source
-    ):
-        item["source_type"] = "vendor_binary"
-        item["vendor_dispatch_wrapper"] = True
-    item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
     _adopt_reviewed_shapes(item)
     _stamp_candidate_metadata(item, op_cat_map)
     # Stamping recomputes benchmark_files from the curated marker table, which
@@ -6901,6 +6792,39 @@ def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | No
             str(item.get("review_skip_reason") or "").strip()
             or f"review: {item.get('review_reason') or 'not worth a tuning session'}"
         )
+
+
+def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | None = None) -> None:
+    """Recompute everything that follows from ``source_file`` after it moved.
+
+    The review returns a location, not a verdict. Re-running the deterministic
+    stamping keeps :func:`classify_patchability` the only gate that decides
+    routability, so the vendor-binary, dispatch-wrapper and runtime-generated
+    rejections still apply to a path the model supplied.
+
+    Only for a revision that moved the path. Clearing
+    :data:`_SOURCE_DERIVED_METADATA` is sound when the values describe a source
+    the candidate no longer names, and unsound otherwise: eighteen of those
+    nineteen keys have no producer in this pass -- the finder that filled them
+    read the demangled device symbol and the binary's exports, and stamping
+    cannot reconstruct that from a path -- so clearing them where the source
+    stood still would drop them for good. Whether any of them is populated today
+    is not the point; a field that cannot be rebuilt must not be cleared on a
+    revision that gave no reason to doubt it.
+    """
+    new_source = str(item.get("source_file") or "")
+    for key in _SOURCE_DERIVED_METADATA:
+        item.pop(key, None)
+    item["source_path"] = new_source
+    item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
+    item["source_type"] = source_type_for(item.get("name", ""), new_source)
+    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
+        item.get("name", ""), new_source
+    ):
+        item["source_type"] = "vendor_binary"
+        item["vendor_dispatch_wrapper"] = True
+    item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
+    _accept_review_proposals(item, op_cat_map)
 
 
 def _run_candidate_review_stage(
@@ -7062,11 +6986,19 @@ def _run_candidate_review_stage(
         if not isinstance(item, dict):
             continue
         kernel_id = str(item.get("kernel_id") or "")
-        if str(item.get("source_file") or "") == before_state.get(kernel_id) and not any(
-            item.get(key) is not None for key in _REVIEW_STAGED_PROPOSALS
-        ):
+        source_moved = str(item.get("source_file") or "") != before_state.get(kernel_id)
+        staged = any(item.get(key) is not None for key in _REVIEW_STAGED_PROPOSALS)
+        if not source_moved and not staged:
             continue
-        _rederive_after_review(item, op_cat_map)
+        # Two different revisions. A moved path invalidates everything derived
+        # from the old one, so those are cleared and recomputed. A path that
+        # stood still invalidates nothing about the source, and most of what the
+        # finder recorded about it has no producer here -- so the proposals are
+        # taken and the source judgments are left alone.
+        if source_moved:
+            _rederive_after_review(item, op_cat_map)
+        else:
+            _accept_review_proposals(item, op_cat_map)
         changed += 1
 
     revisions_path = run_dir / REVISIONS_FILENAME

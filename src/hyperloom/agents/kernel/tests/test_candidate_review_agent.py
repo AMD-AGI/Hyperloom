@@ -867,6 +867,76 @@ class TestReviewStageBoundary:
         assert candidate["shape_provenance"] == cra.REVIEW_BACKFILL_PROVENANCE
 
 
+class TestReviewLeavesSourceJudgmentsAlone:
+    """A revision that moved nothing must not clear what nothing invalidated.
+
+    Eighteen of the nineteen source-derived keys have no producer in this pass:
+    the finder that filled them read the demangled device symbol and the
+    binary's exports, and restamping cannot rebuild that from a path. Clearing
+    them is right when the candidate names a different source than the values
+    describe, and a silent, permanent loss otherwise -- ``kernel_kind`` and
+    ``prebuilt_binary`` are what tell ``classify_patchability`` a kernel is
+    prebuilt assembly, and ``source_framework`` is read before ``source_file``
+    when the backend picks a fellow.
+    """
+
+    FINDER_KEYS = (
+        "kernel_kind",
+        "prebuilt_binary",
+        "source_framework",
+        "op_to_source_status",
+        "op_to_source_patchable",
+        "source_resolution_confidence",
+        "launcher_source_file",
+    )
+
+    def _candidate(self, source):
+        item = {
+            "name": "k",
+            "source_file": str(source),
+            "source_type": "python",
+            "shapes": [],
+            "review_shapes": ["(8192,6144) bf16"],
+        }
+        item.update(
+            {
+                "kernel_kind": "prebuilt_assembly",
+                "prebuilt_binary": True,
+                "source_framework": "aiter",
+                "op_to_source_status": "resolved",
+                "op_to_source_patchable": False,
+                "source_resolution_confidence": 0.95,
+                "launcher_source_file": "/pkg/launcher.py",
+            }
+        )
+        return item
+
+    def test_a_shapes_only_revision_keeps_them(self, tmp_path):
+        source = tmp_path / "k.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        item = self._candidate(source)
+
+        tla._accept_review_proposals(item)
+
+        assert item["shapes"] == ["(8192,6144) bf16"], "the proposal is still taken"
+        for key in self.FINDER_KEYS:
+            assert item.get(key) is not None, f"{key} was cleared with nothing to rebuild it"
+        assert item["kernel_kind"] == "prebuilt_assembly"
+        assert item["prebuilt_binary"] is True
+
+    def test_a_moved_path_still_clears_them(self, tmp_path):
+        """The old values describe a source the candidate no longer names."""
+        source = tmp_path / "k.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        item = self._candidate(source)
+        item["source_file"] = str(tmp_path / "other.py")
+
+        tla._rederive_after_review(item)
+
+        for key in self.FINDER_KEYS:
+            assert item.get(key) is None, f"{key} describes the path that was replaced"
+
+
 class TestRederiveAfterReview:
     def test_a_veto_is_honoured(self, tmp_path, monkeypatch):
         """The session may refuse a kernel it knows is not worth a session.
