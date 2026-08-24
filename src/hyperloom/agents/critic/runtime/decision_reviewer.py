@@ -856,9 +856,11 @@ class DecisionReviewer:
     ) -> None:
         """Commit a coordinator-inbox review into an intent envelope.
 
-        Validates each verdict, records it in session memory, increments
-        metrics, optionally writes a KB lesson, appends any advice intents,
-        and falls back to a heartbeat intent when there is nothing to review.
+        Every verdict is validated before any of them is persisted, so a
+        malformed entry cannot leave earlier proposals marked reviewed with
+        their intents undelivered. Valid batches then record session memory,
+        increment metrics, optionally write a KB lesson, append any advice
+        intents, and fall back to a heartbeat intent when nothing was reviewed.
 
         Args:
             req (CriticRequest): The parsed request.
@@ -867,7 +869,8 @@ class DecisionReviewer:
             session_ctx (dict[str, Any]): Stored session context for KB writes.
 
         Raises:
-            ReviewValidationError: If verdicts are malformed or invalid.
+            ReviewValidationError: If verdicts are malformed, invalid, or
+                target the same proposal twice.
         """
         verdicts_raw = review.get("review_verdicts")
         if not isinstance(verdicts_raw, list):
@@ -883,9 +886,6 @@ class DecisionReviewer:
                 continue
             advice_by_target.setdefault(advice_target, []).append(body)
 
-        # Pass 1: validate every verdict and build intents before any side effects.
-        # A late-index validation error must not leave earlier verdicts marked as
-        # reviewed while their intents were never delivered to the coordinator.
         seen_targets: set[str] = set()
         validated: list[tuple[dict[str, Any], str, str, Intent]] = []
         for i, item in enumerate(verdicts_raw):
@@ -929,7 +929,6 @@ class DecisionReviewer:
                 raise ReviewValidationError(str(exc)) from exc
             validated.append((item, target, verdict, intent))
 
-        # Pass 2: all verdicts are valid — persist side effects as a unit.
         intents: list[Intent] = []
         for item, target, verdict, intent in validated:
             intents.append(intent)

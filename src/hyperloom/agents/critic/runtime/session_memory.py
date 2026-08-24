@@ -31,7 +31,7 @@ from typing import Any, Iterable
 
 from hyperloom.common.io import append_jsonl as _common_append_jsonl
 from hyperloom.common.io import atomic_write_json as _common_atomic_write_json
-from hyperloom.common.jsonio import read_json as _jsonio_read_json
+from hyperloom.common.jsonio import read_json as _common_read_json
 from hyperloom.common.timeutil import now_iso
 
 from .errors import SessionMemoryError
@@ -465,25 +465,24 @@ class SessionMemory:
 # Shared JSON helper
 # ---------------------------------------------------------------------------
 def _read_object(path: Path, *, default: dict[str, Any]) -> dict[str, Any]:
-    """Read a JSON file and return its contents as a dict.
-
-    Returns ``default`` when the file is absent or blank.
+    """Read a JSON object from ``path``.
 
     Args:
         path (Path): The file to read.
-        default (dict[str, Any]): Returned when the file is absent.
+        default (dict[str, Any]): Returned when the file is absent or blank.
+
+    Returns:
+        dict[str, Any]: The decoded object, or ``default``.
 
     Raises:
-        SessionMemoryError: If the file exists but cannot be decoded as a
-            JSON object (corrupt bytes, top-level array, null, etc.).
+        SessionMemoryError: If the file exists but is not a JSON object
+            (corrupt bytes, top-level array, null).
     """
     if not path.exists():
         return default
     try:
-        return _jsonio_read_json(path, default=default, require_dict=True, strict=True, empty_value=default)
-    except ValueError as exc:
-        raise SessionMemoryError(f"corrupt session memory file at {path}: {exc}") from exc
-    except OSError as exc:
+        return _common_read_json(path, require_dict=True, strict=True, empty_value=default)
+    except (OSError, ValueError) as exc:
         raise SessionMemoryError(f"corrupt session memory file at {path}: {exc}") from exc
 
 

@@ -70,9 +70,8 @@ def read_json(path: str | Path | None, default: Any = None, *, require_dict: boo
     """Parse JSON from ``path``; return ``default`` on missing/malformed input.
 
     Kernel-local, stdlib-only mirror of ``common.jsonio.read_json`` tolerant
-    mode: a falsy path or an ``OSError`` / ``JSONDecodeError`` yields ``default``.
-    When ``require_dict`` is True a top-level non-object payload also returns
-    ``default`` instead of the raw value.
+    mode: a falsy path, an ``OSError`` / ``JSONDecodeError``, or — under
+    ``require_dict`` — a non-object payload all yield ``default``.
     """
     if not path:
         return default

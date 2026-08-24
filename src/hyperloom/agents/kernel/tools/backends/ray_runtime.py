@@ -91,12 +91,13 @@ def _isolated_head_port_args() -> Tuple[int, list[str]]:
     """Return ``(gcs_port, extra_start_args)`` bound to FREE probed ports.
 
     Isolates the GCS / dashboard / Ray-client ports so co-located sessions never
-    share Ray's fixed defaults. ``HL_RAY_HEAD_PORT`` pins the GCS port (dashboard
-    and client are still probed to avoid their own collisions).
+    share Ray's fixed defaults. ``HL_RAY_HEAD_PORT`` pins the GCS port when it is
+    a valid TCP port; dashboard and client are still probed to avoid their own
+    collisions.
     """
-    port_override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
-    _port_candidate = int(port_override) if port_override.isdigit() else 0
-    gcs_port = _port_candidate if 1 <= _port_candidate <= 65535 else _free_tcp_port()
+    override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
+    port = int(override) if override.isdigit() else 0
+    gcs_port = port if 1 <= port <= 65535 else _free_tcp_port()
     return gcs_port, [
         f"--dashboard-port={_free_tcp_port()}",
         f"--ray-client-server-port={_free_tcp_port()}",
@@ -429,7 +430,8 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     On a "Version mismatch" RuntimeError (foreign cluster under a different
     Python/Ray), tear the foreign cluster down, bring up a fresh local head
-    under this interpreter, and retry ``ray.init`` once.
+    under this interpreter, and retry once against that head — ``RAY_ADDRESS``
+    still names the foreign cluster and would reproduce the mismatch.
 
     Args:
         num_gpus: Optional GPU count forwarded to a restart, if needed.
@@ -441,12 +443,12 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     runtime_env = safe_runtime_env()
 
-    def _init() -> None:
+    def _init(address: str) -> None:
         """Call ``ray.init`` with stdout suppressed and standard options."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             ray.init(
-                address=os.environ.get("RAY_ADDRESS", "auto"),
+                address=address,
                 ignore_reinit_error=True,
                 log_to_driver=False,
                 logging_level="error",
@@ -454,7 +456,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             )
 
     try:
-        _init()
+        _init(os.environ.get("RAY_ADDRESS", "auto"))
     except Exception as exc:  # noqa: BLE001
         if not _is_ray_version_mismatch(str(exc)):
             raise
@@ -464,15 +466,5 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         except Exception:  # noqa: BLE001
             pass
         force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
-        # Connect to the freshly started local head rather than the old stale
-        # RAY_ADDRESS that triggered the version-mismatch.
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            ray.init(
-                address="auto",
-                ignore_reinit_error=True,
-                log_to_driver=False,
-                logging_level="error",
-                runtime_env=runtime_env,
-            )
+        _init("auto")
     return runtime_env

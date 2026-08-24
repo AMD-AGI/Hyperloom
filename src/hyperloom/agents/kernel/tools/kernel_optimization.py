@@ -117,7 +117,7 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return payload
     if not isinstance(payload, dict):
-        return []
+        raise ValueError(f"kernel candidates file is neither an object nor a list: {path}")
     candidates = list(payload.get("hot_kernels") or payload.get("kernel_candidates") or [])
     skipped = payload.get("skipped_kernels") or []
     if isinstance(skipped, list):

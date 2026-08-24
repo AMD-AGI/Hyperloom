@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_text
+from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
 
@@ -222,11 +223,11 @@ class Journal:
         path = cls._journal_path(session_dir)
         blob: dict[str, Any] = {}
         if path.exists():
-            from hyperloom.common.jsonio import read_json as _rj  # local import keeps top-level deps minimal
-            result = _rj(path, default=None, require_dict=True, on_error=lambda exc: log.warning(
-                "optimization_journal: failed to parse %s (%s); recreating fresh", path, exc,
-            ))
-            blob = result if result is not None else {}
+
+            def _warn(exc: BaseException) -> None:
+                log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
+
+            blob = read_json(path, default={}, require_dict=True, on_error=_warn)
 
         entries_raw = blob.get("entries") or []
         entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
