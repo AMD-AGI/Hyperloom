@@ -162,9 +162,7 @@ def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> N
         ("junk", 4),  # junk -> default
     ],
 )
-def test_env_int_clamps_and_survives_junk(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int
-) -> None:
+def test_env_int_clamps_and_survives_junk(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
     """_env_int floors at the minimum and never crashes on junk."""
     monkeypatch.delenv("HYPERLOOM_MN_TEST_KNOB", raising=False)
     if raw is not None:
@@ -226,9 +224,7 @@ def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(monkeypat
         ("abc", 300),  # junk -> default, never crashes the restart
     ],
 )
-def test_published_ready_timeout_env_parse(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int
-) -> None:
+def test_published_ready_timeout_env_parse(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
     """The env parse honors 0/negatives as skip and survives junk."""
     monkeypatch.delenv("HYPERLOOM_MN_PUBLISHED_READY_S", raising=False)
     if raw is not None:

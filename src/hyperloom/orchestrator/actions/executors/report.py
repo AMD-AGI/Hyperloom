@@ -56,9 +56,7 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     entries = blob.get("entries") if isinstance(blob, dict) else None
     if not isinstance(entries, list):
         return 0
-    return sum(
-        1 for e in entries if isinstance(e, dict) and str(e.get("reason") or "").strip() == "warmup_failed"
-    )
+    return sum(1 for e in entries if isinstance(e, dict) and str(e.get("reason") or "").strip() == "warmup_failed")
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:

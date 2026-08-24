@@ -100,12 +100,8 @@ def test_hard_cap_stays_above_the_soft_kill_at_agentx_baselines(monkeypatch):
     measured_baseline = 111 * 60  # the E4 round
     for baseline in (measured_baseline, 2 * 60 * 60):
         soft_kill = baseline * 2.0
-        stock = _compute_explore_variant_timeout(
-            baseline, 2.0, ceiling_sec=DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
-        )
-        agentx = _compute_explore_variant_timeout(
-            baseline, 2.0, ceiling_sec=AGENTX_EXPLORE_TIMEOUT_CEILING_SEC
-        )
+        stock = _compute_explore_variant_timeout(baseline, 2.0, ceiling_sec=DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC)
+        agentx = _compute_explore_variant_timeout(baseline, 2.0, ceiling_sec=AGENTX_EXPLORE_TIMEOUT_CEILING_SEC)
         assert agentx > soft_kill, f"layering inverted at baseline={baseline}"
         assert agentx >= stock
 
@@ -307,4 +303,3 @@ def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
     """
     _on(monkeypatch)
     assert _valid(_measurement()) is True
-

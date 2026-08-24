@@ -598,10 +598,7 @@ def _record_applyback_keep(state, **verification_overrides):
             "task_group_key": "tg-fused-gemm",
             "proposal": {
                 "decision": "KEEP",
-                "reasons": [
-                    "framework apply-back reference-verified; framework "
-                    "E2E/accuracy deferred to integrate"
-                ],
+                "reasons": ["framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"],
             },
             "verification": verification,
         }
@@ -620,9 +617,7 @@ def test_reference_verified_applyback_queues_with_its_provenance():
 
     assert state.last_kernel_opt["correctness_source"] == "forge_rewrite_reference"
     assert state.last_kernel_opt["integration_validation_status"] == "pending"
-    assert state.last_kernel_opt["framework_applyback"]["commit_ref"] == (
-        "refs/hyperloom/applyback/attempt-1"
-    )
+    assert state.last_kernel_opt["framework_applyback"]["commit_ref"] == ("refs/hyperloom/applyback/attempt-1")
 
     pending = state.pending_kernel_integration_records()
     assert len(pending) == 1

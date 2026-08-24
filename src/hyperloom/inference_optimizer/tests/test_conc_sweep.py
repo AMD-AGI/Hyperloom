@@ -1036,9 +1036,7 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
         max_minutes=360,
         phase_budget_pct={"SWEEP": 0.50},
     )
-    state.record_conc_sweep(
-        {"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"}
-    )
+    state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
     _, declined = exit_normal_sweep(state)
     assert declined["conc_sweep_was_skipped"] is True
     assert declined["conc_sweep_budget_exhausted"] is False
@@ -1088,9 +1086,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
         {"kernel_id": "k001", "integration_id": "integration-1"},
         {"kernel_id": "k002", "integration_id": "integration-2"},
     ]
-    coord.shared_state.pending_kernel_integration_records = (
-        lambda: [pending_queue.pop(0)] if pending_queue else []
-    )
+    coord.shared_state.pending_kernel_integration_records = lambda: [pending_queue.pop(0)] if pending_queue else []
     coord._record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 

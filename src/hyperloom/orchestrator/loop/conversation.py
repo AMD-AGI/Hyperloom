@@ -262,7 +262,11 @@ class ConversationCollaborator:
         rendered = "\n".join(body_lines).splitlines()
         if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
             rendered = rendered[-_RECENT_OUTCOMES_LINE_CAP:]
-            return "\n".join([header] + rendered + [f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)"])
+            return "\n".join(
+                [header]
+                + rendered
+                + [f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)"]
+            )
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:

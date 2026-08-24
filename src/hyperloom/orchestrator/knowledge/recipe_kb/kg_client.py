@@ -80,6 +80,8 @@ def _page_mutex(slug: str) -> threading.Lock:
             mutex = threading.Lock()
             _PAGE_MUTEXES[slug] = mutex
         return mutex
+
+
 # Hard ceiling on BFS breadth to bound client-side traversal cost.
 _MAX_TRAVERSE_NODES = 200
 # Default TTL for the per-client search cache (seconds). One warm-start
@@ -153,12 +155,7 @@ def _as_set(value: Any) -> set[str]:
         items = value
     else:
         items = [value]
-    return {
-        alias
-        for item in items
-        if str(item or "").strip()
-        for alias in _entity_aliases(item)
-    }
+    return {alias for item in items if str(item or "").strip() for alias in _entity_aliases(item)}
 
 
 def _parse_props(raw: str | None) -> dict[str, str]:
@@ -1428,10 +1425,7 @@ def build_kg_client_from_env() -> KGClient | None:
         return KGClient(LocalGraphStore(graph_root), use_native_kg=True)
 
     if not config.gbrain_base_url or not config.gbrain_token:
-        log.info(
-            "remote Recipe mode has no complete optional GBrain KG "
-            "configuration; KG disabled"
-        )
+        log.info("remote Recipe mode has no complete optional GBrain KG configuration; KG disabled")
         return None
 
     timeout_env = os.environ.get("GBRAIN_HTTP_TIMEOUT_SEC")

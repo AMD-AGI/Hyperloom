@@ -113,9 +113,7 @@ class _RenderMixin:
             else ""
         )
         geak_pending_status = (
-            str(self.geak_pending.get("status") or "")
-            if isinstance(getattr(self, "geak_pending", None), dict)
-            else ""
+            str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
@@ -286,14 +284,15 @@ class _RenderMixin:
         from ...phases.machine_state import (
             DEFAULT_PHASE_BUDGET_PCT,
             PHASE_NAMES,
+            is_phase_transition_row,
             normalize_budget_pct,
             phase_elapsed_seconds,
         )
 
         budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        # Aggregate elapsed per phase using phase_history.
+        # Aggregate elapsed per phase using real transitions only.
         elapsed_per_phase: dict[str, float] = {}
-        history = self.phase_history or []
+        history = [row for row in (self.phase_history or []) if is_phase_transition_row(row)]
         for idx, row in enumerate(history):
             if not isinstance(row, dict):
                 continue

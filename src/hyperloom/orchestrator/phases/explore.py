@@ -17,6 +17,8 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
+    PolicyDenied,
+    validate_freeform_wave_task,
 )
 from ..loop.maintenance import run_lease_and_db_reclaim
 from ..loop.sub_agent_runner import SubAgentResult
@@ -645,7 +647,8 @@ class ExplorePhase(PhaseHandler):
         standard free-form specialist dispatches (scope=freeform, lane=cpu,
         mode=research defaults). Each fanned task is re-dispatched through the
         normal ``_handle_delegate`` path. Per-task idempotency keys derive from
-        the wave key; non-dict / empty-description entries are skipped.
+        the wave key. Each entry must pass the same structural checks as
+        :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
 
         Args:
             source: The agent issuing the wave delegate.
@@ -655,20 +658,15 @@ class ExplorePhase(PhaseHandler):
         tasks = params.get("tasks") or []
         shared = {k: v for k, v in params.items() if k != "tasks"}
         base_key = str(intent.payload.get("idempotency_key") or "").strip()
+        pending: list[Intent] = []
         for idx, task in enumerate(tasks):
-            if not isinstance(task, dict):
-                continue
-            desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-            if not desc:
-                continue
+            desc = validate_freeform_wave_task(task, index=idx)
             sub_params = dict(shared)
             sub_params["scope"] = "freeform"
             sub_params["task_description"] = desc
             summary = str(task.get("task_summary") or "").strip()
             if summary:
                 sub_params["task_summary"] = summary
-            # Per-task dial overrides take precedence over the shared params;
-            # then fall back to the freeform recon defaults.
             for carry in (
                 "mode",
                 "bench",
@@ -678,7 +676,7 @@ class ExplorePhase(PhaseHandler):
                 "timeout_minutes",
                 "max_turns",
             ):
-                if carry in task:
+                if isinstance(task, dict) and carry in task:
                     sub_params[carry] = task[carry]
             sub_params.setdefault("mode", "research")
             sub_params.setdefault("lane", "cpu")
@@ -688,10 +686,15 @@ class ExplorePhase(PhaseHandler):
                 sub_payload["idempotency_key"] = f"{base_key}-w{idx}"
             else:
                 sub_payload.pop("idempotency_key", None)
-            await self._handle_delegate(
-                source,
-                Intent(type=intent.type, payload=sub_payload),
-            )
+            sub_intent = Intent(type=intent.type, payload=sub_payload)
+            try:
+                self.policy.validate_intent(source, sub_intent)
+            except PolicyDenied as denied:
+                await self._record_policy_denied(source, sub_intent, denied)
+                raise
+            pending.append(sub_intent)
+        for sub_intent in pending:
+            await self._handle_delegate(source, sub_intent)
 
     async def _record_specialist_retry_exhausted(
         self,
@@ -1209,9 +1212,7 @@ class ExplorePhase(PhaseHandler):
             variant = str(row.get("variant_name") or "").strip()
             # Variant discriminator keeps distinct crash causes in distinct gaps.
             key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
-            layer, domain = self._gap_layer_for_action(
-                action, str(getattr(self.shared_state, "framework", "") or "")
-            )
+            layer, domain = self._gap_layer_for_action(action, str(getattr(self.shared_state, "framework", "") or ""))
             excerpt = str(row.get("error_excerpt") or "")
             detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
             symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"

@@ -761,11 +761,7 @@ class LocalRecipeStore:
         rows = _list_jsonl(self._attempts_path(canonical_id))
         if session_id is None:
             return rows
-        return [
-            row
-            for row in rows
-            if str(row.get("session_id") or "") == str(session_id)
-        ]
+        return [row for row in rows if str(row.get("session_id") or "") == str(session_id)]
 
 
 # search filter helpers

@@ -209,8 +209,7 @@ def test_classify_enablement_integrate_patch_is_enablement_landing():
     assert classify_proposal_action("integrate_patch", None) == ACTION_CLASS_PATCH_LANDING
     # enablement=True or framework_agent_authoring=True downgrades the class.
     assert (
-        classify_proposal_action("integrate_patch", {"params": {"enablement": True}})
-        == ACTION_CLASS_ENABLEMENT_LANDING
+        classify_proposal_action("integrate_patch", {"params": {"enablement": True}}) == ACTION_CLASS_ENABLEMENT_LANDING
     )
     assert (
         classify_proposal_action("integrate", {"params": {"framework_agent_authoring": True}})

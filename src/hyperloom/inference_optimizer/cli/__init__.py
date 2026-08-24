@@ -281,8 +281,7 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
     )
     runner_type = str(bench.get("runner_type") or "mi355x")
     inferencex_root = (
-        os.environ.get("INFERENCEX_PATH", "").strip()
-        or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
+        os.environ.get("INFERENCEX_PATH", "").strip() or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
     )
     script = resolve_scriptable_script("custom", runner_type, inferencex_root, bench)
     if script is not None:
@@ -291,8 +290,7 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
     candidates = scriptable_script_candidates("custom", runner_type, inferencex_root, bench)
     tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
     print(
-        f"ERROR: --framework custom could not resolve a benchmark entrypoint "
-        f"({name}). Tried:\n{tried}",
+        f"ERROR: --framework custom could not resolve a benchmark entrypoint ({name}). Tried:\n{tried}",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -883,9 +881,7 @@ def _validate_and_resolve_claude_model(
             # slot and leave a configured OpenAI gateway unverified.
             if anthropic_url and anthropic_key:
                 candidates.append((anthropic_url, anthropic_key))
-            if openai_url and (
-                (anthropic_url and _same_gateway(anthropic_url, openai_url)) or not candidates
-            ):
+            if openai_url and ((anthropic_url and _same_gateway(anthropic_url, openai_url)) or not candidates):
                 # One gateway serving both protocols, or the only side left once
                 # a keyless Anthropic side was skipped above.
                 candidates.append((openai_url, openai_key))
@@ -1079,8 +1075,7 @@ def _smoke_test_codex_model(
                 continue
             if candidate in catalog_ids:
                 print(
-                    f"Preflight: WARNING — codex model {chosen!r} not in gateway "
-                    f"catalog; falling back to {candidate!r}"
+                    f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog; falling back to {candidate!r}"
                 )
                 args.codex_model = candidate
                 return
@@ -2488,9 +2483,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
     _initial_directive = str(
-        (dict(getattr(coordinator.shared_state, "orchestration_memory", {}) or {})).get(
-            "next_cycle_directive", ""
-        )
+        (dict(getattr(coordinator.shared_state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "")
         or ""
     )
     # A fresh session has no phase recorded yet and always begins at PRELUDE;

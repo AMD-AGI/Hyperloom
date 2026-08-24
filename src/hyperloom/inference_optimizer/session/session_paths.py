@@ -560,6 +560,7 @@ def target_analysis_report_md(session_dir: Path) -> Path:
 # ``<sd>/runtime/recipe_kb/``. Callers MUST go through these helpers so the NDJSON
 # protocol stays homogeneous across producers/consumers.
 
+
 def recipe_kb_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root.
 

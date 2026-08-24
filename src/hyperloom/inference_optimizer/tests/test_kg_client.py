@@ -245,9 +245,7 @@ class _LosingMcp(_FakeMcp):
             if self.puts <= self.drops:
                 # Someone else's page overwrote ours: our line is gone and the
                 # page is not what we wrote.
-                self.pages[args["slug"]] = _page(
-                    f"# Recipe\n\n## Facts\n- other_writer_{self.puts} IMPROVES x ()\n"
-                )
+                self.pages[args["slug"]] = _page(f"# Recipe\n\n## Facts\n- other_writer_{self.puts} IMPROVES x ()\n")
                 return {"ok": True}
             self.pages[args["slug"]] = args["content"]
             return {"ok": True}
@@ -705,9 +703,7 @@ def test_native_graph_traverse_reads_legacy_punctuation_slug() -> None:
     nodes = kg.graph_traverse(start_entity="foo=1", max_hops=1)
 
     assert [node.entity for node in nodes] == ["target_2"]
-    traversed = [
-        args["slug"] for tool, args in mcp.calls if tool == "traverse_graph"
-    ]
+    traversed = [args["slug"] for tool, args in mcp.calls if tool == "traverse_graph"]
     assert traversed == ["foo_1", "foo=1"]
 
 

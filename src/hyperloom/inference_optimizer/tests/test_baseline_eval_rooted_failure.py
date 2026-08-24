@@ -25,31 +25,23 @@ def _bare_executor() -> baseline_mod.BaselineExecutor:
 
 def test_error_text_carrying_a_run_eval_marker_is_eval_rooted():
     ex = _bare_executor()
-    assert ex._is_eval_rooted_failure(
-        {"error": "...\nERROR: run_eval failed with exit code 1\n"}
-    ) is True
+    assert ex._is_eval_rooted_failure({"error": "...\nERROR: run_eval failed with exit code 1\n"}) is True
 
 
 def test_the_rejected_flag_itself_counts_as_eval_rooted():
     """The flag message is the shape that killed real runs; it must classify."""
     ex = _bare_executor()
-    assert ex._is_eval_rooted_failure(
-        {"error": "Unknown parameter: --concurrent-requests"}
-    ) is True
+    assert ex._is_eval_rooted_failure({"error": "Unknown parameter: --concurrent-requests"}) is True
 
 
 def test_marker_in_a_nonfatal_warning_still_classifies():
     ex = _bare_executor()
-    assert ex._is_eval_rooted_failure(
-        {"error": "", "nonfatal_warnings": ["run_eval failed with exit code 1"]}
-    ) is True
+    assert ex._is_eval_rooted_failure({"error": "", "nonfatal_warnings": ["run_eval failed with exit code 1"]}) is True
 
 
 def test_an_ordinary_benchmark_failure_is_not_eval_rooted():
     ex = _bare_executor()
-    assert ex._is_eval_rooted_failure(
-        {"error": "CUDA out of memory", "nonfatal_warnings": ["slow start"]}
-    ) is False
+    assert ex._is_eval_rooted_failure({"error": "CUDA out of memory", "nonfatal_warnings": ["slow start"]}) is False
 
 
 def test_empty_result_is_not_eval_rooted_and_does_not_raise():
@@ -82,9 +74,7 @@ def test_measure_round_config_disables_eval(tmp_path):
     )
     ex = _bare_executor()
 
-    warm = ex._write_lifecycle_config(
-        base, tmp_path / "warmup", cleanup=False, pid_dir=tmp_path, port=41713
-    )
+    warm = ex._write_lifecycle_config(base, tmp_path / "warmup", cleanup=False, pid_dir=tmp_path, port=41713)
     meas = ex._write_lifecycle_config(
         base, tmp_path / "measure", cleanup=True, pid_dir=tmp_path, port=41713, run_eval=False
     )

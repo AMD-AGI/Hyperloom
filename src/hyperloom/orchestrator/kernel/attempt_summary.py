@@ -201,8 +201,7 @@ FIELD_GLOSSARY: dict[str, str] = {
         "efficiency_pct / bound_type / arithmetic_intensity stay null."
     ),
     "collective_op": (
-        "The collective primitive that was optimized: ``all_reduce``, "
-        "``reduce_scatter`` or ``all_gather``."
+        "The collective primitive that was optimized: ``all_reduce``, ``reduce_scatter`` or ``all_gather``."
     ),
     "world_size": ("Rank count the collective was measured across; the lane requires it to match the run's TP width."),
     "bandwidth": (
@@ -711,13 +710,11 @@ def _collective_attempt_records(state: Any) -> list[dict[str, Any]]:
 
 def _classify_collective_attempt(record: dict[str, Any]) -> str:
     """Map one Collective campaign to the existing summary categories."""
-    integration_decision = str(
-        record.get("integration_decision") or ""
-    ).strip().upper()
+    integration_decision = str(record.get("integration_decision") or "").strip().upper()
     # Fall back to legacy field name for --resume compat.
-    integration_status = str(
-        record.get("patch_cleanup_status") or record.get("integration_status") or ""
-    ).strip().lower()
+    integration_status = (
+        str(record.get("patch_cleanup_status") or record.get("integration_status") or "").strip().lower()
+    )
     run_decision = str(record.get("decision") or "").strip().upper()
     run_status = str(record.get("status") or "").strip().lower()
 
@@ -727,9 +724,7 @@ def _classify_collective_attempt(record: dict[str, Any]) -> str:
         return CATEGORY_KEEP_PENDING
     if integration_status == "complete":
         return CATEGORY_ATTEMPTED_REJECTED
-    if integration_status == "pending" or (
-        record.get("kept") and record.get("requires_e2e_validation")
-    ):
+    if integration_status == "pending" or (record.get("kept") and record.get("requires_e2e_validation")):
         return CATEGORY_KEEP_PENDING
     if run_status in {"failed", "error", "crashed", "timeout"}:
         return CATEGORY_ATTEMPTED_REJECTED
@@ -748,23 +743,13 @@ def _render_collective_attempt_row(
 ) -> dict[str, Any]:
     """Render one Collective campaign as a kernel-summary row."""
     run_status = str(record.get("status") or "").strip().lower()
-    integration_decision = str(
-        record.get("integration_decision") or ""
-    ).strip().upper()
-    final_decision = integration_decision or str(
-        record.get("decision") or ""
-    ).strip().upper()
+    integration_decision = str(record.get("integration_decision") or "").strip().upper()
+    final_decision = integration_decision or str(record.get("decision") or "").strip().upper()
     micro_speedup = _to_float(record.get("kernel_speedup")) or 0.0
     e2e_gain_pct = _to_float(record.get("integration_gain_pct"))
-    patch_path = str(
-        record.get("patch_path") or record.get("patch") or ""
-    )
+    patch_path = str(record.get("patch_path") or record.get("patch") or "")
 
-    raw_error_class = str(
-        record.get("integration_error_class")
-        or record.get("error_class")
-        or ""
-    ).lower()
+    raw_error_class = str(record.get("integration_error_class") or record.get("error_class") or "").lower()
     if "timeout" in raw_error_class:
         error_class = ERROR_CLASS_TIMEOUT
     elif "compile" in raw_error_class or "build" in raw_error_class:
@@ -785,10 +770,7 @@ def _render_collective_attempt_row(
     backend_row: dict[str, Any] = {
         "backend": "forge_collective",
         "status": backend_status,
-        "attempt_id": str(
-            record.get("experiment_id")
-            or _stored_collective_attempt_id(record)
-        ),
+        "attempt_id": str(record.get("experiment_id") or _stored_collective_attempt_id(record)),
         "produced_artifact": _is_real_artifact_path(patch_path),
     }
     duration_sec = _to_float(record.get("duration_sec"))
@@ -796,9 +778,7 @@ def _render_collective_attempt_row(
         backend_row["elapsed_sec"] = duration_sec
     if error_class:
         backend_row["error_class"] = error_class
-    error_message = str(
-        record.get("integration_error") or record.get("error") or ""
-    )
+    error_message = str(record.get("integration_error") or record.get("error") or "")
     if error_message:
         backend_row["error_message"] = error_message[-1200:]
     backend_ladder = [backend_row]
@@ -806,9 +786,7 @@ def _render_collective_attempt_row(
     if category == CATEGORY_INTEGRATED:
         summary = "collective E2E KEEP integrated"
     elif category == CATEGORY_KEEP_PENDING:
-        recovery_action = str(
-            record.get("integration_recovery_action") or ""
-        ).strip()
+        recovery_action = str(record.get("integration_recovery_action") or "").strip()
         summary = (
             f"collective integration recovery pending: {recovery_action}"
             if recovery_action
@@ -834,24 +812,17 @@ def _render_collective_attempt_row(
     rejected_reason = ""
     if category == CATEGORY_ATTEMPTED_REJECTED:
         if integration_decision:
-            rejected_reason = (
-                f"collective_e2e_{integration_decision.lower()}"
-            )
+            rejected_reason = f"collective_e2e_{integration_decision.lower()}"
         elif error_message:
             rejected_reason = "collective_run_failed"
         else:
             rejected_reason = "collective_no_keep"
 
     return {
-        "kernel_id": str(
-            record.get("kernel_id")
-            or f"collective:{_stored_collective_attempt_id(record)}"
-        ),
+        "kernel_id": str(record.get("kernel_id") or f"collective:{_stored_collective_attempt_id(record)}"),
         "kernel_name": str(record.get("kernel_name") or ""),
         "kernel_category": "collective",
-        "source_file": str(
-            record.get("source_file") or record.get("target_file") or ""
-        ),
+        "source_file": str(record.get("source_file") or record.get("target_file") or ""),
         "gpu_pct": _to_float(record.get("gpu_pct")),
         "efficiency_pct": None,
         "bound_type": "",
@@ -866,20 +837,11 @@ def _render_collective_attempt_row(
         "summary": summary,
         "attempts_total": 1,
         "partial_count": 0,
-        "failure_count": int(
-            run_status in {"failed", "error", "crashed", "timeout"}
-            or bool(error_class)
-        ),
+        "failure_count": int(run_status in {"failed", "error", "crashed", "timeout"} or bool(error_class)),
         "last_decision": final_decision,
-        "last_status": str(
-            record.get("integration_result_status")
-            or record.get("status")
-            or ""
-        ),
+        "last_status": str(record.get("integration_result_status") or record.get("status") or ""),
         "last_micro_speedup": micro_speedup,
-        "last_ts": str(
-            record.get("integration_ts") or record.get("ts") or ""
-        ),
+        "last_ts": str(record.get("integration_ts") or record.get("ts") or ""),
         "verification": {
             "compile_passed": None,
             "correctness_passed": True if record.get("kept") else None,
@@ -897,11 +859,7 @@ def _render_collective_attempt_row(
         "world_size": record.get("world_size"),
         "iterations": record.get("iterations"),
         "salvaged": bool(record.get("salvaged")),
-        "workspace": str(
-            record.get("integration_workspace")
-            or record.get("workspace")
-            or ""
-        ),
+        "workspace": str(record.get("integration_workspace") or record.get("workspace") or ""),
         "patch_path": patch_path,
         "e2e_gain_pct": e2e_gain_pct,
         "speedup_basis": speedup_basis,
@@ -937,22 +895,14 @@ def build_kernel_optimization_summary(
         (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
     )
 
-    raw_attempts: dict[str, dict[str, Any]] = dict(
-        getattr(state, "kernel_opt_task_attempts", {}) or {}
-    )
+    raw_attempts: dict[str, dict[str, Any]] = dict(getattr(state, "kernel_opt_task_attempts", {}) or {})
     attempts_map: dict[str, dict[str, Any]] = {}
     for ledger_id, attempt in raw_attempts.items():
         if not isinstance(attempt, dict):
             continue
-        current_kernel_id = str(
-            attempt.get("current_kernel_id")
-            or attempt.get("kernel_id")
-            or ledger_id
-        )
+        current_kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
         previous = attempts_map.get(current_kernel_id)
-        if previous is None or str(attempt.get("last_ts") or "") >= str(
-            previous.get("last_ts") or ""
-        ):
+        if previous is None or str(attempt.get("last_ts") or "") >= str(previous.get("last_ts") or ""):
             attempts_map[current_kernel_id] = attempt
     collective_attempts = [
         record
@@ -1083,9 +1033,7 @@ def build_kernel_optimization_summary(
         counts[_category_count_key(category)] += 1
         if category == CATEGORY_ATTEMPTED_REJECTED:
             rejection_breakdown["other"] += 1
-        by_kernel.append(
-            _render_collective_attempt_row(collective_attempt, category)
-        )
+        by_kernel.append(_render_collective_attempt_row(collective_attempt, category))
 
     failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)
     top_takeaways = _build_top_takeaways(

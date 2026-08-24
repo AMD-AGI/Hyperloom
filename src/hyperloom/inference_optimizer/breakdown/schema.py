@@ -389,9 +389,7 @@ class PhaseEvent(TypedDict, total=False):
     """
 
     ts: str
-    action: (
-        str  # baseline / profile / explore / roofline / sweep / kernel_opt / integrate (+ archived: backends / params / validate_stack)
-    )
+    action: str  # baseline / profile / explore / roofline / sweep / kernel_opt / integrate (+ archived: backends / params / validate_stack)
     task_id: str
     kernel_id: str | None  # only for kernel_agent-owned actions
     status: str  # succeeded / failed

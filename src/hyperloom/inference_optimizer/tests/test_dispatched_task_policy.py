@@ -32,10 +32,7 @@ def _warm_replay_dispatch_params(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("original\n", encoding="utf-8")
     if patch_path is None:
-        patch_path = (
-            session_dir
-            / "runtime/remote_recipe/files/kernel/rewrite/patches/warm.patch"
-        )
+        patch_path = session_dir / "runtime/remote_recipe/files/kernel/rewrite/patches/warm.patch"
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(
         "\n".join(
@@ -398,8 +395,7 @@ def test_dispatched_warm_replay_accepts_declared_multi_file_targets(
         handle.write(
             "\n".join(
                 [
-                    "diff --git a/vllm/v1/attention/ops/new_fused_ops.py "
-                    "b/vllm/v1/attention/ops/new_fused_ops.py",
+                    "diff --git a/vllm/v1/attention/ops/new_fused_ops.py b/vllm/v1/attention/ops/new_fused_ops.py",
                     "--- /dev/null",
                     "+++ b/vllm/v1/attention/ops/new_fused_ops.py",
                     "@@ -0,0 +1 @@",
@@ -657,8 +653,7 @@ async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_pa
 
     assert await disp._reconcile_cancelled_policy_denied_integrate_tasks() == []
     rows = await sub.tasks.db.fetchall(
-        "SELECT idempotency_key FROM tasks WHERE kind='integrate_patch' "
-        "AND idempotency_key LIKE ?",
+        "SELECT idempotency_key FROM tasks WHERE kind='integrate_patch' AND idempotency_key LIKE ?",
         ("approved-prop-once-reconcile%",),
     )
     assert len(rows) == 1

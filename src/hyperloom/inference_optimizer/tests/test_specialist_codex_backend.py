@@ -303,7 +303,12 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
     backend = dispatcher._agent_backend()
     if backend == AGENT_BACKEND_CODEX:
         import os as _os
-        base_env = {k: v for k, v in _os.environ.items() if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST}
+
+        base_env = {
+            k: v
+            for k, v in _os.environ.items()
+            if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST
+        }
         cmd, _ = dispatcher._build_codex_launch(
             prompt_file=prompt_file,
             workspace=workspace,

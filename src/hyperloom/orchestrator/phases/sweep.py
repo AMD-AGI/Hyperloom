@@ -62,8 +62,7 @@ class SweepPhase(PhaseHandler):
         denied = self._time_budget_denial_for_action("conc_sweep")
         if denied is not None:
             log.info(
-                "SWEEP entry (from=%s): conc_sweep cannot fit the session budget "
-                "(%s); recording terminal skip.",
+                "SWEEP entry (from=%s): conc_sweep cannot fit the session budget (%s); recording terminal skip.",
                 from_phase or "<unknown>",
                 denied,
             )

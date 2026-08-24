@@ -109,7 +109,7 @@ several intents in the same turn. Free-text replies are dropped.
 Tool input shape:
 
   {{
-    "intent_type": "<one of {', '.join(sorted(t.value for t in allowed_intents))}>",
+    "intent_type": "<one of {", ".join(sorted(t.value for t in allowed_intents))}>",
     "payload": {{ /* per-intent fields — see tool description */ }}
   }}
 
@@ -691,7 +691,9 @@ class ClaudeBackend:
         default_effort = "medium" if self.conversational else "low"
         diag["reasoning_effort"] = kwargs.get(
             "effort",
-            getattr(options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()),
+            getattr(
+                options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()
+            ),
         )
         diag["thinking"] = kwargs.get(
             "thinking",

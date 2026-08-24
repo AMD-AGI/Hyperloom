@@ -11,6 +11,9 @@ Output schema (``score`` return value)::
 
     {"scale": "0-10", "models": {"<slug>": {"<name>": {"score": <0-10>, "reason": "<str>"}}}, "errors": {...}}
 
+Each proposal is scored under a stable ``proposal_<index>`` id in the model
+prompt; results are keyed by the proposal's display ``name`` in the output.
+
 Test seam: pass ``client_factory`` to bypass real client construction.
 """
 
@@ -20,7 +23,6 @@ import asyncio
 import json
 import logging
 import math
-import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +34,6 @@ from hyperloom.common.llm_config import (
     astream_chat_completion_text,
     get_async_openai_client,
 )
-from hyperloom.common.jsonio import extract_first_json_with_key
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
 from ..trace.conversation_trace import ConversationRecord, append_conversation
@@ -65,22 +66,66 @@ large win; 0 = irrelevant or likely harmful. Be calibrated, not generous.
 
 Output ONLY one compact JSON object, no prose, no markdown fence needed:
 
-{"scores": {"<proposal_name>": {"score": <0-10 number>, "reason": "<= 15 words"}}}
+{"scores": {"<proposal_id>": {"score": <0-10 number>, "reason": "<= 15 words"}}}
 
 Rules:
-- One entry per proposal, keyed by its exact "name".
+- One entry per proposal, keyed by its exact "id" (not the human-readable name).
 - "reason" MUST be <= 15 words. Keep it terse to keep the reply short.
 - Do not add keys other than "score" and "reason".
 """.strip()
 
 
-# Bare top-level "scores" object.
-_BARE_JSON_RE = re.compile(r"(\{.*?\"scores\".*\})", re.DOTALL)
-
-
 def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid ``{"scores": {...}}`` object out of a reply."""
-    return extract_first_json_with_key(text, "scores", _BARE_JSON_RE)
+    """Pull the last valid ``{"scores": {...}}`` object out of a reply."""
+    from hyperloom.common.jsonio import extract_last_json_with_key
+
+    return extract_last_json_with_key(text, "scores")
+
+
+@dataclass(frozen=True)
+class _ScoringProposal:
+    """One proposal prepared for multi-model scoring."""
+
+    stable_id: str
+    output_name: str
+    label_name: str
+    proposal: dict[str, Any]
+
+
+def _prepare_scoring_proposals(proposals: list[dict[str, Any]]) -> list[_ScoringProposal]:
+    """Assign stable ids and reject duplicate display names.
+
+    Args:
+        proposals: Candidate variants to score.
+
+    Returns:
+        Prepared scoring entries with stable ids and unique label names.
+
+    Raises:
+        ValueError: When two proposals share the same canonical display name.
+    """
+    seen_labels: set[str] = set()
+    out: list[_ScoringProposal] = []
+    for i, proposal in enumerate(proposals):
+        raw_name = proposal.get("name")
+        if raw_name is not None and str(raw_name).strip():
+            output_name = str(raw_name)
+            label_name = output_name.strip()
+        else:
+            output_name = f"proposal_{i}"
+            label_name = output_name
+        if label_name in seen_labels:
+            raise ValueError(f"duplicate proposal name: {label_name!r}")
+        seen_labels.add(label_name)
+        out.append(
+            _ScoringProposal(
+                stable_id=f"proposal_{i}",
+                output_name=output_name,
+                label_name=label_name,
+                proposal=proposal,
+            )
+        )
+    return out
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
@@ -105,8 +150,11 @@ def _coerce_score(raw: Any) -> float | None:
 
     Returns:
         The score clamped to ``[0, 10]``, or ``None`` if ``raw`` is not numeric
-        or is NaN. Infinities are clamped to the bounds.
+        or is NaN. Infinities are clamped to the bounds. Boolean values are
+        rejected (they would otherwise coerce via ``float(True) == 1.0``).
     """
+    if isinstance(raw, bool):
+        return None
     try:
         val = float(raw)
     except (TypeError, ValueError):
@@ -119,31 +167,32 @@ def _coerce_score(raw: Any) -> float | None:
 def _normalise_model_scores(
     parsed: dict[str, Any],
     *,
-    proposal_names: list[str],
+    scoring_entries: list[_ScoringProposal],
 ) -> dict[str, dict[str, Any]]:
-    """Project parsed ``{"scores": {...}}`` onto known names (drop unknowns, clamp [0,10], truncate reasons).
+    """Project parsed ``{"scores": {...}}`` onto known stable ids.
 
     Args:
         parsed: A parsed ``{"scores": {...}}`` dict from a model reply.
-        proposal_names: Names of the proposals that were actually scored;
-            scores for any other name are discarded.
+        scoring_entries: Prepared proposals keyed by stable id in the prompt.
 
     Returns:
-        A mapping of proposal name to its clamped score and truncated reason.
+        A mapping of proposal display name to its clamped score and truncated
+        reason.
     """
     out: dict[str, dict[str, Any]] = {}
     scores = parsed.get("scores")
     if not isinstance(scores, dict):
         return out
-    known = set(proposal_names)
-    for name, entry in scores.items():
-        key = str(name)
+    id_to_name = {entry.stable_id: entry.output_name for entry in scoring_entries}
+    known = set(id_to_name)
+    for proposal_id, entry in scores.items():
+        key = str(proposal_id)
         if key not in known or not isinstance(entry, dict):
             continue
         score = _coerce_score(entry.get("score"))
         if score is None:
             continue
-        out[key] = {
+        out[id_to_name[key]] = {
             "score": score,
             "reason": _clip(entry.get("reason"), limit=160),
         }
@@ -184,6 +233,8 @@ class ProposalScorer:
         unconfigured environment degrades per-call rather than at boot.
         """
         self.models = tuple(m for m in (str(x).strip() for x in (self.models or ())) if m)
+        if len(self.models) != len(set(self.models)):
+            raise ValueError("duplicate scorer model slug(s) in models")
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
@@ -215,13 +266,13 @@ class ProposalScorer:
         self,
         *,
         gap: dict[str, Any],
-        proposals: list[dict[str, Any]],
+        scoring_entries: list[_ScoringProposal],
     ) -> str:
         """Build ONE group-scoring prompt covering every proposal.
 
         Args:
             gap: The gap being addressed (domain, symptom, evidence, etc.).
-            proposals: Candidate variants to embed in the prompt.
+            scoring_entries: Prepared proposals with stable ids.
 
         Returns:
             The assembled prompt text describing the gap and proposals.
@@ -238,9 +289,10 @@ class ProposalScorer:
 
         lines.append("")
         lines.append("=== Proposals to score ===")
-        for i, p in enumerate(proposals):
-            name = str(p.get("name") or f"proposal_{i}")
-            lines.append(f"- name: {name}")
+        for entry in scoring_entries:
+            p = entry.proposal
+            lines.append(f"- id: {entry.stable_id}")
+            lines.append(f"  name: {entry.label_name}")
             if p.get("extra_args"):
                 lines.append(f"  extra_args: {_clip(p.get('extra_args'))}")
             if p.get("extra_envs"):
@@ -255,7 +307,7 @@ class ProposalScorer:
         self,
         model: str,
         prompt: str,
-        proposal_names: list[str],
+        scoring_entries: list[_ScoringProposal],
         *,
         task_id: str | None = None,
         tick: int | None = None,
@@ -266,7 +318,7 @@ class ProposalScorer:
         Args:
             model: The model slug to score with.
             prompt: The base scoring prompt (instructions are appended).
-            proposal_names: Names of the proposals being scored.
+            scoring_entries: Prepared proposals with stable ids.
 
         Returns:
             A mapping of proposal name to its normalised score and reason.
@@ -348,7 +400,7 @@ class ProposalScorer:
         parsed = _extract_scores_json(text)
         if parsed is None:
             raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
-        return _normalise_model_scores(parsed, proposal_names=proposal_names)
+        return _normalise_model_scores(parsed, scoring_entries=scoring_entries)
 
     def _trace_scorer_llm_call(
         self,
@@ -538,15 +590,22 @@ class ProposalScorer:
             return {"scale": "0-10", "models": {}, "errors": {}}
         if len(proposals) > _MAX_PROPOSALS_SCORED:
             proposals = proposals[:_MAX_PROPOSALS_SCORED]
-        proposal_names = [str(p.get("name") or f"proposal_{i}") for i, p in enumerate(proposals)]
-        prompt = self._build_prompt(gap=gap, proposals=proposals)
+        try:
+            scoring_entries = _prepare_scoring_proposals(proposals)
+        except ValueError as exc:
+            return {
+                "scale": "0-10",
+                "models": {},
+                "errors": {"input": format_exc_brief(exc, limit=200)},
+            }
+        prompt = self._build_prompt(gap=gap, scoring_entries=scoring_entries)
 
         results = await asyncio.gather(
             *(
                 self._score_one_model(
                     m,
                     prompt,
-                    proposal_names,
+                    scoring_entries,
                     task_id=task_id,
                     tick=tick,
                     phase=phase,

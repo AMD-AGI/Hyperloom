@@ -445,10 +445,7 @@ def test_session_kernel_opt_outcome_rollup():
 def test_collective_attempt_identity_normalizes_and_tolerates_absence():
     """A blank identity degrades to ``""`` instead of aborting the report."""
     assert (
-        kas._stored_collective_attempt_id(
-            {"collective_attempt_id": " collective-attempt-1 "}
-        )
-        == "collective-attempt-1"
+        kas._stored_collective_attempt_id({"collective_attempt_id": " collective-attempt-1 "}) == "collective-attempt-1"
     )
 
     for record in ({}, {"collective_attempt_id": "   "}):
@@ -458,29 +455,17 @@ def test_collective_attempt_identity_normalizes_and_tolerates_absence():
 def test_collective_attempt_records_drops_unusable_history():
     """Unusable Collective rows are skipped, never raised."""
     assert kas._collective_attempt_records(SimpleNamespace()) == []
-    assert (
-        kas._collective_attempt_records(
-            SimpleNamespace(collective_attempts={"not": "a list"})
-        )
-        == []
-    )
+    assert kas._collective_attempt_records(SimpleNamespace(collective_attempts={"not": "a list"})) == []
     assert kas._collective_attempt_records(
         SimpleNamespace(collective_attempts=[{"collective_attempt_id": "a"}, 1])
     ) == [{"collective_attempt_id": "a"}]
-    assert (
-        kas._collective_attempt_records(
-            SimpleNamespace(collective_attempts=[{"status": "complete"}])
-        )
-        == []
-    )
+    assert kas._collective_attempt_records(SimpleNamespace(collective_attempts=[{"status": "complete"}])) == []
 
     original = [
         {"collective_attempt_id": "a", "status": "complete"},
         {"collective_attempt_id": "b", "status": "failed"},
     ]
-    records = kas._collective_attempt_records(
-        SimpleNamespace(collective_attempts=original)
-    )
+    records = kas._collective_attempt_records(SimpleNamespace(collective_attempts=original))
     assert records == original
     assert records[0] is not original[0]
     records[0]["status"] = "changed"
@@ -622,10 +607,7 @@ def test_render_collective_attempt_row_integrated_fields():
     assert row["speedup_basis"] == "e2e"
     assert row["category"] == kas.CATEGORY_INTEGRATED
     assert row["outcome_class"] == kas.OUTCOME_SUCCESS
-    assert row["summary"] == (
-        "collective E2E KEEP integrated; micro_speedup=1.235x; "
-        "e2e_gain=2.346%"
-    )
+    assert row["summary"] == ("collective E2E KEEP integrated; micro_speedup=1.235x; e2e_gain=2.346%")
     assert row["last_decision"] == "KEEP"
     assert row["last_status"] == "accepted"
     assert row["last_micro_speedup"] == 1.2346
@@ -875,32 +857,18 @@ def test_build_summary_collective_filtering_and_kernel_deduplication(
     }
     assert summary["rejection_breakdown"]["other"] == 1
     assert summary["kernel_opt_outcome"] == kas.OUTCOME_SUCCESS
-    assert "wrong-key-kernel" not in {
-        row["kernel_id"] for row in summary["by_kernel"]
-    }
+    assert "wrong-key-kernel" not in {row["kernel_id"] for row in summary["by_kernel"]}
 
-    collective_rows = [
-        row for row in summary["by_kernel"] if row.get("lane") == "collective"
-    ]
-    assert [
-        row["collective_attempt_id"] for row in collective_rows
-    ] == [
+    collective_rows = [row for row in summary["by_kernel"] if row.get("lane") == "collective"]
+    assert [row["collective_attempt_id"] for row in collective_rows] == [
         "collective-integrated",
         "collective-reverted",
     ]
     assert all(row["kernel_id"] == "shared-kernel" for row in collective_rows)
-    assert sum(
-        row["kernel_id"] == "shared-kernel" for row in summary["by_kernel"]
-    ) == 2
+    assert sum(row["kernel_id"] == "shared-kernel" for row in summary["by_kernel"]) == 2
 
-    unattempted_rows = [
-        row
-        for row in summary["by_kernel"]
-        if row["category"] == kas.CATEGORY_UNATTEMPTED
-    ]
-    assert {
-        row["kernel_id"] for row in unattempted_rows
-    } == {
+    unattempted_rows = [row for row in summary["by_kernel"] if row["category"] == kas.CATEGORY_UNATTEMPTED]
+    assert {row["kernel_id"] for row in unattempted_rows} == {
         "status-skipped-kernel",
         "decision-skipped-kernel",
     }
