@@ -22,6 +22,7 @@ logical ``0..N-1`` view Ray exposes instead). Off the Ray path (multi-node /
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ from datetime import datetime, timezone
 from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
+
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
@@ -77,6 +81,21 @@ def _parse_gpu_list(raw: str) -> list[int]:
     return out
 
 
+def _explicit_pool() -> list[int] | None:
+    """Resolve the operator's explicit GPU pool, or ``None`` when unset.
+
+    A set-but-unparseable value yields ``[]`` so callers fail closed instead of
+    widening to the auto-resolved pool the operator meant to override.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
+    if raw is None:
+        return None
+    ids = _parse_gpu_list(raw)
+    if not ids:
+        log.error("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES=%r has no valid GPU ids", raw)
+    return ids
+
+
 def _visible_device_mask() -> tuple[list[int], bool]:
     """Resolve the process's visible-GPU mask as absolute device ids.
 
@@ -109,7 +128,8 @@ def resolve_gpu_specialist_devices(
     1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool,
        capped to ``capacity``. The operator has already carved a
        specialist-only set here, so it is trusted verbatim and the serving
-       cards are *not* subtracted again.
+       cards are *not* subtracted again. Set but unparseable yields ``[]``
+       rather than falling through to the wider pool it was meant to override.
     2. The process visible-device mask (``ROCR_VISIBLE_DEVICES``, then
        ``HIP``/``CUDA``), serving cards carved off the front, capped to
        ``capacity``. The leased ids are written verbatim into each specialist
@@ -144,18 +164,8 @@ def resolve_gpu_specialist_devices(
     cap = max(0, int(capacity or 0))
     if cap <= 0:
         return []
-    explicit_raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
-    if explicit_raw is not None:
-        explicit = _parse_gpu_list(explicit_raw)
-        if not explicit:
-            import logging as _logging
-            _logging.getLogger(__name__).error(
-                "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES is set to %r but no valid "
-                "GPU ids could be parsed; failing closed (returning no GPUs for specialists). "
-                "Correct the value or unset the variable to use the auto-resolved pool.",
-                explicit_raw,
-            )
-            return []
+    explicit = _explicit_pool()
+    if explicit is not None:
         return explicit[:cap]
     serving = max(0, int(serving_tp or 0))
     mask_ids, mask_present = _visible_device_mask()
@@ -176,7 +186,7 @@ def resolve_whole_machine_devices() -> list[int]:
     Id-source precedence mirrors :func:`resolve_gpu_specialist_devices`:
 
     1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool
-       (used verbatim, uncapped here).
+       (used verbatim, uncapped here); set but unparseable yields ``[]``.
     2. The process visible-device mask (``ROCR_VISIBLE_DEVICES`` →
        ``HIP``/``CUDA``) — used verbatim.
     3. No mask set → ``range(detect_gpu_count())`` (the machine's detected GPU
@@ -186,17 +196,8 @@ def resolve_whole_machine_devices() -> list[int]:
         The absolute GPU ids available to a framework whole-machine lease;
         ``[]`` when the mask is set-but-empty or nothing can be resolved.
     """
-    explicit_raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
-    if explicit_raw is not None:
-        explicit = _parse_gpu_list(explicit_raw)
-        if not explicit:
-            import logging as _logging
-            _logging.getLogger(__name__).error(
-                "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES is set to %r but no valid "
-                "GPU ids could be parsed; failing closed (returning no GPUs).",
-                explicit_raw,
-            )
-            return []
+    explicit = _explicit_pool()
+    if explicit is not None:
         return explicit
     mask_ids, mask_present = _visible_device_mask()
     if mask_present:

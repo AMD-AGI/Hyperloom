@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.bus.gpu_pool import resolve_gpu_specialist_devices, SpecialistGpuPool
+from hyperloom.orchestrator.bus.gpu_pool import (
+    SpecialistGpuPool,
+    resolve_gpu_specialist_devices,
+    resolve_whole_machine_devices,
+)
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
 _MASK_VARS = (
@@ -111,7 +116,6 @@ def test_explicit_pool_all_invalid_fails_closed(monkeypatch) -> None:
 
 def test_whole_machine_explicit_pool_all_invalid_fails_closed(monkeypatch) -> None:
     """resolve_whole_machine_devices also fails closed on an unusable explicit pool."""
-    from hyperloom.orchestrator.bus.gpu_pool import resolve_whole_machine_devices
     monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "-1,-2")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     result = resolve_whole_machine_devices()
@@ -121,8 +125,6 @@ def test_whole_machine_explicit_pool_all_invalid_fails_closed(monkeypatch) -> No
 @pytest.mark.asyncio
 async def test_try_acquire_same_holder_task_is_idempotent(tmp_path) -> None:
     """Repeated try_acquire for the same holder_id + task_id returns the existing lease."""
-    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-
     db = SqliteConnection(tmp_path / "test.db")
     pool = SpecialistGpuPool(db, gpu_ids=[0, 1, 2, 3])
 
