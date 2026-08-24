@@ -144,8 +144,18 @@ def resolve_gpu_specialist_devices(
     cap = max(0, int(capacity or 0))
     if cap <= 0:
         return []
-    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
-    if explicit:
+    explicit_raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
+    if explicit_raw is not None:
+        explicit = _parse_gpu_list(explicit_raw)
+        if not explicit:
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES is set to %r but no valid "
+                "GPU ids could be parsed; failing closed (returning no GPUs for specialists). "
+                "Correct the value or unset the variable to use the auto-resolved pool.",
+                explicit_raw,
+            )
+            return []
         return explicit[:cap]
     serving = max(0, int(serving_tp or 0))
     mask_ids, mask_present = _visible_device_mask()
@@ -176,8 +186,17 @@ def resolve_whole_machine_devices() -> list[int]:
         The absolute GPU ids available to a framework whole-machine lease;
         ``[]`` when the mask is set-but-empty or nothing can be resolved.
     """
-    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
-    if explicit:
+    explicit_raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
+    if explicit_raw is not None:
+        explicit = _parse_gpu_list(explicit_raw)
+        if not explicit:
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES is set to %r but no valid "
+                "GPU ids could be parsed; failing closed (returning no GPUs).",
+                explicit_raw,
+            )
+            return []
         return explicit
     mask_ids, mask_present = _visible_device_mask()
     if mask_present:
@@ -239,6 +258,9 @@ class SpecialistGpuPool:
     ) -> GpuLease | None:
         """Acquire ``count`` GPU ids or return ``None`` if the pool is full.
 
+        Same holder_id + task_id is idempotent: a live lease is returned as-is
+        (with its TTL refreshed) rather than allocating additional GPUs.
+
         Args:
             count: Number of GPU ids to acquire.
             holder_id: Identifier of the lease holder.
@@ -265,6 +287,27 @@ class SpecialistGpuPool:
                 "DELETE FROM gpu_leases WHERE expires_at <= ?",
                 (now_iso,),
             )
+            # Same-holder/task acquire is idempotent: return the existing lease
+            # (with a refreshed TTL) rather than grabbing another set of GPUs.
+            cur.execute(
+                "SELECT gpu_id, acquired_at FROM gpu_leases WHERE holder_id=? AND task_id=?",
+                (holder_id, task_id),
+            )
+            existing_rows = cur.fetchall()
+            if existing_rows:
+                existing_ids = tuple(int(r["gpu_id"]) for r in existing_rows)
+                acquired_at = existing_rows[0]["acquired_at"]
+                cur.execute(
+                    "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE holder_id=? AND task_id=?",
+                    (expires_iso, now_iso, holder_id, task_id),
+                )
+                return GpuLease(
+                    holder_id=holder_id,
+                    task_id=task_id,
+                    gpu_ids=existing_ids,
+                    acquired_at=acquired_at,
+                    expires_at=expires_iso,
+                )
             placeholders = ",".join("?" * len(self.gpu_ids))
             cur.execute(  # nosec B608 - placeholders string is generated from configured GPU id count.
                 f"SELECT gpu_id FROM gpu_leases WHERE gpu_id IN ({placeholders})",  # nosec B608 - generated placeholders only.
