@@ -10,18 +10,13 @@ specialist / LLM / default_grid proposals collapses to the same row.
 The on-disk fingerprint is content-only: sorted ``(flag, value)`` arg pairs +
 sorted ``extra_envs`` pairs, plus the removal/replacement controls
 (``remove_args``, ``unset_envs``, ``args_mode``) and a canonicalised
-``runtime_override`` when any of those is non-default.  Discriminators such as
+``runtime_override`` when any of those is non-default. Discriminators such as
 framework / tp / workload_signature are kept as side metadata rather than folded
 into the hash.
 
-Pairing semantics: repeated flags collapse to the last occurrence (last-wins).
-Two arg strings that assign the same set of flag→value bindings, regardless of
-order, produce the same fingerprint; strings that assign *different* values to
-any flag produce different fingerprints.
-
-**Ledger note**: changing the pairing algorithm invalidates all fingerprint keys
-already persisted in ``explore_search.tested``.  Any session resumed after this
-change will re-bench its full explored history.
+Args are hashed as flag/value pairs, not as a flat token list: sorting tokens
+flat made ``--a 1 --b 2`` and ``--a 2 --b 1`` collide. Repeated flags collapse
+to the last occurrence, matching ``_shell_safe_dedupe``.
 """
 
 from __future__ import annotations
@@ -29,9 +24,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 from typing import Any
-
-from ._grid_server_args import canonical_args_pairs
 
 
 __all__ = [
@@ -49,6 +43,35 @@ def _coerce_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(v) for v in value if str(v).strip()]
     return [str(value)] if str(value).strip() else []
+
+
+def _args_pairs(args_text: str) -> list[list[str]]:
+    """Return sorted last-wins ``[flag, value]`` / ``[flag]`` pairs for args.
+
+    Sorting by flag name keeps the hash independent of the order distinct flags
+    appear in, while keeping each value bound to its own flag.
+    """
+    try:
+        tokens = shlex.split(args_text)
+    except ValueError:
+        # Shell-parse failure: fall back to whitespace split.
+        tokens = args_text.split()
+    last: dict[str, list[str]] = {}
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if not token.startswith("--"):
+            last[token] = [token]
+        elif "=" in token:
+            flag, _, value = token.partition("=")
+            last[flag] = [flag, value]
+        elif i < len(tokens) and not tokens[i].startswith("--"):
+            last[token] = [token, tokens[i]]
+            i += 1
+        else:
+            last[token] = [token]
+    return sorted(last.values(), key=lambda pair: pair[0])
 
 
 def _canonical_runtime_override(value: Any) -> Any:
@@ -84,11 +107,10 @@ def canonical_fingerprint(
     """Return the canonical 16-char fingerprint for a variant.
 
     Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
-    delegates here. Normalization: args parsed into sorted ``[flag, value]``
-    pairs (last-wins for repeated flags); envs ``(str(k), str(v))`` sorted by
-    key; removal / replacement controls sorted by value; a non-empty
-    ``runtime_override`` folded as an order-independent canonical dict;
-    16-char SHA-1.
+    delegates here. Normalization: args to sorted last-wins ``[flag, value]``
+    pairs; envs ``(str(k), str(v))`` sorted by key; removal / replacement
+    controls sorted by value; a non-empty ``runtime_override`` folded as an
+    order-independent canonical dict; 16-char SHA-1.
 
     Args:
         extra_args: The variant's extra server args string, or ``None``.
@@ -104,7 +126,7 @@ def canonical_fingerprint(
     Returns:
         The canonical 16-char SHA-1 content fingerprint for the variant.
     """
-    args_pairs = canonical_args_pairs(str(extra_args or ""))
+    args_pairs = _args_pairs(str(extra_args or ""))
     env_pairs = sorted((str(k), str(v)) for k, v in (extra_envs or {}).items())
     mode = str(args_mode or "append").strip().lower()
     if mode not in {"append", "replace"}:
