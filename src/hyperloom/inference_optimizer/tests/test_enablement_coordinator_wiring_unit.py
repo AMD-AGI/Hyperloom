@@ -1300,3 +1300,62 @@ async def test_rearm_advanced_merges_args_by_flag_not_substring():
     assert "--enable-chunked-prefill" in merged
     assert "--enable-chunked" in merged
     assert merged[merged.index("--tp") + 1] == "8"
+
+
+# ---- advanced: artifact stacking (issue 2) ----------------------------------
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_stacks_artifacts(monkeypatch):
+    """Artifacts applied in an advanced round must be recorded in kept_artifacts
+    so that _replay_base_artifacts re-installs them at the start of the next round.
+    Before the fix, the advanced result had no 'artifacts_applied' key, so
+    _stack_kept_artifacts() always saw an empty list."""
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_stall_streak=0)
+    art = {
+        "target": "/sgl-workspace/sglang/srt/server_args.py",
+        "rel_target": "srt/server_args.py",
+        "kind": "python_source",
+        "existed": True,
+        "backup": "/s/runs/integrate_patch/t1/artifact_backups/000_server_args.py.bak",
+        "source": "/s/runs/specialist/spec-1/worktree/artifacts/server_args.py",
+    }
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": [],
+            "artifacts_applied": [art],
+            "enablement_launch_log": "new gap after artifact fix",
+        }
+    )
+    st = fake.shared_state
+    assert len(st.enablement.kept_artifacts) == 1
+    assert st.enablement.kept_artifacts[0]["target"] == "/sgl-workspace/sglang/srt/server_args.py"
+    assert st.enablement.stall_streak == 0
+
+
+@pytest.mark.asyncio
+async def test_rearm_advanced_deduplicates_artifacts(monkeypatch):
+    """A base artifact present from a prior round is not double-counted."""
+    art = {
+        "target": "/sgl-workspace/sglang/srt/server_args.py",
+        "rel_target": "srt/server_args.py",
+        "kind": "python_source",
+        "source": "/s/runs/specialist/spec-1/worktree/artifacts/server_args.py",
+    }
+    fake = _enqueue_self(enablement_inflight_task_id="spec-2")
+    # Pre-load the prior round's artifact into state.
+    fake.shared_state.enablement.kept_artifacts = [art]
+    # Second advanced round returns the same artifact (the base was re-applied).
+    fake._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": [],
+            "artifacts_applied": [art],
+            "enablement_launch_log": "yet another gap",
+        }
+    )
+    assert len(fake.shared_state.enablement.kept_artifacts) == 1

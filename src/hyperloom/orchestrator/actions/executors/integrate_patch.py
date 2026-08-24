@@ -2133,20 +2133,6 @@ class IntegratePatchExecutor:
                 )
                 patch_paths = prefix + list(patch_paths)
 
-        # Whole-file artifacts kept by prior rounds. The revert of any later
-        # candidate restores this tree to HEAD, which takes an uncommitted
-        # artifact with it, so each round re-installs the accepted set first.
-        base_artifacts = params.get("enablement_base_artifacts")
-        if bool(params.get("enablement")) and isinstance(base_artifacts, list):
-            for art in base_artifacts:
-                source = Path(str(art.get("source") or ""))
-                target = Path(str(art.get("target") or ""))
-                if not source.is_file():
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                log.info("integrate_patch: re-installed base artifact %s", target)
-
         config_changes = dict(params.get("config_changes") or {})
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
@@ -2282,6 +2268,7 @@ class IntegratePatchExecutor:
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
+                self._replay_base_artifacts(params)
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
                 ctx._ip_output_root = output_root  # type: ignore[attr-defined]
@@ -2312,6 +2299,13 @@ class IntegratePatchExecutor:
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
+            # Forward grounding-drop details so framework.py can surface them in
+            # the next round's mandate.  The field lives on done_payload (written
+            # by runner.py) and must be forwarded here because _no_patches is the
+            # concrete dict framework.py reads via _maybe_rearm_enablement.
+            grounding_drops = (done_payload or {}).get("patches_dropped_by_grounding")
+            if isinstance(grounding_drops, list) and grounding_drops:
+                _no_patches["patches_dropped_by_grounding"] = grounding_drops
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
@@ -2447,6 +2441,8 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "config_changes_applied": {},
             }
+
+        self._replay_base_artifacts(params)
 
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
@@ -2838,10 +2834,7 @@ class IntegratePatchExecutor:
             if advanced:
                 stacked_patches = [str(p) for p in applied]
                 new_log = str(bench_result.get("error") or "")
-                # Artifacts survive an advance for the same reason patches do:
-                # they are what cleared the prior gap, and the next round stacks
-                # them as a base. Reverting them here discarded the progress.
-                artifacts_reverted: list[str] = []
+                artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,
@@ -2858,6 +2851,7 @@ class IntegratePatchExecutor:
                         "specialist_task_id": specialist_task_id,
                         "patches_applied": stacked_patches,
                         "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_applied": applied_artifacts,
                         "artifacts_reverted": artifacts_reverted,
                         "config_changes_applied": config_changes_applied,
                         "extra_envs_applied": extra_envs_applied,
@@ -3991,6 +3985,62 @@ class IntegratePatchExecutor:
                 )
                 break
         return reverted
+
+    def _replay_base_artifacts(self, params: dict[str, Any]) -> None:
+        """Re-install artifacts that prior enablement rounds accepted.
+
+        Called twice per round: in launch-only mode (before the early return, so
+        the probe boots against the accepted stack) and after the framework stash
+        (so the re-install is not immediately swept up by ``_git_stash_if_dirty``).
+        The replay does not feed ``applied_artifacts``; base artifacts are the
+        stable base and must not be reverted when this round's candidate is rolled back.
+
+        Each entry is validated before installation:
+        - ``target`` must resolve inside an allowlisted framework root
+          (via :func:`_resolve_artifact_target`).
+        - ``source`` must resolve inside the session directory.
+
+        Entries that fail either check are skipped with a warning rather than
+        aborting the round.
+        """
+        if not bool(params.get("enablement")):
+            return
+        base_artifacts = params.get("enablement_base_artifacts")
+        if not isinstance(base_artifacts, list):
+            return
+        for art in base_artifacts:
+            if not isinstance(art, dict):
+                continue
+            source_str = str(art.get("source") or "").strip()
+            target_str = str(art.get("target") or "").strip()
+            if not source_str or not target_str:
+                continue
+            source = Path(source_str)
+            if not source.is_file():
+                log.warning("integrate_patch: base artifact source not found: %s", source)
+                continue
+            try:
+                source_resolved = source.resolve()
+            except (OSError, RuntimeError):
+                log.warning("integrate_patch: base artifact source unresolvable: %s", source)
+                continue
+            if not _is_within(source_resolved, self.session_dir.resolve()):
+                log.warning(
+                    "integrate_patch: base artifact source %s escapes session dir; skipping",
+                    source,
+                )
+                continue
+            resolved = _resolve_artifact_target(target_str)
+            if resolved is None:
+                log.warning(
+                    "integrate_patch: base artifact target %r not in allowlisted root; skipping",
+                    target_str,
+                )
+                continue
+            target, _ = resolved
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            log.info("integrate_patch: re-installed base artifact %s", target)
 
     def _apply_artifacts(
         self,
