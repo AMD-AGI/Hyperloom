@@ -1228,8 +1228,8 @@ def test_multi_file_kernel_targets_share_one_framework_root(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
-        lambda: str(framework_root),
+        "hyperloom.orchestrator.framework.paths._warm_replay_kernel_patch_roots",
+        lambda: (str(framework_root),),
     )
 
     targets = coord.phase_prelude._resolve_kernel_target_paths(
@@ -1241,7 +1241,7 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     assert targets == [str(existing), str(added)]
 
 
-def test_kernel_target_rejects_stale_root_when_explicit_root_does_not_match(
+def test_kernel_target_uses_allowlist_when_framework_root_does_not_match(
     tmp_path,
     monkeypatch,
 ):
@@ -1269,12 +1269,19 @@ def test_kernel_target_rejects_stale_root_when_explicit_root_does_not_match(
         lambda: (str(stale_root),),
     )
 
-    entry = {"patch_path": str(patch)}
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
-    assert entry["resolution_reason"] == "explicit_root_target_mismatch"
+    entry = {
+        "patch_path": str(patch),
+        "resolution_error": "old failure",
+        "resolution_reason": "explicit_root_target_mismatch",
+    }
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [
+        str(stale_target)
+    ]
+    assert "resolution_error" not in entry
+    assert "resolution_reason" not in entry
 
 
-def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monkeypatch):
+def test_create_only_kernel_target_requires_known_kernel_root(tmp_path, monkeypatch):
     coord = _make_coord(tmp_path)
     patch = tmp_path / "create.patch"
     patch.write_text(
@@ -1328,6 +1335,33 @@ def test_restored_kernel_plan_reresolves_root_before_blocking(
         coord.shared_state
     ) is None
     assert calls == [[entry]]
+
+
+def test_kernel_plan_blocks_on_any_unresolved_patch_root(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.framework.paths import WarmReplayRootResolution
+
+    coord = _make_coord(tmp_path)
+    entry = {
+        "column": "fusion",
+        "patch_path": str(tmp_path / "fusion.patch"),
+    }
+    coord.shared_state.warm_kernel_kb_plan = [entry]
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_warm_replay_kernel_root",
+        lambda **_kwargs: WarmReplayRootResolution(
+            root="",
+            source="",
+            reason="ambiguous_root",
+            allowlist=("/aiter-a", "/aiter-b"),
+        ),
+    )
+
+    outcome = coord.phase_prelude._warm_replay_kernel_root_block_reason(
+        coord.shared_state
+    )
+
+    assert outcome is not None
+    assert outcome["reason"] == "ambiguous_root"
 
 
 def test_multi_file_kernel_snapshot_restores_modify_and_create(tmp_path):

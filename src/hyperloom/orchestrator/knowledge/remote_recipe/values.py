@@ -1257,9 +1257,10 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
         envs = section.get("extra_envs")
         if isinstance(envs, Mapping) and envs:
             return True
-        patches = section.get("patches")
-        if isinstance(patches, list) and patches:
-            return True
+        for material in ("patches", "artifacts"):
+            items = section.get(material)
+            if isinstance(items, list) and items:
+                return True
     timeline = value.get("patch_timeline")
     if isinstance(timeline, list) and timeline:
         return True

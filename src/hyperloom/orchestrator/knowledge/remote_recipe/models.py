@@ -46,6 +46,17 @@ class RemoteRecipeValidationError(ValueError):
     """A locally-built remote recipe violates the KB Store contract."""
 
 
+def _scope_int(value: Any) -> int | None:
+    """Normalize an integer scope value echoed through a URL query."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 @dataclass(frozen=True)
 class RecipeScope:
     """The partition a Recipe belongs to in the KB Store.
@@ -119,7 +130,25 @@ class RecipeScope:
 
     def matches(self, value: Any) -> bool:
         """True when a View's recorded scope is exactly this one."""
-        return isinstance(value, dict) and value == self.as_dict()
+        expected = self.as_dict()
+        return (
+            isinstance(value, dict)
+            and set(value) == set(expected)
+            and value.get("kernel_optimizer") == self.kernel_optimizer
+            and self.matches_workload_shape(value)
+        )
+
+    def matches_workload_shape(self, value: Any) -> bool:
+        """True when workload dimensions match, accepting URL string echoes."""
+        return isinstance(value, dict) and all(
+            _scope_int(value.get(key)) == expected
+            for key, expected in (
+                ("tp", self.tp),
+                ("conc", self.conc),
+                ("isl", self.isl),
+                ("osl", self.osl),
+            )
+        )
 
 
 def validate_relative_path(value: str) -> str:
