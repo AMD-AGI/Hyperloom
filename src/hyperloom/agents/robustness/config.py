@@ -230,7 +230,6 @@ class Config:
     state_integrity_enabled: bool = True
     state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
-    state_stale_lease_min_age_s: float = 60.0
     state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 

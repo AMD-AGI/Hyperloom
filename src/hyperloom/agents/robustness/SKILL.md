@@ -189,7 +189,6 @@ listed below.
 | `kernel_opt_no_progress` | high | `alert(high)` + `prune_branch(kernel_opt)` | `kernel_pipeline` |
 | `state_json_corrupt` | high | `alert(high)` | `state_integrity` |
 | `coordinator_wal_bloat` (≥ warn / ≥ critical bytes) | medium / high | `alert(medium)` / `alert(high)` | `state_integrity` |
-| `stale_lease` | high | `alert(high)` | `state_integrity` |
 | `inbox_bloat` (≥ warn / ≥ critical bytes) | low / medium | `send_message(observation)` / `alert(medium)` | `state_integrity` |
 | `coordinator_zombie` | high | `alert(high)` | `state_integrity` |
 | `gateway_auth_outage` | high | `alert(high)` | `external_deps` |
