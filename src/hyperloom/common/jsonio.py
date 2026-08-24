@@ -10,9 +10,29 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-# Fenced json block; shared by every model-reply extractor.
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+# Matches a ```json or ``` fenced block, capturing its content as group 1.
+_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
 _EMPTY_UNSET = object()
+
+
+def _first_json_object(text: str) -> dict[str, Any] | None:
+    """Return the first JSON object decoded from *text* using raw_decode.
+
+    Scans left-to-right for the first ``{`` and tries to decode a JSON object
+    from that position.  Unlike a greedy regex, raw_decode handles nested
+    braces and trailing content correctly.
+    """
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            value, _ = decoder.raw_decode(text, idx)
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            pass
+        idx = text.find("{", idx + 1)
+    return None
 
 
 def read_json(
@@ -139,7 +159,13 @@ def coerce_dict(value: dict[str, Any] | Path | str | None, *, default: dict[str,
     if isinstance(value, dict):
         return value
     path = Path(value) if isinstance(value, (str, Path)) else None
-    if path is None or not path.is_file():
+    if path is None:
+        return fallback
+    try:
+        is_file = path.is_file()
+    except OSError:
+        return fallback
+    if not is_file:
         return fallback
     return read_json(path, default=fallback, require_dict=True)
 
@@ -153,9 +179,10 @@ def extract_first_json_with_key(
 ) -> dict[str, Any] | None:
     """Pull a JSON object out of a model reply.
 
-    Prefers a fenced ```json block, then falls back to the bare top-level
-    object matched by *bare_re*, trimming trailing prose from the right until
-    ``json.loads`` accepts a candidate.
+    Prefers fenced ```json / ``` blocks in document order, scanning each
+    block's content with :func:`json.JSONDecoder.raw_decode` so nested braces
+    and trailing prose inside the fence do not cause false negatives.  Falls
+    back to the bare top-level object matched by *bare_re*.
 
     Args:
         text: Raw model reply that may contain a fenced or bare JSON object.
@@ -176,28 +203,19 @@ def extract_first_json_with_key(
         return isinstance(data, dict) and (required_key is None or required_key in data)
 
     found: dict[str, Any] | None = None
-    for m in _FENCED_JSON_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if _qualifies(data):
+    for m in _FENCED_BLOCK_RE.finditer(text):
+        data = _first_json_object(m.group(1))
+        if data is not None and _qualifies(data):
             if not last:
                 return data
             found = data
     if bare_re is not None:
         for m in bare_re.finditer(text):
-            candidate = m.group(1)
-            for end in range(len(candidate), 0, -1):
-                try:
-                    data = json.loads(candidate[:end])
-                except json.JSONDecodeError:
-                    continue
-                if _qualifies(data):
-                    if not last:
-                        return data
-                    found = data
-                break  # parsed but wrong shape; don't keep shrinking
+            data = _first_json_object(m.group(1))
+            if data is not None and _qualifies(data):
+                if not last:
+                    return data
+                found = data
     return found
 
 
