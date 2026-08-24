@@ -43,8 +43,9 @@ from typing import Any
 
 from hyperloom.common.coerce import to_unix
 
-from ..role.prompt_inputs import InboxItem, ReactorContext
+from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from .event_view import EventRow, build_event_view
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -105,7 +106,8 @@ def evaluate_stall_signals(
             symptom per silent agent, possibly empty.
     """
     cfg = config or StallConfig()
-    last_seen = _collect_last_seen(ctx.inbox, data.coordinator_events)
+    view = build_event_view(ctx.inbox, data.coordinator_events)
+    last_seen = _collect_last_seen(view)
     out: list[Symptom] = []
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
@@ -292,45 +294,32 @@ def _quiet_sibling_evidence(
 
 
 def _collect_last_seen(
-    inbox: list[InboxItem],
-    coordinator_events: list[dict[str, Any]],
+    view: list[EventRow],
 ) -> dict[str, float]:
     """Compute the latest activity timestamp per tracked agent.
 
-    Folds together inbox items and coordinator events, keeping the most recent
-    timestamp seen for each tracked agent.
+    Folds the shared event view, keeping the most recent timestamp seen for
+    each tracked agent. Timestamps come from ``EventRow.ts``, which is set
+    from ``payload.ts`` for inbox items and from the DB ``ts`` column for
+    coordinator events.
 
     Args:
-        inbox (list[InboxItem]): Inbox items from the reactor context.
-        coordinator_events (list[dict[str, Any]]): Raw coordinator events.
+        view: Shared event view for this tick.
 
     Returns:
         dict[str, float]: Mapping of agent name to its latest activity unix
             timestamp.
     """
     last: dict[str, float] = {}
-
-    for item in inbox:
-        if item.from_agent not in _TRACKED_AGENTS:
+    for ev in view:
+        if ev.agent not in _TRACKED_AGENTS:
             continue
-        ts = to_unix(item.payload.get("ts") if isinstance(item.payload, dict) else None)
+        ts = to_unix(ev.ts)
         if ts is None:
             continue
-        prev = last.get(item.from_agent)
+        prev = last.get(ev.agent)
         if prev is None or ts > prev:
-            last[item.from_agent] = ts
-
-    for ev in coordinator_events:
-        agent = str(ev.get("agent", "")).strip()
-        if agent not in _TRACKED_AGENTS:
-            continue
-        ts = to_unix(ev.get("ts") or ev.get("timestamp"))
-        if ts is None:
-            continue
-        prev = last.get(agent)
-        if prev is None or ts > prev:
-            last[agent] = ts
-
+            last[ev.agent] = ts
     return last
 
 

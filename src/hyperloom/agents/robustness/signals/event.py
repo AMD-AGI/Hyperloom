@@ -17,8 +17,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..role.prompt_inputs import InboxItem, ReactorContext
+from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from .event_view import EventRow, build_event_view, family_of
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -46,7 +47,8 @@ def evaluate_event_signals(
 ) -> list[Symptom]:
     """Evaluate all Coordinator-event-driven signals for this tick.
 
-    Combines inbox items and ``data.coordinator_events`` and runs the
+    Combines inbox items and ``data.coordinator_events`` via the shared event
+    view (sorted by seq, cross-source duplicates removed) and runs the
     policy-denied, delegated-failure, recover-unsuccessful, and
     idempotency-replay rules.
 
@@ -61,26 +63,24 @@ def evaluate_event_signals(
             empty.
     """
     cfg = config or EventConfig()
-    inbox_view = _normalise_inbox(ctx.inbox)
-    coord_view = _normalise_events(data.coordinator_events)
-    combined = inbox_view + coord_view
+    view = build_event_view(ctx.inbox, data.coordinator_events)
 
     out: list[Symptom] = []
-    out.extend(_policy_denied_symptoms(combined, cfg))
-    out.extend(_delegated_failure_symptoms(combined, cfg))
-    out.extend(_recover_unsuccessful_symptoms(combined, cfg))
+    out.extend(_policy_denied_symptoms(view, cfg))
+    out.extend(_delegated_failure_symptoms(view, cfg))
+    out.extend(_recover_unsuccessful_symptoms(view, cfg))
     out.extend(_idempotency_replay_symptoms(ctx, cfg))
     return out
 
 
 def _policy_denied_symptoms(
-    events: list[dict[str, Any]],
+    events: list[EventRow],
     cfg: EventConfig,
 ) -> list[Symptom]:
     """Fire ``repeated_policy_denied`` for sources over the denial threshold.
 
     Args:
-        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        events: Shared event view for this tick.
         cfg (EventConfig): Tunables (provides the policy-denied threshold).
 
     Returns:
@@ -90,15 +90,12 @@ def _policy_denied_symptoms(
     sources: Counter[str] = Counter()
     rules: Counter[str] = Counter()
     for ev in events:
-        if ev.get("topic") != "observation":
+        if ev.topic != "observation":
             continue
-        payload = ev.get("payload") or {}
-        if not isinstance(payload, dict):
+        if ev.payload.get("kind") != "policy_denied":
             continue
-        if payload.get("kind") != "policy_denied":
-            continue
-        target = ev.get("agent") or payload.get("source") or "unknown"
-        rule = payload.get("rule") or "unknown"
+        target = ev.agent or ev.payload.get("source") or "unknown"
+        rule = ev.payload.get("rule") or "unknown"
         sources[target] += 1
         rules[rule] += 1
 
@@ -130,13 +127,13 @@ def _policy_denied_symptoms(
 
 
 def _delegated_failure_symptoms(
-    events: list[dict[str, Any]],
+    events: list[EventRow],
     cfg: EventConfig,
 ) -> list[Symptom]:
     """Fire ``repeated_failure`` for action families over the failure threshold.
 
     Args:
-        events (list[dict[str, Any]]): Normalised inbox + coordinator events.
+        events: Shared event view for this tick.
         cfg (EventConfig): Tunables (provides the delegated-failure threshold).
 
     Returns:
@@ -146,25 +143,22 @@ def _delegated_failure_symptoms(
     family_counts: Counter[str] = Counter()
     last_evidence: dict[str, dict[str, Any]] = {}
     for ev in events:
-        if ev.get("topic") != "delegated_result":
+        if ev.topic != "delegated_result":
             continue
-        payload = ev.get("payload") or {}
-        if not isinstance(payload, dict):
+        if ev.payload.get("state") != "failed":
             continue
-        if payload.get("state") != "failed":
+        fam = family_of(ev.payload)
+        if not fam:
             continue
-        family = _family_of(payload)
-        if not family:
-            continue
-        family_counts[family] += 1
-        last_evidence[family] = {
-            "task_id": payload.get("task_id"),
-            "kind": payload.get("kind"),
-            "error": payload.get("error"),
+        family_counts[fam] += 1
+        last_evidence[fam] = {
+            "task_id": ev.payload.get("task_id"),
+            "kind": ev.payload.get("kind"),
+            "error": ev.payload.get("error"),
         }
 
     out: list[Symptom] = []
-    for family, count in family_counts.items():
+    for fam, count in family_counts.items():
         if count < cfg.delegated_failure_threshold:
             continue
         severity = (
@@ -174,15 +168,15 @@ def _delegated_failure_symptoms(
             Symptom(
                 name="repeated_failure",
                 severity=severity,
-                summary=(f"action family {family!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
+                summary=(f"action family {fam!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
                 evidence={
-                    "family": family,
+                    "family": fam,
                     "count": count,
-                    "last_failure": last_evidence.get(family, {}),
+                    "last_failure": last_evidence.get(fam, {}),
                 },
-                subject={"family": family},
+                subject={"family": fam},
                 source="coordinator_events",
-                suggestion=f"prune_branch family={family}",
+                suggestion=f"prune_branch family={fam}",
             )
         )
     return out
@@ -270,7 +264,7 @@ def _idempotency_replay_symptoms(
 
 
 def _recover_unsuccessful_symptoms(
-    events: list[dict[str, Any]],
+    events: list[EventRow],
     cfg: EventConfig,
 ) -> list[Symptom]:
     """Emit ``recover_unsuccessful`` when the latest recover needs review.
@@ -281,7 +275,7 @@ def _recover_unsuccessful_symptoms(
     second-guessed.
 
     Args:
-        events: Coordinator event dicts in chronological order.
+        events: Shared event view in chronological order.
         cfg: Event configuration (recover lookback window).
 
     Returns:
@@ -290,14 +284,11 @@ def _recover_unsuccessful_symptoms(
     head = events[-cfg.recover_lookback_events :] if events else []
     latest: dict[str, Any] | None = None
     for ev in head:
-        if ev.get("topic") != "delegated_result":
+        if ev.topic != "delegated_result":
             continue
-        payload = ev.get("payload") or {}
-        if not isinstance(payload, dict):
+        if not _is_recover_payload(ev.payload):
             continue
-        if not _is_recover_payload(payload):
-            continue
-        latest = payload  # last-write-wins → newest
+        latest = ev.payload
     if latest is None:
         return []
     state = str(latest.get("state") or "").strip()
@@ -352,73 +343,6 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
     if "force_gpu_cleanup" in payload and "mid_free_mb_per_gpu" in payload:
         return True
     return False
-
-
-# ---------------------------------------------------------------------------
-# Normalisation helpers
-# ---------------------------------------------------------------------------
-
-
-def _normalise_inbox(inbox: list[InboxItem]) -> list[dict[str, Any]]:
-    """Convert inbox items to the common event-dict shape used by the rules.
-
-    Args:
-        inbox (list[InboxItem]): Inbox items from the reactor context.
-
-    Returns:
-        list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/
-            ``ts`` keys (``ts`` is always ``None`` for inbox items).
-    """
-    return [
-        {
-            "agent": item.from_agent,
-            "topic": item.topic,
-            "payload": item.payload,
-            "ts": None,
-        }
-        for item in inbox
-    ]
-
-
-def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalise raw coordinator events to the common event-dict shape.
-
-    Args:
-        events (list[dict[str, Any]]): Raw events read from coordinator.db.
-
-    Returns:
-        list[dict[str, Any]]: Event dicts with ``agent``/``topic``/``payload``/
-            ``ts`` keys.
-    """
-    out: list[dict[str, Any]] = []
-    for ev in events:
-        out.append(
-            {
-                "agent": ev.get("agent", ""),
-                "topic": ev.get("topic", ""),
-                "payload": ev.get("payload"),
-                "ts": ev.get("ts") or ev.get("timestamp"),
-            }
-        )
-    return out
-
-
-def _family_of(payload: dict[str, Any]) -> str:
-    """Infer the action family from a ``delegated_result`` payload.
-
-    Args:
-        payload: A ``delegated_result`` payload.
-
-    Returns:
-        The family string, falling back to ``kind`` and then ``""``.
-    """
-    family = payload.get("family")
-    if isinstance(family, str) and family.strip():
-        return family.strip()
-    kind = payload.get("kind")
-    if isinstance(kind, str) and kind.strip():
-        return kind.strip()
-    return ""
 
 
 __all__ = ["EventConfig", "evaluate_event_signals"]

@@ -22,6 +22,7 @@ from typing import Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from .event_view import build_event_view, EventRow
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -64,9 +65,10 @@ def evaluate_critic_health_signals(
             empty.
     """
     cfg = config or CriticHealthConfig()
+    view = build_event_view(ctx.inbox, data.coordinator_events)
     out: list[Symptom] = []
     out.extend(_kb_outage_symptoms(data, cfg))
-    out.extend(_unavailable_streak_symptoms(ctx, data, cfg))
+    out.extend(_unavailable_streak_symptoms(view, cfg))
     out.extend(_prune_stuck_symptoms(data, cfg))
     out.extend(_runtime_stuck_symptoms(data, cfg))
     return out
@@ -145,46 +147,30 @@ def _kb_outage_symptoms(
 
 
 def _unavailable_streak_symptoms(
-    ctx: ReactorContext,
-    data: SourceData,
+    view: list[EventRow],
     cfg: CriticHealthConfig,
 ) -> list[Symptom]:
     """Detect a streak of consecutive ``critic_unavailable`` verdicts.
 
-    Scans ``coordinator_events`` plus the reactor inbox for the trailing
-    run of unavailable review verdicts.
+    Walks the shared event view in reverse (newest-first) to count the
+    trailing run of unavailable review verdicts.
 
     Args:
-        ctx: Reactor context (supplies the inbox).
-        data: Collected source data (coordinator events).
+        view: Shared event view for this tick in chronological order.
         cfg: Critic-health configuration thresholds.
 
     Returns:
         A list with one :class:`Symptom` when the streak trips, else empty.
     """
-    rows: list[dict[str, Any]] = []
-    for event in data.coordinator_events:
-        if not isinstance(event, dict):
-            continue
-        if event.get("topic") != "review_verdict":
-            continue
-        payload = event.get("payload") or {}
-        if isinstance(payload, dict):
-            rows.append(payload)
-    for item in ctx.inbox:
-        if item.topic != "review_verdict":
-            continue
-        if isinstance(item.payload, dict):
-            rows.append(item.payload)
-    if not rows:
-        return []
     streak = 0
     samples: list[str] = []
-    for payload in reversed(rows):
-        source = str(payload.get("source") or "")
+    for ev in reversed(view):
+        if ev.topic != "review_verdict":
+            continue
+        source = str(ev.payload.get("source") or "")
         if source == "critic_unavailable":
             streak += 1
-            target = str(payload.get("target_proposal_msg_id") or "")
+            target = str(ev.payload.get("target_proposal_msg_id") or "")
             if target:
                 samples.append(target)
         else:

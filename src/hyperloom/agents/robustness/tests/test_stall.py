@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.agents.robustness.role.prompt_inputs import InboxItem, ReactorContext
+from hyperloom.agents.robustness.signals.event_view import build_event_view
 from hyperloom.agents.robustness.signals.stall import (
     StallConfig,
     _collect_last_seen,
@@ -40,7 +41,8 @@ def test_collect_last_seen_branches() -> None:
         {"agent": "orchestration", "ts": 200.0},
         {"agent": "user", "ts": 5.0},  # untracked
     ]
-    last = _collect_last_seen(inbox, events)
+    view = build_event_view(inbox, events)
+    last = _collect_last_seen(view)
     assert last == {"critic": 50.0, "orchestration": 200.0}
 
 
@@ -219,7 +221,7 @@ def test_kernel_agent_is_not_a_tracked_agent() -> None:
     its behalf, which measures demand for kernel work rather than health.
     """
     inbox = [_item("kernel_agent", ts=1.0)]
-    assert _collect_last_seen(inbox, []) == {}
+    assert _collect_last_seen(build_event_view(inbox, [])) == {}
 
 
 def test_a_long_inline_kernel_step_does_not_accuse_orchestration() -> None:
