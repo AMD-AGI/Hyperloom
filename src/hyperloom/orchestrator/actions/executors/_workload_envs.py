@@ -227,7 +227,6 @@ def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
     )
 
 
-
 def _sync_repo_aliases(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -255,7 +254,6 @@ def _sync_repo_aliases(
     if repo_path:
         envs[f"{prefix}_REPO_PATH"] = repo_path
         envs[f"{prefix}_DIR"] = repo_path
-
 
 
 def _publish_scriptable_repo_root(framework: str, repo_path: str) -> None:
@@ -325,8 +323,6 @@ def _resolve_framework_repo_path(
         if value:
             return value
     return ""
-
-
 
 
 def _custom_script_path(runner_type: str) -> str:
@@ -468,6 +464,7 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
 
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
+
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.
@@ -1272,13 +1269,7 @@ def materialize_config_with_envs(
         _ref_fw_env = server_args_env_name(bench.get("framework"))
         _ref_existing = str(envs.get(_ref_fw_env, "")).strip()
         envs[_ref_fw_env] = merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
-    safe_reference_envs, dropped_reference_envs = filter_untrusted_env_mapping(
-        reference_envs,
-        allow_predicate=valid_env_key,
-    )
-    for _rk in dropped_reference_envs:
-        log.warning("Dropping invalid reference_envs key %s before benchmark materialization", _rk)
-    for _rk, _rv in safe_reference_envs.items():
+    for _rk, _rv in reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's

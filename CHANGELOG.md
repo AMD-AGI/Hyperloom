@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **The `filter_untrusted_env_mapping` call on `reference_envs` inside
+  `materialize_config_with_envs` is gone.** The only writer of that mapping is
+  `cli/bootstrap.py` via `reference_script.parse_reference_script`, which
+  already filters every key through `is_allowed_external_env_key` — a predicate
+  strictly stronger than the `valid_env_key` shape check that was being applied
+  here.  The redundant pass dropped nothing in production, added a warning log
+  that could never fire, and obscured the invariant that the upstream parser is
+  the real gate for this data.
+
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and
   `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
