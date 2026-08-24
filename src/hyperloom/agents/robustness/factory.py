@@ -166,17 +166,12 @@ def build_reactor_components(
         ReactorBundle: The assembled reactor plus the components and sink
         the caller must manage.
     """
-    # Multi-node guard: the probe only sees its own pod, so it is disabled
-    # when config.disable_local_probe is set (ROBUSTNESS_DISABLE_LOCAL_PROBE
-    # or --robustness-disable-local-probe). The router still ticks but skips
-    # every fetch, returning blind empty data each time.
-    if config.disable_local_probe:
-        probe_source: Source | None = None
-    else:
-        probe_source = LocalProbeSource(_build_local_probe_config(config))
-
+    # Multi-node guard: the probe only sees its own pod, so it is disabled there.
+    source: Source = (
+        _BlindSource() if config.disable_local_probe else LocalProbeSource(_build_local_probe_config(config))
+    )
     router = DegradeRouter(
-        _BlindSource() if probe_source is None else probe_source,
+        source,
         fail_threshold=config.source_fail_threshold,
         recheck_interval_s=config.source_recheck_interval_s,
     )
@@ -412,18 +407,16 @@ def _parse_severity(value: str) -> SymptomSeverity:
 
 @dataclass
 class _BlindSource:
-    """Permanent no-op source used when the local probe is disabled.
+    """Stands in for the local probe when it is disabled.
 
-    Returns empty ``SourceData(local_processes_known=False)`` every tick so
-    probe-derived rules stay quiet rather than misfiring.  It never raises,
-    which means the DegradeRouter stays HEALTHY and does not WARN about
-    degradation on a deliberately disabled probe.
+    Never raises, so the router stays HEALTHY rather than reporting a degrade
+    that a deliberately disabled probe did not suffer.
     """
 
     name: str = "local-probe-disabled"
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
-        """Return empty source data with process-visibility marked unknown.
+        """Return empty data with process visibility marked unknown.
 
         Args:
             ctx: Fetch context; unused because this source never collects data.

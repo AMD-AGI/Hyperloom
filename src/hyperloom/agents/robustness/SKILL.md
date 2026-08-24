@@ -225,18 +225,20 @@ The rest read `SourceData`, collected by:
   * `state.json` / WAL / lease integrity, decision-audit and critic-workdir
     scans, and the external-dependency probes (gateway `/models`, source
     mounts, TraceLens CLI)
-* **Quiet stub** — substituted when `Config.disable_local_probe` is set
+* **Blind stub** — substituted when `Config.disable_local_probe` is set
   (the multi-node default). Returns an empty snapshot without raising, so
   probe-derived rules stay silent instead of false-firing on a single pod.
 
 LocalProbe stays small-scope by design: it only collects what the agent
 itself can see, so on multi-node it sees one pod and is therefore disabled.
 
-`DegradeRouter` keeps the collector behind a silent fallback: after
+`DegradeRouter` wraps that single collector in a backoff: after
 `source_fail_threshold` (default 3) consecutive failures it serves an empty
 snapshot instead, and re-probes every `source_recheck_interval_s` (default
 30s). A tick therefore degrades to "no data" rather than failing outright.
-State transitions emit one WARN log; no spam in steady state.
+Empty snapshots carry `local_processes_known=False` so an absent process is
+not read as evidence that nothing is running. State transitions emit one WARN
+log; no spam in steady state.
 
 ## LLM RCA
 
