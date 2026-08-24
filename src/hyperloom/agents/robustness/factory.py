@@ -33,10 +33,6 @@ from .decision.rca_engine import (
     RcaThrottleConfig,
 )
 from .role.findings import FindingSink, FindingSinkConfig
-from .role.postmortem import (
-    PostmortemFinalizer,
-    PostmortemFinalizerConfig,
-)
 from .role.reactor import Reactor, ReactorComponents
 from .state_store import DetectorStateStore
 from .signals import Classifier, SymptomSeverity
@@ -313,20 +309,6 @@ def build_reactor_components(
         )
     )
 
-    finalizer = (
-        PostmortemFinalizer(
-            session_dir=config.session_dir,
-            session_id=sink_session_id,
-            config=PostmortemFinalizerConfig(
-                reports_subdir=config.finalize_reports_subdir,
-                max_findings_in_report=config.finalize_max_findings_in_report,
-                max_tasks_per_action=config.finalize_max_tasks_per_action,
-            ),
-        )
-        if config.finalize_enabled
-        else None
-    )
-
     components = ReactorComponents(
         router=router,
         classifier=classifier,
@@ -334,7 +316,6 @@ def build_reactor_components(
         policy=PolicyAware(),
         sink=sink,
         rca=rca_engine,
-        finalizer=finalizer,
         state_store=state_store,
     )
     return ReactorBundle(
