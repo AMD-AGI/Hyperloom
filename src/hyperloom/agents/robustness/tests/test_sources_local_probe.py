@@ -69,7 +69,7 @@ async def test_local_probe_reads_events_from_real_schema(session_dir: Path):
     assert len(data.coordinator_events) == 2
     topics = sorted(e["topic"] for e in data.coordinator_events)
     assert topics == ["alert", "heartbeat"]
-    assert data.sources_used == ["local-probe"]
+    assert data.coordinator_events  # sources_used field removed; verify data was collected
 
 
 @pytest.mark.asyncio

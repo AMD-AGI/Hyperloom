@@ -3,17 +3,17 @@
 
 """Source protocol + DegradeRouter.
 
-DegradeRouter routes to a primary source and falls back to a secondary
-on repeated failure. State transitions emit one WARN log; in-state
-retries are silent. State machine::
+DegradeRouter wraps a single source with a backoff state machine.  After
+``fail_threshold`` consecutive failures the source is marked DEGRADED and
+skipped for ``recheck_interval_s`` seconds; successful ticks restore it to
+HEALTHY.  While DEGRADED, ``collect`` returns an empty ``SourceData`` with
+``local_processes_known=False`` so downstream signals do not interpret "no
+process data" as evidence that nothing is running.
+
+State machine::
 
     HEALTHY  --(fail_streak >= fail_threshold)-->  DEGRADED
     DEGRADED --(success after recheck_interval_s)--> HEALTHY
-    fallback --(SourceUnavailable)--> FAILED
-
-DEGRADED means "use the fallback this tick"; the next tick re-probes
-after ``recheck_interval_s``. FAILED applies to the fallback source when
-it too is unavailable — the both-sources-unavailable snapshot.
 """
 
 from __future__ import annotations
@@ -29,19 +29,16 @@ log = logging.getLogger(__name__)
 
 
 class HealthState(str, Enum):
-    """Routing state of a single source inside the DegradeRouter.
+    """Routing state of the source inside the DegradeRouter.
 
     Attributes:
         HEALTHY (str): Source is being consulted normally.
         DEGRADED (str): Source failed enough times to be skipped; it is
             reprobed periodically.
-        FAILED (str): Set when the fallback itself is unhealthy; the
-            reactor reports a degraded heartbeat.
     """
 
     HEALTHY = "healthy"
     DEGRADED = "degraded"
-    FAILED = "failed"
 
 
 class SourceUnavailable(RuntimeError):
@@ -57,8 +54,7 @@ class SourceData:
     """Per-tick snapshot the reactor consumes.
 
     Every field defaults to an empty container so downstream signals
-    treat "no data" uniformly. ``sources_used`` records which source
-    produced each tick; ``degraded_reason`` is set on fallback.
+    treat "no data" uniformly.
     """
 
     local_gpu: dict[str, Any] = field(default_factory=dict)
@@ -101,8 +97,6 @@ class SourceData:
     # "is *this agent's* dispatched work still moving" for an agent that is
     # legitimately quiet while it waits on one.
     local_task_progress: dict[str, Any] = field(default_factory=dict)
-    sources_used: list[str] = field(default_factory=list)
-    degraded_reason: str | None = None
 
 
 @runtime_checkable
@@ -145,29 +139,28 @@ class _SourceState:
 
 
 class DegradeRouter:
-    """Coordinator-tick routing across [primary, fallback] sources.
+    """Single-source router with a backoff state machine.
 
-    The router consults the primary first; after ``fail_threshold``
-    consecutive failures it switches to the fallback for subsequent ticks
-    and reprobes the primary every ``recheck_interval_s`` seconds. See
-    :meth:`__init__` for the parameters.
+    Consults the source each tick while HEALTHY; after ``fail_threshold``
+    consecutive failures transitions to DEGRADED and returns empty
+    ``SourceData`` (with ``local_processes_known=False``) until
+    ``recheck_interval_s`` seconds elapse, at which point one reprobe is
+    attempted.  A successful reprobe restores HEALTHY; a failed one keeps
+    the source DEGRADED and resets the recheck timer.
     """
 
     def __init__(
         self,
         primary: Source,
-        fallback: Source,
         *,
         fail_threshold: int = 3,
         recheck_interval_s: float = 30.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        """Initialise the router with its primary and fallback sources.
+        """Initialise the router.
 
         Args:
-            primary (Source): Source consulted first each tick.
-            fallback (Source): Source used while the primary is
-                DEGRADED.
+            primary (Source): The sole source consulted each tick.
             fail_threshold (int): Consecutive primary failures required
                 to mark it DEGRADED; clamped to at least 1.
             recheck_interval_s (float): Seconds between primary reprobes
@@ -176,184 +169,79 @@ class DegradeRouter:
                 defaults to :func:`time.monotonic`.
         """
         self._primary = primary
-        self._fallback = fallback
         self._fail_threshold = max(1, int(fail_threshold))
         self._recheck_interval_s = max(0.0, float(recheck_interval_s))
         self._clock = clock or time.monotonic
-        self._states: dict[str, _SourceState] = {
-            primary.name: _SourceState(name=primary.name),
-            fallback.name: _SourceState(name=fallback.name),
-        }
-
-    @property
-    def primary_state(self) -> HealthState:
-        """Current routing state of the primary source.
-
-        Returns:
-            HealthState: The primary source's :class:`HealthState`.
-        """
-        return self._states[self._primary.name].state
+        self._state = _SourceState(name=primary.name)
 
     async def collect(self, ctx: Any) -> SourceData:
-        """Fetch one tick of source data, with degrade routing.
+        """Fetch one tick of source data with backoff on repeated failure.
 
-        Tries the primary source when it is HEALTHY (or due for a
-        reprobe) and falls back to the secondary source otherwise or on
-        failure. Records success/failure to drive the state machine.
-
-        Args:
-            ctx (Any): The per-tick reactor context passed to each
-                source's ``fetch``.
-
-        Returns:
-            SourceData: The snapshot from whichever source served the
-            tick, with ``sources_used`` annotated.
-        """
-        primary_state = self._states[self._primary.name]
-        if self._should_try_primary(primary_state):
-            try:
-                data = await self._primary.fetch(ctx)
-            except SourceUnavailable as exc:
-                self._record_failure(primary_state, str(exc))
-            except Exception:
-                # Count unexpected errors as failures.
-                self._record_failure(primary_state, "unexpected_exception")
-                log.exception("primary source %s raised unexpectedly", self._primary.name)
-            else:
-                self._record_success(primary_state)
-                if self._primary.name not in data.sources_used:
-                    data.sources_used = [*data.sources_used, self._primary.name]
-                return data
-
-        fallback_data = await self._fetch_fallback(ctx)
-        return fallback_data
-
-    async def _fetch_fallback(self, ctx: Any) -> SourceData:
-        """Fetch from the fallback source and update its state.
-
-        On :class:`SourceUnavailable` the fallback is marked FAILED and
-        a "both sources unavailable" snapshot is returned; on any other
-        exception an empty degraded snapshot is returned. On success the
-        snapshot is annotated with a degraded reason when the primary is
-        still DEGRADED.
+        Returns an empty ``SourceData(local_processes_known=False)`` while
+        the primary is DEGRADED so downstream probe-derived rules stay
+        quiet rather than misfiring.
 
         Args:
-            ctx (Any): The per-tick reactor context passed to the
-                fallback's ``fetch``.
+            ctx (Any): The per-tick reactor context passed to the source's
+                ``fetch``.
 
         Returns:
-            SourceData: The fallback snapshot, or a degraded placeholder
-            snapshot when the fallback also fails.
+            SourceData: The snapshot from the primary, or an empty
+            snapshot while DEGRADED.
         """
-        fallback_state = self._states[self._fallback.name]
+        if not self._should_try_primary():
+            return SourceData(local_processes_known=False)
+
         try:
-            data = await self._fallback.fetch(ctx)
+            data = await self._primary.fetch(ctx)
         except SourceUnavailable as exc:
-            self._record_failure(fallback_state, str(exc))
-            self._maybe_log_transition(
-                fallback_state,
-                HealthState.FAILED,
-                f"fallback unavailable: {exc}",
-            )
-            fallback_state.state = HealthState.FAILED
-            return SourceData(
-                degraded_reason=f"both sources unavailable: primary+{self._fallback.name}",
-                sources_used=[],
-            )
+            self._record_failure(str(exc))
+            return SourceData(local_processes_known=False)
         except Exception:
-            log.exception("fallback source %s raised unexpectedly", self._fallback.name)
-            self._record_failure(fallback_state, "fallback_exception")
-            return SourceData(
-                degraded_reason="fallback raised unexpected exception",
-                sources_used=[],
-            )
+            self._record_failure("unexpected_exception")
+            log.exception("source %s raised unexpectedly", self._primary.name)
+            return SourceData(local_processes_known=False)
         else:
-            self._record_success(fallback_state)
-            if self._fallback.name not in data.sources_used:
-                data.sources_used = [*data.sources_used, self._fallback.name]
-            primary_state = self._states[self._primary.name]
-            if primary_state.state is HealthState.DEGRADED and not data.degraded_reason:
-                data.degraded_reason = f"primary {self._primary.name} degraded; using {self._fallback.name}"
+            self._record_success()
             return data
 
     # -- state machine helpers ------------------------------------------
 
-    def _should_try_primary(self, state: _SourceState) -> bool:
-        """Decide whether the primary should be attempted this tick.
-
-        A HEALTHY source is always tried; a DEGRADED one is only tried
-        once ``recheck_interval_s`` has elapsed since the last attempt
-        (and the recheck clock is advanced when it is).
-
-        Args:
-            state (_SourceState): The primary source's tracked state.
-
-        Returns:
-            bool: ``True`` if the primary should be fetched now.
-        """
-        if state.state is HealthState.HEALTHY:
+    def _should_try_primary(self) -> bool:
+        """Decide whether the primary should be attempted this tick."""
+        if self._state.state is HealthState.HEALTHY:
             return True
         now = self._clock()
-        if (now - state.last_recheck) >= self._recheck_interval_s:
-            state.last_recheck = now
+        if (now - self._state.last_recheck) >= self._recheck_interval_s:
+            self._state.last_recheck = now
             return True
         return False
 
-    def _record_success(self, state: _SourceState) -> None:
-        """Mark a source healthy after a successful fetch.
+    def _record_success(self) -> None:
+        """Mark the source healthy after a successful fetch."""
+        if self._state.state is not HealthState.HEALTHY:
+            self._maybe_log_transition(HealthState.HEALTHY, "recovered")
+            self._state.state = HealthState.HEALTHY
+        self._state.fail_streak = 0
+        self._state.last_recheck = self._clock()
 
-        Resets the failure streak, logs a recovery transition when the
-        source was not already HEALTHY, and advances the recheck clock.
+    def _record_failure(self, reason: str) -> None:
+        """Record a failed fetch and degrade the source past threshold."""
+        self._state.fail_streak += 1
+        self._state.last_recheck = self._clock()
+        if self._state.state is HealthState.HEALTHY and self._state.fail_streak >= self._fail_threshold:
+            self._maybe_log_transition(HealthState.DEGRADED, reason)
+            self._state.state = HealthState.DEGRADED
 
-        Args:
-            state (_SourceState): The source state to update in place.
-        """
-        if state.state is not HealthState.HEALTHY:
-            self._maybe_log_transition(state, HealthState.HEALTHY, "recovered")
-            state.state = HealthState.HEALTHY
-        state.fail_streak = 0
-        state.last_recheck = self._clock()
-
-    def _record_failure(self, state: _SourceState, reason: str) -> None:
-        """Record a failed fetch and degrade the source past threshold.
-
-        Increments the failure streak and advances the recheck clock;
-        when a HEALTHY source crosses ``fail_threshold`` it transitions
-        to DEGRADED (logged once).
-
-        Args:
-            state (_SourceState): The source state to update in place.
-            reason (str): Human-readable failure reason for the log.
-        """
-        state.fail_streak += 1
-        state.last_recheck = self._clock()
-        if state.state is HealthState.HEALTHY and state.fail_streak >= self._fail_threshold:
-            self._maybe_log_transition(state, HealthState.DEGRADED, reason)
-            state.state = HealthState.DEGRADED
-
-    def _maybe_log_transition(
-        self,
-        state: _SourceState,
-        target: HealthState,
-        reason: str,
-    ) -> None:
-        """Emit a single WARN log for a state transition.
-
-        No log is emitted when the source is already in ``target``; the
-        caller is responsible for actually mutating ``state.state``.
-
-        Args:
-            state (_SourceState): The source whose state is changing.
-            target (HealthState): The state being transitioned to.
-            reason (str): Human-readable reason recorded in the log.
-        """
-        if state.state is target:
+    def _maybe_log_transition(self, target: HealthState, reason: str) -> None:
+        """Emit a single WARN log for a state transition."""
+        if self._state.state is target:
             return
         log.warning(
             "source %s state %s -> %s (reason=%s, streak=%d)",
-            state.name,
-            state.state.value,
+            self._state.name,
+            self._state.state.value,
             target.value,
             reason,
-            state.fail_streak,
+            self._state.fail_streak,
         )

@@ -166,25 +166,17 @@ def build_reactor_components(
         ReactorBundle: The assembled reactor plus the components and sink
         the caller must manage.
     """
-    # Multi-node guard: the probe only sees its own pod, so it is disabled there.
-    primary: Source
+    # Multi-node guard: the probe only sees its own pod, so it is disabled
+    # when config.disable_local_probe is set (ROBUSTNESS_DISABLE_LOCAL_PROBE
+    # or --robustness-disable-local-probe). The router still ticks but skips
+    # every fetch, returning blind empty data each time.
     if config.disable_local_probe:
-        primary = _QuietSource(
-            name="local-probe",
-            reason="local-probe disabled: config.disable_local_probe is True",
-        )
+        probe_source: Source | None = None
     else:
-        primary = LocalProbeSource(_build_local_probe_config(config))
-
-    # LocalProbe raises when every sub-probe is empty; degrade to silence.
-    fallback: Source = _QuietSource(
-        name="quiet-fallback",
-        reason="local probe produced no data",
-    )
+        probe_source = LocalProbeSource(_build_local_probe_config(config))
 
     router = DegradeRouter(
-        primary,
-        fallback,
+        _BlindSource() if probe_source is None else probe_source,
         fail_threshold=config.source_fail_threshold,
         recheck_interval_s=config.source_recheck_interval_s,
     )
@@ -419,34 +411,28 @@ def _parse_severity(value: str) -> SymptomSeverity:
 
 
 @dataclass
-class _QuietSource:
-    """Source that collects nothing, carrying its reason for saying so.
+class _BlindSource:
+    """Permanent no-op source used when the local probe is disabled.
 
-    Returns empty :class:`SourceData` rather than raising, so probe-derived
-    rules see "no data" and stay quiet instead of failing the tick. The reason
-    stays visible via ``degraded_reason``.
+    Returns empty ``SourceData(local_processes_known=False)`` every tick so
+    probe-derived rules stay quiet rather than misfiring.  It never raises,
+    which means the DegradeRouter stays HEALTHY and does not WARN about
+    degradation on a deliberately disabled probe.
     """
 
-    name: str
-    reason: str
+    name: str = "local-probe-disabled"
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
-        """Return empty source data annotated with this source's reason.
+        """Return empty source data with process-visibility marked unknown.
 
         Args:
-            ctx: Fetch context supplied by the source protocol; unused because
-                this source never collects data.
+            ctx: Fetch context; unused because this source never collects data.
 
         Returns:
-            A :class:`SourceData` with no signals and a ``degraded_reason``.
+            A :class:`SourceData` with no signals and
+            ``local_processes_known=False``.
         """
-        return SourceData(
-            degraded_reason=self.reason,
-            # Nothing looked: an empty process list here is ignorance, not
-            # evidence that no server is running.
-            local_processes_known=False,
-            sources_used=[self.name],
-        )
+        return SourceData(local_processes_known=False)
 
 
 __all__ = [

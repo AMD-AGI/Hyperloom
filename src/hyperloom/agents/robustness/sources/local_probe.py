@@ -336,7 +336,6 @@ class LocalProbeSource:
             coordinator_events=coordinator_events,
             local_task_progress=local_task_progress,
             local_processes_known=sampled_processes is not None,
-            sources_used=[self.name],
         )
 
 

@@ -30,11 +30,7 @@ class _FakeClock:
 
 
 class _ScriptedSource:
-    """Source double whose ``fetch`` plays out a queued list of outcomes.
-
-    Each entry is either a :class:`SourceData` (returned) or an exception
-    instance (raised). Out-of-script calls raise ``IndexError``.
-    """
+    """Source double whose ``fetch`` plays out a queued list of outcomes."""
 
     def __init__(self, name: str, script: list[object]):
         self.name = name
@@ -57,22 +53,19 @@ def _data(label: str) -> SourceData:
 
 
 @pytest.mark.asyncio
-async def test_router_happy_path_uses_primary_only():
+async def test_router_happy_path_uses_primary():
     clock = _FakeClock()
     primary = _ScriptedSource("server", [_data("server"), _data("server"), _data("server")])
-    fallback = _ScriptedSource("local", [_data("local")])
-    router = DegradeRouter(primary, fallback, clock=clock)
+    router = DegradeRouter(primary, clock=clock)
     for _ in range(3):
         snap = await router.collect(ctx=None)
-        assert snap.sources_used == ["server"]
         assert snap.local_gpu == {"from": "server"}
-        assert snap.degraded_reason is None
+        assert snap.local_processes_known is True
     assert primary.calls == 3
-    assert fallback.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_router_degrades_after_three_failures(caplog):
+async def test_router_degrades_after_threshold_failures(caplog):
     clock = _FakeClock()
     primary = _ScriptedSource(
         "server",
@@ -83,8 +76,7 @@ async def test_router_degrades_after_three_failures(caplog):
             SourceUnavailable("fourth"),
         ],
     )
-    fallback = _ScriptedSource("local", [_data("local"), _data("local"), _data("local"), _data("local")])
-    router = DegradeRouter(primary, fallback, fail_threshold=3, recheck_interval_s=30, clock=clock)
+    router = DegradeRouter(primary, fail_threshold=3, recheck_interval_s=30, clock=clock)
 
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
@@ -93,10 +85,8 @@ async def test_router_degrades_after_three_failures(caplog):
         snap_post = await router.collect(ctx=None)
 
     assert primary.calls == 3, "primary should not be retried inside recheck window"
-    assert fallback.calls == 4
-    assert router.primary_state is HealthState.DEGRADED
-    assert snap_post.degraded_reason and "degraded" in snap_post.degraded_reason
-    assert snap_post.sources_used == ["local"]
+    assert router._state.state is HealthState.DEGRADED
+    assert snap_post.local_processes_known is False, "blind tick must mark processes unknown"
 
     transitions = [r for r in caplog.records if "state healthy -> degraded" in r.getMessage()]
     assert len(transitions) == 1, "single WARN on transition only"
@@ -114,39 +104,37 @@ async def test_router_recovers_after_recheck_window(caplog):
             _data("server"),
         ],
     )
-    fallback = _ScriptedSource("local", [_data("local"), _data("local"), _data("local")])
-    router = DegradeRouter(primary, fallback, fail_threshold=3, recheck_interval_s=30, clock=clock)
+    router = DegradeRouter(primary, fail_threshold=3, recheck_interval_s=30, clock=clock)
 
     for _ in range(3):
         await router.collect(ctx=None)
-    assert router.primary_state is HealthState.DEGRADED
+    assert router._state.state is HealthState.DEGRADED
 
-    # Inside recheck window: primary not probed, fallback served.
+    # Inside recheck window: primary not probed.
     clock.advance(10.0)
-    await router.collect(ctx=None)
+    snap_blind = await router.collect(ctx=None)
     assert primary.calls == 3
+    assert snap_blind.local_processes_known is False
 
     # Past recheck window: primary probed, succeeds, state HEALTHY.
     clock.advance(25.0)
     with caplog.at_level(logging.WARNING):
         snap = await router.collect(ctx=None)
     assert primary.calls == 4
-    assert router.primary_state is HealthState.HEALTHY
-    assert snap.sources_used == ["server"]
-    assert snap.degraded_reason is None
+    assert router._state.state is HealthState.HEALTHY
+    assert snap.local_gpu == {"from": "server"}
+    assert snap.local_processes_known is True
     transitions = [r for r in caplog.records if "state degraded -> healthy" in r.getMessage()]
     assert len(transitions) == 1
 
 
 @pytest.mark.asyncio
-async def test_router_returns_empty_when_both_unavailable():
+async def test_router_returns_empty_when_source_unavailable():
     clock = _FakeClock()
-    primary = _ScriptedSource("server", [SourceUnavailable("p")] * 3)
-    fallback = _ScriptedSource("local", [SourceUnavailable("f")] * 3)
-    router = DegradeRouter(primary, fallback, fail_threshold=1, recheck_interval_s=0, clock=clock)
+    primary = _ScriptedSource("server", [SourceUnavailable("p")])
+    router = DegradeRouter(primary, fail_threshold=1, recheck_interval_s=0, clock=clock)
     snap = await router.collect(ctx=None)
-    assert snap.sources_used == []
-    assert snap.degraded_reason and "both sources unavailable" in snap.degraded_reason
+    assert snap.local_processes_known is False
 
 
 @pytest.mark.asyncio
@@ -157,11 +145,10 @@ async def test_router_treats_unexpected_exception_as_failure(caplog):
         pass
 
     primary = _ScriptedSource("server", [Boom("oops"), Boom("oops"), Boom("oops")])
-    fallback = _ScriptedSource("local", [_data("local"), _data("local"), _data("local")])
-    router = DegradeRouter(primary, fallback, fail_threshold=3, recheck_interval_s=10, clock=clock)
+    router = DegradeRouter(primary, fail_threshold=3, recheck_interval_s=10, clock=clock)
     with caplog.at_level(logging.ERROR):
         for _ in range(3):
             snap = await router.collect(ctx=None)
-            assert snap.sources_used == ["local"]
-    assert router.primary_state is HealthState.DEGRADED
-    assert any("primary source server raised unexpectedly" in r.getMessage() for r in caplog.records)
+            assert snap.local_processes_known is False
+    assert router._state.state is HealthState.DEGRADED
+    assert any("source server raised unexpectedly" in r.getMessage() for r in caplog.records)

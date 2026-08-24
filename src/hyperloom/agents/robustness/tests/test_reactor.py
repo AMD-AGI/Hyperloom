@@ -50,13 +50,11 @@ class _FakeSource:
 def _build_reactor(
     *,
     primary: _FakeSource,
-    fallback: _FakeSource | None = None,
     tmp_path: Path,
     classifier: Classifier | None = None,
     cooldown_ticks: int = 0,
 ) -> tuple[Reactor, FindingSink]:
-    fb = fallback or _FakeSource("fb", SourceData(coordinator_events=[], sources_used=["fb"]))
-    router = DegradeRouter(primary, fb, fail_threshold=2, recheck_interval_s=0.0)
+    router = DegradeRouter(primary, fail_threshold=2, recheck_interval_s=0.0)
     sink = FindingSink(FindingSinkConfig(session_dir=tmp_path, session_id="sess-1"))
     components = ReactorComponents(
         router=router,
@@ -84,7 +82,7 @@ def _ctx(crash_count: int = 0) -> ReactorContext:
 
 @pytest.mark.asyncio
 async def test_reactor_emits_heartbeat_when_no_symptoms(tmp_path: Path):
-    primary = _FakeSource("server", SourceData(sources_used=["server"]))
+    primary = _FakeSource("server", SourceData())
     reactor, sink = _build_reactor(primary=primary, tmp_path=tmp_path)
     intents = await reactor.tick(_ctx())
     assert len(intents) == 1
@@ -96,7 +94,7 @@ async def test_reactor_emits_heartbeat_when_no_symptoms(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_reactor_emits_alert_for_crash_count_and_persists_finding(tmp_path: Path):
-    primary = _FakeSource("server", SourceData(sources_used=["server"]))
+    primary = _FakeSource("server", SourceData())
     reactor, sink = _build_reactor(primary=primary, tmp_path=tmp_path)
     intents = await reactor.tick(_ctx(crash_count=2))
     assert any(i.type is IntentType.ALERT for i in intents)
@@ -114,21 +112,13 @@ async def test_reactor_emits_alert_for_crash_count_and_persists_finding(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_reactor_falls_back_to_secondary_when_primary_fails(tmp_path: Path):
+async def test_reactor_returns_empty_data_when_primary_fails(tmp_path: Path):
     primary = _FakeSource("local-probe", SourceUnavailable("down"))
-    fallback = _FakeSource(
-        "quiet-fallback",
-        SourceData(
-            local_log_errors=[{"pattern": "CUDA out of memory", "line": "boom"}],
-            sources_used=["quiet-fallback"],
-        ),
-    )
-    reactor, _ = _build_reactor(primary=primary, fallback=fallback, tmp_path=tmp_path)
+    reactor, _ = _build_reactor(primary=primary, tmp_path=tmp_path)
     intents = await reactor.tick(_ctx())
     assert primary.calls == 1
-    assert fallback.calls == 1
-    assert any(i.type is IntentType.ALERT for i in intents)
-    assert any(i.payload.get("severity") == "high" for i in intents if i.type is IntentType.ALERT)
+    # With empty data (blind tick) the reactor emits a heartbeat, not an alert.
+    assert any(i.type is IntentType.SEND_MESSAGE and i.payload.get("topic") == "heartbeat" for i in intents)
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +136,8 @@ async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path
             base.append(Intent(type=IntentType.ALERT, payload={"summary": "no severity"}))
             return base
 
-    primary = _FakeSource("server", SourceData(sources_used=["server"]))
-    fallback = _FakeSource("local", SourceData(sources_used=["local"]))
-    router = DegradeRouter(primary, fallback, fail_threshold=2, recheck_interval_s=0.0)
+    primary = _FakeSource("server", SourceData())
+    router = DegradeRouter(primary, fail_threshold=2, recheck_interval_s=0.0)
     components = ReactorComponents(
         router=router,
         classifier=Classifier(configs={"crash": CrashConfig(medium_threshold=2)}),
