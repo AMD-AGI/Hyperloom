@@ -1261,7 +1261,7 @@ def _apply_warm_patches(
     """Apply warm-replay code patches to the Session's active framework root.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
-    patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
+    patch_ref). Applies each patch
     via ``git apply`` when the target is a git work-tree, otherwise via the
     shared nogit ``patch`` CLI path used by integrate_patch.
 
@@ -1287,8 +1287,6 @@ def _apply_warm_patches(
                 "rolled_back": True,
             }
         return []
-
-    blocked = {p.get("patch_file", "") for p in (params.get("blocked_patches") or [])}
 
     applied: list[dict[str, str]] = []
     statuses: list[dict[str, Any]] = []
@@ -1324,22 +1322,6 @@ def _apply_warm_patches(
     snapshot_contents: list[str] = []
     for idx, patch in enumerate(patches):
         patch_file = str(patch.get("patch_file") or "")
-        if patch_file in blocked:
-            if required_timeline:
-                return {
-                    "required": True,
-                    "status": "failed",
-                    "patches": [
-                        {"patch_ref": patch_file, "status": "failed", "reason": "blocked"}
-                    ],
-                    "applied": [],
-                    "failed_ref": patch_file,
-                    "failure": "blocked",
-                    "pre_sha": pre_sha,
-                    "target_repo": target_repo,
-                    "rolled_back": False,
-                }
-            continue
         content = str(patch.get("patch_content") or "")
         patch_ref = str(patch.get("patch_ref") or "")
         if not content and patch_ref:
@@ -1433,18 +1415,6 @@ def _apply_warm_patches(
             "patch_ref": patch_file,
             "timeline_index": patch.get("timeline_index", idx),
         }
-
-        if patch_file in blocked:
-            log.info(
-                "baseline_executor: skipping blocked patch %s",
-                patch_file,
-            )
-            status.update(status="failed", reason="blocked")
-            statuses.append(status)
-            if required_timeline:
-                failed_ref, failure = patch_file, "blocked"
-                break
-            continue
 
         if not patch_content and not patch_ref:
             log.warning(

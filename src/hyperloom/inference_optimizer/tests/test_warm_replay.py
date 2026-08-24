@@ -275,8 +275,6 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
                 "extra_server_args": "--must-not-be-read",
                 "patches": [{"patch_file": "legacy.patch"}],
             },
-            "blocked_patches": [{"patch_file": refs[0]}],
-            "advisory_blocked_patches": [{"patch_file": refs[1]}],
         },
     )
 
@@ -294,7 +292,6 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
         "KERNEL": "1",
     }
     assert [patch["patch_file"] for patch in task.params["patches"]] == refs
-    assert task.params["blocked_patches"] == []
     assert task.params["required_patch_timeline"] is True
 
 

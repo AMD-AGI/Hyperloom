@@ -233,8 +233,6 @@ def test_enablement_user_prompt_strips_perf_only_sections():
         "## 5. WARM-START RECIPE",
         "## 5b. RELATED LESSONS",
         "## 5c. KNOWN PITFALLS",
-        "## 5d. GRAPH-RECOMMENDED KNOBS",
-        "## 5e. GRAPH-GUIDED CONFIG KNOBS",
     ):
         assert banned not in user, f"perf section leaked into enablement prompt: {banned!r}"
 
@@ -289,7 +287,6 @@ def test_perf_specialist_prompt_unchanged_keeps_perf_context():
     _system, user = _build_split("serving_specialist")
     assert "## 4a. ROOFLINE EVIDENCE" in user
     assert "## 5. WARM-START RECIPE" in user
-    assert "## 5d. GRAPH-RECOMMENDED KNOBS" in user
     assert "ENABLEMENT PLAYBOOK" not in user
 
 
