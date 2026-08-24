@@ -29,7 +29,10 @@
 # INSIDE the image, which has no render group, and fails with "unable to find
 # group render". run.sh does this for you via RUN_AS_USER.
 #
-ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:latest
+# Fully qualified: podman has no unqualified-search registry by default and a
+# short name fails with "did not resolve to an alias". Docker assumes docker.io;
+# podman does not.
+ARG ROCM_IMAGE=docker.io/rocm/dev-ubuntu-24.04:latest
 FROM ${ROCM_IMAGE}
 
 # gfx1201 = RDNA4 (R9700 / RX 9070). Override for your arch; the build is
