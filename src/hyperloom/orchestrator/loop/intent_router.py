@@ -805,9 +805,7 @@ class IntentRouter:
                     detail="cache_hit",
                 )
             else:
-                rejected = (
-                    self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
-                )
+                rejected = self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
                 if rejected is not None:
                     result = {
                         "status": "skipped",

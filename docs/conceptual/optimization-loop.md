@@ -236,7 +236,7 @@ taken with every accepted change applied.
 
 ## KERNEL_AGENT
 
-The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration may
+The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration might
 send kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 

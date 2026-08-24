@@ -226,8 +226,6 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     assert "benchmark_script" not in bench
 
 
-
-
 def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
     from hyperloom.orchestrator.actions.executors import bypass_scriptable
 
@@ -683,5 +681,3 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
 # ---------------------------------------------------------------------------
 # Scriptable baseline sampling cost (measurement contract values)
 # ---------------------------------------------------------------------------
-
-

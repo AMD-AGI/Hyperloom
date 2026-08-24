@@ -220,14 +220,13 @@ def _geak_kind_index(
             geak_spec_kind,
         )
     except Exception:  # pragma: no cover - offline replay without orchestrator
+
         def _geak_spec_name(spec: Any) -> str:
             if isinstance(spec, str):
                 return spec.strip()
             if not isinstance(spec, dict):
                 return ""
-            return str(
-                spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or ""
-            ).strip()
+            return str(spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or "").strip()
 
         def geak_spec_kind(spec: Any) -> str | None:
             if not isinstance(spec, dict):
@@ -509,12 +508,7 @@ def _geak_accepted_kernels_from_journey(
         verification = br.get("verification") if isinstance(br.get("verification"), dict) else {}
         dispatch = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
         backend = str(verification.get("best_backend") or (dispatch.get("backends") or [None])[0] or "")
-        op_kind = str(
-            k.get("op_kind")
-            or dispatch.get("op_kind")
-            or e2e.get("op_kind")
-            or ""
-        )
+        op_kind = str(k.get("op_kind") or dispatch.get("op_kind") or e2e.get("op_kind") or "")
         accepted.append(
             {
                 "kernel_id": kid,
@@ -579,9 +573,7 @@ def _geak_accepted_kernels_from_integrate_results(
         ir = read_json(
             path,
             default=None,
-            on_error=lambda exc: warnings.append(
-                f"geak: integrate_result read failed for {cand.name}: {exc}"
-            ),
+            on_error=lambda exc: warnings.append(f"geak: integrate_result read failed for {cand.name}: {exc}"),
         )
         if not isinstance(ir, dict):
             continue
@@ -907,9 +899,7 @@ def collect_geak(
     if not has_result:
         # Engaged via the flag but no result recorded; reconstruct from the
         # on-disk ``geak/`` working tree before surfacing ``missing``.
-        recon = _geak_reconstruct_from_disk(
-            session_dir, warnings, state.get("optimization_stack")
-        )
+        recon = _geak_reconstruct_from_disk(session_dir, warnings, state.get("optimization_stack"))
         if recon is None:
             return {
                 "engaged": True,
@@ -947,9 +937,7 @@ def collect_geak(
             # Which survivor the recovery actually read. A crashed run has no
             # journey, so this is usually ``integrate_result_backfill``.
             "accepted_kernels_source": (
-                str(recon.get("accepted_kernels_source") or "") or None
-                if recovered_kernels
-                else None
+                str(recon.get("accepted_kernels_source") or "") or None if recovered_kernels else None
             ),
             "accepted_kernels_kind_sources": _kind_source_counts(recovered_kernels),
             "accepted_heads": [],
@@ -1007,9 +995,7 @@ def collect_geak(
             accepted_kernels = legacy_strings
             accepted_kernels_source = "result"
         elif status in ("ok", "no_gain"):
-            backfilled = _geak_accepted_kernels_from_journey(
-                result, warnings, state.get("optimization_stack")
-            )
+            backfilled = _geak_accepted_kernels_from_journey(result, warnings, state.get("optimization_stack"))
             if backfilled:
                 accepted_kernels = backfilled
                 accepted_kernels_source = "kernel_journey_backfill"

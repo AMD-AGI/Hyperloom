@@ -1086,10 +1086,7 @@ def summarize_for_prompt(evidence: dict[str, Any], *, limit: int = 12) -> str:
     for row in candidates[:limit]:
         if not isinstance(row, dict):
             continue
-        lines.append(
-            f"[{row.get('rank')}] {row.get('category')} (taxonomy {row.get('taxonomy')}) "
-            f"at {row.get('site')}"
-        )
+        lines.append(f"[{row.get('rank')}] {row.get('category')} (taxonomy {row.get('taxonomy')}) at {row.get('site')}")
         lines.append(f"    evidence: {row.get('signal')}")
         if row.get("enabler"):
             lines.append(

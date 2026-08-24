@@ -162,20 +162,14 @@ class KBStoreClient:
         return urllib.parse.quote(value, safe=":")
 
     def _session_base(self, canonical_id: str, session_id: str) -> str:
-        return (
-            f"/v1/kb/{self._quote(canonical_id)}"
-            f"/sessions/{self._quote(session_id)}"
-        )
+        return f"/v1/kb/{self._quote(canonical_id)}/sessions/{self._quote(session_id)}"
 
     @staticmethod
     def _scope_query(scope: dict[str, Any] | None) -> str:
         if not scope:
             return ""
         return "?" + urllib.parse.urlencode(
-            {
-                key: scope[key]
-                for key in ("kernel_optimizer", "tp", "conc", "isl", "osl")
-            }
+            {key: scope[key] for key in ("kernel_optimizer", "tp", "conc", "isl", "osl")}
         )
 
     # -- knowledge ----------------------------------------------------------
@@ -222,8 +216,7 @@ class KBStoreClient:
         try:
             return self._request(
                 "GET",
-                f"/v1/kb/{self._quote(canonical_id)}/views/hyperloom-recipe"
-                f"{self._scope_query(scope)}",
+                f"/v1/kb/{self._quote(canonical_id)}/views/hyperloom-recipe{self._scope_query(scope)}",
             )
         except KBStoreError as exc:
             if "HTTP 404" in str(exc):
@@ -261,8 +254,7 @@ class KBStoreClient:
         try:
             return self._request(
                 "GET",
-                f"/v1/kb/{self._quote(canonical_id)}/sessions"
-                f"{self._scope_query(scope)}",
+                f"/v1/kb/{self._quote(canonical_id)}/sessions{self._scope_query(scope)}",
             )
         except KBStoreError as exc:
             if "HTTP 404" in str(exc):
@@ -358,9 +350,7 @@ class KBStoreClient:
             with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
                 list(
                     pool.map(
-                        lambda item: self._upload_one(
-                            item[1], sources[item[0]], by_path[item[0]]["sha256"]
-                        ),
+                        lambda item: self._upload_one(item[1], sources[item[0]], by_path[item[0]]["sha256"]),
                         pending,
                     )
                 )
@@ -371,8 +361,7 @@ class KBStoreClient:
             {"files": entries, "verify": True},
         )
         manifest = {
-            str(f.get("path")): str(f.get("uri") or "")
-            for f in (commit.get("artifacts") or {}).get("files") or []
+            str(f.get("path")): str(f.get("uri") or "") for f in (commit.get("artifacts") or {}).get("files") or []
         }
         return {rel: manifest.get(rel, "") for rel in sources}
 
@@ -426,9 +415,7 @@ class KBStoreClient:
 
     # -- download -----------------------------------------------------------
 
-    def list_session_files(
-        self, canonical_id: str, session_id: str, *, kind: str = ""
-    ) -> dict[str, Any]:
+    def list_session_files(self, canonical_id: str, session_id: str, *, kind: str = "") -> dict[str, Any]:
         """Manifest with a short-lived presigned GET URL per file."""
         path = self._session_base(canonical_id, session_id) + "/files"
         if kind:
@@ -481,9 +468,7 @@ class KBStoreClient:
             if not url:
                 raise KBStoreError(f"no download url for {rel}")
             try:
-                with urllib.request.urlopen(url, timeout=self._timeout) as resp, open(
-                    target, "wb"
-                ) as out:
+                with urllib.request.urlopen(url, timeout=self._timeout) as resp, open(target, "wb") as out:
                     while True:
                         chunk = resp.read(_READ_CHUNK)
                         if not chunk:
@@ -498,9 +483,7 @@ class KBStoreClient:
         with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
             return list(pool.map(fetch, files))
 
-    def download_archive(
-        self, canonical_id: str, session_id: str, dest_file: str | Path
-    ) -> Path:
+    def download_archive(self, canonical_id: str, session_id: str, dest_file: str | Path) -> Path:
         """Download the session directory as a single tar.gz."""
         url = self._base + self._session_base(canonical_id, session_id) + "/archive"
         headers = {}
@@ -510,9 +493,7 @@ class KBStoreClient:
         target = Path(dest_file)
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp, open(
-                target, "wb"
-            ) as out:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp, open(target, "wb") as out:
                 while True:
                     chunk = resp.read(_READ_CHUNK)
                     if not chunk:
@@ -564,10 +545,7 @@ class SectionContent:
         self.files = list(files or [])
 
     def __repr__(self) -> str:
-        return (
-            f"SectionContent(section={self.section!r}, "
-            f"keys={sorted(self.knowledge)!r}, files={len(self.files)})"
-        )
+        return f"SectionContent(section={self.section!r}, keys={sorted(self.knowledge)!r}, files={len(self.files)})"
 
 
 class KnowledgeSections:
@@ -646,9 +624,7 @@ class KnowledgeSections:
         merged = dict(knowledge)
         refs: list[str] = []
         if staged is not None:
-            refs = [
-                path.relative_to(self.files_dir).as_posix() for path in staged.files
-            ]
+            refs = [path.relative_to(self.files_dir).as_posix() for path in staged.files]
             if mode == "merge":
                 merged = {**staged.knowledge, **knowledge}
 
@@ -728,11 +704,7 @@ class KnowledgeSections:
         if not isinstance(knowledge, dict):
             return None
         root = self.warm_start_dir / FILES_MEMBER_ROOT / name
-        files = (
-            sorted(path for path in root.rglob("*") if path.is_file())
-            if root.is_dir()
-            else []
-        )
+        files = sorted(path for path in root.rglob("*") if path.is_file()) if root.is_dir() else []
         return SectionContent(name, dict(knowledge), files)
 
     def sections(self) -> list[str]:
@@ -744,8 +716,7 @@ class KnowledgeSections:
 
     def document(self) -> dict[str, Any]:
         """The staged ``{section: knowledge}`` map to publish under ``value``."""
-        return {name: (self.staged(name) or SectionContent(name, {})).knowledge
-                for name in self.sections()}
+        return {name: (self.staged(name) or SectionContent(name, {})).knowledge for name in self.sections()}
 
 
 def _same_bytes(left: Path, right: Path) -> bool:

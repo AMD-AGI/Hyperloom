@@ -560,12 +560,16 @@ def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
         session_dir=tmp_path,
     )
     state = SharedState()
-    task = SimpleNamespace(task_id="t-warm", kind="replay_warm_recipe", params={
-        "output_dir": str(tmp_path / "ws"),
-        "timeout_sec": 10,
-        "model_path": "/wekafs/models/Qwen-Qwen3-8B",
-        "gpu_type": "mi300x",
-    })
+    task = SimpleNamespace(
+        task_id="t-warm",
+        kind="replay_warm_recipe",
+        params={
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        },
+    )
     ctx = SimpleNamespace(task=task, extra={"shared_state": state})
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -982,9 +986,7 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     executor = BaselineExecutor()
     rec = _StopRecorder("eval")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
-    executor._maybe_stop_on_missing_baseline_accuracy(
-        _stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result
-    )
+    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result)
     assert rec.stop_reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result
 
@@ -1104,8 +1106,7 @@ def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
     mbench = magpie / "Magpie" / "scripts" / "benchmark"
     mbench.mkdir(parents=True)
     (mbench / "sglang_mi355x.sh").write_text(
-        '#!/bin/bash\n'
-        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n',
+        '#!/bin/bash\n        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n',
         encoding="utf-8",
     )
     ix = tmp_path / "ix"

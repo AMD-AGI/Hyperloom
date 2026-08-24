@@ -98,6 +98,7 @@ def _knowledge_config_for_forge():
         _KNOWLEDGE_CONFIG_RESOLVED = True
         return config
 
+
 _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
 # runtime budget rather than running a non-productive campaign.
@@ -117,11 +118,7 @@ def _forge_failure_tail(output: str, *, max_chars: int = 500) -> str:
     Result sentinels are skipped because one such line is a whole JSON document
     and would crowd out everything else.
     """
-    lines = [
-        line.strip()
-        for line in (output or "").splitlines()
-        if line.strip() and "__FORGE_RESULT__" not in line
-    ]
+    lines = [line.strip() for line in (output or "").splitlines() if line.strip() and "__FORGE_RESULT__" not in line]
     if not lines:
         return "no output"
     flagged = [line for line in lines if line.startswith(("Error:", "Usage:"))]
@@ -453,11 +450,7 @@ def _stable_implementation_symbols(
     symbols: list[str] = []
     for value in values:
         symbol = str(value or "").strip()
-        if (
-            not symbol
-            or symbol.endswith("...")
-            or any(character.isspace() for character in symbol)
-        ):
+        if not symbol or symbol.endswith("...") or any(character.isspace() for character in symbol):
             continue
         if symbol not in symbols:
             symbols.append(symbol)
@@ -581,9 +574,7 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
     base_commit = base.stdout.strip()
     add = _run_git(["-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
     if add.returncode != 0:
-        raise _WorktreePreparationError(
-            "git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip())
-        )
+        raise _WorktreePreparationError("git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip()))
 
     # Local git identity so IterationLoop commit/revert works.
     _run_git(["-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
@@ -607,13 +598,9 @@ def _remap_implementation_sources(
     try:
         anchor_relative = mapped_anchor.relative_to(workspace_path)
     except ValueError as error:
-        raise _WorktreePreparationError(
-            f"prepared kernel escapes Forge workspace: {mapped_anchor}"
-        ) from error
+        raise _WorktreePreparationError(f"prepared kernel escapes Forge workspace: {mapped_anchor}") from error
     if not mapped_anchor.is_file():
-        raise _WorktreePreparationError(
-            f"prepared kernel does not exist: {mapped_anchor}"
-        )
+        raise _WorktreePreparationError(f"prepared kernel does not exist: {mapped_anchor}")
 
     original_roots: list[Path] = []
     if kernel_repo:
@@ -625,11 +612,7 @@ def _remap_implementation_sources(
         original_roots.append(root)
 
     raw_kernel_sources = candidate.get("kernel_sources") or []
-    raw_sources = (
-        [raw_kernel_sources]
-        if isinstance(raw_kernel_sources, str)
-        else list(raw_kernel_sources)
-    )
+    raw_sources = [raw_kernel_sources] if isinstance(raw_kernel_sources, str) else list(raw_kernel_sources)
     raw_sources.append(source_file)
     remapped: list[str] = []
     for raw_source in raw_sources:
@@ -661,8 +644,7 @@ def _remap_implementation_sources(
             (
                 path.resolve()
                 for path in candidates
-                if path.is_file()
-                and _path_is_within(path.resolve(), workspace_path)
+                if path.is_file() and _path_is_within(path.resolve(), workspace_path)
             ),
             None,
         )
@@ -1139,11 +1121,7 @@ def _untracked_paths(repo: str) -> set[str]:
     proc = _run_git(["-C", repo, "ls-files", "--others", "--exclude-standard", "-z"], timeout=30)
     if proc.returncode != 0:
         raise RuntimeError(f"could not inspect untracked files in {repo}")
-    return {
-        path
-        for path in (proc.stdout or "").split("\0")
-        if path
-    }
+    return {path for path in (proc.stdout or "").split("\0") if path}
 
 
 def _remove_new_untracked(repo: str, baseline: set[str]) -> None:
@@ -1163,9 +1141,7 @@ def _remove_new_untracked(repo: str, baseline: set[str]) -> None:
             if target.is_symlink() or target.is_file():
                 target.unlink()
         except OSError as exc:
-            raise RuntimeError(
-                f"could not remove campaign file: {target}"
-            ) from exc
+            raise RuntimeError(f"could not remove campaign file: {target}") from exc
         parent = target.parent
         while parent != root:
             try:
@@ -1186,13 +1162,15 @@ def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
         timeout=60,
     )
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or b"").decode(
-            "utf-8",
-            errors="replace",
-        ).strip()
-        raise RuntimeError(
-            f"could not restore tracked repository baseline: {detail}"
+        detail = (
+            (proc.stderr or proc.stdout or b"")
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+            .strip()
         )
+        raise RuntimeError(f"could not restore tracked repository baseline: {detail}")
 
 
 def _restore_inplace(restore: dict) -> None:
@@ -1272,8 +1250,7 @@ def _restore_inplace(restore: dict) -> None:
         baseline_untracked = restore.get("baseline_untracked")
         if baseline_untracked is not None:
             if not isinstance(baseline_untracked, list) or any(
-                not isinstance(path, str) or not path
-                for path in baseline_untracked
+                not isinstance(path, str) or not path for path in baseline_untracked
             ):
                 raise RuntimeError("invalid in-place untracked baseline")
             _remove_new_untracked(repo, set(baseline_untracked))
@@ -1458,23 +1435,17 @@ def _invocation_spec_covers_cases(
         return False
 
     expected_selectors = [
-        dict(case.get("selector") or {})
-        for case in grouped_cases
-        if isinstance(case.get("selector"), dict)
+        dict(case.get("selector") or {}) for case in grouped_cases if isinstance(case.get("selector"), dict)
     ]
-    task_group = ((payload.get("workload") or {}).get("task_group") or {})
+    task_group = (payload.get("workload") or {}).get("task_group") or {}
     spec_cases = task_group.get("cases") if isinstance(task_group, dict) else None
     actual_selectors = [
         dict(case.get("selector") or {})
         for case in (spec_cases or [])
         if isinstance(case, dict) and isinstance(case.get("selector"), dict)
     ]
-    driver_contract = ((payload.get("tests") or {}).get("driver_contract") or {})
-    contract_selectors = (
-        driver_contract.get("case_selectors")
-        if isinstance(driver_contract, dict)
-        else None
-    )
+    driver_contract = (payload.get("tests") or {}).get("driver_contract") or {}
+    contract_selectors = driver_contract.get("case_selectors") if isinstance(driver_contract, dict) else None
     return (
         len(expected_selectors) == len(grouped_cases)
         and len(expected_selectors) > 1
@@ -1510,13 +1481,11 @@ def _write_report(
         lines.append(f"mean_case_speedup={mean_case_speedup:.6f}")
         if search_start_ms:
             lines.append(
-                f"search_start_ms={search_start_ms:.4f} "
-                f"improved_during_search={str(improved_during_search).lower()}"
+                f"search_start_ms={search_start_ms:.4f} improved_during_search={str(improved_during_search).lower()}"
             )
         if baseline_ms and best_ms and best_ms > 0:
             lines.append(
-                "# diagnostic raw means (not monotonic): "
-                f"baseline_ms={baseline_ms:.4f} selected_ms={best_ms:.4f}"
+                f"# diagnostic raw means (not monotonic): baseline_ms={baseline_ms:.4f} selected_ms={best_ms:.4f}"
             )
         lines.append("[correctness] pass")
     else:
@@ -1527,10 +1496,7 @@ def _write_report(
         # "speedup" and the "Nx" form so the report scanners never treat it as a
         # KEEP-worthy figure.
         if baseline_ms and best_ms and best_ms > 0:
-            lines.append(
-                f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
-                f"selected_ms={best_ms:.4f}"
-            )
+            lines.append(f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} selected_ms={best_ms:.4f}")
     if integration_validation:
         lines.append(f"[integration_validation] {integration_validation}")
     report = output_dir / "optimization_report.md"
@@ -1581,22 +1547,13 @@ def _export_best_artifacts(
     primary = dst_dir / f"v1_forge{ext}"
     if best_commit:
         try:
-            primary_rel = str(
-                Path(worktree_kernel_file).resolve().relative_to(
-                    Path(workspace).resolve()
-                )
-            )
+            primary_rel = str(Path(worktree_kernel_file).resolve().relative_to(Path(workspace).resolve()))
         except ValueError:
             primary_rel = ""
-        primary_bytes = (
-            _blob_at_commit(best_commit, primary_rel)
-            if primary_rel
-            else None
-        )
+        primary_bytes = _blob_at_commit(best_commit, primary_rel) if primary_rel else None
         if primary_bytes is None:
             raise RuntimeError(
-                f"validated best commit does not contain primary source: "
-                f"{primary_rel or worktree_kernel_file}"
+                f"validated best commit does not contain primary source: {primary_rel or worktree_kernel_file}"
             )
         primary.write_bytes(primary_bytes)
     else:
@@ -1618,9 +1575,7 @@ def _export_best_artifacts(
         diff_cmd.append(best_commit)
     diff = _run_git(diff_cmd, timeout=60)
     if best_commit and diff.returncode != 0:
-        raise RuntimeError(
-            f"could not list files changed by validated best {best_commit}"
-        )
+        raise RuntimeError(f"could not list files changed by validated best {best_commit}")
     for rel in (diff.stdout or "").splitlines():
         rel = rel.strip()
         if not rel:
@@ -1653,20 +1608,14 @@ def _export_best_artifacts(
         patch_cmd.append(best_commit)
     patch = _run_git(patch_cmd, timeout=60)
     if best_commit and patch.returncode != 0:
-        raise RuntimeError(
-            f"could not export validated best patch {best_commit}"
-        )
+        raise RuntimeError(f"could not export validated best patch {best_commit}")
     patch_text = patch.stdout or ""
     if best_commit and (not changed or not patch_text.strip()):
-        raise RuntimeError(
-            f"validated best commit {best_commit} has no exportable source diff"
-        )
+        raise RuntimeError(f"validated best commit {best_commit} has no exportable source diff")
     (dst_dir / "forge.patch").write_text(patch_text)
 
     if best_commit and not primary.is_file():
-        raise RuntimeError(
-            f"validated best primary artifact was not written: {primary}"
-        )
+        raise RuntimeError(f"validated best primary artifact was not written: {primary}")
 
     return str(primary), changed
 
@@ -1940,11 +1889,14 @@ def _terminate_forge_process(
     """Terminate the forge-loop process group, escalating after a grace period."""
     pgid = proc.pid
     descendants = _descendant_processes(proc.pid)
-    if _signal_process_group(
-        pgid,
-        signal.SIGTERM,
-        phase="SIGTERM",
-    ) is False:
+    if (
+        _signal_process_group(
+            pgid,
+            signal.SIGTERM,
+            phase="SIGTERM",
+        )
+        is False
+    ):
         _signal_processes(descendants, signal.SIGTERM)
         try:
             proc.terminate()
@@ -1973,11 +1925,14 @@ def _terminate_forge_process(
             )
         )
         _signal_processes(descendants, signal.SIGKILL)
-        if _signal_process_group(
-            pgid,
-            signal.SIGKILL,
-            phase="timeout SIGKILL",
-        ) is False:
+        if (
+            _signal_process_group(
+                pgid,
+                signal.SIGKILL,
+                phase="timeout SIGKILL",
+            )
+            is False
+        ):
             try:
                 proc.kill()
             except OSError as exc:
@@ -2006,13 +1961,9 @@ def _terminate_forge_process(
                 signal.SIGKILL,
             )
             log.warning(
-                "forge process group was not reaped after SIGKILL: "
-                "pgid=%d residual=%s",
+                "forge process group was not reaped after SIGKILL: pgid=%d residual=%s",
                 pgid,
-                [
-                    {"pid": pid, "state": state}
-                    for pid, _start_time, state in residual
-                ],
+                [{"pid": pid, "state": state} for pid, _start_time, state in residual],
             )
             return "", ""
 
@@ -2166,34 +2117,21 @@ def _observed_mean_case_result_fields(
         mean_case_speedup = float(payload.get("mean_case_speedup"))
     except (TypeError, ValueError):
         mean_case_speedup = None
-    if (
-        mean_case_speedup is not None
-        and (
-            not math.isfinite(mean_case_speedup)
-            or mean_case_speedup <= 0.0
-        )
-    ):
+    if mean_case_speedup is not None and (not math.isfinite(mean_case_speedup) or mean_case_speedup <= 0.0):
         mean_case_speedup = None
     try:
         search_start = float(payload.get("search_start_mean_case_speedup"))
     except (TypeError, ValueError):
         search_start = None
-    if (
-        search_start is not None
-        and (not math.isfinite(search_start) or search_start <= 0.0)
-    ):
+    if search_start is not None and (not math.isfinite(search_start) or search_start <= 0.0):
         search_start = None
-    total_improved = bool(
-        mean_case_speedup is not None and mean_case_speedup > 1.0
-    )
+    total_improved = bool(mean_case_speedup is not None and mean_case_speedup > 1.0)
     incremental = bool(
         payload.get(
             "incremental_improved",
             payload.get(
                 "improved_during_search",
-                mean_case_speedup is not None
-                and search_start is not None
-                and mean_case_speedup > search_start,
+                mean_case_speedup is not None and search_start is not None and mean_case_speedup > search_start,
             ),
         )
     )
@@ -2210,11 +2148,7 @@ def _mean_case_result_fields(
         total_improved,
         incremental,
     ) = _observed_mean_case_result_fields(payload)
-    if (
-        mean_case_speedup is None
-        or search_start is None
-        or not total_improved
-    ):
+    if mean_case_speedup is None or search_start is None or not total_improved:
         return None
     return {
         "mean_case_speedup": mean_case_speedup,
@@ -2451,17 +2385,11 @@ def _validated_rewrite_applyback_result(
             f"applyback_ok={payload.get('applyback_ok')!r})"
         )
     if payload.get("artifact_kind") != _REWRITE_ARTIFACT_KIND:
-        return _reject(
-            f"result artifact_kind={payload.get('artifact_kind')!r} is not "
-            f"{_REWRITE_ARTIFACT_KIND!r}"
-        )
+        return _reject(f"result artifact_kind={payload.get('artifact_kind')!r} is not {_REWRITE_ARTIFACT_KIND!r}")
     try:
         artifact_schema_version = int(payload.get("artifact_schema_version"))
     except (TypeError, ValueError):
-        return _reject(
-            "result artifact_schema_version is not an integer: "
-            f"{payload.get('artifact_schema_version')!r}"
-        )
+        return _reject(f"result artifact_schema_version is not an integer: {payload.get('artifact_schema_version')!r}")
     if artifact_schema_version != _REWRITE_ARTIFACT_SCHEMA_VERSION:
         return _reject(
             f"result artifact_schema_version={artifact_schema_version} is not the "
@@ -2472,45 +2400,32 @@ def _validated_rewrite_applyback_result(
         return _reject("the result names no best_commit")
 
     workspace_root = Path(workspace).resolve()
-    manifest_path = _rewrite_contained_path(
-        workspace_root, payload.get("canonical_manifest"), allow_absolute=True
-    )
-    patch_path = _rewrite_contained_path(
-        workspace_root, payload.get("canonical_patch_path"), allow_absolute=True
-    )
-    files_root = _rewrite_contained_path(
-        workspace_root, payload.get("canonical_files_root"), allow_absolute=True
-    )
+    manifest_path = _rewrite_contained_path(workspace_root, payload.get("canonical_manifest"), allow_absolute=True)
+    patch_path = _rewrite_contained_path(workspace_root, payload.get("canonical_patch_path"), allow_absolute=True)
+    files_root = _rewrite_contained_path(workspace_root, payload.get("canonical_files_root"), allow_absolute=True)
     if manifest_path is None or not manifest_path.is_file():
         return _reject(
-            "canonical_manifest is not a readable file inside the workspace: "
-            f"{payload.get('canonical_manifest')!r}"
+            f"canonical_manifest is not a readable file inside the workspace: {payload.get('canonical_manifest')!r}"
         )
     if patch_path is None or not patch_path.is_file():
         return _reject(
-            "canonical_patch_path is not a readable file inside the workspace: "
-            f"{payload.get('canonical_patch_path')!r}"
+            f"canonical_patch_path is not a readable file inside the workspace: {payload.get('canonical_patch_path')!r}"
         )
     if files_root is None or not files_root.is_dir():
         return _reject(
-            "canonical_files_root is not a directory inside the workspace: "
-            f"{payload.get('canonical_files_root')!r}"
+            f"canonical_files_root is not a directory inside the workspace: {payload.get('canonical_files_root')!r}"
         )
 
     # Reclaiming these paths is destructive and keys off this declaration alone,
     # so an absent or non-relative one fails the result rather than defaulting.
     declared_temporary = payload.get("temporary_paths")
     if not isinstance(declared_temporary, list):
-        return _reject(
-            f"temporary_paths is not a list: {declared_temporary!r}"
-        )
+        return _reject(f"temporary_paths is not a list: {declared_temporary!r}")
     temporary_paths: list[str] = []
     for raw in declared_temporary:
         resolved = _rewrite_contained_path(workspace_root, raw, allow_absolute=False)
         if resolved is None:
-            return _reject(
-                f"declared temporary path escapes the workspace or is absolute: {raw!r}"
-            )
+            return _reject(f"declared temporary path escapes the workspace or is absolute: {raw!r}")
         temporary_paths.append(str(resolved))
 
     try:
@@ -2520,24 +2435,17 @@ def _validated_rewrite_applyback_result(
     if not isinstance(manifest, dict):
         return _reject(f"the manifest at {manifest_path} is not a JSON object")
     if not _rewrite_manifest_has_producer_shape(manifest):
-        return _reject(
-            "the manifest is missing producer-owned fields, so it was not written "
-            "by the rewrite producer"
-        )
+        return _reject("the manifest is missing producer-owned fields, so it was not written by the rewrite producer")
     if manifest.get("schema_version") != _REWRITE_ARTIFACT_SCHEMA_VERSION:
         return _reject(
             f"manifest schema_version={manifest.get('schema_version')!r} is not the "
             f"supported {_REWRITE_ARTIFACT_SCHEMA_VERSION}"
         )
     if manifest.get("artifact_kind") != _REWRITE_ARTIFACT_KIND:
-        return _reject(
-            f"manifest artifact_kind={manifest.get('artifact_kind')!r} is not "
-            f"{_REWRITE_ARTIFACT_KIND!r}"
-        )
+        return _reject(f"manifest artifact_kind={manifest.get('artifact_kind')!r} is not {_REWRITE_ARTIFACT_KIND!r}")
     if manifest.get("validation_scope") != _REWRITE_VALIDATION_SCOPE:
         return _reject(
-            f"manifest validation_scope={manifest.get('validation_scope')!r} is not "
-            f"{_REWRITE_VALIDATION_SCOPE!r}"
+            f"manifest validation_scope={manifest.get('validation_scope')!r} is not {_REWRITE_VALIDATION_SCOPE!r}"
         )
     if str(manifest.get("framework") or "") not in _REWRITE_SUPPORTED_FRAMEWORKS:
         return _reject(
@@ -2589,15 +2497,11 @@ def _validated_rewrite_applyback_result(
         base_commit=base_commit,
     )
     if lineage is None:
-        return _reject(
-            "the manifest's commit lineage or its reference timings did not validate "
-            "against the workspace"
-        )
+        return _reject("the manifest's commit lineage or its reference timings did not validate against the workspace")
     best_commit, baseline_ms, best_ms = lineage
     if best_commit != outer_commit:
         return _reject(
-            f"the manifest's best commit ({best_commit[:12]}) is not the one the "
-            f"result names ({outer_commit[:12]})"
+            f"the manifest's best commit ({best_commit[:12]}) is not the one the result names ({outer_commit[:12]})"
         )
     # Whether the rewrite is *faster* is not part of the producer contract: it
     # may publish a correct-but-not-faster port. That is a consumer policy call,
@@ -2610,9 +2514,7 @@ def _validated_rewrite_applyback_result(
             return _reject("the manifest declares an empty changed_files entry")
         parts = Path(relative)
         if parts.is_absolute() or ".." in parts.parts:
-            return _reject(
-                f"the manifest declares a changed file outside the framework: {relative!r}"
-            )
+            return _reject(f"the manifest declares a changed file outside the framework: {relative!r}")
         changed_files.append(parts.as_posix())
     if not changed_files:
         return _reject("the manifest declares no changed files")
@@ -2632,8 +2534,7 @@ def _validated_rewrite_applyback_result(
     )
     if pinned.returncode != 0 or pinned.stdout.strip() != best_commit:
         return _reject(
-            f"commit_ref {commit_ref!r} does not resolve to the best commit "
-            f"({best_commit[:12]}) in the workspace"
+            f"commit_ref {commit_ref!r} does not resolve to the best commit ({best_commit[:12]}) in the workspace"
         )
 
     return {
@@ -2719,11 +2620,7 @@ def _validated_forge_checkpoint(
     expected_coverage = list(shapes.get("validation") or [])
     if not expected_coverage:
         for shape in (shapes.get("minimal"), shapes.get("primary")):
-            if (
-                isinstance(shape, dict)
-                and shape
-                and shape not in expected_coverage
-            ):
+            if isinstance(shape, dict) and shape and shape not in expected_coverage:
                 expected_coverage.append(shape)
     # forge-loop stopped reporting case coverage once drivers took over suite
     # evaluation, so silence here says nothing about what was measured -- an
@@ -2735,8 +2632,7 @@ def _validated_forge_checkpoint(
         # Discarding a best the producer already validated and committed is too
         # expensive an outcome to leave to a return value nobody can attribute.
         log.warning(
-            "forge recovery: dropping checkpoint for %s -- case coverage "
-            "mismatch: expected %r, checkpoint reported %r",
+            "forge recovery: dropping checkpoint for %s -- case coverage mismatch: expected %r, checkpoint reported %r",
             best_commit[:12],
             expected_coverage,
             actual_coverage,
@@ -2770,10 +2666,7 @@ def _validated_warm_start_result(
         warm_best = {}
     if read.get("validated") is False or read.get("validation_passed") is False:
         return None
-    if (
-        warm_best.get("validated") is False
-        or warm_best.get("validation_passed") is False
-    ):
+    if warm_best.get("validated") is False or warm_best.get("validation_passed") is False:
         return None
 
     best_commit = str(
@@ -2783,11 +2676,7 @@ def _validated_warm_start_result(
         or read.get("best_commit")
         or read.get("applied_commit")
         or read.get("commit_hash")
-        or (
-            result.get("best_commit")
-            if result.get("best_iteration") in (None, 0, "0")
-            else ""
-        )
+        or (result.get("best_commit") if result.get("best_iteration") in (None, 0, "0") else "")
         or ""
     ).strip()
     if not best_commit or best_commit == base_commit:
@@ -2885,14 +2774,9 @@ def _run_loop_via_cli(
         try:
             stale_path.unlink(missing_ok=True)
         except OSError as exc:
-            raise RuntimeError(
-                f"could not clear stale Forge recovery artifact {stale_path}: "
-                f"{exc}"
-            ) from exc
+            raise RuntimeError(f"could not clear stale Forge recovery artifact {stale_path}: {exc}") from exc
         if stale_path.exists():
-            raise RuntimeError(
-                f"stale Forge recovery artifact still exists: {stale_path}"
-            )
+            raise RuntimeError(f"stale Forge recovery artifact still exists: {stale_path}")
     forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
     if forge_root:
@@ -3004,15 +2888,10 @@ def _run_loop_via_cli(
             stdout, stderr = _terminate_forge_process(proc)
         out = (stdout or "") + "\n" + (stderr or "")
         if timed_out:
-            loop_exc = RuntimeError(
-                f"forge-loop exceeded absolute deadline after {timeout_s}s"
-            )
+            loop_exc = RuntimeError(f"forge-loop exceeded absolute deadline after {timeout_s}s")
         if proc.returncode != 0:
             if loop_exc is None:
-                loop_exc = RuntimeError(
-                    f"forge-loop exited rc={proc.returncode}: "
-                    f"{_forge_failure_tail(out)}"
-                )
+                loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}: {_forge_failure_tail(out)}")
     except Exception as exc:  # noqa: BLE001
         loop_exc = exc
 
@@ -3055,17 +2934,13 @@ def _run_loop_via_cli(
             search_start_mean_case_speedup,
             total_improved,
             incremental_improved,
-        ) = _observed_mean_case_result_fields(
-            parsed
-        )
+        ) = _observed_mean_case_result_fields(parsed)
         improved = total_improved
         improved_during_search = incremental_improved
         if parsed.get("deadline_expired"):
             timed_out = True
             if loop_exc is None:
-                loop_exc = RuntimeError(
-                    "forge-loop reached its graceful absolute deadline"
-                )
+                loop_exc = RuntimeError("forge-loop reached its graceful absolute deadline")
     checkpoint = _read_forge_checkpoint(experiments_dir)
     return ForgeLoopOutcome(
         baseline_ms=baseline_ms,
@@ -3091,9 +2966,7 @@ def _write_changed_files_index(output_dir: Path, changed_files: list[str]) -> No
     if not changed_files:
         return
     try:
-        (output_dir / "optimized_versions" / "changed_files.txt").write_text(
-            "\n".join(changed_files) + "\n"
-        )
+        (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
     except OSError:
         log.warning("forge export: could not write the changed-files index")
 
@@ -3168,9 +3041,7 @@ def _run_rewrite_via_cli(
     try:
         result_json.unlink(missing_ok=True)
     except OSError as exc:
-        raise RuntimeError(
-            f"could not clear stale rewrite result {result_json}: {exc}"
-        ) from exc
+        raise RuntimeError(f"could not clear stale rewrite result {result_json}: {exc}") from exc
     if result_json.exists():
         raise RuntimeError(f"stale rewrite result still exists: {result_json}")
 
@@ -3272,14 +3143,9 @@ def _run_rewrite_via_cli(
             stdout, stderr = _terminate_forge_process(proc)
         out = (stdout or "") + "\n" + (stderr or "")
         if timed_out:
-            run_exc = RuntimeError(
-                f"forge rewrite exceeded absolute deadline after {timeout_s}s"
-            )
+            run_exc = RuntimeError(f"forge rewrite exceeded absolute deadline after {timeout_s}s")
         if proc.returncode != 0 and run_exc is None:
-            run_exc = RuntimeError(
-                f"forge rewrite exited rc={proc.returncode}: "
-                f"{_forge_failure_tail(out)}"
-            )
+            run_exc = RuntimeError(f"forge rewrite exited rc={proc.returncode}: {_forge_failure_tail(out)}")
     except Exception as exc:  # noqa: BLE001
         run_exc = exc
 
@@ -3432,6 +3298,7 @@ def _run_rewrite_attempt(
         base_commit=base_commit,
         problems=applyback_problems,
     )
+
     def _rejected(detail: str) -> tuple[dict, list[str]]:
         """Report a rewrite attempt that produced nothing this route can keep."""
         failed = _normalized(1, "", detail, time.time() - started)
@@ -3459,8 +3326,7 @@ def _run_rewrite_attempt(
     # and keeps the producer's scratch unreclaimed on any rejection.
     if applyback["best_ms"] >= applyback["baseline_ms"]:
         log.info(
-            "forge rewrite: rejecting a valid apply-back that is not faster "
-            "(best=%sms baseline=%sms commit=%s)",
+            "forge rewrite: rejecting a valid apply-back that is not faster (best=%sms baseline=%sms commit=%s)",
             applyback["best_ms"],
             applyback["baseline_ms"],
             applyback["best_commit"][:12],
@@ -3575,9 +3441,7 @@ def _repoint_relocated_artifacts(
             result[key] = moved
     artifacts = result.get("artifacts")
     if isinstance(artifacts, list):
-        result["artifacts"] = [
-            relocated(entry) or str(entry) for entry in artifacts
-        ]
+        result["artifacts"] = [relocated(entry) or str(entry) for entry in artifacts]
     applyback = result.get("flydsl_applyback")
     if isinstance(applyback, dict):
         for key in _RELOCATABLE_ARTIFACT_KEYS:
@@ -3624,13 +3488,10 @@ def _finalize_forge_workspace(
                     preserved = destination
                     suffix = 1
                     while preserved.exists():
-                        preserved = destination.with_name(
-                            f"{destination.name}_workspace_{suffix}"
-                        )
+                        preserved = destination.with_name(f"{destination.name}_workspace_{suffix}")
                         suffix += 1
                     log.warning(
-                        "forge: %s already holds campaign artifacts; preserving the "
-                        "in-place campaign at %s instead",
+                        "forge: %s already holds campaign artifacts; preserving the in-place campaign at %s instead",
                         destination,
                         preserved,
                     )
@@ -3643,16 +3504,12 @@ def _finalize_forge_workspace(
                     moved_to=destination,
                 )
             except OSError as error:
-                cleanup_errors.append(
-                    f"failed to preserve in-place campaign artifacts: {error}"
-                )
+                cleanup_errors.append(f"failed to preserve in-place campaign artifacts: {error}")
         driver_paths: set[Path] = set()
         try:
             driver_paths.update(Path(workspace).glob(".forge_driver_*.py"))
         except OSError as error:
-            cleanup_errors.append(
-                f"failed to enumerate generated in-place drivers: {error}"
-            )
+            cleanup_errors.append(f"failed to enumerate generated in-place drivers: {error}")
         if driver:
             driver_paths.add(Path(driver))
         for driver_path in driver_paths:
@@ -3663,22 +3520,16 @@ def _finalize_forge_workspace(
             except FileNotFoundError:
                 pass  # already gone -- nothing to clean up
             except OSError as error:
-                cleanup_errors.append(
-                    f"failed to remove generated in-place driver: {error}"
-                )
+                cleanup_errors.append(f"failed to remove generated in-place driver: {error}")
         _restore_generated_driver_exclude(Path(workspace))
         workspace_root = Path(workspace).resolve()
         for raw in temporary_paths or []:
             declared = Path(str(raw))
             if not declared.is_absolute() or not _path_is_within(declared, workspace_root):
-                cleanup_errors.append(
-                    f"declared temporary path escapes the workspace: {raw}"
-                )
+                cleanup_errors.append(f"declared temporary path escapes the workspace: {raw}")
                 continue
             if declared.resolve() == workspace_root:
-                cleanup_errors.append(
-                    "declared temporary path is the workspace root itself"
-                )
+                cleanup_errors.append("declared temporary path is the workspace root itself")
                 continue
             try:
                 if declared.is_dir() and not declared.is_symlink():
@@ -3686,17 +3537,13 @@ def _finalize_forge_workspace(
                 else:
                     declared.unlink(missing_ok=True)
             except OSError as error:
-                cleanup_errors.append(
-                    f"failed to remove producer temporary path {declared}: {error}"
-                )
+                cleanup_errors.append(f"failed to remove producer temporary path {declared}: {error}")
         try:
             _restore_inplace(restore_info)
         except Exception as error:  # noqa: BLE001 - combine cleanup/restore failures
             cleanup_errors.append(f"failed to restore in-place repository: {error}")
         if cleanup_errors:
-            raise RuntimeError(
-                "in-place workspace cleanup failed: " + "; ".join(cleanup_errors)
-            )
+            raise RuntimeError("in-place workspace cleanup failed: " + "; ".join(cleanup_errors))
         return
     log.info(
         "forge: retaining workspace for inspection: %s (branch=%s, nogit=%s)",
@@ -3749,9 +3596,7 @@ def _vendor_playbook_lock_dir(output_dir: Path, group_id: str) -> Path:
     return output_dir.parent / "vendor_playbook_locks" / safe_group
 
 
-def _read_vendor_playbook_cached_result(
-    lock_dir: Path, *, max_failure_age_s: float | None = None
-) -> dict | None:
+def _read_vendor_playbook_cached_result(lock_dir: Path, *, max_failure_age_s: float | None = None) -> dict | None:
     """Read a previously-cached vendor-playbook result, if any.
 
     A cached SUCCESS (``returncode == 0``) is returned unconditionally --
@@ -3840,9 +3685,7 @@ def _claim_is_stale(claim_path: Path, timeout_s: int) -> bool:
        finding #3).
     """
     lock_dir = claim_path.parent
-    cached = _read_vendor_playbook_cached_result(
-        lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
-    )
+    cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
     if cached is None and (lock_dir / "result.json").is_file():
         return True
     age_s = _claim_marker_age_s(claim_path)
@@ -3911,9 +3754,7 @@ def _claim_vendor_playbook_run(lock_dir: Path, timeout_s: int) -> bool:
     return True
 
 
-def _wait_for_vendor_playbook_result(
-    lock_dir: Path, deadline_unix: float, timeout_s: int
-) -> dict | None:
+def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float, timeout_s: int) -> dict | None:
     """Poll for the winner's result until it appears, the claim looks
     abandoned, or ``deadline_unix`` passes.
 
@@ -3926,9 +3767,7 @@ def _wait_for_vendor_playbook_result(
     """
     claim_path = lock_dir / "claimed.lock"
     while True:
-        cached = _read_vendor_playbook_cached_result(
-            lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
-        )
+        cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
         if cached is not None:
             return cached
         if _claim_is_stale(claim_path, timeout_s):
@@ -3999,9 +3838,7 @@ def _copy_vendor_task_bundle(task_bundle_root: Path, workspace: Path) -> None:
             shutil.copy2(item, dest)
     gitignore = workspace / ".gitignore"
     if not gitignore.is_file():
-        gitignore.write_text(
-            "__pycache__/\n*.pyc\n*.log\nbuild/\nforge_experiments/\n", encoding="utf-8"
-        )
+        gitignore.write_text("__pycache__/\n*.pyc\n*.log\nbuild/\nforge_experiments/\n", encoding="utf-8")
     _git = shutil.which("git") or "git"
     subprocess.run([_git, "init", "-q"], cwd=str(workspace), check=True)
     subprocess.run(
@@ -4056,9 +3893,7 @@ def _run_vendor_playbook_loop_via_cli(
         try:
             stale_path.unlink(missing_ok=True)
         except OSError as exc:
-            raise RuntimeError(
-                f"could not clear stale Forge recovery artifact {stale_path}: {exc}"
-            ) from exc
+            raise RuntimeError(f"could not clear stale Forge recovery artifact {stale_path}: {exc}") from exc
 
     forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
@@ -4270,8 +4105,7 @@ def _run_claimed_vendor_playbook(
         result = _normalized(
             2,
             "",
-            f"forge: failed to copy vendor playbook task bundle {task_bundle_root} "
-            f"-> {workspace}: {exc}",
+            f"forge: failed to copy vendor playbook task bundle {task_bundle_root} -> {workspace}: {exc}",
             time.time() - started,
             skipped=True,
         )
@@ -4486,9 +4320,7 @@ def _submit_vendor_playbook(
                 )
             return result
 
-    cached = _read_vendor_playbook_cached_result(
-        lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S
-    )
+    cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
     if cached is not None:
         return _reuse(cached)
 
@@ -4886,15 +4718,11 @@ def submit(
             else loop_outcome.baseline_ms
         )
         search_start_ms = (
-            loop_outcome.search_start_ms
-            if loop_outcome.search_start_ms is not None
-            else loop_outcome.baseline_ms
+            loop_outcome.search_start_ms if loop_outcome.search_start_ms is not None else loop_outcome.baseline_ms
         )
         best_ms = loop_outcome.best_ms
         mean_case_speedup = loop_outcome.mean_case_speedup
-        search_start_mean_case_speedup = (
-            loop_outcome.search_start_mean_case_speedup
-        )
+        search_start_mean_case_speedup = loop_outcome.search_start_mean_case_speedup
         improved = loop_outcome.total_improved
         improved_during_search = loop_outcome.incremental_improved
         best_commit = ""
@@ -4903,9 +4731,7 @@ def submit(
                 baseline_ms = recovery["baseline_ms"]
             best_ms = recovery["best_ms"]
             mean_case_speedup = recovery["mean_case_speedup"]
-            search_start_mean_case_speedup = recovery[
-                "search_start_mean_case_speedup"
-            ]
+            search_start_mean_case_speedup = recovery["search_start_mean_case_speedup"]
             improved = recovery["total_improved"]
             improved_during_search = recovery["incremental_improved"]
             best_commit = recovery["best_commit"]
@@ -4916,8 +4742,7 @@ def submit(
             # -- a persistent mismatch is a forge-side bug, not noise.
             if published["best_commit"] != checkpoint_recovery["best_commit"]:
                 log.warning(
-                    "forge best_result.json (%s) and checkpoint (%s) disagree; "
-                    "keeping the published manifest",
+                    "forge best_result.json (%s) and checkpoint (%s) disagree; keeping the published manifest",
                     published["best_commit"][:12],
                     checkpoint_recovery["best_commit"][:12],
                 )
@@ -4980,9 +4805,7 @@ def submit(
         res["search_start_ms"] = search_start_ms
         res["best_ms"] = best_ms
         res["mean_case_speedup"] = mean_case_speedup
-        res["search_start_mean_case_speedup"] = (
-            search_start_mean_case_speedup
-        )
+        res["search_start_mean_case_speedup"] = search_start_mean_case_speedup
         res["improved"] = improved
         res["total_improved"] = improved
         res["incremental_improved"] = improved_during_search
@@ -4993,9 +4816,7 @@ def submit(
         )
         if canonical_artifacts:
             res.update(canonical_artifacts)
-            res["artifacts"] = [
-                str(canonical_artifacts["canonical_patch_path"])
-            ]
+            res["artifacts"] = [str(canonical_artifacts["canonical_patch_path"])]
         if loop_outcome.structured_result is not None:
             res["forge_result"] = loop_outcome.structured_result
             kb_experience = loop_outcome.structured_result.get("kb_experience")
@@ -5022,9 +4843,7 @@ def submit(
         res["target_functions"] = implementation_symbols
         if recovery is not None:
             res["best_commit"] = recovery["best_commit"]
-            res["checkpoint_path"] = str(
-                experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
-            )
+            res["checkpoint_path"] = str(experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json")
         finalized_result = res
         return res
     except Exception as exc:  # noqa: BLE001

@@ -141,9 +141,7 @@ def test_phase_discover_json_golden(monkeypatch, tmp_path: Path, capsys) -> None
     }
 
 
-def test_phase_discover_per_gap_enumerate_failure_is_isolated(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
+def test_phase_discover_per_gap_enumerate_failure_is_isolated(monkeypatch, tmp_path: Path, capsys) -> None:
     """A single gap whose enumerate raises must NOT fail the command: it exits
     0, WARNs to stderr, and still emits candidates from the healthy gaps.
     """

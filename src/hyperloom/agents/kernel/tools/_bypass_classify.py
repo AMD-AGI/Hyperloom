@@ -99,9 +99,7 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
     # GEMM (vendor + generic).
     (re.compile(r"(?i)Cijk_|wvSplitK|splitKreduce|hipblaslt|rocblas|cublas|nvjet"), "GEMM", 12),
     (
-        re.compile(
-            r"(?i)kernel_gemm_xdl_cshuffle|_?gemm_a\d+w\d+|_gemm_a16_w16|hgemm_bf16|flatmm|opus_gemm"
-        ),
+        re.compile(r"(?i)kernel_gemm_xdl_cshuffle|_?gemm_a\d+w\d+|_gemm_a16_w16|hgemm_bf16|flatmm|opus_gemm"),
         "GEMM",
         12,
     ),

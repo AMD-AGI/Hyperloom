@@ -398,5 +398,3 @@ def test_robustness_options_multi_node_defaults() -> None:
     assert opts["disable_local_probe"] is True
     assert opts["auto_probe_inference_server"] is False
     assert opts["progress_no_levers_min_minutes"] == 60.0
-
-

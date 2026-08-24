@@ -296,7 +296,7 @@ for the user-facing summary.
   into the container and every carrier defaults it to `geak`.
 
   `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been partially
-  superseded by `docs/conceptual/kernel-execution-path.md`, which documents the
+  superseded by `docs/reference/kernel-execution-path.md`, which documents the
   programmatic dispatch flow and artifact layout. Operator sections from the
   original (Credentials, Ray head, Recovery, TraceLens Requirements, Proposal
   Rules) are not carried over; refer to the individual reference docs for those.

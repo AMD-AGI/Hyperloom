@@ -307,9 +307,7 @@ class CodexBackend:
         # compaction parser reads that as degenerate, skips the compaction, and
         # leaves the conversation growing -- the failure this backend exists to
         # end. An explicit per-turn override is the only channel available.
-        turn_prompt = (
-            f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
-        )
+        turn_prompt = f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
@@ -426,9 +424,7 @@ class CodexBackend:
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
-            part
-            for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents))
-            if part
+            part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
         )
 
     def reset_conversation(self) -> None:

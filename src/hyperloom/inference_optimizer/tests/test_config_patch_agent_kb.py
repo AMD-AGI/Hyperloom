@@ -76,9 +76,7 @@ def test_recipe_replay_reads_single_final_config(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    replay = RecipeReplayKB(
-        KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
-    )
+    replay = RecipeReplayKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=warm))
 
     assert replay.read_config() == {
         "extra_server_args": "--page-size 32",
@@ -111,9 +109,7 @@ def test_read_and_section_isolation(tmp_path: Path) -> None:
         "extra_server_args": "--prior",
         "extra_envs": {"VLLM_PRIOR": "1"},
     }
-    assert explore.read_patches() == [
-        "explore/overlays/000000/00-prior.patch"
-    ]
+    assert explore.read_patches() == ["explore/overlays/000000/00-prior.patch"]
     assert framework.read() == {}
     assert framework.read_patches() == []
 
@@ -129,10 +125,14 @@ def test_ordered_patch_refs_are_deterministic_and_idempotent(tmp_path: Path) -> 
     refs = kb.stage_patches([first, second], stack_index=7)
     again = kb.stage_patches([first, second], stack_index=7)
 
-    assert refs == again == [
-        "framework/overlays/000007/00-fix-one.patch",
-        "framework/overlays/000007/01-tune.patch",
-    ]
+    assert (
+        refs
+        == again
+        == [
+            "framework/overlays/000007/00-fix-one.patch",
+            "framework/overlays/000007/01-tune.patch",
+        ]
+    )
     staged = sections.staged("framework")
     assert staged.knowledge["patches"] == refs
     assert [path.relative_to(sections.files_dir).as_posix() for path in staged.files] == refs
@@ -169,18 +169,15 @@ def test_multi_patch_staging_is_atomic_on_unreadable_member(
     section_file = sections.root / "sections" / "framework.json"
     before_section = section_file.read_bytes()
     before_files = sorted(
-        path.relative_to(sections.files_dir)
-        for path in sections.files_dir.rglob("*")
-        if path.is_file()
+        path.relative_to(sections.files_dir) for path in sections.files_dir.rglob("*") if path.is_file()
     )
 
     assert kb.stage_patches([first, missing], stack_index=3) == []
     assert section_file.read_bytes() == before_section
-    assert sorted(
-        path.relative_to(sections.files_dir)
-        for path in sections.files_dir.rglob("*")
-        if path.is_file()
-    ) == before_files
+    assert (
+        sorted(path.relative_to(sections.files_dir) for path in sections.files_dir.rglob("*") if path.is_file())
+        == before_files
+    )
 
 
 def test_patch_staging_rejects_more_than_100_members_atomically(
@@ -199,9 +196,7 @@ def test_patch_staging_rejects_more_than_100_members_atomically(
         assert kb.stage_patches(patches, stack_index=0) == []
     assert "maximum is 100" in caplog.text
     assert sections.staged("explore") is None
-    assert not any(
-        path.is_file() for path in sections.files_dir.rglob("*")
-    )
+    assert not any(path.is_file() for path in sections.files_dir.rglob("*"))
 
 
 def test_close_timeline_orders_patches_across_owners(tmp_path: Path) -> None:
@@ -226,10 +221,7 @@ def test_close_timeline_orders_patches_across_owners(tmp_path: Path) -> None:
         sections=sections,
     )
 
-    assert (
-        bundle.knowledge["knowledge_schema_version"]
-        == CURRENT_KNOWLEDGE_SCHEMA_VERSION
-    )
+    assert bundle.knowledge["knowledge_schema_version"] == CURRENT_KNOWLEDGE_SCHEMA_VERSION
     assert bundle.knowledge["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
     timeline = bundle.knowledge["value"]["patch_timeline"]
     assert timeline == [
@@ -370,9 +362,7 @@ def test_close_drops_permanently_missing_owner_section(tmp_path: Path) -> None:
 
     bundle = build_remote_knowledge(state, tmp_path / "files")
 
-    assert bundle.knowledge["provenance"]["dropped_staged_sections"] == [
-        "FRAMEWORK_AGENT:0"
-    ]
+    assert bundle.knowledge["provenance"]["dropped_staged_sections"] == ["FRAMEWORK_AGENT:0"]
 
 
 def test_close_fails_with_transient_incomplete_required_section(
@@ -416,11 +406,7 @@ def test_close_fails_for_required_staged_section_with_missing_file(
                 [
                     {
                         "action": "framework",
-                        "kb_required_owner": (
-                            "EXPLORE"
-                            if section == "explore"
-                            else "FRAMEWORK_AGENT"
-                        ),
+                        "kb_required_owner": ("EXPLORE" if section == "explore" else "FRAMEWORK_AGENT"),
                     }
                 ]
             ),
@@ -470,9 +456,7 @@ def test_close_fails_when_required_owner_section_is_missing(
     owner: str,
     expected: str,
 ) -> None:
-    state = _state(
-        [{"action": "integrate_patch", "kb_required_owner": owner}]
-    )
+    state = _state([{"action": "integrate_patch", "kb_required_owner": owner}])
 
     with pytest.raises(
         RemoteRecipeValidationError,
@@ -589,9 +573,7 @@ def test_close_fails_when_replayed_prior_overlay_cannot_be_read(
         ),
         encoding="utf-8",
     )
-    state = _state(
-        [{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}]
-    )
+    state = _state([{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}])
     state.warm_replay_outcome = {
         "status": "reproduced",
         "replayed_patch_refs": [old_ref],
@@ -632,9 +614,7 @@ def test_close_fails_when_replayed_prior_overlay_adoption_fails(
         ),
         encoding="utf-8",
     )
-    state = _state(
-        [{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}]
-    )
+    state = _state([{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}])
     state.warm_replay_outcome = {
         "status": "reproduced",
         "replayed_patch_refs": [old_ref],
@@ -663,10 +643,7 @@ def test_close_adopts_aggregate_timeline_over_100_members(
     tmp_path: Path,
 ) -> None:
     warm = tmp_path / "warm-many"
-    refs = [
-        f"framework/overlays/000004/{index:02d}-p{index}.patch"
-        for index in range(101)
-    ]
+    refs = [f"framework/overlays/000004/{index:02d}-p{index}.patch" for index in range(101)]
     for index, ref in enumerate(refs):
         patch = warm / "files" / ref
         patch.parent.mkdir(parents=True, exist_ok=True)
@@ -686,9 +663,7 @@ def test_close_adopts_aggregate_timeline_over_100_members(
         ),
         encoding="utf-8",
     )
-    state = _state(
-        [{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}]
-    )
+    state = _state([{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}])
     state.warm_replay_outcome = {
         "status": "reproduced",
         "replayed_patch_refs": refs,
@@ -705,9 +680,7 @@ def test_close_adopts_aggregate_timeline_over_100_members(
 
     timeline = bundle.knowledge["value"]["patch_timeline"]
     assert len(timeline) == 101
-    assert timeline[-1].startswith(
-        "framework/overlays/000000/100-"
-    )
+    assert timeline[-1].startswith("framework/overlays/000000/100-")
     bundle.validate()
 
 
@@ -733,9 +706,7 @@ def test_close_drops_already_present_prior_overlay(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
-    state = _state(
-        [{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}]
-    )
+    state = _state([{"action": "replay_warm_recipe", "source_phase": "PRELUDE"}])
     state.warm_replay_outcome = {
         "status": "reproduced",
         # already_present is intentionally absent from replayed_patch_refs.

@@ -386,6 +386,5 @@ def test_kb_hardware_slug_encodes_formation_and_backend() -> None:
     )
     # ep==1 (no expert parallelism) is omitted; tp still encoded.
     assert (
-        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob")
-        == "MI300X_ws16_tp8_rayjob"
+        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob") == "MI300X_ws16_tp8_rayjob"
     )

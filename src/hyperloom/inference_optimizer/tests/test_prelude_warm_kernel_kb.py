@@ -7,6 +7,7 @@ PRELUDE reads nested ``value.kernel.gemm/fusion/rewrite`` through
 :class:`KernelAgentKB` from the same already-downloaded inference Recipe used by
 Explore and Framework. The Recipe replay task grades the combined set once.
 """
+
 from __future__ import annotations
 
 import json
@@ -82,9 +83,7 @@ class _StubPrelude:
         return self._reader
 
     async def _record_warm_kernel_keep(self, result, pending, envs, args, applied) -> None:
-        self.booked.append(
-            {"result": result, "pending": pending, "envs": envs, "args": args}
-        )
+        self.booked.append({"result": result, "pending": pending, "envs": envs, "args": args})
 
     def _apply_warm_kernel_patch(self, entry: dict, target: str) -> dict:
         self.applied.append(target)
@@ -127,9 +126,7 @@ def _kernel_record(tmp_path: Path, value: dict, files: dict[str, str]) -> Path:
 
 
 def _kernel_reader(record: Path) -> KernelAgentKB:
-    return KernelAgentKB(
-        KnowledgeSections(record / "draft", warm_start_dir=record)
-    )
+    return KernelAgentKB(KnowledgeSections(record / "draft", warm_start_dir=record))
 
 
 def _rewrite_item(target: Path, name: str = "k1") -> dict:
@@ -143,9 +140,7 @@ def _rewrite_item(target: Path, name: str = "k1") -> dict:
 
 def _grading(stub: _StubPrelude, decision: str, gain: float = 5.0):
     async def _validate(extra_envs: dict, extra_server_args: str) -> dict:
-        stub.validations.append(
-            {"extra_envs": extra_envs, "extra_server_args": extra_server_args}
-        )
+        stub.validations.append({"extra_envs": extra_envs, "extra_server_args": extra_server_args})
         return {"status": "ok", "decision": decision, "gain_pct": gain}
 
     return _validate
@@ -167,9 +162,7 @@ def test_resolve_target_from_diff_header_against_roots(monkeypatch, tmp_path: Pa
     live.write_text("old", encoding="utf-8")
     patch = tmp_path / "k.diff"
     patch.write_text(
-        "diff --git a/pkg/foo.py b/pkg/foo.py\n"
-        "--- a/pkg/foo.py\n"
-        "+++ b/pkg/foo.py\n",
+        "diff --git a/pkg/foo.py b/pkg/foo.py\n--- a/pkg/foo.py\n+++ b/pkg/foo.py\n",
         encoding="utf-8",
     )
 
@@ -381,9 +374,7 @@ async def test_one_shot_save_failure_stops_before_kernel_apply(
     outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "error"
-    assert outcome["reason"] == (
-        "kernel_attempt_state_persist_failed:OSError"
-    )
+    assert outcome["reason"] == ("kernel_attempt_state_persist_failed:OSError")
     assert stub.applied == []
     assert target.read_text(encoding="utf-8") == "old"
 
@@ -413,17 +404,14 @@ async def test_prepared_state_save_failure_rolls_back_kernel_set(
     stub.shared_state.save = _save
     stub._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda applied, snapshots=None: (
-            rollbacks.append((list(applied), list(snapshots or [])))
-            or {"ok": True, "errors": []}
+            rollbacks.append((list(applied), list(snapshots or []))) or {"ok": True, "errors": []}
         )
     )
 
     outcome = await stub._prepare_warm_kernel_kb()
 
     assert outcome["status"] == "error"
-    assert outcome["reason"] == (
-        "kernel_prepared_state_persist_failed:OSError"
-    )
+    assert outcome["reason"] == ("kernel_prepared_state_persist_failed:OSError")
     assert len(rollbacks) == 1
     assert len(rollbacks[0][0]) == 1
     assert len(rollbacks[0][1]) == 1
@@ -561,9 +549,7 @@ async def test_kernel_snapshot_is_durable_before_first_mutation(
     with pytest.raises(SystemExit, match="crash window"):
         await stub._prepare_warm_kernel_kb()
 
-    restored = PreludePhase._restore_warm_kernel_snapshots(
-        stub.shared_state.warm_replay_pending["kernel_snapshots"]
-    )
+    restored = PreludePhase._restore_warm_kernel_snapshots(stub.shared_state.warm_replay_pending["kernel_snapshots"])
     assert restored["ok"] is True
     assert target.read_text() == "old"
 

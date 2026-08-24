@@ -87,21 +87,13 @@ def _gain_attribution_lines(
     summary = optimizations.get("summary_by_source") or {}
     validation = optimizations.get("validation") or {}
     canonical_sources = {
-        source: to_float(bucket.get("total_gain_pct"))
-        for source, bucket in summary.items()
-        if isinstance(bucket, dict)
+        source: to_float(bucket.get("total_gain_pct")) for source, bucket in summary.items() if isinstance(bucket, dict)
     }
-    canonical_nonzero = {
-        source: gain
-        for source, gain in canonical_sources.items()
-        if gain and gain != 0
-    }
+    canonical_nonzero = {source: gain for source, gain in canonical_sources.items() if gain and gain != 0}
     canonical_total = sum(canonical_nonzero.values())
     if canonical_nonzero and canonical_total:
         lines = [
-            f"{source}: {gain:.2f}% of total "
-            f"(={(gain / canonical_total * 100):.0f}% share of "
-            f"{canonical_total:.2f}%)"
+            f"{source}: {gain:.2f}% of total (={(gain / canonical_total * 100):.0f}% share of {canonical_total:.2f}%)"
             for source, gain in sorted(
                 canonical_nonzero.items(),
                 key=lambda item: -item[1],
