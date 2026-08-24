@@ -547,6 +547,7 @@ class PreludePhase(PhaseHandler):
                 return reject(f"create target already exists: {candidate}")
             resolved.append(str(candidate))
         entry.pop("resolution_error", None)
+        entry.pop("resolution_reason", None)
         return resolved
 
     @staticmethod
@@ -878,19 +879,10 @@ class PreludePhase(PhaseHandler):
             patch_raw = str(entry.get("patch_path") or "").strip()
             if not patch_raw:
                 continue
-            reason_code = str(
-                entry.get("resolution_reason")
-                or entry.get("resolution_error")
-                or ""
-            ).split(";", 1)[0].strip()
-            if reason_code not in {
-                "kernel_patch_root_not_in_allowlist",
-                "active_kernel_patch_root_missing",
-            }:
-                continue
             # A persisted plan may be restored on resume under a different
             # environment, and inline patch material may also have changed
-            # since the reason was recorded. Re-resolve before blocking.
+            # since the reason was recorded. Re-resolve every patch and only
+            # allow the combined replay when a safe root is explicit.
             resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
             if resolution.root:
                 continue

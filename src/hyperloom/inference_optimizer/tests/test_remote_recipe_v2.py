@@ -56,6 +56,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     _Files,
     build_publishable_recipe_config,
+    has_replay_material,
 )
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
@@ -1452,6 +1453,23 @@ def test_view_rejects_a_different_recipe_scope() -> None:
         )
 
 
+def test_view_accepts_scope_dimensions_echoed_as_strings() -> None:
+    store = _FakeStore()
+    store.envelope["scope"] = {
+        key: str(value) if key != "kernel_optimizer" else value
+        for key, value in _SCOPE.as_dict().items()
+    }
+    store.envelope["knowledge"]["workload_shape"] = {
+        key: str(value)
+        for key, value in store.envelope["knowledge"]["workload_shape"].items()
+    }
+
+    assert RemoteRecipeClient(store).get_view(  # type: ignore[arg-type]
+        "inference:m:h:f:mt:a:v:p",
+        _SCOPE,
+    )
+
+
 def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     store = _FakeStore(champion=100.0, conflict=True)
     client = RemoteRecipeClient(store)  # type: ignore[arg-type]
@@ -1556,6 +1574,19 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
     assert result.status == "skipped"
     assert result.reason == "empty_replay_material"
     assert store.calls == []
+
+
+def test_artifact_only_recipe_has_replay_material() -> None:
+    assert has_replay_material(
+        {
+            "value": {
+                "config": {},
+                "explore": {"artifacts": ["explore/fix.py"]},
+                "framework": {},
+                "kernel": {},
+            }
+        }
+    )
 
 
 @pytest.mark.parametrize(
