@@ -3,30 +3,14 @@
 
 """Knowledge-Graph query client over local or GBrain page stores.
 
-The kb-mirror drivers embed a ``## Facts`` fence in every consumable page
-body (recipe / framework_patch / kernel / gemm_tune / arch_family). Each
-fence line is a typed triple::
-
-    - {Subject} {PREDICATE} {Object} (prop1: val1, prop2: val2, ...)
-
-This module turns that document substrate into a small graph query
-surface (``query_facts`` / ``graph_traverse`` / ``find_conflicts``) plus
-incremental writes (``emit_fact``).
-
-Two execution modes:
-
-* **Simulation** — client-side. ``query_facts`` drives gbrain ``search`` +
-  client-side fence parsing/filtering; ``graph_traverse`` runs a client BFS
-  over ``query_facts``; writes are read-modify-write over ``get_page`` /
-  ``put_page``.
-* **Native (``use_native_kg``)** — maps the triple API onto gbrain's
-  first-class *link graph*. A triple ``(subject, predicate, object)`` becomes
-  an edge ``add_link(from=subject, to=object, link_type=predicate,
-  context=json(properties))``; reads use ``get_links`` / ``get_backlinks`` /
-  ``traverse_graph``. Fact properties are encoded in the edge ``context`` JSON.
-  ``add_link`` requires both endpoints to exist, so writes materialize missing
-  nodes. gbrain reports some write failures as an in-band ``{"error": ...}`` payload,
-  so the write paths inspect the decoded result via :func:`_rpc_failed`.
+All backends expose the same native link-graph API (``get_links`` /
+``get_backlinks`` / ``traverse_graph`` / ``add_link``).  A triple
+``(subject, predicate, object)`` maps to an edge
+``add_link(from=subject, to=object, link_type=predicate,
+context=json(properties))``.  Fact properties are encoded in the edge
+``context`` JSON.  gbrain reports some write failures as an in-band
+``{"error": ...}`` payload, so write paths inspect the decoded result via
+:func:`_rpc_failed`.
 
 Every read method has a ``*_safe`` companion that swallows transport failures
 and returns an empty result, so the KG layer can never block or break a
@@ -40,10 +24,9 @@ import json
 import logging
 import os
 import re
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 from ..config import KnowledgeConfig, KnowledgeStoreMode
 from .gbrain_mcp import GbrainRemoteError, _GbrainMcp
@@ -54,18 +37,8 @@ log = logging.getLogger(__name__)
 # Cap the number of fact lines parsed per page (mirrors the mirror-side
 # write cap) so a malformed/oversized page never blows up a query tick.
 _MAX_FACTS_PER_PAGE = 50
-# Hard ceiling on BFS breadth to bound client-side traversal cost.
+# Hard ceiling on BFS breadth to bound native traversal cost.
 _MAX_TRAVERSE_NODES = 200
-# Default TTL for the per-client search cache (seconds). One warm-start
-# enhancement issues many repeated searches; caching avoids re-hitting the
-# foreground HTTP budget for the same query terms.
-_SEARCH_CACHE_TTL_SEC = 30.0
-
-# Parse one fence line: "- SUBJECT PREDICATE OBJECT (props)". Subject and
-# object are slug tokens (no spaces); predicate is an uppercase relation.
-_FACT_LINE_RE = re.compile(
-    r"^-\s+(?P<subject>\S+)\s+(?P<predicate>[A-Z][A-Z0-9_]*)\s+(?P<object>\S+)\s*(?:\((?P<props>.*)\))?\s*$"
-)
 
 
 def _entity(value: Any) -> str:
@@ -135,29 +108,6 @@ def _as_set(value: Any) -> set[str]:
     }
 
 
-def _parse_props(raw: str | None) -> dict[str, str]:
-    """Parse the ``(key: val, key: val)`` property blob of a fact line.
-
-    Args:
-        raw: The inner text between the parentheses (may be ``None``/empty).
-
-    Returns:
-        A mapping of property name to value (both stripped strings).
-    """
-    props: dict[str, str] = {}
-    if not raw:
-        return props
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        key, sep, val = part.partition(":")
-        if sep:
-            props[key.strip()] = val.strip()
-        else:
-            props[part] = ""
-    return props
-
 
 @dataclass
 class Fact:
@@ -208,64 +158,6 @@ def _pct(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-
-def parse_facts_fence(body: str, *, source_slug: str = "") -> list[Fact]:
-    """Extract all triples from a page body's ``## Facts`` fence.
-
-    Reads the bullet lines under the first ``## Facts`` header up to the
-    next ``## `` header (or end of body). Malformed lines are skipped.
-
-    Args:
-        body: The full page body markdown.
-        source_slug: Slug recorded on each parsed fact for provenance.
-
-    Returns:
-        The parsed facts (capped at :data:`_MAX_FACTS_PER_PAGE`).
-    """
-    if not body or "## Facts" not in body:
-        return []
-    facts: list[Fact] = []
-    in_fence = False
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("## "):
-            # Enter the Facts section; any other ## header ends it.
-            in_fence = stripped[3:].strip().lower().startswith("facts")
-            continue
-        if not in_fence:
-            continue
-        m = _FACT_LINE_RE.match(stripped)
-        if not m:
-            continue
-        facts.append(
-            Fact(
-                subject=_entity(m.group("subject")),
-                predicate=m.group("predicate").strip().upper(),
-                object=_entity(m.group("object")),
-                properties=_parse_props(m.group("props")),
-                source_slug=source_slug,
-            )
-        )
-        if len(facts) >= _MAX_FACTS_PER_PAGE:
-            break
-    return facts
-
-
-def format_fact_line(subject: str, predicate: str, obj: str, properties: dict[str, Any] | None) -> str:
-    """Render a triple into the canonical ``## Facts`` fence line.
-
-    Args:
-        subject: Subject entity.
-        predicate: Relation (forced uppercase).
-        obj: Object entity.
-        properties: Optional property mapping.
-
-    Returns:
-        A single fence line, e.g. ``"- a IMPROVES b (gain: +5%)"``.
-    """
-    props = properties or {}
-    inner = ", ".join(f"{k}: {v}" for k, v in props.items())
-    return f"- {_entity(subject)} {str(predicate).strip().upper()} {_entity(obj)} ({inner})"
 
 
 def _link_type(predicate: Any) -> str:
@@ -394,28 +286,18 @@ def _conditions_match(fact: Fact, conditions: dict[str, Any] | None) -> bool:
 
 
 class KGClient:
-    """Knowledge-graph query surface over a local or GBrain page store.
+    """Knowledge-graph query surface over a local or GBrain page store."""
 
-    Simulates graph queries client-side via ``search`` + fence parsing, or
-    delegates to native graph tools when ``use_native_kg`` is set.
-    """
-
-    def __init__(self, mcp: Any, *, use_native_kg: bool = False, search_limit: int = 100) -> None:
+    def __init__(self, mcp: Any) -> None:
         """Initialize the client.
 
         Args:
             mcp: A duck-typed backend adapter exposing
                 ``call(tool, arguments)``. The remote implementation uses MCP;
                 the local implementation is an in-process filesystem adapter.
-            use_native_kg: Delegate to native graph tools when ``True``.
-            search_limit: Default page fan-out per ``query_facts`` search.
         """
         self._mcp = mcp
-        self._native = bool(use_native_kg)
-        self._search_limit = max(1, int(search_limit))
-        # query_str -> (monotonic_ts, [(slug, body), ...]); bounded by TTL.
-        self._search_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
-        # Slugs confirmed to exist as pages, memoized by the native write path.
+        # Slugs confirmed to exist as pages, memoized by the write path.
         self._known_nodes: set[str] = set()
 
     def is_available(self) -> bool:
@@ -432,78 +314,6 @@ class KGClient:
         except (GbrainRemoteError, OSError, TimeoutError) as exc:
             log.info("kg backend unavailable: %s", exc)
             return False
-
-    def _cache_ttl(self) -> float:
-        """Return the search-cache TTL in seconds (env-overridable)."""
-        raw = os.environ.get("GBRAIN_KG_CACHE_TTL_SEC", "").strip()
-        if raw:
-            try:
-                return max(0.0, float(raw))
-            except ValueError:
-                pass
-        return _SEARCH_CACHE_TTL_SEC
-
-    def _search_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
-        """Search pages and return ``(slug, body)`` pairs (TTL-cached).
-
-        Tolerates list / ``{results|pages|hits: [...]}`` envelopes and fetches
-        the body via ``get_page`` when the hit omits it. Results are memoized
-        per query string for :data:`_SEARCH_CACHE_TTL_SEC`.
-
-        Args:
-            query: Free-text search string.
-            limit: Maximum hits to fetch.
-
-        Returns:
-            A list of ``(slug, body)`` tuples.
-        """
-        if self._mcp is None:
-            return []
-        ttl = self._cache_ttl()
-        now = time.monotonic()
-        cache_key = f"{query}\x00{int(limit)}"
-        if ttl > 0.0:
-            cached = self._search_cache.get(cache_key)
-            if cached is not None and now - cached[0] <= ttl:
-                return list(cached[1])
-        raw = self._mcp.call("search", {"query": query, "limit": int(limit)})
-        hits: Sequence[Any]
-        if isinstance(raw, dict):
-            hits = raw.get("results") or raw.get("pages") or raw.get("hits") or []
-        elif isinstance(raw, list):
-            hits = raw
-        else:
-            hits = []
-        out: list[tuple[str, str]] = []
-        for hit in hits:
-            if not isinstance(hit, dict):
-                continue
-            slug = str(hit.get("slug") or hit.get("id") or "")
-            body = hit.get("body")
-            if not body and slug:
-                body = self._page_body(slug)
-            if slug and body:
-                out.append((slug, str(body)))
-        if ttl > 0.0:
-            self._search_cache[cache_key] = (now, list(out))
-        return out
-
-    def _page_body(self, slug: str) -> str:
-        """Fetch a page and return its body markdown (best-effort).
-
-        Args:
-            slug: The page slug.
-
-        Returns:
-            The page body, or ``""`` when unavailable.
-        """
-        if self._mcp is None:
-            return ""
-        try:
-            page = self._mcp.call("get_page", {"slug": slug})
-        except (GbrainRemoteError, OSError, TimeoutError):
-            return ""
-        return _page_content(page)
 
     @staticmethod
     def _as_edges(raw: Any) -> list[dict[str, Any]]:
@@ -613,8 +423,12 @@ class KGClient:
     ) -> list[Fact]:
         """Return facts matching the given subject/predicate/object filters.
 
-        Any filter may be ``None`` (match any), a single value, a list, or
-        a pipe-delimited alternation for the predicate.
+        Anchors on the concrete side of the triple: ``get_links`` when a
+        subject is given, otherwise ``get_backlinks`` on the object. Edges are
+        mapped to facts and filtered locally. Predicate-only queries cannot be
+        served (no global edge scan) and return ``[]``.
+
+        Any filter may be ``None`` (match any), a single value, or a list.
 
         Args:
             subject: Subject entity filter.
@@ -622,68 +436,6 @@ class KGClient:
             object: Object entity filter.
             conditions: Property constraints applied to each candidate.
             limit: Maximum facts to return.
-
-        Returns:
-            The matching facts (deduplicated, capped at ``limit``).
-        """
-        if self._native:
-            return self._native_query_facts(subject, predicate, object, conditions, limit)
-
-        subj_set = _as_set(subject)
-        pred_set = _as_set(predicate)
-        obj_set = _as_set(object)
-
-        query_terms: list[str] = []
-        for raw in (subject, predicate, object):
-            if isinstance(raw, str) and raw and "|" not in raw:
-                query_terms.append(raw)
-            elif isinstance(raw, (list, tuple, set)) and raw:
-                query_terms.append(str(next(iter(raw))))
-        query_str = " ".join(query_terms) or "Facts"
-
-        pages = self._search_pages(query_str, self._search_limit)
-        seen: set[tuple[str, str, str]] = set()
-        out: list[Fact] = []
-        for slug, body in pages:
-            for fact in parse_facts_fence(body, source_slug=slug):
-                if subj_set and fact.subject not in subj_set:
-                    continue
-                if pred_set and _entity(fact.predicate) not in pred_set:
-                    continue
-                if obj_set and fact.object not in obj_set:
-                    continue
-                if not _conditions_match(fact, conditions):
-                    continue
-                key = (fact.subject, fact.predicate, fact.object)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(fact)
-                if len(out) >= int(limit):
-                    return out
-        return out
-
-    def _native_query_facts(
-        self,
-        subject: Any,
-        predicate: Any,
-        object: Any,
-        conditions: Any,
-        limit: int,  # noqa: A002
-    ) -> list[Fact]:
-        """Run ``query_facts`` over gbrain's native link graph.
-
-        Anchors on the concrete side of the triple: ``get_links`` when a
-        subject is given, otherwise ``get_backlinks`` on the object. Edges are
-        mapped to facts and filtered locally. Predicate-only queries cannot be
-        served (no global edge scan) and return ``[]``.
-
-        Args:
-            subject: Subject filter (slug or list of slugs).
-            predicate: Predicate filter.
-            object: Object filter (slug or list of slugs).
-            conditions: Property constraints.
-            limit: Maximum facts.
 
         Returns:
             The matching facts (deduplicated, capped at ``limit``).
@@ -728,63 +480,21 @@ class KGClient:
         max_hops: int = 2,
         direction: str = "outbound",
     ) -> list[GraphNode]:
-        """Breadth-first traversal from ``start_entity`` over the fact graph.
+        """Traversal from ``start_entity`` via the native link graph.
+
+        Maps to ``traverse_graph(slug, depth, direction)``.  The ``link_type``
+        filter is omitted on the wire so multi-relation paths are followed;
+        edges are filtered locally by ``predicate_filter``.  Output is capped
+        at :data:`_MAX_TRAVERSE_NODES`.
 
         Args:
             start_entity: The seed entity.
-            predicate_filter: Relations to follow (``None`` = any).
+            predicate_filter: Relations to keep (``None`` keeps all).
             max_hops: Maximum traversal depth (hard-capped at 3).
             direction: ``outbound`` / ``inbound`` / ``both``.
 
         Returns:
             The reached nodes (each carrying the fact it was reached by).
-        """
-        if self._native:
-            return self._native_graph_traverse(start_entity, predicate_filter, max_hops, direction)
-
-        max_hops = min(int(max_hops), 3)
-        start = _entity(start_entity)
-        visited: set[str] = set()
-        queue: list[tuple[str, int]] = [(start, 0)]
-        results: list[GraphNode] = []
-        while queue and len(visited) < _MAX_TRAVERSE_NODES:
-            entity, depth = queue.pop(0)
-            if depth >= max_hops or entity in visited:
-                continue
-            visited.add(entity)
-            facts: list[Fact] = []
-            if direction in ("outbound", "both"):
-                facts += self.query_facts(subject=entity, predicate=predicate_filter, limit=_MAX_FACTS_PER_PAGE)
-            if direction in ("inbound", "both"):
-                facts += self.query_facts(object=entity, predicate=predicate_filter, limit=_MAX_FACTS_PER_PAGE)
-            for fact in facts:
-                nxt = fact.object if fact.subject == entity else fact.subject
-                if not nxt or nxt == entity:
-                    continue
-                results.append(GraphNode(entity=nxt, depth=depth + 1, via=fact))
-                if nxt not in visited:
-                    queue.append((nxt, depth + 1))
-        return results
-
-    def _native_graph_traverse(
-        self, start_entity: str, predicate_filter: Any, max_hops: int, direction: str
-    ) -> list[GraphNode]:
-        """Run ``graph_traverse`` over gbrain's native link graph.
-
-        Maps to ``traverse_graph(slug, depth, direction)``. The ``link_type``
-        filter is omitted so multi-relation paths are followed, then edges are
-        filtered locally by ``predicate_filter``. Each surviving edge yields a
-        :class:`GraphNode` for its far endpoint. Output is capped at
-        :data:`_MAX_TRAVERSE_NODES`.
-
-        Args:
-            start_entity: Seed entity.
-            predicate_filter: Relations to keep (``None`` keeps all).
-            max_hops: Traversal depth (hard-capped at 3).
-            direction: ``outbound`` / ``inbound`` / ``both``.
-
-        Returns:
-            The reached nodes.
         """
         dir_map = {"outbound": "out", "inbound": "in", "both": "both"}
         native_dir = dir_map.get(direction, "out")
@@ -876,58 +586,15 @@ class KGClient:
                 )
         return out
 
-    # Writes: read-modify-write over get_page/put_page.
     def emit_fact(
         self,
         *,
-        page_slug: str,
         subject: str,
         predicate: str,
         object: str,  # noqa: A002
         properties: dict[str, Any] | None = None,
     ) -> bool:
-        """Append a fact to a page's ``## Facts`` fence (idempotent).
-
-        Reads the page, inserts the formatted line under the existing
-        ``## Facts`` header (or creates the fence), and writes it back. A
-        duplicate ``(subject, predicate, object)`` line is a no-op.
-
-        Args:
-            page_slug: Target page slug.
-            subject: Subject entity.
-            predicate: Relation.
-            object: Object entity.
-            properties: Optional fact properties.
-
-        Returns:
-            ``True`` when the page was written, ``False`` on no-op.
-        """
-        if self._native:
-            return self._native_emit_fact(subject, predicate, object, properties)
-        content = self._page_content_raw(page_slug)
-        if content is None:
-            return False
-        line = format_fact_line(subject, predicate, object, properties)
-        existing = {(f.subject, f.predicate, f.object) for f in parse_facts_fence(content)}
-        if (_entity(subject), str(predicate).strip().upper(), _entity(object)) in existing:
-            return False
-        if "## Facts" in content:
-            new_content = content.replace("## Facts\n", f"## Facts\n{line}\n", 1)
-        else:
-            sep = "" if content.endswith("\n") else "\n"
-            new_content = f"{content}{sep}\n## Facts\n{line}\n"
-        self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
-        self._search_cache.clear()
-        return True
-
-    def _native_emit_fact(
-        self,
-        subject: str,
-        predicate: str,
-        object: str,
-        properties: dict[str, Any] | None,  # noqa: A002
-    ) -> bool:
-        """Emit a fact as a native link-graph edge.
+        """Emit a fact as a native link-graph edge (idempotent).
 
         Materializes both endpoint nodes (``add_link`` requires them) then
         creates the edge. ``add_link`` is idempotent on ``(from, to,
@@ -964,25 +631,6 @@ class KGClient:
             return False
         return True
 
-    def _page_content_raw(self, slug: str) -> str | None:
-        """Fetch the full raw markdown of a page for read-modify-write.
-
-        Args:
-            slug: The page slug.
-
-        Returns:
-            The page content, or ``None`` when unavailable.
-        """
-        if self._mcp is None:
-            return None
-        try:
-            page = self._mcp.call("get_page", {"slug": slug})
-        except (GbrainRemoteError, OSError, TimeoutError) as exc:
-            log.warning("kg get_page failed for %s: %s", slug, exc)
-            return None
-        content = _page_content(page, full=True)
-        return content or None
-
     def _degrade_safe(self, method: Callable[..., Any], default: Any, **kwargs: Any) -> Any:
         """Call *method*, returning *default* on any known backend error."""
         try:
@@ -1007,84 +655,6 @@ class KGClient:
         """Call :meth:`emit_fact`, returning ``False`` on any backend error."""
         return self._degrade_safe(self.emit_fact, False, **kwargs)
 
-
-def _page_content(page: Any, *, full: bool = False) -> str:
-    """Extract a page's body (or full raw markdown) from a get_page result.
-
-    gbrain may return the page as a raw markdown string, as ``{content}``
-    /``{raw}``/``{markdown}``, or as a structured ``{frontmatter, body}``.
-    This normalizes those shapes.
-
-    Args:
-        page: The raw ``get_page`` result.
-        full: When ``True`` return the full frontmatter+body markdown;
-            otherwise return only the body (for fact parsing).
-
-    Returns:
-        The requested content, or ``""`` when nothing usable is present.
-    """
-    if isinstance(page, str):
-        return page
-    if not isinstance(page, dict):
-        return ""
-    for key in ("content", "raw", "markdown"):
-        val = page.get(key)
-        if isinstance(val, str) and val.strip():
-            return val if full else _strip_frontmatter(val)
-    body = page.get("body")
-    body = str(body) if body is not None else ""
-    if not full:
-        return body
-    # Full markdown reconstruction: prefer a verbatim frontmatter string,
-    # otherwise re-serialize the parsed dict so a read-modify-write never drops
-    # ``type``/``tags``/``attrs``.
-    fm_raw = page.get("frontmatter_raw")
-    if isinstance(fm_raw, str) and fm_raw.strip():
-        return f"{fm_raw}\n\n{body}" if body else fm_raw
-    fm = page.get("frontmatter")
-    if isinstance(fm, dict) and fm:
-        fm_block = _serialize_frontmatter(fm)
-        return f"{fm_block}\n\n{body}" if body else fm_block
-    return body
-
-
-def _serialize_frontmatter(fm: dict[str, Any]) -> str:
-    """Re-serialize a parsed frontmatter dict into a ``---`` YAML block.
-
-    Scalars as ``key: value``, lists as ``key: [a, b]``, nested maps as compact
-    JSON. Not byte-identical to the original, but preserves every semantic field.
-
-    Args:
-        fm: The parsed frontmatter mapping.
-
-    Returns:
-        A ``---``-delimited frontmatter block.
-    """
-    lines = ["---"]
-    for key, val in fm.items():
-        if isinstance(val, dict):
-            lines.append(f"{key}: {json.dumps(val, ensure_ascii=False, default=str)}")
-        elif isinstance(val, (list, tuple)):
-            lines.append(f"{key}: [{', '.join(str(x) for x in val)}]")
-        else:
-            lines.append(f"{key}: {val}")
-    lines.append("---")
-    return "\n".join(lines)
-
-
-def _strip_frontmatter(content: str) -> str:
-    """Return the body portion below a leading ``---`` frontmatter block.
-
-    Args:
-        content: Full page markdown.
-
-    Returns:
-        The body (content unchanged when no frontmatter delimiter found).
-    """
-    if not content.startswith("---"):
-        return content
-    parts = content.split("---", 2)
-    return parts[2].lstrip("\n") if len(parts) == 3 else content
 
 
 def generate_variants_graph_guided(
@@ -1347,21 +917,20 @@ def generate_warmstart_donor_graph_guided(
 def build_kg_client_from_env() -> KGClient | None:
     """Construct a :class:`KGClient` from the shared ``KnowledgeConfig``.
 
-    Local mode is the default and always uses an in-process
-    :class:`LocalGraphStore` rooted at
-    ``$KNOWLEDGE_LOCAL_ROOT/hyperloom/kg``. Ambient GBrain credentials are
-    deliberately ignored in local mode. Remote mode preserves the prior
-    GBrain transport and ``GBRAIN_KG_NATIVE`` compatibility when both optional
-    ``GBRAIN_BASE_URL`` and ``GBRAIN_TOKEN`` values are configured.
+    Local mode uses an in-process :class:`LocalGraphStore` rooted at
+    ``$KNOWLEDGE_LOCAL_ROOT/hyperloom/kg``.  Remote mode uses the optional
+    GBrain transport when both ``GBRAIN_BASE_URL`` and ``GBRAIN_TOKEN`` are
+    configured.  Ambient GBrain credentials are deliberately ignored in local
+    mode.
 
     Returns:
-        A configured local or remote client. ``None`` is retained in the type
-        for source compatibility, although validated modes always construct.
+        A configured client, or ``None`` when GBrain is not configured in
+        remote mode.
     """
     config = KnowledgeConfig.from_env()
     if config.mode is KnowledgeStoreMode.LOCAL:
         graph_root = Path(config.local_root) / "hyperloom" / "kg"
-        return KGClient(LocalGraphStore(graph_root), use_native_kg=True)
+        return KGClient(LocalGraphStore(graph_root))
 
     if not config.gbrain_base_url or not config.gbrain_token:
         log.info(
@@ -1377,9 +946,8 @@ def build_kg_client_from_env() -> KGClient | None:
             timeout_sec = float(timeout_env)
         except ValueError:
             timeout_sec = 2.0
-    use_native = (os.environ.get("GBRAIN_KG_NATIVE", "") or "").strip().lower() in ("1", "true", "yes")
     mcp = _GbrainMcp(config.gbrain_base_url, config.gbrain_token, timeout_sec)
-    return KGClient(mcp, use_native_kg=use_native)
+    return KGClient(mcp)
 
 
 _CACHED_CLIENT: KGClient | None = None
@@ -1418,8 +986,6 @@ __all__ = [
     "Fact",
     "GraphNode",
     "KGClient",
-    "parse_facts_fence",
-    "format_fact_line",
     "generate_variants_graph_guided",
     "generate_knob_candidates_graph_guided",
     "build_kg_client_from_env",

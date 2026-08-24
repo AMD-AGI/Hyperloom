@@ -328,10 +328,8 @@ def _kg_native_config_donor(
     framework: str,
     model_type: str,
 ) -> Mapping[str, Any] | None:
-    """Borrow a cross-model warm-replay donor from the native KG link-graph.
+    """Borrow a cross-model warm-replay donor from the KG link-graph.
 
-    Active only when a native KG client is reachable. Local mode supplies one
-    automatically; remote mode retains the ``GBRAIN_KG_NATIVE`` gate.
     Returns a recipe-shaped donor synthesized from the strongest cross-model
     ``KNOB_IMPROVES`` edge for the target ``arch+precision`` (single_top), or
     ``None`` to fall back to the recipe-KB sibling search. Fully
@@ -345,8 +343,8 @@ def _kg_native_config_donor(
         model_type: Target model type (stamped onto the synthesized donor).
 
     Returns:
-        A recipe-shaped donor row, or ``None`` when KG is unavailable, not in
-        native mode, or carries no usable cross-model knob.
+        A recipe-shaped donor row, or ``None`` when KG is unavailable or
+        carries no usable cross-model knob.
     """
     archs = [a for a in (architectures or []) if str(a or "").strip()]
     if not archs:
@@ -358,7 +356,7 @@ def _kg_native_config_donor(
         )
 
         kg = get_kg_client()
-        if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
+        if kg is None or not kg.is_available():
             return None
         donor = generate_warmstart_donor_graph_guided(
             kg,

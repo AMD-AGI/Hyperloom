@@ -114,32 +114,10 @@ def test_no_architectures_yields_none() -> None:
     assert out is None
 
 
-def test_recipe_kb_helper_requires_native_kg(monkeypatch) -> None:
-    # _kg_native_config_donor must not borrow from a non-native (sim) client.
+def test_recipe_kb_helper_returns_donor(monkeypatch) -> None:
     from hyperloom.orchestrator.knowledge import recipe_kb_t0
 
-    class _SimKG:
-        _native = False
-
-        def is_available(self) -> bool:
-            return True
-
-        def query_facts_safe(self, **kwargs: Any) -> list[Fact]:
-            return [_knob_fact(fp="x", gain="+20%")]
-
-    monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _SimKG())
-    out = recipe_kb_t0._kg_native_config_donor(
-        architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
-    )
-    assert out is None
-
-
-def test_recipe_kb_helper_returns_native_donor(monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import recipe_kb_t0
-
-    class _NativeKG:
-        _native = True
-
+    class _KG:
         def is_available(self) -> bool:
             return True
 
@@ -149,7 +127,7 @@ def test_recipe_kb_helper_returns_native_donor(monkeypatch) -> None:
                 return [_knob_fact(fp="x", gain="+25%", args="--win")]
             return []
 
-    monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _NativeKG())
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _KG())
     out = recipe_kb_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
     )
