@@ -4239,13 +4239,19 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         # field at the task bundle's anchor file instead of leaving it
         # empty (which would otherwise fall through as "missing_native_source").
         #
-        # The anchor also overrides whatever the grep tier guessed. A registry
-        # match is a curated statement that this operator is tuned through a
-        # task bundle, whereas the guess can be a same-word collision --
-        # ``mori::EpDispatchCombineOp::dispatch`` reduces to the keyword
-        # "dispatch" and lands on an unrelated vendor header. Handing that path
-        # to a backend would rewrite the wrong file.
-        item["source_file"] = resolve_kernel_anchor_path(playbook)
+        # The anchor also overrides whatever the grep tier guessed, and does so
+        # whether or not the guess was right. A registry match is a curated
+        # statement that this operator is tuned through a task bundle, so the
+        # device source is not the file a backend should be handed even when
+        # the guess found it -- and the guess can just as easily be a same-word
+        # collision (``mori::EpDispatchCombineOp::dispatch`` reduces to the
+        # keyword "dispatch" and lands on an unrelated vendor header).
+        anchor = resolve_kernel_anchor_path(playbook)
+        if source_file and source_file != anchor:
+            # Keep the displaced path for triage: an unconditional override is
+            # only auditable if the value it replaced is still recorded.
+            item["source_file_superseded_by_playbook"] = source_file
+        item["source_file"] = anchor
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
@@ -4842,7 +4848,16 @@ def _is_curated_resolution(item: dict[str, Any]) -> bool:
     source in the installed tree; a model shown a path and forty lines cannot
     outrank that, so finder resolutions (like the retired curated map before
     them) are not open to LLM rewriting.
+
+    A vendor-playbook match qualifies on the same grounds and regardless of
+    which tier resolved the path it replaced: the registry states that the
+    operator is tuned through a task bundle, and ``source_file`` holds that
+    bundle's anchor. Leaving it unprotected would let a review proposal point
+    the field back at framework source and route the candidate to a backend
+    that has nothing to rewrite there.
     """
+    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook":
+        return True
     status = str(item.get("op_to_source_status") or "").strip()
     method = str(item.get("source_resolution_method") or "").strip()
     authoritative = {

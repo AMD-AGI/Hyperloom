@@ -330,6 +330,64 @@ def test_playbook_anchor_overrides_a_same_word_grep_collision():
         assert str(item["source_file"]).endswith("mori_ep_config.py")
 
 
+def test_playbook_anchor_also_overrides_a_correct_grep_hit():
+    """The override does not depend on the guess being wrong.
+
+    ``dispatch_combine.py`` under site-packages really is where these operators
+    live, so this is the case where the grep tier was right. The anchor still
+    wins: the registry says the operator is tuned through a task bundle, and a
+    backend handed the device source has nothing to rewrite there. The
+    displaced path stays on the row so the override is auditable rather than
+    silent.
+    """
+    candidates = [
+        _mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
+        _mori_combine_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
+    ]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    for item in out:
+        assert item["patch_strategy"] == "vendor_playbook"
+        assert str(item["source_file"]).endswith("mori_ep_config.py")
+        assert item["source_file_superseded_by_playbook"] == _MORI_SITE_PACKAGES_FILE
+
+
+def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
+    """Nothing displaced, nothing recorded.
+
+    The search roots are emptied so the grep tier cannot resolve anything: on a
+    host with the frameworks installed it reaches the same-word collision this
+    file's other cases describe, which is a displacement rather than the
+    graph-captured no-source shape under test here.
+    """
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
+    candidates = [_mori_dispatch_candidate(source_file="")]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    assert str(out[0]["source_file"]).endswith("mori_ep_config.py")
+    assert "source_file_superseded_by_playbook" not in out[0]
+
+
+def test_a_playbook_candidate_is_not_open_to_review_rewriting():
+    """Protection cannot key on the tier that resolved the replaced path.
+
+    ``source_file`` holds the task bundle's anchor whatever tier ran before, so
+    keying protection on that tier alone leaves the row open: a review proposal
+    could point the field back at framework source, routing the candidate to a
+    backend with nothing to rewrite and losing the playbook route.
+    """
+    resolved_by_grep = {
+        "kernel_id": "k010",
+        "source_resolution_method": "name_grep",
+        "op_to_source_status": "",
+    }
+    assert tla._is_curated_resolution(resolved_by_grep) is False
+
+    assert tla._is_curated_resolution(
+        {**resolved_by_grep, "patch_strategy": "vendor_playbook"}
+    ) is True
+
+
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --
 
 
