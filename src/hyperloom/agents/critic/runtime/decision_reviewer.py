@@ -596,7 +596,6 @@ class DecisionReviewer:
                     scope=scope_filter,
                     kind=None,
                     topic=topic,
-                    metadata_filter=None,
                     limit=prior_limit,
                     ctx=ctx,
                 )
@@ -618,7 +617,6 @@ class DecisionReviewer:
                 scope=scope_filter,
                 kind=None,
                 topic=topic,
-                metadata_filter=None,
                 limit=prior_limit,
                 ctx=ctx,
             )
@@ -885,7 +883,11 @@ class DecisionReviewer:
                 continue
             advice_by_target.setdefault(advice_target, []).append(body)
 
-        intents: list[Intent] = []
+        # Pass 1: validate every verdict and build intents before any side effects.
+        # A late-index validation error must not leave earlier verdicts marked as
+        # reviewed while their intents were never delivered to the coordinator.
+        seen_targets: set[str] = set()
+        validated: list[tuple[dict[str, Any], str, str, Intent]] = []
         for i, item in enumerate(verdicts_raw):
             if not isinstance(item, dict):
                 raise ReviewValidationError(f"review.review_verdicts[{i}] must be an object")
@@ -895,6 +897,11 @@ class DecisionReviewer:
                 raise ReviewValidationError(f"review.review_verdicts[{i}].verdict {verdict!r} is not valid")
             if not isinstance(target, str) or not target:
                 raise ReviewValidationError(f"review.review_verdicts[{i}].target_proposal_msg_id missing")
+            if target in seen_targets:
+                raise ReviewValidationError(
+                    f"review.review_verdicts[{i}].target_proposal_msg_id {target!r} appears more than once"
+                )
+            seen_targets.add(target)
             advice_parts = [
                 part
                 for part in [item.get("advice_text", ""), *advice_by_target.get(target, [])]
@@ -920,6 +927,11 @@ class DecisionReviewer:
                 )
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
+            validated.append((item, target, verdict, intent))
+
+        # Pass 2: all verdicts are valid — persist side effects as a unit.
+        intents: list[Intent] = []
+        for item, target, verdict, intent in validated:
             intents.append(intent)
             self.session_memory.mark_reviewed(req.session_id, target, verdict, decision_id=req.decision_id)
             self.session_memory.append_decision(
