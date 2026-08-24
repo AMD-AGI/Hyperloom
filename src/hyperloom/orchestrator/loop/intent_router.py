@@ -21,8 +21,11 @@ import json
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
@@ -46,6 +49,9 @@ from ..policy.gate import (
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
+
+if TYPE_CHECKING:
+    from .coordinator import Coordinator, PendingProposal
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -85,6 +91,41 @@ class IntentRouter:
     def __getattr__(self, name: str) -> Any:
         # Attributes not defined on the router resolve onto the coordinator.
         return getattr(object.__getattribute__(self, "_coord"), name)
+
+    async def _stamp_integrate_patch_owner(
+        self,
+        params: dict[str, Any],
+    ) -> str:
+        """Copy immutable author ownership from the originating specialist."""
+        owner = patch_owner_phase(params)
+        if owner:
+            params["source_phase"] = owner
+            return owner
+        specialist_task_id = str(params.get("specialist_task_id") or "").strip()
+        if not specialist_task_id:
+            return ""
+        try:
+            specialist = await self.tasks.get(specialist_task_id)
+        except TaskNotFound:
+            return ""
+        specialist_params = dict(getattr(specialist, "params", None) or {})
+        owner = patch_owner_phase(specialist_params)
+        if not owner:
+            return ""
+        for key in (
+            "domain",
+            "source_domain",
+            "provenance",
+            "gap_canonical_id",
+            "gap_layer",
+            "framework_agent_authoring",
+            "framework_agent_candidate_id",
+        ):
+            value = specialist_params.get(key)
+            if value not in (None, "", [], {}):
+                params.setdefault(key, value)
+        params["source_phase"] = owner
+        return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
         """Validate an emitted intent through PolicyGate, then route it.
@@ -174,11 +215,30 @@ class IntentRouter:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
+        payload = dict(intent.payload)
+        if action_name == "integrate_patch":
+            params = dict(payload.get("params") or {})
+            if not await self._stamp_integrate_patch_owner(params):
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "proposal_rejected",
+                        "reason": "integrate_patch_owner_missing",
+                        "from_agent": source,
+                        "action_name": action_name,
+                        "specialist_task_id": str(
+                            params.get("specialist_task_id") or ""
+                        ),
+                    },
+                )
+                return
+            payload["params"] = params
         msg = Message.new(
             source,
             "*",
             "proposal",
-            {**intent.payload, "needs_review": True},
+            {**payload, "needs_review": True},
             priority=1,
         )
         await self.bus.append_and_seq(msg)
@@ -189,7 +249,7 @@ class IntentRouter:
             from_agent=source,
             action_name=action_name,
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
-            payload=dict(intent.payload),
+            payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
 
@@ -519,6 +579,22 @@ class IntentRouter:
             return
         # delegate explore runs variants directly (no Critic pre-review).
         params = dict(intent.payload.get("params") or {})
+        if action_name == "integrate_patch":
+            if not await self._stamp_integrate_patch_owner(params):
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "delegate_rejected",
+                        "reason": "integrate_patch_owner_missing",
+                        "from_agent": source,
+                        "action_name": action_name,
+                        "specialist_task_id": str(
+                            params.get("specialist_task_id") or ""
+                        ),
+                    },
+                )
+                return
         if action_name == "specialist":
             # Capture proposal ownership at dispatch. Specialist work can finish
             # after the state machine advances, so completion-time phase is not
