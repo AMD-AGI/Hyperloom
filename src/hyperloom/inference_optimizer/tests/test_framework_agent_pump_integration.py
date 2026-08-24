@@ -348,8 +348,7 @@ def test_pump_retries_empty_discover_before_marking_phase_done(
         assert [
             r
             for r in stub.shared_state.phase_history
-            if isinstance(r.get("evidence"), dict)
-            and r["evidence"].get("event") == "framework_agent_phase_done"
+            if isinstance(r.get("evidence"), dict) and r["evidence"].get("event") == "framework_agent_phase_done"
         ] == []
 
     # The limit-th consecutive empty batch ends the phase with a summary row.
@@ -359,8 +358,7 @@ def test_pump_retries_empty_discover_before_marking_phase_done(
     rows = [
         r
         for r in stub.shared_state.phase_history
-        if isinstance(r.get("evidence"), dict)
-        and r["evidence"].get("event") == "framework_agent_phase_done"
+        if isinstance(r.get("evidence"), dict) and r["evidence"].get("event") == "framework_agent_phase_done"
     ]
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"
