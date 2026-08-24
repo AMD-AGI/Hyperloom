@@ -528,23 +528,23 @@ class KGClient:
         return [r for r in rows if isinstance(r, dict)]
 
     def _get_links(self, slug: str) -> list[dict[str, Any]]:
-        """Return outgoing edges for ``slug`` (best-effort)."""
+        """Return outgoing edges for ``slug``."""
         if self._mcp is None or not slug:
             return []
         return self._as_edges(self._mcp.call("get_links", {"slug": slug}))
 
     def _get_backlinks(self, slug: str) -> list[dict[str, Any]]:
-        """Return incoming edges for ``slug`` (best-effort)."""
+        """Return incoming edges for ``slug``."""
         if self._mcp is None or not slug:
             return []
         return self._as_edges(self._mcp.call("get_backlinks", {"slug": slug}))
 
     def _node_exists(self, slug: str) -> bool:
-        """Return ``True`` when a page for ``slug`` exists."""
-        try:
-            page = self._mcp.call("get_page", {"slug": slug})
-        except (GbrainRemoteError, OSError, TimeoutError):
-            return False
+        """Return ``True`` when a page for ``slug`` exists, ``False`` when it
+        is confirmed absent.  Raises on transport or I/O failures so callers
+        cannot mistake a failed probe for a missing node.
+        """
+        page = self._mcp.call("get_page", {"slug": slug})
         if isinstance(page, str):
             return bool(page.strip())
         if isinstance(page, dict):
@@ -562,6 +562,10 @@ class KGClient:
         result is inspected (gbrain reports failures in-band), so a failed
         creation is not memoized as present.
 
+        A transport or I/O failure from the existence probe is treated as
+        "cannot confirm" — no write is issued and ``False`` is returned so the
+        caller's ``_safe`` wrapper can surface the failure faithfully.
+
         Args:
             slug: The entity slug to materialize.
 
@@ -572,7 +576,12 @@ class KGClient:
             return False
         if slug in self._known_nodes:
             return True
-        if self._node_exists(slug):
+        try:
+            exists = self._node_exists(slug)
+        except (GbrainRemoteError, OSError, TimeoutError) as exc:
+            log.warning("kg _ensure_node probe failed for %s: %s", slug, exc)
+            return False
+        if exists:
             self._known_nodes.add(slug)
             return True
         try:
