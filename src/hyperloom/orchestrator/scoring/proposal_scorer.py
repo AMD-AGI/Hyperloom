@@ -23,7 +23,6 @@ import asyncio
 import json
 import logging
 import math
-import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,34 +75,11 @@ Rules:
 """.strip()
 
 
-_SCORES_OBJECT_OPENER_RE = re.compile(r'\{\s*"scores"\s*:', re.DOTALL)
-
-
 def _extract_scores_json(text: str) -> dict[str, Any] | None:
     """Pull the last valid ``{"scores": {...}}`` object out of a reply."""
-    if not text:
-        return None
-    from hyperloom.common.jsonio import _FENCED_JSON_RE
+    from hyperloom.common.jsonio import extract_last_json_with_key
 
-    found: dict[str, Any] | None = None
-    for m in _FENCED_JSON_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and "scores" in data:
-            found = data
-    for m in _SCORES_OBJECT_OPENER_RE.finditer(text):
-        candidate = text[m.start() :]
-        for end in range(len(candidate), 0, -1):
-            try:
-                data = json.loads(candidate[:end])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(data, dict) and "scores" in data:
-                found = data
-            break
-    return found
+    return extract_last_json_with_key(text, "scores")
 
 
 @dataclass(frozen=True)
@@ -111,7 +87,8 @@ class _ScoringProposal:
     """One proposal prepared for multi-model scoring."""
 
     stable_id: str
-    display_name: str
+    output_name: str
+    label_name: str
     proposal: dict[str, Any]
 
 
@@ -122,22 +99,29 @@ def _prepare_scoring_proposals(proposals: list[dict[str, Any]]) -> list[_Scoring
         proposals: Candidate variants to score.
 
     Returns:
-        Prepared scoring entries with stable ids and unique display names.
+        Prepared scoring entries with stable ids and unique label names.
 
     Raises:
-        ValueError: When two proposals share the same non-empty display name.
+        ValueError: When two proposals share the same canonical display name.
     """
-    seen_names: set[str] = set()
+    seen_labels: set[str] = set()
     out: list[_ScoringProposal] = []
     for i, proposal in enumerate(proposals):
-        display_name = str(proposal.get("name") or f"proposal_{i}").strip() or f"proposal_{i}"
-        if display_name in seen_names:
-            raise ValueError(f"duplicate proposal name: {display_name!r}")
-        seen_names.add(display_name)
+        raw_name = proposal.get("name")
+        if raw_name is not None and str(raw_name).strip():
+            output_name = str(raw_name)
+            label_name = output_name.strip()
+        else:
+            output_name = f"proposal_{i}"
+            label_name = output_name
+        if label_name in seen_labels:
+            raise ValueError(f"duplicate proposal name: {label_name!r}")
+        seen_labels.add(label_name)
         out.append(
             _ScoringProposal(
                 stable_id=f"proposal_{i}",
-                display_name=display_name,
+                output_name=output_name,
+                label_name=label_name,
                 proposal=proposal,
             )
         )
@@ -199,7 +183,7 @@ def _normalise_model_scores(
     scores = parsed.get("scores")
     if not isinstance(scores, dict):
         return out
-    id_to_name = {entry.stable_id: entry.display_name for entry in scoring_entries}
+    id_to_name = {entry.stable_id: entry.output_name for entry in scoring_entries}
     known = set(id_to_name)
     for proposal_id, entry in scores.items():
         key = str(proposal_id)
@@ -308,7 +292,7 @@ class ProposalScorer:
         for entry in scoring_entries:
             p = entry.proposal
             lines.append(f"- id: {entry.stable_id}")
-            lines.append(f"  name: {entry.display_name}")
+            lines.append(f"  name: {entry.label_name}")
             if p.get("extra_args"):
                 lines.append(f"  extra_args: {_clip(p.get('extra_args'))}")
             if p.get("extra_envs"):

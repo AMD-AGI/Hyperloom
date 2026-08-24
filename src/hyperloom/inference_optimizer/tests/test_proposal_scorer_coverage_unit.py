@@ -70,8 +70,18 @@ def test_normalise_scores_not_dict():
 
 def test_normalise_drops_unknown_and_bad_score():
     entries = [
-        _ScoringProposal(stable_id="proposal_0", display_name="a", proposal={"name": "a"}),
-        _ScoringProposal(stable_id="proposal_1", display_name="b", proposal={"name": "b"}),
+        _ScoringProposal(
+            stable_id="proposal_0",
+            output_name="a",
+            label_name="a",
+            proposal={"name": "a"},
+        ),
+        _ScoringProposal(
+            stable_id="proposal_1",
+            output_name="b",
+            label_name="b",
+            proposal={"name": "b"},
+        ),
     ]
     parsed = {
         "scores": {
