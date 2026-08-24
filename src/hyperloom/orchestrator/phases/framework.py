@@ -4448,9 +4448,7 @@ class FrameworkPhase(PhaseHandler):
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            self._maybe_rearm_enablement(
-                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
-            )
+            self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
             self._note_build_routed(task_id)
             return
 
