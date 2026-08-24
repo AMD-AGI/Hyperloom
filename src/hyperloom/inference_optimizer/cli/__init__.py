@@ -65,6 +65,7 @@ from .bootstrap import (
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
+from hyperloom.orchestrator.actions.executors._latency_budget import LATENCY_BUDGET_ENV
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -1631,6 +1632,79 @@ def _export_operator_launch_shape(
         os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
 
 
+#: Internal handoff for the compute-partition lever. Operators pass
+#: ``--compute-partition-modes`` / ``--streams-per-partition`` /
+#: ``--max-latency-ms``; these carry the resolved values to the executors.
+PARTITION_MODES_ENV = "HYPERLOOM_COMPUTE_PARTITION_MODES"
+STREAMS_PER_PARTITION_ENV = "HYPERLOOM_STREAMS_PER_PARTITION"
+
+
+def _export_partition_lever(
+    *,
+    modes_raw: str | None,
+    streams_per_partition: int,
+    max_latency_ms: float | None,
+) -> tuple[str, ...]:
+    """Validate and project the compute-partition lever into env.
+
+    Validation happens here, at launch, rather than at the apply site: applying
+    a mode is a privileged mutation of a shared card partway through a session,
+    and discovering a typo there means unwinding a live topology instead of
+    printing a usage error.
+
+    Empty inputs clear the variables, so a second session in the same shell
+    cannot inherit a partition lever the operator did not ask for this time.
+
+    Args:
+        modes_raw: The raw ``--compute-partition-modes`` value.
+        streams_per_partition: The resolved ``--streams-per-partition``.
+        max_latency_ms: The resolved ``--max-latency-ms``, if any.
+
+    Returns:
+        The canonical modes, empty when the lever is off.
+    """
+    from hyperloom.common.gpu_partition import PartitionError, parse_modes
+
+    budget = float(max_latency_ms or 0.0)
+    if budget > 0:
+        os.environ[LATENCY_BUDGET_ENV] = repr(budget)
+    else:
+        os.environ.pop(LATENCY_BUDGET_ENV, None)
+
+    try:
+        modes = parse_modes(modes_raw)
+    except PartitionError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    if not modes:
+        os.environ.pop(PARTITION_MODES_ENV, None)
+        os.environ.pop(STREAMS_PER_PARTITION_ENV, None)
+        return ()
+
+    if streams_per_partition < 1:
+        print(
+            f"ERROR: --streams-per-partition must be >= 1, got {streams_per_partition}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if budget <= 0:
+        # Not fatal: maximizing offline throughput regardless of per-request
+        # latency is a legitimate goal. But it is not usually what someone
+        # means, and throughput is the only gate without a budget, so the
+        # search will end up choosing the narrowest partition offered.
+        print(
+            "WARN: --compute-partition-modes without --max-latency-ms. Narrower "
+            "partitions raise aggregate throughput by making each stream "
+            "slower, and throughput is the only KEEP gate, so the search is "
+            "free to trade away per-request latency without bound.",
+            file=sys.stderr,
+        )
+    os.environ[PARTITION_MODES_ENV] = ",".join(modes)
+    os.environ[STREAMS_PER_PARTITION_ENV] = str(int(streams_per_partition))
+    return modes
+
+
 # Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
 # Anything else (baseline / preflight failures, crashes, enablement stalls) exits
 # non-zero so CI surfaces genuine problems.
@@ -1714,6 +1788,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     _export_operator_launch_shape(
         server_args=str(getattr(args, "server_args", "") or "").strip(),
         extra_env=parse_operator_extra_env(args),
+    )
+    _export_partition_lever(
+        modes_raw=getattr(args, "compute_partition_modes", None),
+        streams_per_partition=int(getattr(args, "streams_per_partition", 2) or 2),
+        max_latency_ms=getattr(args, "max_latency_ms", None),
     )
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
@@ -1933,6 +2012,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _export_operator_launch_shape(
             server_args=_resume_server_args,
             extra_env=_resume_extra_env,
+        )
+        # The lever is part of the measurement contract: a resume that dropped
+        # it would compare candidates measured under partitioning against a
+        # baseline that no longer is.
+        _export_partition_lever(
+            modes_raw=getattr(args, "compute_partition_modes", None) or state.compute_partition_modes,
+            streams_per_partition=int(
+                getattr(args, "streams_per_partition", 0) or state.streams_per_partition or 2
+            ),
+            max_latency_ms=getattr(args, "max_latency_ms", None) or state.latency_budget_ms,
         )
         state.operator_server_args = _resume_server_args
         state.operator_extra_env = _resume_extra_env

@@ -666,6 +666,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
     benchmark_backend: str = ""
+    # ``--compute-partition-modes``: canonical SPX/DPX/QPX/CPX modes the session
+    # may set on the card. Empty (the default) leaves the hardware alone.
+    compute_partition_modes: list[str] = field(default_factory=list)
+    # ``--streams-per-partition``: concurrent streams placed on each partition.
+    # Part of the measurement contract, not a tuning detail -- a mode measured
+    # at one stream per partition is a different experiment from the same mode
+    # at two, and only the latter is where partitioning pays.
+    streams_per_partition: int = 2
+    # ``--max-latency-ms``: constraint, not target. 0 disables, which restores
+    # the throughput-only KEEP the optimizer had before.
+    latency_budget_ms: float = 0.0
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1

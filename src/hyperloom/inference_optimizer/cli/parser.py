@@ -288,6 +288,35 @@ def _build_parser() -> argparse.ArgumentParser:
         "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
     )
     opt.add_argument(
+        "--compute-partition-modes",
+        type=str,
+        default=None,
+        metavar="MODES",
+        help="Comma-separated compute-partition modes to evaluate, e.g. "
+        "'spx,dpx,cpx'. Off by default. Partitioning a card only ever gives "
+        "one stream fewer CUs, so it cannot improve single-stream latency "
+        "and pays only in aggregate throughput at concurrency -- see "
+        "--streams-per-partition. Requires a privileged amd-smi on the "
+        "host: the mode is a property of the card, not of the process, so a "
+        "session confined to an unprivileged container cannot set it. The "
+        "session restores the mode it found on the way out. Pair with "
+        "--max-latency-ms; without a budget the search picks the narrowest "
+        "partition on offer, which is the slowest one per request.",
+    )
+    opt.add_argument(
+        "--streams-per-partition",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Concurrent streams to place on each partition when "
+        "--compute-partition-modes is in use. Defaults to 2, which is where "
+        "every mode measured on MI355X peaked: one stream leaves each "
+        "partition idle through the fixed per-pass cost, a second fills it, "
+        "a third only adds queueing. Raise it only with evidence, and note "
+        "that every stream on a partition holds its own copy of the "
+        "weights, so this multiplies the memory a mode has to fit.",
+    )
+    opt.add_argument(
         "--framework",
         choices=list(framework_registry.names()),
         default=None,
@@ -587,6 +616,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
+    )
+    opt.add_argument(
+        "--max-latency-ms",
+        type=float,
+        default=None,
+        metavar="MS",
+        help="Refuse any candidate whose mean end-to-end latency exceeds MS. A "
+        "constraint, not a target, so it combines with --target-gain / "
+        "--target-tput rather than replacing one. Off by default, which "
+        "leaves throughput the only gate. Set it whenever the search can "
+        "trade latency for throughput -- most of all with "
+        "--compute-partition-modes, where the highest-throughput "
+        "configuration is by construction the slowest one per request. The "
+        "gate fails closed: a candidate that reported no latency is "
+        "refused, because an unmeasured constraint is not a satisfied one.",
     )
     opt.add_argument(
         "--resume-from",

@@ -29,6 +29,12 @@ from typing import Any
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.inference_optimizer.session.paths import asset_root
 
+from ._partition_lever import (
+    PartitionError,
+    maybe_hold_partition_mode,
+    plan_partition_run,
+)
+
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
     """Return the scriptable entrypoint name (e.g. xdit_mi300x.sh)."""
@@ -116,6 +122,7 @@ def build_scriptable_env(
     *,
     profile: bool = False,
     profile_dir: str | None = None,
+    partition_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the env for a scriptable benchmark script.
 
@@ -125,6 +132,10 @@ def build_scriptable_env(
         workspace: Per-run workspace directory.
         profile: Whether the torch profiler is enabled for this run.
         profile_dir: Directory the profiler traces should be written to.
+        partition_env: Description of the compute-partition shape established
+            for this run, when the lever is engaged. Run-scoped rather than
+            overridable: it reports what the hardware was actually set to, so a
+            YAML env claiming otherwise must not win.
 
     Returns:
         The environment mapping for the scriptable subprocess.
@@ -145,6 +156,8 @@ def build_scriptable_env(
         if profile_dir:
             run_scoped["VLLM_TORCH_PROFILER_DIR"] = profile_dir
             run_scoped["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
+    if partition_env:
+        run_scoped.update(partition_env)
     return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
 
 
@@ -187,31 +200,50 @@ def run_scriptable(
         # carry the diagnostic instead of a blank abort_reason.json.
         _write_logs(workspace, "", f"{error}\ntried:\n{tried}\n")
         return 2, error
-    env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
+    # A requested partition mode is established before the benchmark starts and
+    # restored after it ends, so the measurement and its label agree. A mode
+    # that cannot be set aborts the run rather than measuring the topology that
+    # happens to be there, which would be indistinguishable from a real result.
+    try:
+        mode, partition_env = plan_partition_run(bench.get("envs"), gpu_type=runner_type)
+    except PartitionError as exc:
+        return 2, f"compute-partition lever: {exc}"
+    env = build_scriptable_env(
+        bench,
+        runner_type,
+        workspace,
+        profile=profile,
+        profile_dir=profile_dir,
+        partition_env=partition_env,
+    )
     cmd = ["bash", str(script)]
     # Streamed straight to disk instead of captured in memory: a runner killed
     # from outside (lease reap / OOM) must still leave a forensic trail.
-    with ExitStack() as stack:
-        stdout_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stdout.log"))
-        stderr_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stderr.log"))
-        proc = subprocess.Popen(  # noqa: S603 — cmd is this module's own bash entrypoint
-            cmd,
-            env=env,
-            stdout=stdout_sink,
-            stderr=stderr_sink,
-        )
-        try:
-            proc.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            _write_logs(
-                workspace,
-                "",
-                f"scriptable benchmark timed out after {timeout_s}s",
-                append=True,
+    try:
+        with maybe_hold_partition_mode(mode, gpu_type=runner_type), ExitStack() as stack:
+            stdout_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stdout.log"))
+            stderr_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stderr.log"))
+            proc = subprocess.Popen(  # noqa: S603 — cmd is this module's own bash entrypoint
+                cmd,
+                env=env,
+                stdout=stdout_sink,
+                stderr=stderr_sink,
             )
-            return 124, None
+            try:
+                proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                _write_logs(
+                    workspace,
+                    "",
+                    f"scriptable benchmark timed out after {timeout_s}s",
+                    append=True,
+                )
+                return 124, None
+    except PartitionError as exc:
+        _write_logs(workspace, "", f"compute-partition lever: {exc}\n", append=True)
+        return 2, f"compute-partition lever: {exc}"
     return proc.returncode, None
 
 

@@ -80,6 +80,11 @@ from ._grid_runner import (
     session_grid_bounds,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
+from ._latency_budget import (
+    describe_latency_budget,
+    latency_keep_block,
+    resolve_latency_budget_ms,
+)
 from ._ray_serving import maybe_serving_lease
 
 # DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
@@ -799,6 +804,9 @@ class ExploreExecutor:
                 self.stack_stable_threshold_pct,
             )
         )
+        latency_budget_ms = resolve_latency_budget_ms(params, ss)
+        if latency_budget_ms > 0:
+            log.info("explore: enforcing %s on KEEP", describe_latency_budget(latency_budget_ms))
         enable_stack_rebench = bool(
             params.get(
                 "enable_stack_rebench",
@@ -1514,6 +1522,13 @@ class ExploreExecutor:
                     # clear keep_threshold (and the accuracy gate) earn a warm
                     # stack-rebench round.
                     gain = gain_pct(r.output_throughput, running_base_tput)
+                    # A throughput gain bought with latency is still a gain to
+                    # the gate above, so a session that named a latency budget
+                    # has it enforced here rather than only reported.
+                    latency_blocked, latency_reason = latency_keep_block(
+                        r.e2el_mean_ms,
+                        budget_ms=latency_budget_ms,
+                    )
                     outcome = "FAILED"
                     reason: str = ""
                     if r.status != "succeeded" or gain is None:
@@ -1521,6 +1536,15 @@ class ExploreExecutor:
                     elif gain < keep_threshold_pct:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
+                    elif latency_blocked:
+                        outcome = "REVERT"
+                        reason = latency_reason
+                        log.warning(
+                            "explore: variant %s REVERT (+%.2f%% throughput, %s)",
+                            gv.name,
+                            gain,
+                            latency_reason,
+                        )
                     else:
                         # Accuracy gate. For serving it runs only for high-risk
                         # variants. For scriptable frameworks the image-quality

@@ -355,6 +355,15 @@ def _seed_shared_state(
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
+        # Compute-partition lever, read back from the env ``_export_partition_lever``
+        # published rather than re-derived from argv: that env is the validated,
+        # clamped, canonical form, and seeding from the raw flag would let the
+        # manifest disagree with what the executors were actually handed.
+        compute_partition_modes=[
+            m for m in os.environ.get("HYPERLOOM_COMPUTE_PARTITION_MODES", "").split(",") if m
+        ],
+        streams_per_partition=max(1, int(os.environ.get("HYPERLOOM_STREAMS_PER_PARTITION", "") or 2)),
+        latency_budget_ms=max(0.0, float(os.environ.get("HYPERLOOM_MAX_LATENCY_MS", "") or 0.0)),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
