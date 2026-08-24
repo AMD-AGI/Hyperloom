@@ -1528,7 +1528,7 @@ def _build_attempt_summary(manifest_entry: dict[str, Any]) -> dict[str, Any]:
     """Project a BuildResult.to_state() entry onto TargetedBuildAttemptSummary."""
     action = manifest_entry.get("action") or {}
     installed = manifest_entry.get("installed_versions") or {}
-    artifacts = manifest_entry.get("built_artifacts") or []
+    probes = manifest_entry.get("build_probes") or []
     return {
         "component": str(action.get("component") or manifest_entry.get("component") or ""),
         "ref": str(installed.get("aiter_ref") or installed.get("vllm_ref") or installed.get("sgl_kernel_ref") or action.get("ref") or ""),
@@ -1538,7 +1538,7 @@ def _build_attempt_summary(manifest_entry: dict[str, Any]) -> dict[str, Any]:
         "failure_class": str(manifest_entry.get("failure_class") or "ok"),
         "failure_summary": str(manifest_entry.get("failure_summary") or ""),
         "installed_versions": {str(k): str(v) for k, v in installed.items()} if isinstance(installed, dict) else {},
-        "built_artifacts": [str(p) for p in artifacts[:8]],
+        "build_probes": [str(p) for p in probes[:8]],
         "build_log_path": str(manifest_entry.get("build_log_path") or ""),
         "attempt_root": str(manifest_entry.get("attempt_root") or ""),
     }

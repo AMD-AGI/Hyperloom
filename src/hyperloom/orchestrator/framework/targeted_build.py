@@ -329,16 +329,12 @@ def run_aiter_build(
     so the coordinator tick loop is never blocked).  All subprocess calls go
     through the injectable ``run`` shim for testability.
     """
-    import time as _time
-
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
         probe_torch_abi,
         run_argv,
         sort_tags_desc,
-        verify_fresh_artifacts,
-        verify_symbols,
         write_rocm_torch_constraints,
     )
 
@@ -457,7 +453,6 @@ def run_aiter_build(
         install_env["MAX_JOBS"] = str(max_jobs)
 
     git_run = git if git is not None else _run
-    since_unix = _time.time()
     selected_ref = ref
     installed_ok = False
 
@@ -474,6 +469,16 @@ def run_aiter_build(
             log_msg = res.stderr_tail or res.stdout_tail
             build_log.write_text(log_msg, encoding="utf-8")
             return _fail("compile_error", f"pip install failed for ref={ref!r}: rc={res.returncode}")
+        probe = run_argv(
+            [attempt_py, "-c", "import aiter"],
+            cwd=str(root), env=install_env, timeout_sec=60, run=_run,
+        )
+        if probe.returncode != 0:
+            return _fail(
+                "boot_failed",
+                f"aiter not importable after pip install (ref={ref!r}): {probe.stderr_tail or probe.stdout_tail}",
+            )
+        selected_ref = ref
     else:
         # Tag-descending autoselect
         tags_res = git_run(
@@ -505,21 +510,7 @@ def run_aiter_build(
         if not installed_ok:
             return _fail("compile_error", "no AITER tag installed and imported successfully")
 
-    # 6. Artifact freshness + symbol verify ------------------------------------
-    expected_artifacts = list(action.expected_artifacts) or ["**/*.so"]
-    freshness = verify_fresh_artifacts(str(worktree_dir), since_unix, expected_artifacts)
-    built_paths: tuple[str, ...] = tuple(freshness.get("fresh", []))
-
-    sym_result: dict[str, Any] = {"verified": True}
-    if action.expected_symbols:
-        sym_result = verify_symbols(attempt_py, list(action.expected_symbols), run=_run)
-        if not sym_result["verified"]:
-            return _fail(
-                "symbol_missing",
-                f"expected symbols not importable after build: {sym_result['missing']}",
-            )
-
-    # 7. Collect installed_versions + hashes, return BuildResult ---------------
+    # 6. Collect installed_versions + return BuildResult -----------------------
     sha_res = git_run(
         ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
         capture_output=True, text=True, timeout=30,
@@ -547,7 +538,6 @@ def run_aiter_build(
         ok=True,
         attempt_root=str(root),
         runtime=runtime,
-        built_artifacts=built_paths,
         installed_versions=installed_versions,
         build_log_path=str(build_log),
         failure_class="ok",
@@ -579,15 +569,12 @@ def run_sgl_kernel_build(
     """
     import os as _os
     import sys as _sys
-    import time as _time
 
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
         probe_torch_abi,
         run_argv,
-        verify_fresh_artifacts,
-        verify_symbols,
         write_rocm_torch_constraints,
     )
 
@@ -674,7 +661,6 @@ def run_sgl_kernel_build(
     except Exception as exc:  # noqa: BLE001
         return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
 
-    since_unix = _time.time()
     sgl_kernel_dir = worktree_dir / "sgl-kernel"
 
     # Build sgl-kernel with explicit AMDGPU_TARGET
@@ -712,15 +698,15 @@ def run_sgl_kernel_build(
         build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"sgl-kernel pip install failed (rc={pip_res.returncode})")
 
-    # Verify
-    expected_artifacts = list(action.expected_artifacts) or ["**/*.so"]
-    freshness = verify_fresh_artifacts(str(sgl_kernel_dir), since_unix, expected_artifacts)
-    built_paths: tuple[str, ...] = tuple(freshness.get("fresh", []))
-
-    if action.expected_symbols:
-        sym_result = verify_symbols(attempt_py, list(action.expected_symbols), run=_run)
-        if not sym_result["verified"]:
-            return _fail("symbol_missing", f"symbols not importable: {sym_result['missing']}")
+    probe = run_argv(
+        [attempt_py, "-c", "import sgl_kernel"],
+        cwd=str(root), env=dict(_os.environ), timeout_sec=60, run=_run,
+    )
+    if probe.returncode != 0:
+        return _fail(
+            "boot_failed",
+            f"sgl_kernel not importable after pip install: {probe.stderr_tail or probe.stdout_tail}",
+        )
 
     git_run = git if git is not None else _run
     sha_res = git_run(["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
@@ -749,7 +735,6 @@ def run_sgl_kernel_build(
         ok=True,
         attempt_root=str(root),
         runtime=runtime,
-        built_artifacts=built_paths,
         installed_versions=installed_versions,
         build_log_path=str(build_log),
         failure_class="ok",
@@ -807,15 +792,12 @@ def run_vllm_source_build(
     """
     import os as _os
     import sys as _sys
-    import time as _time
 
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
         probe_torch_abi,
         run_argv,
-        verify_fresh_artifacts,
-        verify_symbols,
         write_rocm_torch_constraints,
     )
 
@@ -916,7 +898,6 @@ def run_vllm_source_build(
     except Exception as exc:  # noqa: BLE001
         return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
 
-    since_unix = _time.time()
     # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the
     # toolchain root even on ROCm. The pip build-env overlay does not inherit an
     # unset CUDA_HOME/ROCM_HOME, so derive the ROCm root and export it explicitly.
@@ -994,16 +975,6 @@ def run_vllm_source_build(
             f"(rc={load_probe.returncode}; out={load_probe.stdout_tail[:200]})",
         )
 
-    # Artifact freshness (fresh _C*.so means the extension was compiled)
-    expected_artifacts = list(action.expected_artifacts) or ["vllm/_C*.so", "**/_C*.so"]
-    freshness = verify_fresh_artifacts(str(worktree_dir), since_unix, expected_artifacts)
-    built_paths: tuple[str, ...] = tuple(freshness.get("fresh", []))
-
-    if action.expected_symbols:
-        sym_result = verify_symbols(attempt_py, list(action.expected_symbols), run=_run)
-        if not sym_result["verified"]:
-            return _fail("symbol_missing", f"symbols not importable: {sym_result['missing']}")
-
     git_run = git if git is not None else _run
     sha_res = git_run(["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
                       capture_output=True, text=True, timeout=30)
@@ -1032,7 +1003,6 @@ def run_vllm_source_build(
         ok=True,
         attempt_root=str(root),
         runtime=runtime,
-        built_artifacts=built_paths,
         installed_versions=installed_versions,
         build_log_path=str(build_log),
         failure_class="ok",

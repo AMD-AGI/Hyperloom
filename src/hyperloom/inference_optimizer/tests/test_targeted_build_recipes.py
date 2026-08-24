@@ -108,15 +108,12 @@ def _aiter_action(**kw):
     return TargetedBuildAction(**base)
 
 
-def _patch_aiter_isolation(monkeypatch, tmp_path, *, make_so=True):
+def _patch_aiter_isolation(monkeypatch, tmp_path):
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True, exist_ok=True)
     (venv / "bin" / "python").write_text("#!/usr/bin/env python3\n")
-
-    if make_so:
-        (worktree / "module_aiter_core.so").write_bytes(b"\x7fELF")
 
     fake = FakeIsolation(worktree, venv)
 
@@ -258,7 +255,7 @@ def _make_rocm_run(*, hip_ok=True, torch_ver="2.10.0+git8514f05",
 # ---------------------------------------------------------------------------
 
 def test_run_aiter_build_success_pinned_ref(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
 
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
@@ -276,7 +273,7 @@ def test_run_aiter_build_success_pinned_ref(monkeypatch, tmp_path):
 
 
 def test_run_aiter_build_success_runtime_paths_valid(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
@@ -294,7 +291,7 @@ def test_run_aiter_build_success_runtime_paths_valid(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_run_aiter_build_compile_error(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=False)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
@@ -317,23 +314,18 @@ def test_run_aiter_build_abi_mismatch(monkeypatch, tmp_path):
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
 
 
-def test_run_aiter_build_symbol_missing(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
-
-    def _run_missing(argv, **kw):
-        cmd = " ".join(str(a) for a in argv)
-        if "fp4_moe" in cmd:
-            return _completed(returncode=1)
-        return _make_aiter_run()(argv, **kw)
-
+def test_run_aiter_pinned_ref_import_probe_gate(monkeypatch, tmp_path):
+    """A pinned ref that installs but does not import is not a successful build."""
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
-        _aiter_action(ref="v0.1.0", expected_symbols=("aiter.ops.fp4_moe",)),
+        _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
-        run=_run_missing, git=_make_git(),
+        run=_make_aiter_run(pip_ok=True, import_ok=False),
+        git=_make_git(),
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
-    assert result.failure_class == "symbol_missing"
+    assert result.failure_class == "boot_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +333,7 @@ def test_run_aiter_build_symbol_missing(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_run_aiter_build_autoselect_hit(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref=""),
         str(tmp_path / "attempt"),
@@ -354,7 +346,7 @@ def test_run_aiter_build_autoselect_hit(monkeypatch, tmp_path):
 
 
 def test_run_aiter_build_autoselect_exhaust(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=False)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref=""),
         str(tmp_path / "attempt"),
@@ -377,7 +369,7 @@ def test_run_aiter_build_no_live_tree_mutation(monkeypatch, tmp_path):
             install_envs.append(dict(kw["env"]))
         return _make_aiter_run()(argv, **kw)
 
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0"),
         str(tmp_path / "attempt"),
@@ -402,7 +394,7 @@ def test_run_aiter_build_no_live_tree_mutation(monkeypatch, tmp_path):
 
 
 def test_run_aiter_build_reproducible_versions(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0", gpu_arch="gfx950"),
         str(tmp_path / "attempt"),
@@ -418,7 +410,7 @@ def test_run_aiter_build_reproducible_versions(monkeypatch, tmp_path):
 
 
 def test_run_aiter_build_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0", gpu_arch="gfx950",
                       source_pr_url="https://github.com/ROCm/aiter/pull/77"),
@@ -431,7 +423,7 @@ def test_run_aiter_build_source_pr_url_in_installed_versions(monkeypatch, tmp_pa
 
 
 def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
-    _patch_aiter_isolation(monkeypatch, tmp_path, make_so=True)
+    _patch_aiter_isolation(monkeypatch, tmp_path)
     result = run_aiter_build(
         _aiter_action(ref="v0.1.0", gpu_arch="gfx950"),
         str(tmp_path / "attempt"),
@@ -609,28 +601,28 @@ def test_sgl_kernel_build_pyproject_toml_copied(monkeypatch, tmp_path):
     assert (wt / "python" / "pyproject.toml").exists()
 
 
-def test_sgl_kernel_symbol_missing(monkeypatch, tmp_path):
+def test_sgl_kernel_import_probe_gate(monkeypatch, tmp_path):
+    """An sgl-kernel install that does not import is not a successful build."""
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
     (wt / "python").mkdir()
-    (wt / "sgl-kernel" / "lib.so").write_bytes(b"ELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
 
-    def _run_missing(argv, **kw):
+    def _run_no_import(argv, **kw):
         cmd = " ".join(str(a) for a in argv)
-        if "fp4_gemm" in cmd:
-            return _completed(returncode=1)
+        if "import sgl_kernel" in cmd:
+            return _completed(returncode=1, stderr="ModuleNotFoundError\n")
         return _make_rocm_run()(argv, **kw)
 
     result = run_sgl_kernel_build(
-        _sgl_action(expected_symbols=("sgl_kernel.fp4_gemm",)),
+        _sgl_action(),
         str(tmp_path / "attempt"),
-        run=_run_missing, disk_preflight_fn=_noop_disk,
+        run=_run_no_import, disk_preflight_fn=_noop_disk,
     )
     assert result.ok is False
-    assert result.failure_class == "symbol_missing"
+    assert result.failure_class == "boot_failed"
 
 
 def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
@@ -789,30 +781,6 @@ def test_vllm_source_rocm_verify_fails_boot_failed(monkeypatch, tmp_path):
     )
     assert result.ok is False
     assert result.failure_class == "boot_failed"
-
-
-def test_vllm_source_symbol_missing(monkeypatch, tmp_path):
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    (wt / "vllm").mkdir()
-    (wt / "vllm" / "_C.so").write_bytes(b"ELF")
-    venv = tmp_path / "venv"
-    (venv / "bin").mkdir(parents=True)
-    _patch_isolation(monkeypatch, wt, venv)
-
-    def _run_sym(argv, **kw):
-        cmd = " ".join(str(a) for a in argv)
-        if "model_executor" in cmd and "deepseek_v4" in cmd.lower():
-            return _completed(returncode=1)
-        return _make_rocm_run()(argv, **kw)
-
-    result = run_vllm_source_build(
-        _vllm_action(expected_symbols=("vllm.model_executor.models.deepseek_v4",)),
-        str(tmp_path / "attempt"),
-        run=_run_sym, disk_preflight_fn=_noop_disk,
-    )
-    assert result.ok is False
-    assert result.failure_class == "symbol_missing"
 
 
 def test_vllm_source_runtime_fields(monkeypatch, tmp_path):

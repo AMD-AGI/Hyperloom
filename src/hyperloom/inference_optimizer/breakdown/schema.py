@@ -2528,12 +2528,12 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
         ref: Git ref / tag used for the build.
         gpu_arch: Explicit target arch (``gfx942`` / ``gfx950`` / ...).
         max_jobs: Parallelism cap passed to the compile.
-        ok: Whether the build + verify passed.
+        ok: Whether the build probe and install succeeded.
         failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
         failure_summary: Human-readable reason (agent decision input).
         installed_versions: torch/ref/sha/arch recorded after a successful build;
             includes ``source_pr_url`` when a discovered PR ref drove the build.
-        built_artifacts: Verified artifact paths (up to 8).
+        build_probes: Post-build probe descriptors (e.g. ``"import aiter: ok"``).
         build_log_path: Path to the compile log inside the attempt dir.
         attempt_root: Attempt directory anchoring the build.
     """
@@ -2546,7 +2546,7 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
     failure_class: str
     failure_summary: str
     installed_versions: dict[str, str]
-    built_artifacts: list[str]
+    build_probes: list[str]
     build_log_path: str
     attempt_root: str
 

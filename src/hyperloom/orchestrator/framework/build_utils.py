@@ -9,7 +9,6 @@ be tested without a GPU or compiler.  No PATH is hard-coded.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import shlex
 import subprocess
@@ -281,118 +280,6 @@ def probe_torch_abi(
 
 
 # ---------------------------------------------------------------------------
-# Artifact freshness verify
-# ---------------------------------------------------------------------------
-
-def verify_fresh_artifacts(
-    build_dir: str | Path,
-    since_unix: float,
-    expected_artifacts: list[str] | tuple[str, ...],
-) -> dict[str, Any]:
-    """Check that at least one expected artifact glob was built after *since_unix*.
-
-    Args:
-        build_dir: Root directory to search for artifacts.
-        since_unix: Unix timestamp threshold (mtime + 1.0s slack must exceed this).
-        expected_artifacts: List of glob patterns relative to *build_dir*.
-
-    Returns:
-        dict: ``{"verified": bool, "status": str, "fresh": [...fresh paths...]}``
-    """
-    root = Path(build_dir)
-    if not root.exists():
-        return {"verified": False, "status": "stale", "reason": f"build_dir absent: {root}"}
-
-    patterns = list(expected_artifacts) if expected_artifacts else ["*.so", "**/*.so"]
-    fresh: list[str] = []
-    for pattern in patterns:
-        for p in root.glob(pattern):
-            try:
-                mtime = p.stat().st_mtime
-            except OSError:
-                continue
-            if mtime + 1.0 >= since_unix:
-                fresh.append(str(p))
-
-    if fresh:
-        return {"verified": True, "status": "ok", "fresh": sorted(set(fresh))[:16]}
-    return {
-        "verified": False,
-        "status": "stale",
-        "reason": "no freshly-built artifacts found after build",
-        "build_dir": str(root),
-        "patterns": patterns,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Symbol verify (import probe)
-# ---------------------------------------------------------------------------
-
-def verify_symbols(
-    python_exe: str,
-    expected_symbols: list[str] | tuple[str, ...],
-    *,
-    run: _RunCallable = subprocess.run,
-) -> dict[str, Any]:
-    """Verify that *expected_symbols* are importable in the given interpreter.
-
-    Uses an ``import aiter; getattr(aiter, sym)`` style probe — matches the
-    installer's ``import aiter`` gate.
-
-    Args:
-        python_exe: Python interpreter (the attempt venv's python).
-        expected_symbols: Dotted names to probe (e.g. ``["aiter.ops.fp4_moe"]``).
-        run: Injectable runner.
-
-    Returns:
-        dict: ``{"verified": bool, "missing": [...], "present": [...]}``
-    """
-    missing: list[str] = []
-    present: list[str] = []
-    for sym in expected_symbols:
-        parts = sym.split(".", 1)
-        if len(parts) == 2:
-            code = f"import {parts[0]}; getattr({parts[0]}, {parts[1]!r})"
-        else:
-            code = f"import {sym}"
-        res = run([python_exe, "-c", code], capture_output=True, text=True, timeout=60)
-        if getattr(res, "returncode", 1) == 0:
-            present.append(sym)
-        else:
-            missing.append(sym)
-    return {
-        "verified": len(missing) == 0,
-        "missing": missing,
-        "present": present,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Artifact hashing (sha256, reproducibility)
-# ---------------------------------------------------------------------------
-
-def hash_artifacts(paths: list[str] | tuple[str, ...]) -> dict[str, str]:
-    """Return a ``{path: sha256_hex}`` map for each existing artifact.
-
-    Args:
-        paths: File paths to hash.
-
-    Returns:
-        dict[str, str]: Path -> sha256 hex digest; missing files are skipped.
-    """
-    out: dict[str, str] = {}
-    for p in paths:
-        try:
-            data = Path(p).read_bytes()
-            out[str(p)] = hashlib.sha256(data).hexdigest()
-        except OSError:
-            # Missing/unreadable artifact paths are skipped.
-            pass
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Version-sorted tag list (sort -V -r equivalent for autoselect)
 # ---------------------------------------------------------------------------
 
@@ -424,11 +311,8 @@ __all__ = [
     "RunResult",
     "check_rocm_toolchain_alignment",
     "coerce_build_argv",
-    "hash_artifacts",
     "probe_torch_abi",
     "run_argv",
     "sort_tags_desc",
-    "verify_fresh_artifacts",
-    "verify_symbols",
     "write_rocm_torch_constraints",
 ]
