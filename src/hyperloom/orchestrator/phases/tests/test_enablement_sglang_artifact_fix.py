@@ -243,6 +243,22 @@ def test_no_candidate_roots_is_distinct_from_a_miss(tmp_path):
     assert nothing.reason == "no_candidate_roots"
 
 
+def test_create_only_reason_does_not_depend_on_the_candidates(tmp_path):
+    """A create-only set has no pre-image, so candidates cannot speak to it.
+
+    Letting the candidate list rename this reason made the outcome depend on
+    which framework trees happen to exist on the host: a clean CI box, where the
+    allowlist names roots that are all absent, disagreed with a dev box where one
+    of them was real.
+    """
+    real = _checkout(tmp_path / "root", "present.py")
+    absent = tmp_path / "absent"
+
+    for candidates in ((real,), (absent,), ()):
+        resolution = _ps.resolve_patch_apply_root((_CREATE_ONLY_DIFF,), explicit_root=None, candidate_roots=candidates)
+        assert resolution.reason == "pure_create_requires_explicit_root", candidates
+
+
 # Artifact stacking
 
 

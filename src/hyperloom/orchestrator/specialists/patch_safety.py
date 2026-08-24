@@ -133,6 +133,18 @@ PATCH_ROOT_FAIL_REASONS: tuple[str, ...] = (
     "ambiguous_root",  # more than one candidate holds every pre-image
 )
 
+# The subset of the above that reports an absent tree rather than a fact about
+# the patch. Vetting cannot conclude anything from these: with no pre-image to
+# match, or nothing to match it against, there is no hallucinated target to
+# catch, so the patch survives as GROUND_UNCHECKED and the applying caller --
+# which resolves its own root -- decides.
+_GROUNDING_UNDECIDABLE_REASONS: frozenset[str] = frozenset(
+    {
+        "no_candidate_roots",
+        "pure_create_requires_explicit_root",
+    }
+)
+
 
 def _safe_patch_path(raw: str) -> str:
     value = str(raw or "").strip().split("\t", 1)[0]
@@ -288,10 +300,10 @@ def resolve_patch_apply_root(
     ``default_root`` a caller supplies when it has independent grounds for it,
     such as the checkout a specialist's worktree was cut from.
 
-    Having no root to match against at all is reported as ``no_candidate_roots``
-    rather than as a miss, because absence of a tree is not evidence about the
-    patch. Callers decide what that means for them: a vetting gate declines to
-    judge, an applying one still refuses.
+    When pre-images do exist but no candidate was offered, the answer is
+    ``no_candidate_roots`` rather than a miss, because absence of a tree is not
+    evidence about the patch. Callers decide what that means for them: a vetting
+    gate declines to judge, an applying one still refuses.
 
     Args:
         patch_texts: The diffs to place. Blank entries are ignored.
@@ -351,16 +363,18 @@ def resolve_patch_apply_root(
         if candidate_default is not None and candidate_default.is_dir():
             resolved_default = candidate_default
 
-    # Nothing to match against is not evidence against the patch. Say so
-    # separately so a vetting caller can decline to judge while an applying
-    # caller still refuses to write into a tree it cannot name.
-    if not roots and resolved_default is None:
-        return PatchRootResolution(None, "no_candidate_roots")
-
+    # Settled before the candidates are considered at all: a create-only set has
+    # no pre-image, so whether any candidate exists says nothing about it.
     if not has_existing:
         if resolved_default is None:
             return PatchRootResolution(None, "pure_create_requires_explicit_root")
         return PatchRootResolution(resolved_default)
+
+    # Nothing to match the pre-images against is not evidence against the patch.
+    # Say so separately so a vetting caller can decline to judge while an
+    # applying caller still refuses to write into a tree it cannot name.
+    if not roots:
+        return PatchRootResolution(None, "no_candidate_roots")
 
     matches = tuple(root for root in roots if not any(patch_targets_missing(text, root) for text in texts))
     if not matches:
@@ -866,7 +880,7 @@ def vet_patches(
         candidate_roots=candidates,
         default_root=base_checkout,
     )
-    if resolution.reason == "no_candidate_roots":
+    if resolution.reason in _GROUNDING_UNDECIDABLE_REASONS:
         # No tree was available to ground against, so nothing here is evidence
         # the patches are wrong. Keep them advisory and let integrate_patch,
         # which resolves its own root, have the deciding say.
