@@ -67,10 +67,7 @@ class RecipeKB:
         if isinstance(row, dict):
             result = {
                 "canonical_id": str(row.get("canonical_id") or ""),
-                "exact": bool(
-                    canonical_id
-                    and str(row.get("canonical_id") or "") == canonical_id
-                ),
+                "exact": bool(canonical_id and str(row.get("canonical_id") or "") == canonical_id),
                 "best_throughput": float(row.get("best_throughput") or 0.0),
                 "best_config_nonempty": bool(row.get("best_config")),
             }
@@ -124,11 +121,7 @@ class RecipeKB:
         details = provenance.get("details")
         details = details if isinstance(details, dict) else {}
         counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
-        prior = (
-            result.get("prior_counts")
-            if isinstance(result.get("prior_counts"), dict)
-            else {}
-        )
+        prior = result.get("prior_counts") if isinstance(result.get("prior_counts"), dict) else {}
         self._emit_audit(
             {
                 "op": "write",
@@ -153,22 +146,15 @@ class RecipeKB:
                     )
                 },
                 "result": {
-                    "canonical_id": str(
-                        result.get("canonical_id") or canonical_id
-                    ),
+                    "canonical_id": str(result.get("canonical_id") or canonical_id),
                     "version": int(result.get("version") or 0),
                     "created": bool(result.get("created")),
-                    "best_throughput": float(
-                        kwargs.get("best_throughput") or 0.0
-                    ),
+                    "best_throughput": float(kwargs.get("best_throughput") or 0.0),
                     "best_config_nonempty": bool(kwargs.get("best_config")),
                     "write_safety": {},
                 },
                 "counts": {key: int(value) for key, value in counts.items()},
-                "delta": {
-                    key: int(value) - int(prior.get(key, 0) or 0)
-                    for key, value in counts.items()
-                },
+                "delta": {key: int(value) - int(prior.get(key, 0) or 0) for key, value in counts.items()},
                 "provenance": {
                     "component": "recipe_kb",
                     "generator": str(provenance.get("generator") or ""),

@@ -154,9 +154,7 @@ class TestServerLogParsing:
             "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv, "
             "will use default config!"
         )
-        assert parse_aiter_consulted_tables(line) == {
-            "/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"
-        }
+        assert parse_aiter_consulted_tables(line) == {"/tmp/aiter_configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv"}
 
     def test_consulted_tables_of_empty_log(self):
         assert parse_aiter_consulted_tables("") == set()
@@ -344,8 +342,7 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
 
     ENVS = {"AITER_CONFIG_GEMM": ""}
     LOOKUP_LINE = (
-        "[aiter] shape is M:1082, N:5120, K:17408, not found tuned config in "
-        "/x/candidate.csv, will use default config!"
+        "[aiter] shape is M:1082, N:5120, K:17408, not found tuned config in /x/candidate.csv, will use default config!"
     )
     HEADER = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
 
@@ -361,9 +358,7 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
         """Exercise the body directly, so a bound-method slip cannot fake a pass."""
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
-        return KernelPhase._gemm_tuned_config_coverage_impl(
-            phase, "aiter_dense", {"AITER_CONFIG_GEMM": str(csv_path)}
-        )
+        return KernelPhase._gemm_tuned_config_coverage_impl(phase, "aiter_dense", {"AITER_CONFIG_GEMM": str(csv_path)})
 
     def test_unreadable_csv_is_undetermined_not_zero_coverage(self, tmp_path):
         phase = self._phase(tmp_path)
@@ -425,10 +420,7 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
             _gemm_tuned_config_coverage_impl=_boom,
         )
 
-        assert (
-            KernelPhase._gemm_tuned_config_coverage(phase, "fmoe_ck", self.ENVS)
-            is None
-        )
+        assert KernelPhase._gemm_tuned_config_coverage(phase, "fmoe_ck", self.ENVS) is None
 
 
 class TestSafeMtime:

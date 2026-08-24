@@ -52,9 +52,7 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
 
 # Fallback locations for cpp_itfs template builds. ``AITER_ROOT_DIR`` and the
 # current HOME are resolved dynamically before these paths.
-AITER_CPP_BUILD_PROBE_PATHS: tuple[str, ...] = (
-    "/root/.aiter/build",
-)
+AITER_CPP_BUILD_PROBE_PATHS: tuple[str, ...] = ("/root/.aiter/build",)
 
 # Mtime gate (minutes) for the lock sweep. Applied on every path, including the
 # no-live-compiler one: a fresh lock's owner cannot be identified.
@@ -171,10 +169,7 @@ def _any_live_compiler(
     except ImportError:
         return None
     try:
-        normalized_dirs = [
-            str(path.resolve())
-            for path in (build_dirs or [])
-        ]
+        normalized_dirs = [str(path.resolve()) for path in (build_dirs or [])]
         for proc in psutil.process_iter(["name", "cmdline", "cwd"]):
             try:
                 info = proc.info
@@ -192,9 +187,7 @@ def _any_live_compiler(
                 cwd = str(info.get("cwd") or "")
                 command = "\0".join(str(arg) for arg in cmdline)
                 if any(
-                    cwd == build_dir
-                    or cwd.startswith(f"{build_dir}{os.sep}")
-                    or build_dir in command
+                    cwd == build_dir or cwd.startswith(f"{build_dir}{os.sep}") or build_dir in command
                     for build_dir in normalized_dirs
                 ):
                     return True
@@ -237,9 +230,7 @@ def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None =
     return resolved
 
 
-def _resolve_lock_sweep_dirs(
-    aiter_jit_dir: Path | None, unreadable: list[str] | None = None
-) -> list[Path]:
+def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] | None = None) -> list[Path]:
     """Resolve every active aiter build tree that may contain baton locks.
 
     An explicit argument remains a single-directory test/diagnostic override.
@@ -300,9 +291,7 @@ def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
         override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
         if override:
             override_path = Path(override)
-            preferred = _dedupe_existing_dirs(
-                [override_path / "build", override_path]
-            )
+            preferred = _dedupe_existing_dirs([override_path / "build", override_path])
             if preferred:
                 return preferred[0]
     resolved = _resolve_lock_sweep_dirs(aiter_jit_dir)
@@ -353,11 +342,7 @@ def clean_stale_aiter_locks(
     if not resolved_dirs:
         return stats
 
-    primary = (
-        _resolve_lock_sweep_dir(None)
-        if aiter_jit_dir is None
-        else resolved_dirs[0]
-    )
+    primary = _resolve_lock_sweep_dir(None) if aiter_jit_dir is None else resolved_dirs[0]
     stats["dir"] = str(primary or resolved_dirs[0])
     stats["dirs"] = [str(path) for path in resolved_dirs]
 
@@ -453,13 +438,10 @@ def find_aiter_baton_wait(
     contains large logs from multiple attempts.
     """
     try:
-        candidates = [
-            path
-            for path in search_root.rglob("*")
-            if path.is_file() and path.name in _BATON_LOG_NAMES
-        ]
+        candidates = [path for path in search_root.rglob("*") if path.is_file() and path.name in _BATON_LOG_NAMES]
     except OSError:
         return None
+
     def _mtime(path: Path) -> float:
         try:
             return path.stat().st_mtime
@@ -468,9 +450,7 @@ def find_aiter_baton_wait(
 
     candidates.sort(key=_mtime, reverse=True)
     if since_unix is not None:
-        candidates = [
-            path for path in candidates if _mtime(path) >= since_unix
-        ]
+        candidates = [path for path in candidates if _mtime(path) >= since_unix]
     marker_lower = _BATON_WAIT_MARKER.lower()
     for path in candidates[:max_files]:
         try:

@@ -561,9 +561,7 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["reverted", "kept_inert"])
-async def test_integrate_nonpromotion_never_stages_patch(
-    session_dir, tmp_path, monkeypatch, status
-):
+async def test_integrate_nonpromotion_never_stages_patch(session_dir, tmp_path, monkeypatch, status):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
@@ -688,9 +686,7 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
 
 
 @pytest.mark.asyncio
-async def test_framework_agent_keep_stages_returned_raw_patch(
-    session_dir, tmp_path, monkeypatch
-):
+async def test_framework_agent_keep_stages_returned_raw_patch(session_dir, tmp_path, monkeypatch):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
@@ -717,9 +713,7 @@ async def test_framework_agent_keep_stages_returned_raw_patch(
 
 
 @pytest.mark.asyncio
-async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
-    session_dir, tmp_path, monkeypatch
-):
+async def test_explicit_empty_patches_applied_never_scans_stale_workspace(session_dir, tmp_path, monkeypatch):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
@@ -751,9 +745,7 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(
 
 
 @pytest.mark.asyncio
-async def test_local_mode_without_remote_draft_does_not_enqueue_outbox(
-    session_dir, tmp_path, monkeypatch
-):
+async def test_local_mode_without_remote_draft_does_not_enqueue_outbox(session_dir, tmp_path, monkeypatch):
     monkeypatch.delenv("KB_DRAFT_DIR", raising=False)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     patch = tmp_path / "accepted.patch"
@@ -777,9 +769,7 @@ async def test_local_mode_without_remote_draft_does_not_enqueue_outbox(
 
 
 @pytest.mark.asyncio
-async def test_keep_kb_hook_runs_only_after_authoritative_save(
-    session_dir, tmp_path, monkeypatch
-):
+async def test_keep_kb_hook_runs_only_after_authoritative_save(session_dir, tmp_path, monkeypatch):
     monkeypatch.setenv("KB_DRAFT_DIR", str(tmp_path / "draft"))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     patch = tmp_path / "pr.patch"
@@ -866,12 +856,8 @@ def test_outbox_dead_letters_missing_patch_without_blocking_close(
 
     assert coord.shared_state.kb_stage_outbox == []
     assert coord.shared_state.kb_stage_dead_letter[0]["id"] == row["id"]
-    assert coord.shared_state.kb_stage_dead_letter[0]["reason"] == (
-        "patch_source_missing"
-    )
-    assert "kb_required_owner" not in (
-        coord.shared_state.optimization_stack[0]
-    )
+    assert coord.shared_state.kb_stage_dead_letter[0]["reason"] == ("patch_source_missing")
+    assert "kb_required_owner" not in (coord.shared_state.optimization_stack[0])
 
 
 @pytest.mark.asyncio
@@ -1461,12 +1447,8 @@ async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
 
     top = s.optimization_stack[-1]
     assert top.get("source_snapshot") == "/session/optimization_stack/src/abc123"
-    assert top.get("source_manifest") == (
-        "/session/optimization_stack/src/abc123/manifest.json"
-    )
-    assert top.get("target_files") == [
-        "vllm/model_executor/layers/quantization/foo.py"
-    ]
+    assert top.get("source_manifest") == ("/session/optimization_stack/src/abc123/manifest.json")
+    assert top.get("target_files") == ["vllm/model_executor/layers/quantization/foo.py"]
     assert top.get("framework_root") == "/opt/vllm"
     assert top.get("base_sha") == "deadbeef"
 
@@ -1598,9 +1580,7 @@ def test_lift_does_not_double_append_same_fingerprint(session_dir):
     s = coord.shared_state
     s.baseline_tput = 1000.0
     fp = "shared_fp_abc123"
-    s.optimization_stack = [
-        {"action": "explore", "variant_name": "original", "fingerprint": fp, "tput": 1100.0}
-    ]
+    s.optimization_stack = [{"action": "explore", "variant_name": "original", "fingerprint": fp, "tput": 1100.0}]
     s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--fast", "extra_envs": {}}
 
     lifted = coord._lift_to_current_best(
@@ -1622,9 +1602,7 @@ def test_lift_at_or_below_anchor_does_not_modify_stack(session_dir):
     s = coord.shared_state
     s.baseline_tput = 1000.0
     fp = "shared_fp_rerun"
-    s.optimization_stack = [
-        {"action": "explore", "variant_name": "prior", "fingerprint": fp, "tput": 1100.0}
-    ]
+    s.optimization_stack = [{"action": "explore", "variant_name": "prior", "fingerprint": fp, "tput": 1100.0}]
     s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--fast", "extra_envs": {}}
 
     lifted = coord._lift_to_current_best(

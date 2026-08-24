@@ -142,17 +142,13 @@ def _geak_name_resolver() -> Any:
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import _geak_spec_name
     except Exception:  # pragma: no cover - offline replay without orchestrator
+
         def _geak_spec_name(spec: Any) -> str:
             if isinstance(spec, str):
                 return spec.strip()
             if not isinstance(spec, dict):
                 return ""
-            return str(
-                spec.get("short_name")
-                or spec.get("kernel_id")
-                or spec.get("cand_tag")
-                or ""
-            ).strip()
+            return str(spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or "").strip()
 
     return _geak_spec_name
 
@@ -173,6 +169,7 @@ def _geak_env_test() -> Any:
     try:
         from hyperloom.orchestrator.loop.coordinator_helpers import geak_spec_is_env
     except Exception:  # pragma: no cover - offline replay without orchestrator
+
         def geak_spec_is_env(spec: Any) -> bool:
             if not isinstance(spec, dict):
                 return False
@@ -212,9 +209,7 @@ def _geak_kernel_names(entry: dict[str, Any]) -> list[str]:
     """
     resolve = _geak_name_resolver()
     is_env = _geak_env_test()
-    lanes = list(entry.get("accepted_kernels") or []) + list(
-        entry.get("accepted_heads") or []
-    )
+    lanes = list(entry.get("accepted_kernels") or []) + list(entry.get("accepted_heads") or [])
     out: list[str] = []
     for item in lanes:
         if is_env(item):
@@ -331,9 +326,7 @@ def _entry_family(entry: dict[str, Any]) -> str:
         return "framework"
     phase = str(entry.get("source_phase") or entry.get("phase") or "").strip().upper()
     provenance = str(entry.get("provenance") or "").strip().lower()
-    specialist_owned = bool(entry.get("domain")) or provenance.startswith(
-        "specialist:"
-    )
+    specialist_owned = bool(entry.get("domain")) or provenance.startswith("specialist:")
     if phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
         return "framework"
     if phase == "EXPLORE" or specialist_owned:
@@ -504,10 +497,7 @@ def collect_attribution(
     # not tied to a Forge KEEP stays unattributed instead of being reverse-
     # inferred onto Forge (which may not have run at all this session).
     kernel_unattributed = max(kernel_total - forge_total, 0.0)
-    unattributed_total = (
-        family_totals.get("unattributed", 0.0)
-        + family_totals.get("other", 0.0)
-    )
+    unattributed_total = family_totals.get("unattributed", 0.0) + family_totals.get("other", 0.0)
 
     notes: list[str] = []
     if not state_provided:
@@ -641,11 +631,7 @@ def _collect_phase_breakdown(
             # For this delayed application mechanism, proposal ownership is the
             # attribution phase; the acceptance timestamp is only execution
             # context and must not manufacture a kernel_agent/"?" row.
-            phase = (
-                fam
-                if fam in {"framework", "explore"}
-                else "unattributed"
-            )
+            phase = fam if fam in {"framework", "explore"} else "unattributed"
         # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"

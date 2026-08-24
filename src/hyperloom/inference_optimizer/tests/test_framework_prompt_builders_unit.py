@@ -35,9 +35,15 @@ def test_ranker_prompt_includes_candidate_rows():
         "1. id=PR:2 repo=ROCm/vllm title='moe opt'",
     ]
     prompt = build_framework_ranker_prompt(
-        model="m", framework="f", gpu_type="g", precision="fp16",
-        tp=1, best_throughput=None,
-        candidate_rows=rows, has_local_explore=False, memory_block="",
+        model="m",
+        framework="f",
+        gpu_type="g",
+        precision="fp16",
+        tp=1,
+        best_throughput=None,
+        candidate_rows=rows,
+        has_local_explore=False,
+        memory_block="",
     )
     for row in rows:
         assert row in prompt
@@ -45,28 +51,42 @@ def test_ranker_prompt_includes_candidate_rows():
 
 def test_ranker_prompt_local_explore_note_when_flagged():
     prompt = build_framework_ranker_prompt(
-        model="m", framework="f", gpu_type="g", precision="fp16",
-        tp=1, best_throughput=None,
+        model="m",
+        framework="f",
+        gpu_type="g",
+        precision="fp16",
+        tp=1,
+        best_throughput=None,
         candidate_rows=["0. id=local_explore:1 repo='' title=''"],
-        has_local_explore=True, memory_block="",
+        has_local_explore=True,
+        memory_block="",
     )
     assert "LOCAL-EXPLORATION" in prompt
 
 
 def test_ranker_prompt_no_local_explore_note_when_absent():
     prompt = build_framework_ranker_prompt(
-        model="m", framework="f", gpu_type="g", precision="fp16",
-        tp=1, best_throughput=None,
+        model="m",
+        framework="f",
+        gpu_type="g",
+        precision="fp16",
+        tp=1,
+        best_throughput=None,
         candidate_rows=["0. id=PR:1 repo=r title='t'"],
-        has_local_explore=False, memory_block="",
+        has_local_explore=False,
+        memory_block="",
     )
     assert "LOCAL-EXPLORATION" not in prompt
 
 
 def test_ranker_prompt_memory_block_appears():
     prompt = build_framework_ranker_prompt(
-        model="m", framework="f", gpu_type="g", precision="fp16",
-        tp=1, best_throughput=None,
+        model="m",
+        framework="f",
+        gpu_type="g",
+        precision="fp16",
+        tp=1,
+        best_throughput=None,
         candidate_rows=[],
         has_local_explore=False,
         memory_block="Already tried THIS session: PR:999",
@@ -76,9 +96,15 @@ def test_ranker_prompt_memory_block_appears():
 
 def test_ranker_prompt_footer_contains_json_hint():
     prompt = build_framework_ranker_prompt(
-        model="m", framework="f", gpu_type="g", precision="fp16",
-        tp=1, best_throughput=None,
-        candidate_rows=[], has_local_explore=False, memory_block="",
+        model="m",
+        framework="f",
+        gpu_type="g",
+        precision="fp16",
+        tp=1,
+        best_throughput=None,
+        candidate_rows=[],
+        has_local_explore=False,
+        memory_block="",
     )
     assert '"candidate_id"' in prompt
     assert '"reason"' in prompt

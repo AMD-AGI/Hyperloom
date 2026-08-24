@@ -75,7 +75,7 @@ Hyperloom combines:
 - Trace analysis, identifying kernel bottlenecks and bridge planning through
   [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
    from [Magpie](https://github.com/AMD-AGI/Magpie) and
-   [Intellikit](https://github.com/AMDResearch/intellikit))
+   [IntelliKit](https://github.com/AMDResearch/intellikit))
 - Kernel optimization through the
   [GEAK](https://github.com/AMD-AGI/GEAK) backend.
 - Agentic search space exploration through

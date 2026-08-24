@@ -48,5 +48,3 @@ def test_prune_old_workdirs_noop_when_under_keep(tmp_path):
     (root / "000000").mkdir()
     session_paths._prune_old_workdirs(root, keep=5)
     assert (root / "000000").is_dir()
-
-

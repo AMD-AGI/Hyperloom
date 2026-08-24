@@ -68,19 +68,31 @@ def test_dual_gemm_tags():
     # bf16 GEMM -> both tags true.
     r_bf16 = tsm.build_row(
         _launch("gemm_bf16", op_name="aten::mm", dtypes=["c10::BFloat16", "c10::BFloat16"]),
-        graph_variant="eager", node_ordinal=0, phase="decode", bucket="eager", capture_only=False,
+        graph_variant="eager",
+        node_ordinal=0,
+        phase="decode",
+        bucket="eager",
+        capture_only=False,
     )
     assert r_bf16["is_gemm"] is True and r_bf16["is_target_gemm"] is True
     # GEMM with no dtype info -> gemm but NOT target (unaddressable == uncovered).
     r_nodtype = tsm.build_row(
         _launch("gemm_unknown", op_name="aten::mm"),
-        graph_variant="eager", node_ordinal=1, phase="decode", bucket="eager", capture_only=False,
+        graph_variant="eager",
+        node_ordinal=1,
+        phase="decode",
+        bucket="eager",
+        capture_only=False,
     )
     assert r_nodtype["is_gemm"] is True and r_nodtype["is_target_gemm"] is False
     # Non-GEMM -> neither.
     r_norm = tsm.build_row(
         _launch("rms_norm", op_name="", dtypes=["c10::BFloat16"]),
-        graph_variant="eager", node_ordinal=2, phase="decode", bucket="eager", capture_only=False,
+        graph_variant="eager",
+        node_ordinal=2,
+        phase="decode",
+        bucket="eager",
+        capture_only=False,
     )
     assert r_norm["is_gemm"] is False and r_norm["is_target_gemm"] is False
 
@@ -88,7 +100,11 @@ def test_dual_gemm_tags():
 def test_dims_extraction_from_shapes():
     r = tsm.build_row(
         _launch("gemm", op_name="aten::mm", shapes=[[128, 4096], [4096, 8192]], dtypes=["fp8"]),
-        graph_variant="eager", node_ordinal=0, phase="decode", bucket="eager", capture_only=False,
+        graph_variant="eager",
+        node_ordinal=0,
+        phase="decode",
+        bucket="eager",
+        capture_only=False,
     )
     assert r["dims"] == {"M": 128, "N": 8192, "K": 4096, "batch": None, "groups": None}
 
@@ -101,15 +117,19 @@ def test_dims_extraction_aiter_blockscale_weight_nk_layout():
     [A[M,K], B(weight)[N,K], x_scale[M,K/128], w_scale[N/128,K/128], out[M,N], scalar].
     N must be the weight dim that is not K (Qwen3-14B qkv/o/gate_up/down)."""
     cases = [
-        ([[8192, 5120], [5120, 5120], [8192, 40], [40, 40], [8192, 5120]], 5120),      # o_proj/attn
+        ([[8192, 5120], [5120, 5120], [8192, 40], [40, 40], [8192, 5120]], 5120),  # o_proj/attn
         ([[8192, 5120], [34816, 5120], [8192, 40], [272, 40], [8192, 34816]], 34816),  # gate_up
         ([[8192, 17408], [5120, 17408], [8192, 136], [40, 136], [8192, 5120]], 5120),  # down
-        ([[8192, 5120], [7168, 5120], [8192, 40], [56, 40], [8192, 7168]], 7168),      # qkv
+        ([[8192, 5120], [7168, 5120], [8192, 40], [56, 40], [8192, 7168]], 7168),  # qkv
     ]
     for shapes, expect_n in cases:
         r = tsm.build_row(
             _launch("gemm", op_name="aiter::gemm_a8w8_blockscale_ck", shapes=shapes, dtypes=["fp8", "fp8"]),
-            graph_variant="bs_512", node_ordinal=0, phase="decode", bucket="bs_512", capture_only=True,
+            graph_variant="bs_512",
+            node_ordinal=0,
+            phase="decode",
+            bucket="bs_512",
+            capture_only=True,
         )
         assert r["dims"]["M"] == shapes[0][0], (shapes, r["dims"])
         assert r["dims"]["K"] == shapes[0][1], (shapes, r["dims"])
@@ -118,8 +138,10 @@ def test_dims_extraction_aiter_blockscale_weight_nk_layout():
 
 def test_variant_meta_recorded_in_workload():
     m = tsm.build_shape_manifest(
-        main_analysis=_analysis([]), capture_variants=[("bs_512", _analysis([]))],
-        provenance={}, main_trace_hash="h",
+        main_analysis=_analysis([]),
+        capture_variants=[("bs_512", _analysis([]))],
+        provenance={},
+        main_trace_hash="h",
         variant_meta={"bs_512": {"batch_size": "512", "mode": "PIECEWISE"}},
     )
     assert m["workload"]["variant_meta"]["bs_512"]["mode"] == "PIECEWISE"
@@ -127,10 +149,14 @@ def test_variant_meta_recorded_in_workload():
 
 
 def test_load_execution_details(tmp_path):
-    (tmp_path / "execution_details.json").write_text(json.dumps([
-        {"file": "graph_capture_rank_0.1.pt.trace.json.gz", "batch_size": "512", "mode": "PIECEWISE"},
-        {"file": "graph_capture_rank_0.2.pt.trace.json.gz", "batch_size": "256", "mode": "PIECEWISE"},
-    ]))
+    (tmp_path / "execution_details.json").write_text(
+        json.dumps(
+            [
+                {"file": "graph_capture_rank_0.1.pt.trace.json.gz", "batch_size": "512", "mode": "PIECEWISE"},
+                {"file": "graph_capture_rank_0.2.pt.trace.json.gz", "batch_size": "256", "mode": "PIECEWISE"},
+            ]
+        )
+    )
     m = bta._load_execution_details(tmp_path)
     assert m["graph_capture_rank_0.1.pt.trace.json.gz"]["batch_size"] == "512"
     assert m["graph_capture_rank_0.2.pt.trace.json.gz"]["mode"] == "PIECEWISE"
@@ -143,11 +169,15 @@ def test_discover_capture_shards_vllm_graph_capture(tmp_path):
     cap.mkdir()
     for i in (1, 2, 3):
         (cap / f"graph_capture_rank_0.{i}.pt.trace.json.gz").write_bytes(b"x")
-    (cap / "execution_details.json").write_text(json.dumps([
-        {"file": "graph_capture_rank_0.1.pt.trace.json.gz", "batch_size": "512", "mode": "PIECEWISE"},
-        {"file": "graph_capture_rank_0.2.pt.trace.json.gz", "batch_size": "256", "mode": "PIECEWISE"},
-        {"file": "graph_capture_rank_0.3.pt.trace.json.gz", "batch_size": "512", "mode": "FULL"},
-    ]))
+    (cap / "execution_details.json").write_text(
+        json.dumps(
+            [
+                {"file": "graph_capture_rank_0.1.pt.trace.json.gz", "batch_size": "512", "mode": "PIECEWISE"},
+                {"file": "graph_capture_rank_0.2.pt.trace.json.gz", "batch_size": "256", "mode": "PIECEWISE"},
+                {"file": "graph_capture_rank_0.3.pt.trace.json.gz", "batch_size": "512", "mode": "FULL"},
+            ]
+        )
+    )
     out = bta._discover_capture_shards(str(cap), "")
     labels = sorted(lbl for _, lbl, _ in out)
     # Same batch, different graph mode -> distinct variants (no collision).
@@ -168,8 +198,12 @@ def test_discover_capture_shards_sglang_bs_shards(tmp_path):
 def test_signature_discriminates_variant():
     """Same math shape + same ordinal but different graph_variant -> distinct."""
     launch = _launch("gemm", op_name="aten::mm", shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"])
-    r16 = tsm.build_row(launch, graph_variant="bs_16", node_ordinal=0, phase="decode", bucket="bs_16", capture_only=True)
-    r32 = tsm.build_row(launch, graph_variant="bs_32", node_ordinal=0, phase="decode", bucket="bs_32", capture_only=True)
+    r16 = tsm.build_row(
+        launch, graph_variant="bs_16", node_ordinal=0, phase="decode", bucket="bs_16", capture_only=True
+    )
+    r32 = tsm.build_row(
+        launch, graph_variant="bs_32", node_ordinal=0, phase="decode", bucket="bs_32", capture_only=True
+    )
     assert r16["signature_key"] != r32["signature_key"]
 
 
@@ -244,26 +278,35 @@ def test_eager_fallback_when_no_capture():
 def test_manifest_hash_deterministic_and_sensitive():
     launch = _launch("gemm", op_name="aten::mm", shapes=[[16, 4096], [4096, 4096]], dtypes=["bf16"])
     m1 = tsm.build_shape_manifest(
-        main_analysis=_analysis([]), capture_variants=[("bs_16", _analysis([launch]))],
-        provenance={}, main_trace_hash="h",
+        main_analysis=_analysis([]),
+        capture_variants=[("bs_16", _analysis([launch]))],
+        provenance={},
+        main_trace_hash="h",
     )
     m2 = tsm.build_shape_manifest(
-        main_analysis=_analysis([]), capture_variants=[("bs_16", _analysis([launch]))],
-        provenance={}, main_trace_hash="h",
+        main_analysis=_analysis([]),
+        capture_variants=[("bs_16", _analysis([launch]))],
+        provenance={},
+        main_trace_hash="h",
     )
     assert m1["manifest_hash"] == m2["manifest_hash"]
     other = _launch("gemm", op_name="aten::mm", shapes=[[32, 4096], [4096, 4096]], dtypes=["bf16"])
     m3 = tsm.build_shape_manifest(
-        main_analysis=_analysis([]), capture_variants=[("bs_16", _analysis([other]))],
-        provenance={}, main_trace_hash="h",
+        main_analysis=_analysis([]),
+        capture_variants=[("bs_16", _analysis([other]))],
+        provenance={},
+        main_trace_hash="h",
     )
     assert m3["manifest_hash"] != m1["manifest_hash"]
 
 
 def test_manifest_schema_shape():
     manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis([]), capture_variants=[], provenance={"_provenance_source": "wp1_stub"},
-        main_trace_hash="h", generated_at="2026-07-23T00:00:00Z",
+        main_analysis=_analysis([]),
+        capture_variants=[],
+        provenance={"_provenance_source": "wp1_stub"},
+        main_trace_hash="h",
+        generated_at="2026-07-23T00:00:00Z",
     )
     assert manifest["schema_version"] == tsm.SCHEMA_VERSION
     assert manifest["manifest_kind"] == tsm.MANIFEST_KIND
@@ -275,8 +318,10 @@ def test_manifest_schema_shape():
 
 def test_empty_launches_produce_no_rows():
     manifest = tsm.build_shape_manifest(
-        main_analysis=_analysis([]), capture_variants=[("bs_16", _analysis([]))],
-        provenance={}, main_trace_hash="h",
+        main_analysis=_analysis([]),
+        capture_variants=[("bs_16", _analysis([]))],
+        provenance={},
+        main_trace_hash="h",
     )
     assert manifest["rows"] == []
 
@@ -288,7 +333,15 @@ def test_reader_enriches_launches_and_feeds_producer(tmp_path):
     """A tiny real trace flows through the reader and its enriched launches build
     a manifest with resolved shapes/dtypes (proves the additive reader change)."""
     events = [
-        {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 100, "Input Dims": [[64, 4096], [4096, 4096]], "Input type": ["c10::BFloat16", "c10::BFloat16"]}},
+        {
+            "cat": "cpu_op",
+            "name": "aten::mm",
+            "args": {
+                "External id": 100,
+                "Input Dims": [[64, 4096], [4096, 4096]],
+                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+            },
+        },
         {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
         {"cat": "kernel", "ph": "X", "name": "Cijk_gemm_bf16", "ts": 1000, "dur": 200, "args": {"correlation": 5}},
     ]
@@ -302,7 +355,10 @@ def test_reader_enriches_launches_and_feeds_producer(tmp_path):
     assert launches[0]["dtypes"] == ["c10::BFloat16", "c10::BFloat16"]
 
     manifest = tsm.build_shape_manifest(
-        main_analysis=analysis, capture_variants=[], provenance={}, main_trace_hash="h",
+        main_analysis=analysis,
+        capture_variants=[],
+        provenance={},
+        main_trace_hash="h",
     )
     row = next(r for r in manifest["rows"] if r["op"] == "gemm")
     assert row["dims"] == {"M": 64, "N": 4096, "K": 4096, "batch": None, "groups": None}

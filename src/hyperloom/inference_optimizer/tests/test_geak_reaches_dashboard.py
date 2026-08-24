@@ -48,9 +48,7 @@ def _journey(tmp_path: Path, kernels: list[dict]) -> str:
     path.write_text(
         json.dumps(
             {
-                "discovery_runs": [
-                    {"source": "profile", "status": "success", "hot_kernels": []}
-                ],
+                "discovery_runs": [{"source": "profile", "status": "success", "hot_kernels": []}],
                 "kernels": kernels,
             }
         ),
@@ -187,9 +185,7 @@ def test_reverted_geak_kernel_is_not_credited(tmp_path: Path) -> None:
     _record_baseline(tmp_path)
     kernel = _kernel("regressed", gain=-3.0, before=1000.0, after=970.0)
     kernel["e2e"].update(integrated=False, validated=False, decision="REVERT")
-    coord._record_geak_kernel_journey(
-        {"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])}
-    )
+    coord._record_geak_kernel_journey({"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])})
     geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
     assert not geak.get("keeps")
 
@@ -220,11 +216,7 @@ def test_keep_without_a_throughput_pair_is_visible_but_not_summed(tmp_path: Path
     """
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
-    result = {
-        "kernel_journey_path": _journey(
-            tmp_path, [_kernel_without_throughput_pair("k_nopair", gain=29.994)]
-        )
-    }
+    result = {"kernel_journey_path": _journey(tmp_path, [_kernel_without_throughput_pair("k_nopair", gain=29.994)])}
     coord._record_geak_kernel_journey(result)
 
     geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
@@ -245,11 +237,7 @@ def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Pa
     """
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
-    result = {
-        "kernel_journey_path": _journey(
-            tmp_path, [_kernel("k_route", gain=5.0, before=1000.0, after=1050.0)]
-        )
-    }
+    result = {"kernel_journey_path": _journey(tmp_path, [_kernel("k_route", gain=5.0, before=1000.0, after=1050.0)])}
     coord._record_geak_kernel_journey(result)
 
     warnings: list[str] = []
@@ -262,11 +250,7 @@ def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Pa
     kernel_ops = [op for op in operations if str(op.get("name") or "") == "k_route"]
     assert kernel_ops, operations
     parents = {str(op.get("parent_operation_id") or "") for op in kernel_ops}
-    geak_route_ids = {
-        str(op.get("operation_id") or "")
-        for op in operations
-        if str(op.get("name") or "") == "geak"
-    }
+    geak_route_ids = {str(op.get("operation_id") or "") for op in operations if str(op.get("name") or "") == "geak"}
     assert geak_route_ids, sorted(names)
     assert parents <= geak_route_ids, (parents, geak_route_ids)
 
@@ -302,9 +286,7 @@ def test_reverting_a_geak_kernel_stays_on_the_geak_route(tmp_path: Path) -> None
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     kernel = _kernel("k_revert_route", gain=5.0, before=1000.0, after=1050.0)
-    coord._record_geak_kernel_journey(
-        {"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])}
-    )
+    coord._record_geak_kernel_journey({"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])})
     # `_reject_*` lives on KernelPhase and is not among the methods Coordinator
     # delegates, so bind it directly rather than reaching through the facade.
     from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -335,11 +317,7 @@ def test_the_geak_route_subject_names_geak(tmp_path: Path) -> None:
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     coord._record_geak_kernel_journey(
-        {
-            "kernel_journey_path": _journey(
-                tmp_path, [_kernel("k_subject", gain=5.0, before=1000.0, after=1050.0)]
-            )
-        }
+        {"kernel_journey_path": _journey(tmp_path, [_kernel("k_subject", gain=5.0, before=1000.0, after=1050.0)])}
     )
 
     names, subjects = _route_ops(tmp_path)
@@ -357,9 +335,7 @@ def test_every_journey_replay_call_names_its_route() -> None:
     """
     import re
 
-    source = Path(
-        __file__
-    ).resolve().parents[3] / "hyperloom" / "orchestrator" / "phases" / "kernel.py"
+    source = Path(__file__).resolve().parents[3] / "hyperloom" / "orchestrator" / "phases" / "kernel.py"
     text = source.read_text(encoding="utf-8")
     replay = text[text.index("def _record_geak_kernel_journey") :]
     unrouted = []
@@ -375,7 +351,5 @@ def test_every_journey_replay_call_names_its_route() -> None:
             i += 1
         call = replay[match.start() : i + 1]
         if 'route_strategy="geak"' not in call:
-            unrouted.append(
-                (match.group(1), replay[: match.start()].count("\n"))
-            )
+            unrouted.append((match.group(1), replay[: match.start()].count("\n")))
     assert not unrouted, f"recorder calls in the GEAK replay with no GEAK route: {unrouted}"

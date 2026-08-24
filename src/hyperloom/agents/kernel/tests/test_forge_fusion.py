@@ -341,9 +341,7 @@ def test_main_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch,
         ),
         encoding="utf-8",
     )
-    (output_dir / "fusion.patch").write_text(
-        "diff --git a/stale.py b/stale.py\n", encoding="utf-8"
-    )
+    (output_dir / "fusion.patch").write_text("diff --git a/stale.py b/stale.py\n", encoding="utf-8")
     input_json = tmp_path / "input.json"
     input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
@@ -463,9 +461,7 @@ def test_normalize_manifest_refuses_a_keep_integrate_cannot_apply(tmp_path):
         ("repo_root", "a patch root"),
     ],
 )
-def test_normalize_manifest_checks_each_artifact_it_hands_to_integrate(
-    tmp_path, drop, expected
-):
+def test_normalize_manifest_checks_each_artifact_it_hands_to_integrate(tmp_path, drop, expected):
     """Verified rather than assumed: the producer is another repository."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -806,9 +802,7 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     def fake_run(_cmd, _timeout):
         # The run writes its own manifest; main() clears any stale one first.
         _patch_file(output_dir)
-        (output_dir / "fusion_manifest.json").write_text(
-            json.dumps(manifest), encoding="utf-8"
-        )
+        (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         return Proc()
 
     monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)

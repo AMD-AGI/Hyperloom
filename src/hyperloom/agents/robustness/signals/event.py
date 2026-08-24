@@ -167,9 +167,7 @@ def _delegated_failure_symptoms(
     for family, count in family_counts.items():
         if count < cfg.delegated_failure_threshold:
             continue
-        severity = (
-            SymptomSeverity.HIGH if count >= cfg.delegated_failure_prune_threshold else SymptomSeverity.MEDIUM
-        )
+        severity = SymptomSeverity.HIGH if count >= cfg.delegated_failure_prune_threshold else SymptomSeverity.MEDIUM
         out.append(
             Symptom(
                 name="repeated_failure",

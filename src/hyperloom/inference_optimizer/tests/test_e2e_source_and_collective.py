@@ -56,8 +56,7 @@ def framework_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         (triton_definition, "def _mxfp8_grouped_gemm_kernel():\n    return None\n"),
         (
             collective_definition,
-            "template <typename T>\n"
-            "__global__ void reduce_scatter_cross_device_store() {}\n",
+            "template <typename T>\n__global__ void reduce_scatter_cross_device_store() {}\n",
         ),
     )
     for path, content in files:
@@ -95,8 +94,7 @@ def _frame(name: str, ts: float, dur: float) -> dict:
 
 
 def _launch(corr: int, api: str, ts: float) -> dict:
-    return {"cat": "cuda_runtime", "name": api, "tid": _TID, "ts": ts, "dur": 2.0,
-            "args": {"correlation": corr}}
+    return {"cat": "cuda_runtime", "name": api, "tid": _TID, "ts": ts, "dur": 2.0, "args": {"correlation": corr}}
 
 
 def _kernel(name: str, corr: int, ts: float) -> dict:
@@ -138,10 +136,7 @@ def trace_file(tmp_path: Path, framework_sources: dict[str, str]) -> Path:
 
 
 def _row(operation: str, kernel_path: str, kernel_name: str, time_ms: str, pct: str) -> str:
-    return (
-        f"| {operation} |  | {kernel_path} | {kernel_name} | {time_ms} | {pct} "
-        f"| 342 | — | — | — | miscellaneous |"
-    )
+    return f"| {operation} |  | {kernel_path} | {kernel_name} | {time_ms} | {pct} | 342 | — | — | — | miscellaneous |"
 
 
 @pytest.fixture()
@@ -154,28 +149,56 @@ def analysis_md(tmp_path: Path) -> Path:
     )
     blocks = [
         # Triton kernel, placeholder "Not found".
-        ("MXFP8 grouped GEMM dominates uncategorized time",
-         _row(f"hipModuleLaunchKernel->{_TRITON_KERNEL} (Synthetic Op)", "Not found", _TRITON_KERNEL, "228.74", "20.75")),
+        (
+            "MXFP8 grouped GEMM dominates uncategorized time",
+            _row(
+                f"hipModuleLaunchKernel->{_TRITON_KERNEL} (Synthetic Op)",
+                "Not found",
+                _TRITON_KERNEL,
+                "228.74",
+                "20.75",
+            ),
+        ),
         # aiter collective, placeholder "AITER (vendor)" and an elided symbol.
-        ("Exposed tensor-parallel collective",
-         _row(f"hipLaunchKernel->{_COLLECTIVE_KERNEL_TRUNCATED} (Synthetic Op)",
-              "AITER (vendor)", _COLLECTIVE_KERNEL_TRUNCATED, "88.10", "8.00")),
+        (
+            "Exposed tensor-parallel collective",
+            _row(
+                f"hipLaunchKernel->{_COLLECTIVE_KERNEL_TRUNCATED} (Synthetic Op)",
+                "AITER (vendor)",
+                _COLLECTIVE_KERNEL_TRUNCATED,
+                "88.10",
+                "8.00",
+            ),
+        ),
         # A bare runtime API: not a kernel, must never be routed anywhere.
-        ("Graph launch aggregate",
-         _row("hipGraphLaunch", "", "hipGraphLaunch", "60.00", "5.44")),
+        ("Graph launch aggregate", _row("hipGraphLaunch", "", "hipGraphLaunch", "60.00", "5.44")),
     ]
 
     lines = ["# TraceLens Analysis", ""]
     for index, (title, _row_text) in enumerate(blocks, 1):
-        lines += ["<!-- impact-begin kind=p_item category=other low=1.0 mid=2.0 high=3.0 -->",
-                  f"**Impact**: P{index} {title}", "<!-- impact-end -->", ""]
+        lines += [
+            "<!-- impact-begin kind=p_item category=other low=1.0 mid=2.0 high=3.0 -->",
+            f"**Impact**: P{index} {title}",
+            "<!-- impact-end -->",
+            "",
+        ]
     lines += ["", "## Detailed Analysis", ""]
     for index, (title, row_text) in enumerate(blocks, 1):
         # The compute-tier marker is what makes a block a candidate block; the
         # parser skips any heading not preceded by one.
-        lines += [f'<a id="detailed-analysis-compute-p{index}"></a>',
-                  f"<!-- reasoning-candidate tier=compute rank={index} -->",
-                  f"#### 🔴 P{index}: {title}", "", "**Data:**", "", header, row_text, "", "---", ""]
+        lines += [
+            f'<a id="detailed-analysis-compute-p{index}"></a>',
+            f"<!-- reasoning-candidate tier=compute rank={index} -->",
+            f"#### 🔴 P{index}: {title}",
+            "",
+            "**Data:**",
+            "",
+            header,
+            row_text,
+            "",
+            "---",
+            "",
+        ]
 
     path = tmp_path / "analysis.md"
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -284,14 +307,10 @@ def _state_as_orchestrator_sees_it(candidates: list[dict], tmp_path: Path):
         for c in candidates
     ]
     assert all("kernel_contract" not in row for row in projection)
-    return type(
-        "S", (), {"last_trace_analyze": {"hot_kernels_top15": projection, "candidates_path": str(path)}}
-    )()
+    return type("S", (), {"last_trace_analyze": {"hot_kernels_top15": projection, "candidates_path": str(path)}})()
 
 
-def test_non_all_reduce_collective_is_typed_but_not_selected(
-    analysis_md, trace_file, tmp_path
-):
+def test_non_all_reduce_collective_is_typed_but_not_selected(analysis_md, trace_file, tmp_path):
     candidates = _finalize(analysis_md, trace_file)
     item = _by_kernel(candidates, "reduce_scatter_cross_device_store")
 

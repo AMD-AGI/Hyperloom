@@ -299,9 +299,13 @@ def _analyze_benchmark(path: Path) -> dict[str, Any]:
     )
     if kernel is None:
         kernel = next((func for func in perf_functions if func is not reference), None)
-    test = benchmark_functions[0] if benchmark_functions else next(
-        (func for func in functions if func.name.startswith(("test_", "bench_"))),
-        None,
+    test = (
+        benchmark_functions[0]
+        if benchmark_functions
+        else next(
+            (func for func in functions if func.name.startswith(("test_", "bench_"))),
+            None,
+        )
     )
 
     evidence["reference_function"] = reference.name if reference else ""
@@ -335,11 +339,7 @@ def _benchmark_evidence(
 def _primary_benchmark_evidence(evidence: list[dict[str, Any]]) -> dict[str, Any]:
     """Select and compact the benchmark evidence most useful for driver authoring."""
     primary = next(
-        (
-            row
-            for row in evidence
-            if row.get("kernel_function") and row.get("kernel_call_targets")
-        ),
+        (row for row in evidence if row.get("kernel_function") and row.get("kernel_call_targets")),
         None,
     )
     if primary is None:
@@ -378,11 +378,7 @@ def _source_symbol(source_file: str, raw_symbols: list[str]) -> str:
         tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
     except (OSError, SyntaxError):
         return ""
-    function_names = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
+    function_names = [node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
     prefixes = [symbol.removesuffix("...") for symbol in raw_symbols if symbol]
     matches = [
         name
@@ -407,10 +403,7 @@ def _benchmark_report_from_trace(candidate: dict[str, Any]) -> Path | None:
         if not trace_input:
             return None
         report = Path(trace_input).expanduser().resolve().parent / "benchmark_report.json"
-        if (
-            report.is_file()
-            and report.stat().st_size <= _MAX_BENCHMARK_REPORT_BYTES
-        ):
+        if report.is_file() and report.stat().st_size <= _MAX_BENCHMARK_REPORT_BYTES:
             return report
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
         return None
@@ -420,11 +413,7 @@ def _benchmark_report_from_trace(candidate: dict[str, Any]) -> Path | None:
 def _runtime_symbols(candidate: dict[str, Any], raw_symbols: list[str]) -> list[str]:
     """Recover complete runtime symbols from the original benchmark report."""
     complete = [symbol for symbol in raw_symbols if symbol and not symbol.endswith("...")]
-    truncated_prefixes = [
-        symbol.removesuffix("...")
-        for symbol in raw_symbols
-        if symbol.endswith("...")
-    ]
+    truncated_prefixes = [symbol.removesuffix("...") for symbol in raw_symbols if symbol.endswith("...")]
     if not truncated_prefixes:
         return list(dict.fromkeys(complete))
 
@@ -529,11 +518,7 @@ def _compact_json(value: Any, *, key: str = "") -> Any:
                 compacted[str(child_key)] = cleaned
         return compacted if compacted else _OMIT
     if isinstance(value, list):
-        cleaned_items = [
-            cleaned
-            for item in value
-            if (cleaned := _compact_json(item)) is not _OMIT
-        ]
+        cleaned_items = [cleaned for item in value if (cleaned := _compact_json(item)) is not _OMIT]
         if cleaned_items or key == "shape":
             return cleaned_items
         return _OMIT
@@ -632,17 +617,11 @@ def _task_group_contract(
     if not isinstance(group, dict):
         return {}
     rows_by_kernel_id = {
-        str(row.get("kernel_id") or ""): row
-        for row in (group.get("rows") or [])
-        if isinstance(row, dict)
+        str(row.get("kernel_id") or ""): row for row in (group.get("rows") or []) if isinstance(row, dict)
     }
     cases: list[dict[str, Any]] = []
     for normalized in task_group_shape_cases(candidate):
-        kernel_ids = [
-            str(kernel_id)
-            for kernel_id in (normalized.get("kernel_ids") or [])
-            if str(kernel_id)
-        ]
+        kernel_ids = [str(kernel_id) for kernel_id in (normalized.get("kernel_ids") or []) if str(kernel_id)]
         source_row = next(
             (rows_by_kernel_id[kernel_id] for kernel_id in kernel_ids if kernel_id in rows_by_kernel_id),
             {},
@@ -681,11 +660,7 @@ def _task_group_contract(
         "task_group_id": str(group.get("task_group_id") or ""),
         "task_group_key": str(group.get("task_group_key") or ""),
         "primary_kernel_id": str(group.get("primary_kernel_id") or ""),
-        "kernel_ids": [
-            str(item)
-            for item in (group.get("kernel_ids") or [])
-            if str(item)
-        ],
+        "kernel_ids": [str(item) for item in (group.get("kernel_ids") or []) if str(item)],
         "aggregate_gpu_pct": group.get("aggregate_gpu_pct"),
         "aggregate_call_count": group.get("aggregate_call_count"),
         "cases": cases,
@@ -764,11 +739,7 @@ def _source_level_symbols(source_files: list[str]) -> list[str]:
                     continue
                 decorators: list[str] = []
                 for decorator in node.decorator_list:
-                    target = (
-                        decorator.func
-                        if isinstance(decorator, ast.Call)
-                        else decorator
-                    )
+                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
                     if isinstance(target, ast.Name):
                         decorators.append(target.id)
                     elif isinstance(target, ast.Attribute):
@@ -845,9 +816,7 @@ def build_invocation_spec(
         {
             int(record["shape"][0])
             for record in inputs
-            if isinstance(record.get("shape"), list)
-            and record["shape"]
-            and isinstance(record["shape"][0], int)
+            if isinstance(record.get("shape"), list) and record["shape"] and isinstance(record["shape"][0], int)
         }
     )
     if observed_leading_dims:
@@ -868,16 +837,10 @@ def build_invocation_spec(
     runtime_symbols = _runtime_symbols(candidate, raw_device_symbols)
     raw_target_symbols = candidate.get("target_functions") or []
     if isinstance(raw_target_symbols, str):
-        raw_target_symbols = [
-            value.strip()
-            for value in raw_target_symbols.split(",")
-            if value.strip()
-        ]
+        raw_target_symbols = [value.strip() for value in raw_target_symbols.split(",") if value.strip()]
     elif not isinstance(raw_target_symbols, list):
         raw_target_symbols = []
-    parsed_source_symbols = _source_level_symbols(
-        list(dict.fromkeys([source, *kernel_sources]))
-    )
+    parsed_source_symbols = _source_level_symbols(list(dict.fromkeys([source, *kernel_sources])))
     curated_source_symbol = str(candidate.get("source_symbol") or "").strip()
     if not curated_source_symbol and not parsed_source_symbols:
         curated_source_symbol = source_symbol
@@ -895,8 +858,7 @@ def build_invocation_spec(
     unresolved_prefixes = [
         symbol.removesuffix("...")
         for symbol in raw_device_symbols
-        if symbol.endswith("...")
-        and not any(full.startswith(symbol.removesuffix("...")) for full in runtime_symbols)
+        if symbol.endswith("...") and not any(full.startswith(symbol.removesuffix("...")) for full in runtime_symbols)
     ]
     runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
     runtime_flags = candidate.get("runtime_flags") if isinstance(candidate.get("runtime_flags"), dict) else {}

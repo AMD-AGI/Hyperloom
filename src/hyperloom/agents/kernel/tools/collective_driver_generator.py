@@ -115,9 +115,7 @@ def _collective_op(candidate: dict[str, Any]) -> str:
         raise ValueError(f"unsupported collective operation: {op or '<missing>'}")
     reduce_op = str(contract.get("reduce_op") or "sum").strip().lower()
     if op != "all_gather" and reduce_op != "sum":
-        raise ValueError(
-            f"unsupported collective reduction: {reduce_op} (references reduce with sum)"
-        )
+        raise ValueError(f"unsupported collective reduction: {reduce_op} (references reduce with sum)")
     return op
 
 
@@ -548,7 +546,7 @@ if __name__ == "__main__":
 ''')
 
 
-_PROGRAM_TEMPLATE = Template('''# Optimize `$kernel_name`
+_PROGRAM_TEMPLATE = Template("""# Optimize `$kernel_name`
 
 | | |
 |---|---|
@@ -597,7 +595,7 @@ regime still has headroom.
 - Do not weaken or bypass the parity gate.
 - Do not add a barrier inside the timed region to stabilise the measurement.
 - Keep graph replay and `--nproc-per-node=$world_size`.
-''')
+""")
 
 
 def generate_collective_driver(
@@ -620,9 +618,7 @@ def generate_collective_driver(
         # would compare against a truncated output rather than fail loudly.
         ragged = [s for s in shapes if s[0] % world_size]
         if ragged:
-            raise ValueError(
-                f"reduce_scatter shapes must divide across {world_size} ranks: {ragged}"
-            )
+            raise ValueError(f"reduce_scatter shapes must divide across {world_size} ranks: {ragged}")
     dtype = _dtype_of(candidate)
     kernel_name_raw = candidate.get("device_kernel_name") or candidate.get("name")
     source_file_raw = candidate.get("source_file")
@@ -640,21 +636,14 @@ def generate_collective_driver(
     source_file = source_file_raw.strip()
     function = function_raw.strip()
     gpu_pct_raw = candidate.get("gpu_pct")
-    if (
-        isinstance(gpu_pct_raw, bool)
-        or not isinstance(gpu_pct_raw, (int, float))
-    ):
+    if isinstance(gpu_pct_raw, bool) or not isinstance(gpu_pct_raw, (int, float)):
         raise ValueError("collective candidate has invalid gpu_pct")
     gpu_pct = float(gpu_pct_raw)
     if not math.isfinite(gpu_pct) or gpu_pct < 0:
         raise ValueError("collective candidate gpu_pct must be finite and non-negative")
 
     line = candidate.get("source_line")
-    if line is not None and (
-        isinstance(line, bool)
-        or not isinstance(line, int)
-        or line <= 0
-    ):
+    if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line <= 0):
         raise ValueError("collective candidate source_line must be positive")
     if line is not None:
         launcher_hint = f"{source_file}({line}): {function}"

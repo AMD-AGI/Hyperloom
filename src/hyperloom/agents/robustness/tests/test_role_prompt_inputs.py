@@ -394,12 +394,7 @@ def test_phase_block_parsed_correctly():
 
 
 def test_phase_block_absent_gives_empty_string():
-    prompt = (
-        "=== Shared session state ===\n"
-        "session_id=sess\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
-    )
+    prompt = "=== Shared session state ===\nsession_id=sess\n=== Inbox for robustness ===\n(no new messages)\n"
     ctx = from_coordinator_prompt(prompt)
     assert ctx.phase == ""
 
@@ -445,12 +440,7 @@ def test_phase_budget_no_history_sentinel():
 
 
 def test_phase_budget_absent_gives_empty_list():
-    prompt = (
-        "=== Shared session state ===\n"
-        "session_id=s\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
-    )
+    prompt = "=== Shared session state ===\nsession_id=s\n=== Inbox for robustness ===\n(no new messages)\n"
     ctx = from_coordinator_prompt(prompt)
     assert ctx.phase_budget == []
 
@@ -495,11 +485,6 @@ def test_conversation_progress_high_severity():
 
 
 def test_conversation_progress_absent_gives_none():
-    prompt = (
-        "=== Shared session state ===\n"
-        "session_id=s\n"
-        "=== Inbox for robustness ===\n"
-        "(no new messages)\n"
-    )
+    prompt = "=== Shared session state ===\nsession_id=s\n=== Inbox for robustness ===\n(no new messages)\n"
     ctx = from_coordinator_prompt(prompt)
     assert ctx.conversation_progress is None

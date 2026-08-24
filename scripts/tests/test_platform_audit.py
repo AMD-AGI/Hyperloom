@@ -33,6 +33,7 @@ pa = _load()
 
 # -------------------------------------------------------------- verdicts
 
+
 def test_determinism_is_recorded_not_judged():
     """The one knob this tool cannot read, only infer, must not gate anything.
 
@@ -65,7 +66,7 @@ def test_determinism_row_says_it_was_inferred():
 
 
 def test_every_recorded_knob_explains_its_silence():
-    """"Not checked" is a claim, so each recorded knob carries its reason."""
+    """ "Not checked" is a claim, so each recorded knob carries its reason."""
     for key, spec in pa.RECORDED.items():
         assert spec["why"].strip(), f"{key} records no reason for having no verdict"
     row = {r["key"]: r for r in pa.build_rows({})}["nps"]
@@ -93,6 +94,7 @@ def test_unresolved_values_are_unknown_not_pass(value):
 
 # -------------------------------------------------------------- determinism
 
+
 def test_infer_determinism_normalizes_value_and_separates_the_caveat():
     value, note = pa.infer_determinism(25.0)
     assert value == "power" and "25.0" in note
@@ -110,9 +112,9 @@ def test_infer_determinism_declines_when_ambiguous_or_unmeasured():
 
 # -------------------------------------------------------------- exit codes
 
+
 def _rows(**verdicts):
-    return [{"key": k, "verdict": v, "knob": k, "value": "", "target": "", "note": ""}
-            for k, v in verdicts.items()]
+    return [{"key": k, "verdict": v, "knob": k, "value": "", "target": "", "note": ""} for k, v in verdicts.items()]
 
 
 def test_exit_code_ranks_fail_above_unknown():
@@ -160,6 +162,7 @@ def test_quick_mode_still_fails_on_a_knob_it_can_read():
 
 # -------------------------------------------------------------- rows
 
+
 def test_build_rows_marks_recorded_knobs_and_judges_the_rest():
     osl = {
         "core_performance_boost": "enabled",
@@ -185,6 +188,7 @@ def test_every_judged_knob_cites_its_basis():
 
 # -------------------------------------------------------------- epyc parsing
 
+
 @pytest.mark.parametrize(
     "model,expected",
     [
@@ -207,6 +211,7 @@ def test_epyc_generation_declines_on_non_numeric_skus():
 
 # -------------------------------------------------------------- topology
 
+
 def test_sample_cores_spreads_across_the_topology(monkeypatch):
     monkeypatch.setattr(pa, "physical_cores", lambda: list(range(0, 64)))
     assert pa.sample_cores(4) == [0, 16, 32, 48]
@@ -221,12 +226,13 @@ def test_sample_cores_degrades_on_small_parts(monkeypatch):
 
 
 def test_os_layer_survives_a_host_with_no_cpu_sysfs(monkeypatch):
-    """"Never raises" is a promise, and a missing /sys tree is how it breaks.
+    """ "Never raises" is a promise, and a missing /sys tree is how it breaks.
 
     A container without /sys/devices/system/cpu is the ordinary case here, not
     an exotic one: it must degrade to "unknown" rather than throw out of a
     function every caller treats as total.
     """
+
     def _no_such_tree(path):
         raise FileNotFoundError(path)
 

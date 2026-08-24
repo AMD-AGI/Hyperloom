@@ -77,9 +77,7 @@ def _double_run_dirs(tmp_path: Path, warmup_score: float | None) -> dict:
     measure_bench.mkdir(parents=True, exist_ok=True)
     if warmup_score is not None:
         (warm_bench / "results_2026-08-19T00-00-00.json").write_text(
-            json.dumps(
-                {"results": {"gsm8k": {"exact_match,strict-match": warmup_score}}}
-            ),
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": warmup_score}}}),
             encoding="utf-8",
         )
     return {

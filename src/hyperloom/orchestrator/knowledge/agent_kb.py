@@ -39,12 +39,7 @@ def _prior_member(
         return None
     rel = str(ref or "").strip().lstrip("/")
     parts = Path(rel).parts if rel else ()
-    if (
-        not parts
-        or (owner and parts[0] != owner)
-        or ".." in parts
-        or Path(rel).is_absolute()
-    ):
+    if not parts or (owner and parts[0] != owner) or ".." in parts or Path(rel).is_absolute():
         return None
     root = sections.warm_start_dir / FILES_MEMBER_ROOT
     if root.is_symlink():
@@ -99,11 +94,7 @@ class _ConfigPatchAgentKB:
         prior = self.read()
         return {
             "extra_server_args": str(prior.get("extra_server_args") or ""),
-            "extra_envs": (
-                dict(prior.get("extra_envs") or {})
-                if isinstance(prior.get("extra_envs"), Mapping)
-                else {}
-            ),
+            "extra_envs": (dict(prior.get("extra_envs") or {}) if isinstance(prior.get("extra_envs"), Mapping) else {}),
         }
 
     def read_patches(self) -> list[str]:
@@ -112,11 +103,7 @@ class _ConfigPatchAgentKB:
         patches = prior.get("patches")
         if not isinstance(patches, list):
             return []
-        return [
-            str(ref)
-            for ref in patches
-            if isinstance(ref, str) and str(ref).strip()
-        ]
+        return [str(ref) for ref in patches if isinstance(ref, str) and str(ref).strip()]
 
     def stage_patches(
         self,
@@ -157,21 +144,14 @@ class _ConfigPatchAgentKB:
                     stem = stem[: -len(suffix)]
                     break
             safe_name = _PATCH_NAME_RE.sub("-", stem).strip("._-") or "patch"
-            ref = (
-                f"{self.SECTION}/overlays/{index:06d}/"
-                f"{member_index:02d}-{safe_name}.patch"
-            )
+            ref = f"{self.SECTION}/overlays/{index:06d}/{member_index:02d}-{safe_name}.patch"
             try:
                 if src.is_symlink() or not src.is_file():
-                    raise KBStoreError(
-                        f"artifact is not a readable regular file: {src}"
-                    )
+                    raise KBStoreError(f"artifact is not a readable regular file: {src}")
                 content = src.read_bytes()
                 destination = self._sections.files_dir / ref
                 if destination.exists() and destination.read_bytes() != content:
-                    raise KBStoreError(
-                        f"artifact ref already has different bytes: {ref}"
-                    )
+                    raise KBStoreError(f"artifact ref already has different bytes: {ref}")
                 prepared.append((src, ref, content))
             except (KBStoreError, OSError, ValueError) as exc:
                 log.warning(
@@ -188,11 +168,7 @@ class _ConfigPatchAgentKB:
         try:
             staged = self._sections.staged(self.SECTION)
             document = dict(staged.knowledge) if staged is not None else {}
-            recorded = [
-                str(ref)
-                for ref in (document.get("patches") or [])
-                if str(ref).strip()
-            ]
+            recorded = [str(ref) for ref in (document.get("patches") or []) if str(ref).strip()]
             for ref in refs:
                 if ref not in recorded:
                     recorded.append(ref)
@@ -204,10 +180,7 @@ class _ConfigPatchAgentKB:
                 ),
             )
             existing_files = (
-                [
-                    path.relative_to(self._sections.files_dir).as_posix()
-                    for path in staged.files
-                ]
+                [path.relative_to(self._sections.files_dir).as_posix() for path in staged.files]
                 if staged is not None
                 else []
             )
@@ -221,11 +194,7 @@ class _ConfigPatchAgentKB:
                 temp.write_bytes(content)
                 os.replace(temp, destination)
                 created.append(destination)
-            target = (
-                self._sections.root
-                / "sections"
-                / f"{self.SECTION}.json"
-            )
+            target = self._sections.root / "sections" / f"{self.SECTION}.json"
             target.parent.mkdir(parents=True, exist_ok=True)
             temp_section = target.with_name(f".{target.name}.tmp")
             temp_section.write_text(
@@ -283,10 +252,7 @@ class RecipeReplayKB:
 
     @property
     def active(self) -> bool:
-        return (
-            self._sections is not None
-            and self._sections.warm_start_dir is not None
-        )
+        return self._sections is not None and self._sections.warm_start_dir is not None
 
     def _read_value(self) -> dict[str, Any]:
         """Return the validated current Recipe value object."""
@@ -304,27 +270,16 @@ class RecipeReplayKB:
         try:
             document = json.loads(recipe.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise RemoteRecipeValidationError(
-                f"current Recipe is unreadable: {exc}"
-            ) from exc
-        knowledge = (
-            document.get("knowledge")
-            if isinstance(document.get("knowledge"), Mapping)
-            else document
-        )
+            raise RemoteRecipeValidationError(f"current Recipe is unreadable: {exc}") from exc
+        knowledge = document.get("knowledge") if isinstance(document.get("knowledge"), Mapping) else document
         if (
-            knowledge.get("knowledge_schema_version")
-            != CURRENT_KNOWLEDGE_SCHEMA_VERSION
+            knowledge.get("knowledge_schema_version") != CURRENT_KNOWLEDGE_SCHEMA_VERSION
             or knowledge.get("record_kind") != RECORD_KIND_HYPERLOOM_RECIPE
         ):
-            raise RemoteRecipeValidationError(
-                "downloaded Recipe does not match the current knowledge contract"
-            )
+            raise RemoteRecipeValidationError("downloaded Recipe does not match the current knowledge contract")
         value = knowledge.get("value")
         if not isinstance(value, Mapping):
-            raise RemoteRecipeValidationError(
-                "downloaded Recipe value must be an object"
-            )
+            raise RemoteRecipeValidationError("downloaded Recipe value must be an object")
         return dict(value)
 
     def read_config(self) -> dict[str, Any]:
@@ -335,9 +290,7 @@ class RecipeReplayKB:
         return {
             "extra_server_args": str(config.get("extra_server_args") or ""),
             "extra_envs": (
-                dict(config.get("extra_envs") or {})
-                if isinstance(config.get("extra_envs"), Mapping)
-                else {}
+                dict(config.get("extra_envs") or {}) if isinstance(config.get("extra_envs"), Mapping) else {}
             ),
         }
 
@@ -350,12 +303,8 @@ class RecipeReplayKB:
 
         value = self._read_value()
         timeline = value.get("patch_timeline") if isinstance(value, Mapping) else None
-        if not isinstance(timeline, list) or not all(
-            isinstance(ref, str) for ref in timeline
-        ):
-            raise RemoteRecipeValidationError(
-                "current Recipe value.patch_timeline must be a flat string list"
-            )
+        if not isinstance(timeline, list) or not all(isinstance(ref, str) for ref in timeline):
+            raise RemoteRecipeValidationError("current Recipe value.patch_timeline must be a flat string list")
         return [validate_relative_path(ref) for ref in timeline]
 
 

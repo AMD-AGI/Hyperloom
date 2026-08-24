@@ -108,7 +108,12 @@ def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
     from hyperloom.agents.framework import kb as fa_kb
     from hyperloom.inference_optimizer.cli.kb import _legacy_recipe_root, _resolve_local_kb_root
 
-    for name in ("INFERENCE_OPTIMIZER_FA_KB_PATH", "FRAMEWORK_AGENT_KB_DIR", "HYPERLOOM_LOCAL_KB_ROOT", "KNOWLEDGE_LOCAL_ROOT"):
+    for name in (
+        "INFERENCE_OPTIMIZER_FA_KB_PATH",
+        "FRAMEWORK_AGENT_KB_DIR",
+        "HYPERLOOM_LOCAL_KB_ROOT",
+        "KNOWLEDGE_LOCAL_ROOT",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 

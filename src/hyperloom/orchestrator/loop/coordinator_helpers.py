@@ -797,11 +797,7 @@ def proceedable_variant_names(held_by_name: Mapping[str, str]) -> set[str]:
     Returns:
         The non-blank names whose verdict is proceedable.
     """
-    return {
-        name
-        for name, verdict in held_by_name.items()
-        if verdict in _PROCEEDABLE_VERDICTS and str(name).strip()
-    }
+    return {name for name, verdict in held_by_name.items() if verdict in _PROCEEDABLE_VERDICTS and str(name).strip()}
 
 
 def collapse_verdict_map(held_by_name: Mapping[str, str]) -> tuple[str, set[str] | None]:
