@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Knowledge-Graph query client over local or GBrain page stores.
+"""Knowledge-Graph query client over a local or GBrain link graph.
 
-All backends expose the same native link-graph API (``get_links`` /
-``get_backlinks`` / ``traverse_graph`` / ``add_link``).  A triple
-``(subject, predicate, object)`` maps to an edge
-``add_link(from=subject, to=object, link_type=predicate,
-context=json(properties))``.  Fact properties are encoded in the edge
-``context`` JSON.  gbrain reports some write failures as an in-band
-``{"error": ...}`` payload, so write paths inspect the decoded result via
-:func:`_rpc_failed`.
+Backends expose one link-graph surface (``get_links`` / ``get_backlinks`` /
+``traverse_graph`` / ``add_link``). A triple ``(subject, predicate, object)``
+maps to ``add_link(from=subject, to=object, link_type=predicate,
+context=json(properties))``, so fact properties ride in the edge ``context``
+JSON. gbrain reports some write failures as an in-band ``{"error": ...}``
+payload, so write paths inspect the decoded result via :func:`_rpc_failed`.
 
 Every read method has a ``*_safe`` companion that swallows transport failures
 and returns an empty result, so the KG layer can never block or break a
@@ -26,7 +24,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from ..config import KnowledgeConfig, KnowledgeStoreMode
 from .gbrain_mcp import GbrainRemoteError, _GbrainMcp
@@ -34,10 +32,10 @@ from .local_graph_store import LocalGraphStore
 
 log = logging.getLogger(__name__)
 
-# Cap the number of fact lines parsed per page (mirrors the mirror-side
-# write cap) so a malformed/oversized page never blows up a query tick.
-_MAX_FACTS_PER_PAGE = 50
-# Hard ceiling on BFS breadth to bound native traversal cost.
+# Cap the facts one query may return so an over-connected node never blows up
+# a query tick.
+_MAX_FACTS_PER_QUERY = 50
+# Hard ceiling on nodes returned by one traversal to bound its cost.
 _MAX_TRAVERSE_NODES = 200
 
 
@@ -108,10 +106,9 @@ def _as_set(value: Any) -> set[str]:
     }
 
 
-
 @dataclass
 class Fact:
-    """A typed triple parsed from a page ``## Facts`` fence."""
+    """A typed triple decoded from one link-graph edge."""
 
     subject: str
     predicate: str
@@ -157,7 +154,6 @@ def _pct(value: Any) -> float:
         return float(str(value).strip().rstrip("%"))
     except (TypeError, ValueError):
         return 0.0
-
 
 
 def _link_type(predicate: Any) -> str:
@@ -262,9 +258,8 @@ def _edge_to_fact(edge: dict[str, Any]) -> Fact:
 def _conditions_match(fact: Fact, conditions: dict[str, Any] | None) -> bool:
     """Return ``True`` when every requested condition matches the fact.
 
-    Matching is lenient (normalized substring either way) because the
-    simulation layer compares free-form property text (``hw``/``fw``/
-    ``condition``/``precision``).
+    Matching is lenient (normalized substring either way) because edge
+    properties are free-form text (``hw``/``fw``/``condition``/``precision``).
 
     Args:
         fact: The candidate fact.
@@ -286,7 +281,7 @@ def _conditions_match(fact: Fact, conditions: dict[str, Any] | None) -> bool:
 
 
 class KGClient:
-    """Knowledge-graph query surface over a local or GBrain page store."""
+    """Knowledge-graph query surface over a local or GBrain link graph."""
 
     def __init__(self, mcp: Any) -> None:
         """Initialize the client.
@@ -350,9 +345,10 @@ class KGClient:
         return self._as_edges(self._mcp.call("get_backlinks", {"slug": slug}))
 
     def _node_exists(self, slug: str) -> bool:
-        """Return ``True`` when a page for ``slug`` exists, ``False`` when it
-        is confirmed absent.  Raises on transport or I/O failures so callers
-        cannot mistake a failed probe for a missing node.
+        """Return whether a page for ``slug`` exists.
+
+        Transport and I/O failures propagate so a failed probe is never read
+        as a confirmed absence.
         """
         page = self._mcp.call("get_page", {"slug": slug})
         if isinstance(page, str):
@@ -370,11 +366,9 @@ class KGClient:
         materialized as a minimal typed stub; confirmed slugs are memoized to
         avoid repeated ``get_page`` probes within a process. The ``put_page``
         result is inspected (gbrain reports failures in-band), so a failed
-        creation is not memoized as present.
-
-        A transport or I/O failure from the existence probe is treated as
-        "cannot confirm" — no write is issued and ``False`` is returned so the
-        caller's ``_safe`` wrapper can surface the failure faithfully.
+        creation is not memoized as present. An unreadable probe writes
+        nothing, since overwriting a page that may already hold real content
+        would destroy it.
 
         Args:
             slug: The entity slug to materialize.
@@ -389,7 +383,7 @@ class KGClient:
         try:
             exists = self._node_exists(slug)
         except (GbrainRemoteError, OSError, TimeoutError) as exc:
-            log.warning("kg _ensure_node probe failed for %s: %s", slug, exc)
+            log.warning("kg _ensure_node probe unreadable for %s: %s", slug, exc)
             return False
         if exists:
             self._known_nodes.add(slug)
@@ -568,7 +562,7 @@ class KGClient:
             facts = self.query_facts(
                 subject=knob,
                 predicate="CONFLICTS_WITH",
-                limit=_MAX_FACTS_PER_PAGE,
+                limit=_MAX_FACTS_PER_QUERY,
             )
             for fact in facts:
                 if fact.object not in knob_set:
@@ -656,7 +650,6 @@ class KGClient:
         return self._degrade_safe(self.emit_fact, False, **kwargs)
 
 
-
 def generate_variants_graph_guided(
     kg: KGClient,
     *,
@@ -705,7 +698,7 @@ def generate_variants_graph_guided(
         object=list(archs),
         predicate=["IMPROVES", "IMPROVES_TTFT", "IMPROVES_DECODE"],
         conditions=conditions or None,
-        limit=_MAX_FACTS_PER_PAGE,
+        limit=_MAX_FACTS_PER_QUERY,
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -714,11 +707,11 @@ def generate_variants_graph_guided(
         if not knob or knob in seen or knob in tried_set or knob in blocked_set or knob in stack_set:
             continue
         # REQUIRES: every dependency must already be in the stack.
-        deps = kg.query_facts_safe(subject=knob, predicate=["REQUIRES"], limit=_MAX_FACTS_PER_PAGE)
+        deps = kg.query_facts_safe(subject=knob, predicate=["REQUIRES"], limit=_MAX_FACTS_PER_QUERY)
         if any(d.object and d.object not in stack_set for d in deps):
             continue
         # CONFLICTS_WITH: reject if conflicting with an in-stack knob.
-        conflicts = kg.query_facts_safe(subject=knob, predicate=["CONFLICTS_WITH"], limit=_MAX_FACTS_PER_PAGE)
+        conflicts = kg.query_facts_safe(subject=knob, predicate=["CONFLICTS_WITH"], limit=_MAX_FACTS_PER_QUERY)
         if any(c.object in stack_set for c in conflicts):
             continue
         seen.add(knob)
@@ -802,13 +795,13 @@ def generate_knob_candidates_graph_guided(
         conditions["fw"] = framework
 
     blocked_set = {
-        f.subject for f in kg.query_facts_safe(object=objs, predicate=["KNOB_REVERTED_ON"], limit=_MAX_FACTS_PER_PAGE)
+        f.subject for f in kg.query_facts_safe(object=objs, predicate=["KNOB_REVERTED_ON"], limit=_MAX_FACTS_PER_QUERY)
     }
     candidates = kg.query_facts_safe(
         object=objs,
         predicate=["KNOB_IMPROVES"],
         conditions=conditions or None,
-        limit=_MAX_FACTS_PER_PAGE,
+        limit=_MAX_FACTS_PER_QUERY,
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()

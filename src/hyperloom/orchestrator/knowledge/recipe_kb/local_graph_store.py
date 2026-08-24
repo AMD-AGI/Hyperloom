@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 import tempfile
 import threading
@@ -38,9 +37,7 @@ try:
 except ImportError:  # pragma: no cover - Linux production path
     fcntl = None  # type: ignore[assignment]
 
-from ._path_safety import SLUG_PART_RE as _SLUG_PART_RE
-from ._path_safety import assert_within_root as _assert_within_root
-from ._path_safety import validated_slug as _validated_slug
+from ._path_safety import is_within_root, validated_slug
 
 _ROOT_LOCKS_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, threading.RLock] = {}
@@ -60,7 +57,6 @@ def _thread_lock_for(root: Path) -> threading.RLock:
             lock = threading.RLock()
             _ROOT_LOCKS[key] = lock
         return lock
-
 
 
 def _edge_key(edge: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -151,12 +147,10 @@ class LocalGraphStore:
                         os.close(fd)
 
     def _path_for(self, base: Path, slug: str, suffix: str) -> Path:
-        parts = _validated_slug(slug).split("/")
+        parts = validated_slug(slug).split("/")
         path = base.joinpath(*parts[:-1], parts[-1] + suffix)
-        try:
-            _assert_within_root(path, base)
-        except ValueError as exc:
-            raise ValueError(f"unsafe graph slug path: {slug!r}") from exc
+        if not is_within_root(path, base):
+            raise ValueError(f"unsafe graph slug path: {slug!r}")
         return path
 
     def _page_path(self, slug: str) -> Path:
@@ -207,10 +201,8 @@ class LocalGraphStore:
         if not isinstance(relative, str) or not relative or relative.startswith("/"):
             raise LocalGraphStoreError("invalid local graph transaction target")
         candidate = self.root.joinpath(*relative.split("/"))
-        try:
-            _assert_within_root(candidate, self.root)
-        except ValueError as exc:
-            raise LocalGraphStoreError("local graph transaction target escaped root") from exc
+        if not is_within_root(candidate, self.root):
+            raise LocalGraphStoreError("local graph transaction target escaped root")
         allowed = (
             self.outbound_root.resolve(),
             self.inbound_root.resolve(),
@@ -292,7 +284,7 @@ class LocalGraphStore:
                 continue
             relative = path.relative_to(self.pages_root).as_posix()
             slug = relative[:-3]
-            _validated_slug(slug)
+            validated_slug(slug)
             slugs.append(slug)
         slugs.sort()
         return slugs
@@ -312,7 +304,7 @@ class LocalGraphStore:
         return [{"slug": slug} for slug in slugs]
 
     def _get_page(self, args: Mapping[str, Any]) -> dict[str, Any]:
-        slug = _validated_slug(args.get("slug"))
+        slug = validated_slug(args.get("slug"))
         with self._locked(exclusive=False):
             path = self._page_path(slug)
             if not path.is_file() or path.is_symlink():
@@ -321,7 +313,7 @@ class LocalGraphStore:
         return {"slug": slug, "content": content, "body": content}
 
     def _put_page(self, args: Mapping[str, Any]) -> dict[str, Any]:
-        slug = _validated_slug(args.get("slug"))
+        slug = validated_slug(args.get("slug"))
         content = args.get("content", args.get("body"))
         if not isinstance(content, str):
             raise ValueError("put_page requires string content")
@@ -331,8 +323,8 @@ class LocalGraphStore:
         return {"slug": slug, "status": "created" if created else "updated"}
 
     def _add_link(self, args: Mapping[str, Any]) -> dict[str, Any]:
-        from_slug = _validated_slug(args.get("from", args.get("from_slug")))
-        to_slug = _validated_slug(args.get("to", args.get("to_slug")))
+        from_slug = validated_slug(args.get("from", args.get("from_slug")))
+        to_slug = validated_slug(args.get("to", args.get("to_slug")))
         link_type = str(args.get("link_type") or "").strip()
         if not link_type:
             raise ValueError("add_link requires a non-empty link_type")
@@ -364,21 +356,21 @@ class LocalGraphStore:
         return {"status": "ok"}
 
     def _get_links(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
-        slug = _validated_slug(args.get("slug"))
+        slug = validated_slug(args.get("slug"))
         link_type = str(args.get("link_type") or "").strip()
         with self._locked(exclusive=False):
             edges = self._read_edges_unlocked("outbound", slug)
         return [edge for edge in edges if not link_type or edge.get("link_type") == link_type]
 
     def _get_backlinks(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
-        slug = _validated_slug(args.get("slug"))
+        slug = validated_slug(args.get("slug"))
         link_type = str(args.get("link_type") or "").strip()
         with self._locked(exclusive=False):
             edges = self._read_edges_unlocked("inbound", slug)
         return [edge for edge in edges if not link_type or edge.get("link_type") == link_type]
 
     def _traverse_graph(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
-        start = _validated_slug(args.get("slug"))
+        start = validated_slug(args.get("slug"))
         depth = max(0, min(int(args.get("depth", 5)), 20))
         direction = str(args.get("direction") or "out").strip().lower()
         if direction not in {"out", "in", "both"}:

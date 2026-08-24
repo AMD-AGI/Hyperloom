@@ -116,13 +116,13 @@ def test_cid_to_path_components_rejects_empty_segment() -> None:
 def test_cid_to_path_components_rejects_traversal_segment() -> None:
     with pytest.raises(InvalidCanonicalIdError) as ei:
         cid_to_path_components("inference:..:hw:fw:mt:arch:fv:prec")
-    assert "unsafe" in ei.value.reason
+    assert "not a safe path component" in ei.value.reason
 
 
 def test_cid_to_path_components_rejects_absolute_segment() -> None:
     with pytest.raises(InvalidCanonicalIdError) as ei:
         cid_to_path_components("inference:/abs:hw:fw:mt:arch:fv:prec")
-    assert "unsafe" in ei.value.reason
+    assert "not a safe path component" in ei.value.reason
 
 
 def test_put_recipe_rejects_traversal_cid(tmp_path: Path) -> None:
