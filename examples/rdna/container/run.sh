@@ -32,11 +32,23 @@ ARGS=(run --rm
       -v "$MODEL_DIR:/models:ro"
       -e "MODEL=/models/$(basename "$MODEL_ABS")")
 
-# The container runs as root by default, and root reaches /dev/kfd and /dev/dri
-# via CAP_DAC_OVERRIDE -- no --group-add needed. It is needed ONLY when dropping
-# to a non-root user, and then it must be the HOST's NUMERIC gid: --group-add
-# render resolves the name inside the image, which has no render group, and
-# fails with "unable to find group render".
+# Device access differs by engine, and getting it wrong looks like a broken GPU
+# rather than a permissions problem:
+#   docker (rootful)  root in-container reaches the devices via CAP_DAC_OVERRIDE;
+#                     no --group-add needed.
+#   podman ROOTLESS   in-container uid 0 maps to your host uid, so /dev/kfd is
+#                     nobody:nogroup and CAP_DAC_OVERRIDE does NOT apply. Host
+#                     supplementary groups are dropped unless --group-add
+#                     keep-groups is passed. Without it rocminfo reports ZERO
+#                     GPUs and test-backend-ops quietly runs CPU-only, which
+#                     "passes" while proving nothing.
+if [ "$(basename "$DOCKER")" = "podman" ] \
+   && [ "$($DOCKER info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = "true" ]; then
+    ARGS+=(--group-add keep-groups)
+fi
+
+# --group-add render is wrong on both engines: the NAME resolves inside the
+# image, which has no render group. A non-root user needs the host NUMERIC gid.
 if [ -n "${RUN_AS_USER:-}" ]; then
     ARGS+=(--user "$RUN_AS_USER")
     for g in render video; do

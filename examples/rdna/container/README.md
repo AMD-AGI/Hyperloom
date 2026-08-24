@@ -49,12 +49,24 @@ docker run --rm \
     hyperloom-rdna:test
 ```
 
-**No `--group-add` is needed.** The container runs as root, which reaches
-`/dev/kfd` and `/dev/dri` through `CAP_DAC_OVERRIDE` — verified: `rocminfo`
-sees both GPUs and `test-backend-ops` passes without it. It is required *only*
-when dropping to a non-root user, and then it must be the host's **numeric**
-GID, because `--group-add render` resolves the group name inside the image,
-which has no `render` group. `run.sh` handles that via `RUN_AS_USER=1000:1000`.
+**Device access differs by engine** — and getting it wrong looks like a broken
+GPU rather than a permissions problem:
+
+- **Docker (rootful):** no `--group-add` needed. The container runs as root and
+  reaches `/dev/kfd` and `/dev/dri` through `CAP_DAC_OVERRIDE` — verified,
+  `rocminfo` sees both GPUs and `test-backend-ops` passes without it.
+- **Podman rootless:** in-container uid 0 maps to *your* host uid, so `/dev/kfd`
+  appears as `nobody:nogroup` and `CAP_DAC_OVERRIDE` does **not** apply. Host
+  supplementary groups are dropped unless you pass **`--group-add keep-groups`**.
+  Measured: without it `rocminfo` reports **zero** GPUs and `test-backend-ops`
+  runs CPU-only and reports `1/1 backends passed` — a green result that proves
+  nothing. With it: `gfx1201`, `2/2 backends passed`.
+
+`run.sh` detects rootless podman and adds `keep-groups` for you.
+
+`--group-add render` is wrong on both engines: the *name* resolves inside the
+image, which has no `render` group. A non-root user needs the host's **numeric**
+GID (`RUN_AS_USER=1000:1000` in `run.sh`).
 
 Defaults to the full probe (`--bench`), so it runs the correctness gate and the
 benchmark and prints a paste-ready report. Add `-e CORRECTNESS_OPS=ALL` for a
