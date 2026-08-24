@@ -63,8 +63,13 @@ export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 Then run the outer launcher preflight (IR-1):
 
 ```bash
-"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH"
+"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH" \
+  || { echo "preflight failed — aborting launch"; exit 1; }
 ```
+
+A non-zero exit indicates GPU occupancy above the allowed threshold, a stale
+serving process, or an unreadable GPU state. Do not continue to
+`python -m hyperloom.inference_optimizer.cli optimize` in any of these cases.
 
 Do not manually pip-install SDKs, start Ray, or
 `curl /v1/models` unless debugging a failed preflight. `_preflight()` and
