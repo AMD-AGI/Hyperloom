@@ -22,6 +22,7 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.actions.executors._partition_lever import read_session_lever
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -308,6 +309,10 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
+
+    # Compute-partition lever as the launcher published it, read through the one
+    # parser that owns those variables.
+    _partition_lever_seed = read_session_lever()
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -359,11 +364,9 @@ def _seed_shared_state(
         # published rather than re-derived from argv: that env is the validated,
         # clamped, canonical form, and seeding from the raw flag would let the
         # manifest disagree with what the executors were actually handed.
-        compute_partition_modes=[
-            m for m in os.environ.get("HYPERLOOM_COMPUTE_PARTITION_MODES", "").split(",") if m
-        ],
-        streams_per_partition=max(1, int(os.environ.get("HYPERLOOM_STREAMS_PER_PARTITION", "") or 2)),
-        latency_budget_ms=max(0.0, float(os.environ.get("HYPERLOOM_MAX_LATENCY_MS", "") or 0.0)),
+        compute_partition_modes=list(_partition_lever_seed[0]),
+        streams_per_partition=_partition_lever_seed[1],
+        latency_budget_ms=_partition_lever_seed[2],
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),

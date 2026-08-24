@@ -306,7 +306,10 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--streams-per-partition",
         type=int,
-        default=2,
+        # None, not 2, so a resume can tell "not passed" from "passed 2" and
+        # let the persisted value stand. The 2 is applied where the flag is
+        # resolved.
+        default=None,
         metavar="N",
         help="Concurrent streams to place on each partition when "
         "--compute-partition-modes is in use. Defaults to 2, which is where "

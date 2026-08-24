@@ -85,6 +85,29 @@ def streams_per_partition() -> int:
         return 2
 
 
+def read_session_lever() -> tuple[tuple[str, ...], int, float]:
+    """Read the session lever back out of the env the CLI published.
+
+    One reader for the several places that need it -- seeding the manifest,
+    persisting across a resume, reporting the session's shape -- because that
+    env is the canonical post-validation form of these three flags. Parsing it
+    independently at each site is that many chances for the manifest to record
+    a contract the executors were never handed.
+
+    Returns:
+        ``(modes, streams_per_partition, latency_budget_ms)``. Empty modes and a
+        zero budget each mean off.
+    """
+    from ._latency_budget import LATENCY_BUDGET_ENV
+
+    modes = tuple(m.strip() for m in os.environ.get(PARTITION_MODES_ENV, "").split(",") if m.strip())
+    try:
+        budget = max(0.0, float(os.environ.get(LATENCY_BUDGET_ENV, "").strip() or 0.0))
+    except ValueError:
+        budget = 0.0
+    return modes, streams_per_partition(), budget
+
+
 def requested_mode(envs: dict[str, Any] | None) -> str:
     """Return the partition mode this run asks for, or ``""`` when none.
 

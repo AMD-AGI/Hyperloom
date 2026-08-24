@@ -10,12 +10,15 @@ not see in its environment, and whether it ran at all.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer import cli
 from hyperloom.orchestrator.actions.executors import _partition_lever as pl
 from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
 from hyperloom.orchestrator.actions.executors._latency_budget import (
@@ -191,3 +194,125 @@ def test_latency_budget_precedence_is_most_specific_first(monkeypatch):
     assert resolve_latency_budget_ms({"latency_budget_ms": 500}, _State()) == 500.0
     assert resolve_latency_budget_ms({}, _State()) == 400.0
     assert resolve_latency_budget_ms({}, None) == 250.0
+
+
+class TestResumeContract:
+    """The lever must survive a resume, because it is part of how a number was got.
+
+    A resume that quietly dropped the mode or the streams count would compare
+    candidates measured under partitioning against a baseline that was not, and
+    the comparison would look ordinary. These lock the precedence chain (CLI
+    flag > exported env > archived state) and the write-back that keeps the
+    manifest agreeing with what the executors were handed.
+    """
+
+    @staticmethod
+    def _args(**over):
+        ns = argparse.Namespace(
+            compute_partition_modes=None, streams_per_partition=None, max_latency_ms=None
+        )
+        for key, value in over.items():
+            setattr(ns, key, value)
+        return ns
+
+    @staticmethod
+    def _state(modes=(), streams=2, budget=0.0):
+        state = SimpleNamespace(
+            compute_partition_modes=list(modes),
+            streams_per_partition=streams,
+            latency_budget_ms=budget,
+        )
+        return state
+
+    def test_archive_supplies_the_lever_when_the_resume_omits_it(self, monkeypatch):
+        monkeypatch.delenv(pl.PARTITION_MODES_ENV, raising=False)
+        monkeypatch.delenv(pl.STREAMS_PER_PARTITION_ENV, raising=False)
+        monkeypatch.delenv("HYPERLOOM_MAX_LATENCY_MS", raising=False)
+        args = self._args()
+        cli._restore_partition_lever_from_state(args, self._state(("DPX", "CPX"), 3, 400.0))
+        assert args.compute_partition_modes == "DPX,CPX"
+        assert args.streams_per_partition == 3
+        assert args.max_latency_ms == 400.0
+
+    def test_an_exported_env_outranks_the_archive(self, monkeypatch):
+        # Someone who exports the budget for this resume means it, and the
+        # archived value is older information.
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "QPX")
+        monkeypatch.setenv("HYPERLOOM_MAX_LATENCY_MS", "250")
+        args = self._args()
+        cli._restore_partition_lever_from_state(args, self._state(("DPX",), 2, 400.0))
+        assert args.compute_partition_modes == "QPX"
+        assert args.max_latency_ms == 250.0
+
+    def test_a_re_passed_flag_outranks_both(self, monkeypatch):
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "QPX")
+        monkeypatch.setenv("HYPERLOOM_MAX_LATENCY_MS", "250")
+        args = self._args(compute_partition_modes="cpx", max_latency_ms=99.0)
+        cli._restore_partition_lever_from_state(args, self._state(("DPX",), 2, 400.0))
+        assert args.compute_partition_modes == "cpx"
+        assert args.max_latency_ms == 99.0
+
+    def test_streams_two_is_distinguishable_from_streams_unset(self, monkeypatch):
+        # The reason --streams-per-partition defaults to None: with a default of
+        # 2 a resume cannot tell "not passed" from "passed 2", and would
+        # overwrite a persisted 4 every time.
+        monkeypatch.delenv(pl.STREAMS_PER_PARTITION_ENV, raising=False)
+        unset = self._args()
+        cli._restore_partition_lever_from_state(unset, self._state(("DPX",), 4, 0.0))
+        assert unset.streams_per_partition == 4
+
+        explicit = self._args(streams_per_partition=2)
+        cli._restore_partition_lever_from_state(explicit, self._state(("DPX",), 4, 0.0))
+        assert explicit.streams_per_partition == 2
+
+    def test_persist_writes_the_live_contract_back_onto_state(self, monkeypatch):
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "DPX,CPX")
+        monkeypatch.setenv(pl.STREAMS_PER_PARTITION_ENV, "3")
+        monkeypatch.setenv("HYPERLOOM_MAX_LATENCY_MS", "275.5")
+        state = self._state()
+        cli._persist_partition_lever(state)
+        assert state.compute_partition_modes == ["DPX", "CPX"]
+        assert state.streams_per_partition == 3
+        assert state.latency_budget_ms == 275.5
+
+    def test_persist_records_the_lever_being_off(self, monkeypatch):
+        monkeypatch.delenv(pl.PARTITION_MODES_ENV, raising=False)
+        monkeypatch.delenv(pl.STREAMS_PER_PARTITION_ENV, raising=False)
+        monkeypatch.delenv("HYPERLOOM_MAX_LATENCY_MS", raising=False)
+        state = self._state(("DPX",), 3, 400.0)
+        cli._persist_partition_lever(state)
+        assert state.compute_partition_modes == []
+        assert state.latency_budget_ms == 0.0
+
+
+def test_streams_per_partition_parses_to_none_when_not_passed():
+    """Locks the parser half of the resume contract.
+
+    ``_restore_partition_lever_from_state`` can only tell "not passed" from
+    "passed 2" if the flag's default stays None. Giving it a default of 2 --
+    which reads as harmless, since 2 is the documented default -- would make
+    every resume overwrite a persisted streams count with 2 and quietly change
+    the experiment.
+    """
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    args = _build_parser().parse_args(["optimize", "--model", "/tmp/m"])
+    assert args.streams_per_partition is None
+    assert args.compute_partition_modes is None
+    assert args.max_latency_ms is None
+
+    passed = _build_parser().parse_args(
+        ["optimize", "--model", "/tmp/m", "--streams-per-partition", "2"]
+    )
+    assert passed.streams_per_partition == 2
+
+
+def test_read_session_lever_tolerates_a_malformed_budget(monkeypatch):
+    # The env is machine-written, but a hand-edited resume script is not, and a
+    # crash in the seed path would lose the session rather than the value.
+    monkeypatch.setenv("HYPERLOOM_MAX_LATENCY_MS", "not-a-number")
+    monkeypatch.setenv(pl.PARTITION_MODES_ENV, " DPX , , CPX ")
+    modes, streams, budget = pl.read_session_lever()
+    assert modes == ("DPX", "CPX")
+    assert budget == 0.0
+    assert streams >= 1

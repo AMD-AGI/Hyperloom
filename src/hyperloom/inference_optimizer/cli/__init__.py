@@ -66,6 +66,11 @@ from .bootstrap import (
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
 from hyperloom.orchestrator.actions.executors._latency_budget import LATENCY_BUDGET_ENV
+from hyperloom.orchestrator.actions.executors._partition_lever import (
+    PARTITION_MODES_ENV,
+    STREAMS_PER_PARTITION_ENV,
+    read_session_lever,
+)
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -1632,13 +1637,6 @@ def _export_operator_launch_shape(
         os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
 
 
-#: Internal handoff for the compute-partition lever. Operators pass
-#: ``--compute-partition-modes`` / ``--streams-per-partition`` /
-#: ``--max-latency-ms``; these carry the resolved values to the executors.
-PARTITION_MODES_ENV = "HYPERLOOM_COMPUTE_PARTITION_MODES"
-STREAMS_PER_PARTITION_ENV = "HYPERLOOM_STREAMS_PER_PARTITION"
-
-
 def _export_partition_lever(
     *,
     modes_raw: str | None,
@@ -1703,6 +1701,49 @@ def _export_partition_lever(
     os.environ[PARTITION_MODES_ENV] = ",".join(modes)
     os.environ[STREAMS_PER_PARTITION_ENV] = str(int(streams_per_partition))
     return modes
+
+
+def _restore_partition_lever_from_state(args: Any, state: SharedState) -> None:
+    """Fill the partition lever from env or archive when this resume omitted it.
+
+    Priority is CLI flag > already-exported env > archived ``SharedState``, the
+    same chain :func:`_restore_operator_supplied_paths_from_state` applies to
+    the custom-workload paths. Resolved values are written back onto ``args`` so
+    :func:`_export_partition_lever` remains the only writer of the env it owns,
+    and so the flag still gets validated rather than trusted.
+
+    The archive tier is what lets a resume reproduce the session's measurement
+    contract: partition mode and streams-per-partition are part of *how* a
+    number was obtained, so a resume that silently dropped them would compare
+    candidates measured under partitioning against a baseline that was not.
+
+    Args:
+        args: Parsed CLI namespace, updated in place.
+        state: Resumed session state.
+    """
+    if not str(getattr(args, "compute_partition_modes", None) or "").strip():
+        env_modes = os.environ.get(PARTITION_MODES_ENV, "").strip()
+        args.compute_partition_modes = env_modes or ",".join(state.compute_partition_modes or [])
+    if not (getattr(args, "streams_per_partition", None) or 0):
+        env_streams = os.environ.get(STREAMS_PER_PARTITION_ENV, "").strip()
+        args.streams_per_partition = int(env_streams or state.streams_per_partition or 2)
+    if not (getattr(args, "max_latency_ms", None) or 0.0):
+        env_budget = os.environ.get(LATENCY_BUDGET_ENV, "").strip()
+        args.max_latency_ms = float(env_budget or state.latency_budget_ms or 0.0)
+
+
+def _persist_partition_lever(state: SharedState) -> None:
+    """Mirror the live lever env back onto ``state`` for the next resume.
+
+    Without this a resume that re-passed ``--max-latency-ms`` would publish the
+    new budget to the executors while the manifest kept the old one, so the
+    session would be measured under one contract and recorded under another --
+    and the resume after it would restore the stale number.
+    """
+    modes, streams, budget = read_session_lever()
+    state.compute_partition_modes = list(modes)
+    state.streams_per_partition = streams
+    state.latency_budget_ms = budget
 
 
 # Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
@@ -2013,16 +2054,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             server_args=_resume_server_args,
             extra_env=_resume_extra_env,
         )
-        # The lever is part of the measurement contract: a resume that dropped
-        # it would compare candidates measured under partitioning against a
-        # baseline that no longer is.
+        # The lever is part of the measurement contract, so it resumes on the
+        # same restore / apply / persist path as the custom-workload paths below.
+        _restore_partition_lever_from_state(args, state)
         _export_partition_lever(
-            modes_raw=getattr(args, "compute_partition_modes", None) or state.compute_partition_modes,
-            streams_per_partition=int(
-                getattr(args, "streams_per_partition", 0) or state.streams_per_partition or 2
-            ),
-            max_latency_ms=getattr(args, "max_latency_ms", None) or state.latency_budget_ms,
+            modes_raw=getattr(args, "compute_partition_modes", None),
+            streams_per_partition=int(getattr(args, "streams_per_partition", None) or 2),
+            max_latency_ms=getattr(args, "max_latency_ms", None),
         )
+        _persist_partition_lever(state)
+        if state.compute_partition_modes:
+            print(f"  re-exported partition modes: {','.join(state.compute_partition_modes)}")
+        if state.latency_budget_ms:
+            print(f"  re-exported max_latency_ms : {state.latency_budget_ms:g}")
         state.operator_server_args = _resume_server_args
         state.operator_extra_env = _resume_extra_env
         if _resume_server_args:
