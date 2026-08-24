@@ -157,8 +157,6 @@ class LocalProbeConfig:
     optimizer_runs_dirname: str = "optimizer_runs"
     # External-deps probe.
     external_deps_enabled: bool = True
-    # Per-mount stat-latency budget; above this → ``wekafs_degraded``.
-    external_mount_stat_timeout_s: float = 5.0
     # Override gateway probe URL; empty → derive from ``$OPENAI_BASE_URL`` + ``/models``.
     external_gateway_probe_url: str = ""
 
@@ -292,7 +290,6 @@ class LocalProbeSource:
         local_external_deps = (
             await _probe_external_deps(
                 cfg.external_gateway_probe_url,
-                cfg.external_mount_stat_timeout_s,
                 cfg.health_probe_timeout_s,
             )
             if cfg.external_deps_enabled
@@ -2029,7 +2026,6 @@ def _probe_coordinator_pid(
 
 async def _probe_external_deps(
     gateway_probe_url_override: str,
-    mount_timeout_s: float,
     http_timeout_s: float,
 ) -> dict[str, Any]:
     """Async wrapper that runs the external-dependency probes once per tick.
@@ -2038,8 +2034,6 @@ async def _probe_external_deps(
         gateway_probe_url_override (str): Explicit gateway probe URL;
             when empty it is derived from ``$OPENAI_BASE_URL`` +
             ``/models``.
-        mount_timeout_s (float): Per-mount stat-latency budget passed to
-            the mounts probe.
         http_timeout_s (float): Timeout for the gateway HTTP probe.
 
     Returns:
@@ -2052,10 +2046,7 @@ async def _probe_external_deps(
         if base:
             gateway_url = base.rstrip("/") + "/models"
     gateway = await _probe_gateway_health(gateway_url, http_timeout_s) if gateway_url else {}
-    mounts = await asyncio.to_thread(
-        _probe_external_mounts,
-        mount_timeout_s,
-    )
+    mounts = await asyncio.to_thread(_probe_external_mounts)
     tracelens_cli = await asyncio.to_thread(_probe_tracelens_cli)
     if not gateway and not mounts and not tracelens_cli:
         return {}
@@ -2145,23 +2136,20 @@ _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _probe_external_mounts(
-    timeout_s: float,
-) -> list[dict[str, Any]]:
-    """``os.stat`` each external mount, time it, flag slow / failing.
+def _probe_external_mounts() -> list[dict[str, Any]]:
+    """``os.stat`` each external mount, recording reachability and latency.
 
     Mount paths are read from the env names in
     :data:`_EXTERNAL_MOUNT_ENVS` at probe time so an operator can
     relocate them without a rebuild; unset envs are skipped rather than
     falling back to a default path.
 
-    Args:
-        timeout_s (float): Stat-latency budget in seconds; echoed back
-            as ``timeout_ms`` so the signal layer can flag slow mounts.
+    Latency is classified against the ``ExternalDepsConfig`` thresholds
+    in the signal layer.
 
     Returns:
         list[dict[str, Any]]: One ``{env_name, path, ok, error,
-        latency_ms, timeout_ms}`` entry per configured mount.
+        latency_ms}`` entry per configured mount.
     """
     out: list[dict[str, Any]] = []
     for env_name, default_path in _EXTERNAL_MOUNT_ENVS:
@@ -2189,7 +2177,6 @@ def _probe_external_mounts(
                 "ok": ok,
                 "error": error,
                 "latency_ms": round(latency_ms, 2),
-                "timeout_ms": timeout_s * 1000.0,
             }
         )
     return out
