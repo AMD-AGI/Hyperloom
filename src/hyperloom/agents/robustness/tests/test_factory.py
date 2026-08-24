@@ -379,9 +379,9 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_quiet_source_when_local_probe_disabled(tmp_path: Path):
-    """``disable_local_probe`` swaps the LocalProbe for a quiet stub that never yields high-severity local symptoms."""
-    from hyperloom.agents.robustness.factory import _QuietSource
+async def test_factory_uses_blind_source_when_local_probe_disabled(tmp_path: Path):
+    """``disable_local_probe`` swaps the LocalProbe for a blind stub that returns empty data."""
+    from hyperloom.agents.robustness.factory import _BlindSource
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
     config = Config(session_dir=tmp_path, disable_local_probe=True)
@@ -389,12 +389,12 @@ async def test_factory_uses_quiet_source_when_local_probe_disabled(tmp_path: Pat
     try:
         router = bundle.components.router
         primary = router._primary  # type: ignore[attr-defined]
-        assert isinstance(primary, _QuietSource)
+        assert isinstance(primary, _BlindSource)
         assert not isinstance(primary, LocalProbeSource)
         data = await primary.fetch(None)
         assert data.local_processes == []
         assert data.local_server_health == []
-        assert data.degraded_reason and "local-probe disabled" in data.degraded_reason
+        assert data.local_processes_known is False
     finally:
         await bundle.aclose()
 

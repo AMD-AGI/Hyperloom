@@ -98,7 +98,7 @@ def _leak_data() -> SourceData:
             ],
         },
         local_processes=[],
-        sources_used=["local"],
+        
     )
 
 
@@ -108,7 +108,7 @@ def _ray_pending_data(pending: int = 7) -> SourceData:
             "healthy": True,
             "pending_tasks": pending,
         },
-        sources_used=["local"],
+        
     )
 
 
@@ -144,7 +144,7 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
         local_processes=[
             {"pid": 4242, "cmd": "python -m sglang.launch_server"},
         ],
-        sources_used=["local"],
+        
     )
     # Rebuild with a matching owner pattern to exercise reset.
     c2, store2 = _fresh_classifier(tmp_path)
@@ -202,13 +202,13 @@ def test_gain_plateau_history_survives_subprocess_restarts(
             cumulative_gain_validated=0.0,
             optimization_stack_size=1,
         )
-        c.classify(SourceData(sources_used=["local"]), ctx)
+        c.classify(SourceData(), ctx)
         store.flush_atomic()
     # After three flat ticks the rolling window is full and delta is 0
     # → ``gain_plateau`` should fire on a 4th classifier instance.
     c4, store4 = _fresh_classifier(tmp_path)
     syms = c4.classify(
-        SourceData(sources_used=["local"]),
+        SourceData(),
         _ctx_with_tick(
             4,
             cumulative_gain_validated=0.0,
