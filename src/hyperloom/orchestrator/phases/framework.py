@@ -3133,9 +3133,6 @@ class FrameworkPhase(PhaseHandler):
         """
         state = self.shared_state
         try:
-            history = getattr(state, "phase_history", None)
-            if not isinstance(history, list):
-                return
             from ..framework import client as _fa_client
             from ..framework.artifacts import summarize_candidate_outcomes
 
@@ -3170,10 +3167,10 @@ class FrameworkPhase(PhaseHandler):
             if advisory:
                 log.warning("FRAMEWORK advisory: %s", advisory)
 
-            history.append(
-                {
+            state.append_phase_history_event(
+                reason=reason,
+                evidence={
                     "event": "framework_agent_phase_done",
-                    "reason": reason,
                     "failure_count": int(failure_count),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
                     "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
@@ -3183,8 +3180,7 @@ class FrameworkPhase(PhaseHandler):
                     "tested": int(summary.get("tested") or 0),
                     "consecutive_empty_discoveries": consecutive_empty,
                     "advisory": advisory,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
+                },
             )
         except Exception:  # noqa: BLE001 — defensive
             pass
@@ -3371,17 +3367,15 @@ class FrameworkPhase(PhaseHandler):
                 last_exc,
             )
             try:
-                history = getattr(state, "phase_history", None)
-                if isinstance(history, list):
-                    history.append(
-                        {
-                            "event": "framework_agent_discover_failed",
-                            "attempt": failures,
-                            "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                            "error": repr(last_exc),
-                            "ts": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
+                state.append_phase_history_event(
+                    reason="framework_agent_discover_failed",
+                    evidence={
+                        "event": "framework_agent_discover_failed",
+                        "attempt": failures,
+                        "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                        "error": repr(last_exc),
+                    },
+                )
             except Exception:  # noqa: BLE001 — defensive
                 pass
             state.save(self.session_dir)
@@ -4317,6 +4311,11 @@ class FrameworkPhase(PhaseHandler):
         boot the model before KEEP is declared. Each row is read once, except that
         a build whose probe was cancelled before it ran is read again: nothing
         launched the runtime, so nothing has decided anything about that build.
+
+        Oldest-unrouted-first avoids starving older builds when a newer row is
+        already routed; the tradeoff is that a succeeded build whose probe cannot
+        be enqueued yet is retried every tick and can defer newer failed builds
+        until its probe opens or the budget recovers.
         """
         try:
             all_tasks = []
@@ -4324,42 +4323,70 @@ class FrameworkPhase(PhaseHandler):
                 all_tasks.extend(t for t in await self.tasks.by_state(st) if t.kind == "targeted_build")
             if not all_tasks:
                 return
-            # Pick the most recent terminal row (by updated_at).
-            task = sorted(all_tasks, key=lambda t: str(getattr(t, "updated_at", "") or ""))[-1]
-            task_id = str(getattr(task, "task_id", "") or "")
-            # Skip rows already accounted for (tracked by enablement_build_manifest),
-            # unless what they were routed to was cancelled before it ran, which
-            # leaves the build no more launched than an unrouted one.
-            state = self.shared_state
-            routed = self._build_routing_record(task_id)
-            if routed is not None and not await self._build_probe_was_cancelled(routed):
+            # Oldest terminal row first so a newer, already-routed build cannot
+            # hide an older build that still needs routing.
+            for task in sorted(
+                all_tasks,
+                key=lambda t: str(getattr(t, "updated_at", "") or ""),
+            ):
+                task_id = str(getattr(task, "task_id", "") or "")
+                # Skip rows already accounted for (tracked by enablement_build_manifest),
+                # unless what they were routed to was cancelled before it ran, which
+                # leaves the build no more launched than an unrouted one.
+                routed = self._build_routing_record(task_id)
+                if routed is not None and not await self._build_probe_was_cancelled(routed):
+                    continue
+
+                if task.state == "succeeded":
+                    await self._route_succeeded_build(task, routed)
+                else:
+                    await self._route_failed_build(task)
                 return
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
-            if task.state == "succeeded":
-                await self._route_succeeded_build(task, routed)
-                return
+    async def _route_failed_build(self, task: "Task") -> None:
+        """Route a failed targeted_build row through the enablement rearm path."""
+        task_id = str(getattr(task, "task_id", "") or "")
+        state = self.shared_state
+        fc = ""
+        # failed row — read failure_class from history or last_build_failure
+        history = getattr(task, "history", None) or []
+        if isinstance(history, (list, tuple)) and history:
+            last_ev = history[-1]
+            if isinstance(last_ev, dict):
+                fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
 
-            # A failed build is accounted for the moment it is read: the rearm
-            # below is the whole outcome, so re-reading the row would charge the
-            # stall streak twice for one build.
-            self._note_build_routed(task_id)
-            fc = ""
-            # failed row — read failure_class from history or last_build_failure
-            history = getattr(task, "history", None) or []
-            if isinstance(history, (list, tuple)) and history:
-                last_ev = history[-1]
-                if isinstance(last_ev, dict):
-                    fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
+        lbf = state.enablement.last_build_failure or {}
+        if not fc and isinstance(lbf, dict):
+            fc = str(lbf.get("failure_class") or "")
 
-            lbf = state.enablement.last_build_failure or {}
-            if not fc and isinstance(lbf, dict):
-                fc = str(lbf.get("failure_class") or "")
+        # Novelty ledger: time-based failures are always advanced; defect
+        # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
+        # has not been seen before (novel), reverted when it is a repeat.
+        time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
+        novelty_key: list[Any] | None = None
+        if fc in time_classes:
+            new_log = str(state.enablement.launch_log or "")
+            res = {
+                "enablement": True,
+                "status": "advanced",
+                "advanced": True,
+                "patches_applied": [],
+                "enablement_launch_log": new_log,
+            }
+        else:
+            from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
 
-            # Novelty ledger: time-based failures are always advanced; defect
-            # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
-            # has not been seen before (novel), reverted when it is a repeat.
-            time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
-            if fc in time_classes:
+            task_params = getattr(task, "params", None) or {}
+            _action = _TBA.from_state(task_params)
+            _key = list(_bnk(_action))
+            ledger = list(state.enablement.build_novelty or [])
+            is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
+            if is_repeat:
+                res = {"enablement": True, "status": "reverted"}
+                novelty_key = None
+            else:
                 new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
@@ -4368,36 +4395,21 @@ class FrameworkPhase(PhaseHandler):
                     "patches_applied": [],
                     "enablement_launch_log": new_log,
                 }
-            else:
-                from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
-
-                task_params = getattr(task, "params", None) or {}
-                _action = _TBA.from_state(task_params)
-                _key = list(_bnk(_action))
-                ledger = list(state.enablement.build_novelty or [])
-                is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
-                ledger.append(_key)
-                state.enablement.build_novelty = ledger[-20:]
-                if is_repeat:
-                    res = {"enablement": True, "status": "reverted"}
-                else:
-                    new_log = str(state.enablement.launch_log or "")
-                    res = {
-                        "enablement": True,
-                        "status": "advanced",
-                        "advanced": True,
-                        "patches_applied": [],
-                        "enablement_launch_log": new_log,
-                    }
-            log.info(
-                "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
-                res["status"],
-                task_id,
-                fc,
-            )
-            self._maybe_rearm_enablement(res)
-        except Exception:  # noqa: BLE001 — never wedge the tick
-            log.debug("enablement: route_build_outcomes failed", exc_info=True)
+                novelty_key = _key
+        log.info(
+            "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
+            res["status"],
+            task_id,
+            fc,
+        )
+        # Rearm, ledger append, and manifest ack must stay together: a failed
+        # rearm leaves the build unrouted and the novelty ledger unchanged.
+        self._maybe_rearm_enablement(res)
+        if novelty_key is not None:
+            ledger = list(state.enablement.build_novelty or [])
+            ledger.append(novelty_key)
+            state.enablement.build_novelty = ledger[-20:]
+        self._note_build_routed(task_id)
 
     async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
         """Turn a succeeded targeted build into a launch probe, or a no-progress round.
@@ -4435,9 +4447,9 @@ class FrameworkPhase(PhaseHandler):
 
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
-            self._note_build_routed(task_id)
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
             self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
+            self._note_build_routed(task_id)
             return
 
         log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
