@@ -406,8 +406,10 @@ class PhaseEvent(TypedDict, total=False):
 # Capability summary — Capability cards in UI
 class CapabilityEntry(TypedDict, total=False):
     status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
-    attempts: int
-    keeps: int  # kernels adopted at integrate (NOT micro-only KEEP)
+    attempts: int  # invocation rows, NOT distinct kernels: how many tries
+    keeps: int  # distinct kernels adopted at integrate (NOT micro-only KEEP)
+    micro_only_keeps: int  # micro-KEPT kernels that never reached integrate
+    pending_integrate: int  # micro-KEPT kernels whose integrate verdict is undecided
     reverts: int  # micro-KEPT kernels reverted at integrate (e2e regressed)
     e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
     tested: int  # for backends/params/explore: distinct variants tested
@@ -430,8 +432,7 @@ class CapabilitySummary(TypedDict, total=False):
 
     Attributes:
         geak (CapabilityEntry): GEAK kernel-generation capability.
-        forge (CapabilityEntry): Forge kernel-generation capability; emitted by
-            the collector but not yet declared on this TypedDict.
+        forge (CapabilityEntry): Forge kernel-generation capability.
         explore (CapabilityEntry): Primary explore (param/backend search) row.
         backends (CapabilityEntry): Compatibility alias for backend exploration.
         params (CapabilityEntry): Compatibility alias for param exploration.
@@ -443,6 +444,7 @@ class CapabilitySummary(TypedDict, total=False):
     """
 
     geak: CapabilityEntry
+    forge: CapabilityEntry
     # primary explore row; backends/params/validate_stack are compat aliases.
     explore: CapabilityEntry
     backends: CapabilityEntry

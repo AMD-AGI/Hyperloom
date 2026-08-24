@@ -171,6 +171,24 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     }
 
 
+# Sections whose renderer is registered but whose data nothing produces: no
+# collector, exporter key or recorder fragment ever fills them. They are always
+# skipped, so surfacing that as a data-quality flag would tell the reader this
+# run came up short when the truth is that the feature was never wired up --
+# and four permanent flags would drown the ones that do describe the session.
+# ``test_breakdown_report_integrity`` recomputes this set from the real
+# exporter + recorder key space, so wiring a producer up (or adding another
+# dead section) fails the suite instead of silently drifting.
+_SECTIONS_WITHOUT_PRODUCER = frozenset(
+    {
+        "data_provenance",
+        "decision_journal",
+        "kernel_decision_path",
+        "kernel_profiling",
+    }
+)
+
+
 def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
@@ -199,8 +217,20 @@ def _data_quality_flags(
         flags.append(line)
 
     for sec in rendered:
-        # Skip dropped sections.
         if sec.skipped:
+            if sec.section_id in _SECTIONS_WITHOUT_PRODUCER:
+                continue
+            # A dropped section still carries evidence: "this never ran" is a
+            # data-quality fact, and discarding it lets a reader mistake an
+            # untested area for a clean one. Prefer the renderer's warnings,
+            # fall back to its key facts, and state the absence either way.
+            # Both, not either: a renderer that logged a warning may still
+            # carry the key fact that explains it, and ``or`` would drop it.
+            evidence = [*sec.warnings, *sec.key_facts]
+            for line in evidence:
+                _push(f"[{sec.section_id}] skipped: {line}")
+            if not evidence:
+                _push(f"[{sec.section_id}] skipped: no data recorded this session.")
             continue
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
