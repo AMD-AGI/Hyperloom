@@ -9,14 +9,30 @@ numbers); any cross-section reasoning belongs in this module.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from hyperloom.common.coerce import to_float
 
-from .base import RenderedSection
+from .base import RenderedSection, as_dict
+
+log = logging.getLogger(__name__)
 
 __all__ = ["GlobalFacts", "build_global_facts"]
+
+_T = TypeVar("_T")
+
+#: Stage counts every consumer of the funnel indexes unconditionally.
+_EMPTY_FUNNEL: dict[str, int] = {
+    "detected": 0,
+    "recommended": 0,
+    "optimized": 0,
+    "adopted": 0,
+    "partial": 0,
+    "reverted": 0,
+    "rejected": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -87,21 +103,13 @@ def _gain_attribution_lines(
     summary = optimizations.get("summary_by_source") or {}
     validation = optimizations.get("validation") or {}
     canonical_sources = {
-        source: to_float(bucket.get("total_gain_pct"))
-        for source, bucket in summary.items()
-        if isinstance(bucket, dict)
+        source: to_float(bucket.get("total_gain_pct")) for source, bucket in summary.items() if isinstance(bucket, dict)
     }
-    canonical_nonzero = {
-        source: gain
-        for source, gain in canonical_sources.items()
-        if gain and gain != 0
-    }
+    canonical_nonzero = {source: gain for source, gain in canonical_sources.items() if gain and gain != 0}
     canonical_total = sum(canonical_nonzero.values())
     if canonical_nonzero and canonical_total:
         lines = [
-            f"{source}: {gain:.2f}% of total "
-            f"(={(gain / canonical_total * 100):.0f}% share of "
-            f"{canonical_total:.2f}%)"
+            f"{source}: {gain:.2f}% of total (={(gain / canonical_total * 100):.0f}% share of {canonical_total:.2f}%)"
             for source, gain in sorted(
                 canonical_nonzero.items(),
                 key=lambda item: -item[1],
@@ -297,23 +305,43 @@ def build_global_facts(
         rendered (list[RenderedSection]): The already-rendered sections, used
             to gather per-section data-quality warnings.
 
+    Each fact is computed in isolation: a section whose shape drifted from
+    what its computation expects costs that one fact and is reported as a
+    data-quality flag, rather than losing the whole pack.
+
     Returns:
         GlobalFacts: The populated, frozen fact pack.
     """
-    workload = breakdown.get("workload") or {}
-    session = breakdown.get("session") or {}
-    attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
-    kept, not_attempted = _capabilities_split(breakdown)
+    unavailable: list[str] = []
+
+    def _fact(label: str, compute: Callable[[], _T], default: _T) -> _T:
+        """Compute one fact, recording a flag and falling back on failure."""
+        try:
+            return compute()
+        except Exception as exc:  # noqa: BLE001 — one bad fact must not lose the pack
+            log.exception("global fact %s failed", label)
+            unavailable.append(f"`{label}` could not be computed: {type(exc).__name__}: {exc}")
+            return default
+
+    workload = as_dict(breakdown.get("workload"))
+    session = as_dict(breakdown.get("session"))
+    attribution_lines, attribution_method = _fact(
+        "gain_attribution",
+        lambda: _gain_attribution_lines(breakdown),
+        ([], "unavailable"),
+    )
+    kept, not_attempted = _fact("capabilities", lambda: _capabilities_split(breakdown), ([], []))
+    flags = _fact("data_quality_flags", lambda: _data_quality_flags(breakdown, rendered), [])
     return GlobalFacts(
-        headline=_headline(breakdown),
+        headline=_fact("headline", lambda: _headline(breakdown), "no headline available"),
         stop_reason=str(session.get("stop_reason") or ""),
         elapsed_minutes=to_float(session.get("elapsed_minutes")),
-        objective=dict(workload.get("objective") or {}),
-        workload_summary=_workload_summary(workload),
+        objective=_fact("objective", lambda: dict(workload.get("objective") or {}), {}),
+        workload_summary=_fact("workload_summary", lambda: _workload_summary(workload), "unavailable"),
         gain_attribution_lines=attribution_lines,
         capabilities_not_attempted=not_attempted,
         capabilities_kept=kept,
-        kernel_pipeline_funnel=_kernel_funnel(breakdown),
-        data_quality_flags=_data_quality_flags(breakdown, rendered),
+        kernel_pipeline_funnel=_fact("kernel_pipeline_funnel", lambda: _kernel_funnel(breakdown), dict(_EMPTY_FUNNEL)),
+        data_quality_flags=flags + unavailable,
         attribution_method=attribution_method,
     )

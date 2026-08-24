@@ -10,17 +10,38 @@ narrates ``key_facts``.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "Decision",
     "RenderedSection",
     "RendererFn",
     "REGISTRY",
+    "as_dict",
     "register_renderer",
+    "render_section",
 ]
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """The value when it is a mapping, else an empty dict.
+
+    Section values are read back from JSON a producer wrote, so a section
+    that drifted to a list or a string must not turn attribute access into
+    an exception.
+
+    Args:
+        value: A breakdown section value.
+
+    Returns:
+        ``value`` when it is a dict, otherwise ``{}``.
+    """
+    return value if isinstance(value, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -93,6 +114,37 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
         return fn
 
     return _wrap
+
+
+def render_section(
+    section_id: str,
+    fn: RendererFn,
+    breakdown: dict[str, Any],
+) -> RenderedSection:
+    """Run one renderer, degrading to a warning-only section when it raises.
+
+    Sections are rendered from whatever the producers wrote, and a section
+    whose shape drifted from what its renderer expects must cost that one
+    section rather than the whole report. The failure is surfaced as a data
+    quality warning so it is visible in the output instead of silent.
+
+    Args:
+        section_id: Registry id of the renderer, used for the fallback title.
+        fn: The renderer to invoke.
+        breakdown: The parsed ``session_breakdown.json`` dict.
+
+    Returns:
+        The renderer's section, or a placeholder naming the failure.
+    """
+    try:
+        return fn(breakdown)
+    except Exception as exc:  # noqa: BLE001 — one bad section must not lose the report
+        log.exception("report section %s failed to render", section_id)
+        return RenderedSection(
+            section_id=section_id,
+            title=section_id.replace("_", " ").title(),
+            warnings=[f"section could not be rendered: {type(exc).__name__}: {exc}"],
+        )
 
 
 # Small markdown helpers.

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .base import REGISTRY, RenderedSection
+from .base import REGISTRY, RenderedSection, as_dict, render_section
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
@@ -138,7 +138,7 @@ def render_session_report(
             (sections, global facts, prompt and raw LLM response) for replay
             and debugging.
     """
-    sections = [fn(breakdown) for _sid, fn in REGISTRY]
+    sections = [render_section(sid, fn, breakdown) for sid, fn in REGISTRY]
     global_facts = build_global_facts(breakdown, sections)
     user_prompt = build_user_prompt(sections, global_facts)
 
@@ -199,7 +199,7 @@ def _stitch(
     Returns:
         str: The complete report markdown, newline-terminated.
     """
-    session = breakdown.get("session") or {}
+    session = as_dict(breakdown.get("session"))
     title = f"# Hyperloom Session Report — {session.get('session_id') or '(no session_id)'}"
 
     parts: list[str] = [title, ""]
