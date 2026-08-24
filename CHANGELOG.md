@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **`stop_ray_if_owned` and the ownership return value of `ensure_ray_cluster` are gone.**
+  `stop_ray_if_owned` was introduced alongside `parallel_e2e_runner.py` and was
+  called exclusively by `_stop_ray_via_helper` in that script. When
+  `parallel_e2e_runner.py` was retired in `c92784cbf`, the helper was deleted but
+  `stop_ray_if_owned` was left behind with zero production call sites, no test
+  references, and no `__all__` or documentation contract. `ensure_ray_cluster`
+  returned the ownership flag only for that pair; with the pair gone the return
+  value had no consumer. The function is deleted and the signature narrowed to
+  `-> None`. The standard deployment path starts a long-lived shared head via
+  `install.sh`; `ensure_ray_cluster` connects to it and returns immediately, so
+  nothing that previously ran after a `False` return changes behaviour.
+
 - **The `reference_envs` filter inside `materialize_config_with_envs` is gone.**
   The only writer of that mapping is `cli/bootstrap.py` via
   `reference_script.parse_reference_script`, which already filters every key
