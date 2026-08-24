@@ -41,6 +41,50 @@ _AUDIT_ACTIONS = (
 )
 
 
+class TimelineDedup:
+    """Decide which timeline rows describe an event already seen.
+
+    Rows collide on ``(action, ts-to-second, change)``. Rows that also carry
+    distinct task ids are distinct events and are all kept -- but only while
+    every row seen for that triple was itself task-tagged. An untagged row is
+    the same event observed from another source (journal vs audit list vs
+    recorder fragment), so it keeps the legacy fold rather than duplicating.
+
+    The collector and the exporter merge different mixes of those sources.
+    Sharing this decision is what stops them disagreeing about what one event
+    is: an exporter with a weaker identity silently drops rows the collector
+    would have kept, and nothing downstream can tell that happened.
+    """
+
+    def __init__(self) -> None:
+        """Start with no events seen."""
+        self._seen: dict[tuple[str, str, str], set[str]] = {}
+
+    def is_new(self, ev: dict[str, Any]) -> bool:
+        """Record ``ev`` and report whether it is an event not seen before.
+
+        Args:
+            ev (dict[str, Any]): One timeline event row.
+
+        Returns:
+            bool: ``True`` when the row should be kept.
+        """
+        base = (
+            str(ev.get("action") or ""),
+            iso_z(ev.get("ts"))[:19],
+            str(ev.get("change") or ev.get("task_id") or ""),
+        )
+        task_id = str(ev.get("task_id") or "")
+        prior = self._seen.get(base)
+        if prior is None:
+            self._seen[base] = {task_id}
+            return True
+        if task_id and task_id not in prior and all(prior):
+            prior.add(task_id)
+            return True
+        return False
+
+
 def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
     """Map one optimization_journal entry to a phase_timeline event.
 
@@ -227,29 +271,8 @@ def collect_phase_timeline(
         ev["ts"] = iso_z(ev.get("ts"))
 
     # De-dup: journal rows are appended first and win on collision.
-    #
-    # Rows collide on ``(action, ts-to-second, change)``. Rows that also carry
-    # distinct task ids are distinct events and are all kept -- but only while
-    # every row seen for that triple was itself task-tagged. An untagged row is
-    # the same event observed from the other source (journal vs audit list), so
-    # it keeps the legacy fold instead of being duplicated.
-    seen_tasks: dict[tuple[str, str, str], set[str]] = {}
-    deduped: list[dict[str, Any]] = []
-    for ev in events:
-        base = (
-            str(ev.get("action") or ""),
-            (str(ev.get("ts") or ""))[:19],
-            str(ev.get("change") or ev.get("task_id") or ""),
-        )
-        task_id = str(ev.get("task_id") or "")
-        prior = seen_tasks.get(base)
-        if prior is None:
-            seen_tasks[base] = {task_id}
-            deduped.append(ev)
-            continue
-        if task_id and task_id not in prior and all(prior):
-            prior.add(task_id)
-            deduped.append(ev)
+    dedup = TimelineDedup()
+    deduped = [ev for ev in events if dedup.is_new(ev)]
 
     deduped.sort(key=lambda e: e.get("ts") or "")
     return deduped
@@ -315,6 +338,30 @@ def _fold_search_ledger_keeps(row: dict[str, Any], search: dict[str, Any]) -> No
     row["status"] = "kept"
 
 
+# How decided a verdict is. One kernel can carry several integrate rows (the
+# ledger is keyed ``<kernel_id>|<patch_path>|<extra_args>``), and folding them
+# by kernel must not hand the outcome to whichever row is iterated last: an
+# adopted patch is not undone by a reverted sibling. Anything unlisted --
+# ``NEEDS_REVIEW``, or no decision recorded yet -- ranks lowest, because it is
+# the absence of a verdict rather than a verdict.
+_VERDICT_RANK = {"KEEP": 3, "REVERT": 2, "REJECT": 2}
+
+
+def _stronger_verdict(current: str, candidate: str) -> str:
+    """Return whichever of two integrate verdicts is more decided.
+
+    Args:
+        current (str): The verdict folded so far.
+        candidate (str): The verdict being folded in.
+
+    Returns:
+        str: The verdict that should represent the kernel.
+    """
+    if _VERDICT_RANK.get(candidate, 1) > _VERDICT_RANK.get(current, 1):
+        return candidate
+    return current
+
+
 def collect_capability_summary(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
@@ -343,10 +390,17 @@ def collect_capability_summary(
             kid = str(ent.get("kernel_id") or "")
             if not kid:
                 continue
-            integ_by_kid[kid] = {
-                "decision": str(ent.get("last_decision") or "").upper(),
-                "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
-            }
+            decision = str(ent.get("last_decision") or "").upper()
+            gain = _to_float(ent.get("best_gain_pct"))
+            prior = integ_by_kid.get(kid)
+            if prior is None:
+                integ_by_kid[kid] = {"decision": decision, "e2e_gain_pct": gain}
+                continue
+            # Fold, never overwrite: several patches for one kernel each get
+            # their own row here.
+            prior["decision"] = _stronger_verdict(prior["decision"], decision)
+            if gain is not None and (prior["e2e_gain_pct"] is None or gain > prior["e2e_gain_pct"]):
+                prior["e2e_gain_pct"] = gain
 
     # Kernel backends from on-disk invocations, reconciled against the integrate verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -365,6 +419,7 @@ def collect_capability_summary(
         # across runs is still one kernel.
         adopted_kids: set[str] = set()
         reverted_kids: set[str] = set()
+        pending_kids: set[str] = set()
         micro_only_kids: set[str] = set()
         best_e2e: float | None = None
         for i, v in enumerate(invs):
@@ -380,18 +435,29 @@ def collect_capability_summary(
                 # ``keeps`` is "kernels adopted at integrate").
                 micro_only_kids.add(ident)
                 continue
-            g = outcome["e2e_gain_pct"]
-            if g is not None and (best_e2e is None or g > best_e2e):
-                best_e2e = g
-            if outcome["decision"] in ("REVERT", "REJECT"):
+            decision = outcome["decision"]
+            if decision == "KEEP":
+                adopted_kids.add(ident)
+                # Only an adoption contributes to "best gain": a reverted
+                # patch's number describes a regression, and an undecided
+                # one describes a measurement nobody has ruled on.
+                g = outcome["e2e_gain_pct"]
+                if g is not None and (best_e2e is None or g > best_e2e):
+                    best_e2e = g
+            elif decision in ("REVERT", "REJECT"):
                 reverted_kids.add(ident)
             else:
-                adopted_kids.add(ident)
-        # An adoption outranks a revert or a micro-only KEEP for the same kernel.
+                # NEEDS_REVIEW, or no decision recorded. The verdict is not in,
+                # and a gain <= 0 NEEDS_REVIEW never gets retried, so calling
+                # this an adoption misreports it for the rest of the session.
+                pending_kids.add(ident)
+        # A decided outcome outranks an undecided one for the same kernel.
         reverted_kids -= adopted_kids
-        micro_only_kids -= adopted_kids | reverted_kids
+        pending_kids -= adopted_kids | reverted_kids
+        micro_only_kids -= adopted_kids | reverted_kids | pending_kids
         adopted = len(adopted_kids)
         reverted = len(reverted_kids)
+        pending = len(pending_kids)
         micro_only = len(micro_only_kids)
         status = (
             "kept" if adopted > 0 else "reverted" if reverted > 0 else "attempted" if attempts > 0 else "not_attempted"
@@ -403,6 +469,8 @@ def collect_capability_summary(
         }
         if reverted:
             row["reverts"] = reverted
+        if pending:
+            row["pending_integrate"] = pending
         if micro_only:
             row["micro_only_keeps"] = micro_only
         if best_e2e is not None:

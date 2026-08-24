@@ -232,7 +232,9 @@ def _data_quality_flags(
             # data-quality fact, and discarding it lets a reader mistake an
             # untested area for a clean one. Prefer the renderer's warnings,
             # fall back to its key facts, and state the absence either way.
-            evidence = sec.warnings or sec.key_facts
+            # Both, not either: a renderer that logged a warning may still
+            # carry the key fact that explains it, and ``or`` would drop it.
+            evidence = [*sec.warnings, *sec.key_facts]
             for line in evidence:
                 _push(f"[{sec.section_id}] skipped: {line}")
             if not evidence:

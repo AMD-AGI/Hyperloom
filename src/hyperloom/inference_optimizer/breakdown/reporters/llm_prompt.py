@@ -125,53 +125,51 @@ def build_user_prompt(
 _MAX_EXEC_SUMMARY_CHARS = 1500
 _MAX_NARRATIVE_CHARS = 800
 
-# Narratives are pasted under a heading the composer owns -- the summary under
-# an H2, each section paragraph under an H3. A line that opens a heading, a
-# code fence or a block-level element re-parents every deterministic block that
-# follows it, turning a wrong paragraph into a wrong document.
-_STRUCTURAL_LINE = re.compile(
+# Narratives are pasted into a slot the composer owns -- the summary under an
+# H2, each section paragraph under an H3. Markdown that *opens a block* escapes
+# that slot and re-parents every deterministic block after it: an unterminated
+# HTML comment comments the rest of the report out, an odd code fence swallows
+# it. CommonMark has many ways to open a block, and a blacklist that misses one
+# fails silently and totally -- so match the act of opening a block, and treat
+# it as evidence the model ignored the brief.
+_BLOCK_OPENER = re.compile(
     r"""
     ^\s{0,3}(
-        \#{1,6}(\s|$)                                  # ATX heading
-      | (```|~~~)                                      # code fence
-      | (={3,}|-{3,}|\*{3,}|_{3,})\s*$                 # setext rule / thematic break
-      | </?(script|style|iframe|div|h[1-6]|table)\b    # block-level HTML
+        \#{1,6}(\s|$)                      # ATX heading
+      | (```|~~~)                          # fenced code
+      | (={3,}|-{3,}|\*{3,}|_{3,})\s*$     # setext underline / thematic break
+      | <                                  # any HTML block: tag, comment, PI, CDATA
     )
     """,
-    re.VERBOSE | re.IGNORECASE,
+    re.VERBOSE,
 )
 
 
 def _sanitize(text: str, *, max_chars: int) -> str:
-    """Strip model prose that would restructure the report instead of describing it.
+    """Return model prose only when it is safe to paste into the report.
 
-    Structural lines are dropped individually; output that is mostly structure
-    is dropped whole, as is output past ``max_chars`` -- half a truncated
-    sentence reads worse than the deterministic fallback. Callers treat ``""``
-    as "the model said nothing usable", which every consumer already handles.
+    Prose that opens a markdown block, or that ran past the length the prompt
+    asked for, is discarded whole rather than repaired: a partially stripped
+    paragraph is prose the model did not write, and half a truncated sentence
+    reads worse than the deterministic text. ``""`` means "nothing usable",
+    which every caller already treats as "fall back".
+
+    Note the anchor: only a line *starting* a block is rejected, so ordinary
+    prose containing ``<`` (``latency < 5ms``) passes untouched.
 
     Args:
         text (str): Raw narrative as the model wrote it.
-        max_chars (int): Length ceiling, applied after cleaning.
+        max_chars (int): Length ceiling for the whole narrative.
 
     Returns:
-        str: The cleaned narrative, or ``""`` when it is unusable.
+        str: The narrative, or ``""`` when it must not be used.
     """
-    kept: list[str] = []
-    dropped = 0
-    for line in (text or "").splitlines():
-        line = line.rstrip()
-        if _STRUCTURAL_LINE.match(line):
-            dropped += 1
-            continue
-        # Four leading spaces would render as an indented code block.
-        kept.append(re.sub(r"^\s{4,}", "", line))
-    # More structure than prose means the model wrote a document, and none of
-    # that document belongs inside a section someone else owns.
-    if dropped and dropped > sum(1 for line in kept if line.strip()):
+    cleaned = (text or "").strip()
+    if not cleaned or len(cleaned) > max_chars:
         return ""
-    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
-    return "" if len(cleaned) > max_chars else cleaned
+    if any(_BLOCK_OPENER.match(line) for line in cleaned.splitlines()):
+        return ""
+    return cleaned
 
 
 def parse_llm_response(raw: str) -> dict[str, Any]:

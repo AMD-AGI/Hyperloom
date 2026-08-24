@@ -62,7 +62,12 @@ def _imports_recorder(path: Path) -> bool:
             if any(_FORBIDDEN_FRAGMENT in alias.name for alias in node.names):
                 return True
         elif isinstance(node, ast.ImportFrom):
-            if _FORBIDDEN_FRAGMENT in (node.module or ""):
+            module = node.module or ""
+            if _FORBIDDEN_FRAGMENT in module:
+                return True
+            # ``from ...breakdown import recorder`` names the package in the
+            # alias rather than the module path, and reaches the same writers.
+            if module.endswith("breakdown") and any(alias.name == "recorder" for alias in node.names):
                 return True
     return False
 
@@ -86,26 +91,34 @@ def test_subprocess_packages_do_not_write_breakdown_fragments() -> None:
 
 
 def test_the_detector_actually_detects(tmp_path: Path) -> None:
-    """Guard the guard: a rule that cannot fail protects nothing."""
-    absolute = tmp_path / "absolute.py"
-    absolute.write_text(
-        "from hyperloom.inference_optimizer.breakdown.recorder import instrument\n",
-        encoding="utf-8",
-    )
-    relative = tmp_path / "relative.py"
-    relative.write_text(
-        "from ...inference_optimizer.breakdown.recorder.recorder import Recorder\n",
-        encoding="utf-8",
-    )
-    plain_import = tmp_path / "plain.py"
-    plain_import.write_text(
-        "import hyperloom.inference_optimizer.breakdown.recorder as r\n",
-        encoding="utf-8",
-    )
-    innocent = tmp_path / "innocent.py"
-    innocent.write_text("from hyperloom.common import io\n", encoding="utf-8")
+    """Guard the guard: a rule that cannot fail protects nothing.
 
-    assert _imports_recorder(absolute)
-    assert _imports_recorder(relative)
-    assert _imports_recorder(plain_import)
-    assert not _imports_recorder(innocent)
+    Every form below reaches ``recorder.get_recorder`` at runtime, so every one
+    has to trip the check. The parent-package forms are the ones the first
+    version of this guard missed: it inspected only the module path, and
+    ``from ...breakdown import recorder`` carries the package in the alias.
+    """
+    reaching = [
+        "from hyperloom.inference_optimizer.breakdown.recorder import instrument",
+        "from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder",
+        "import hyperloom.inference_optimizer.breakdown.recorder as r",
+        "from hyperloom.inference_optimizer.breakdown import recorder",
+        "from hyperloom.inference_optimizer.breakdown import recorder as r",
+        "from ...inference_optimizer.breakdown import recorder",
+        "from ...breakdown.recorder import instrument",
+    ]
+    for index, source in enumerate(reaching):
+        path = tmp_path / f"reaching_{index}.py"
+        path.write_text(source + "\n", encoding="utf-8")
+        assert _imports_recorder(path), f"guard missed a real writer: {source}"
+
+    # Neighbouring modules under the same package must not trip it.
+    innocent = [
+        "from hyperloom.common import io",
+        "from hyperloom.inference_optimizer.breakdown import exporter",
+        "from hyperloom.inference_optimizer.breakdown import schema",
+    ]
+    for index, source in enumerate(innocent):
+        path = tmp_path / f"innocent_{index}.py"
+        path.write_text(source + "\n", encoding="utf-8")
+        assert not _imports_recorder(path), f"guard false-positived on: {source}"

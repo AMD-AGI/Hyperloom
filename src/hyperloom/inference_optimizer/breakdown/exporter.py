@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json
-from hyperloom.common.timeutil import iso_z
 
 from . import collectors
 from .schema import SCHEMA_VERSION_V5
@@ -29,26 +28,6 @@ log = logging.getLogger(__name__)
 
 EXPORTER_VERSION = "session-breakdown-1.0.0"
 BREAKDOWN_FILENAME = "session_breakdown.json"
-
-
-def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
-    """Dedupe key matching :func:`collectors.collect_phase_timeline`.
-
-    ``(action, ts-to-second, change|task_id)`` with the timestamp canonicalised
-    to ``...Z`` so a recorder fragment row and the collector's audit-list row
-    for the same attempt collapse to one event.
-
-    Args:
-        ev: A phase-timeline event dict.
-
-    Returns:
-        The ``(action, ts-to-second, change|task_id)`` dedupe key.
-    """
-    return (
-        str(ev.get("action") or ""),
-        iso_z(ev.get("ts"))[:19],
-        str(ev.get("change") or ev.get("task_id") or ""),
-    )
 
 
 def _merge_phase_timeline(
@@ -73,7 +52,12 @@ def _merge_phase_timeline(
     base: list[dict[str, Any]] = list(collector_value) if isinstance(collector_value, list) else []
     if not isinstance(fragment, list) or not fragment:
         return base
-    seen = {_phase_event_key(ev) for ev in base if isinstance(ev, dict)}
+    # Share the collector's identity rule rather than restating it: the two
+    # disagreeing is invisible downstream, and costs whole events.
+    dedup = collectors.TimelineDedup()
+    for ev in base:
+        if isinstance(ev, dict):
+            dedup.is_new(ev)
     for ev in fragment:
         if not isinstance(ev, dict):
             continue
@@ -82,11 +66,8 @@ def _merge_phase_timeline(
         norm.setdefault("kernel_id", None)
         norm.setdefault("phase", "")
         norm.setdefault("change", str(ev.get("action") or ""))
-        key = _phase_event_key(norm)
-        if key in seen:
-            continue
-        seen.add(key)
-        base.append(norm)
+        if dedup.is_new(norm):
+            base.append(norm)
     base.sort(key=lambda e: e.get("ts") or "")
     return base
 

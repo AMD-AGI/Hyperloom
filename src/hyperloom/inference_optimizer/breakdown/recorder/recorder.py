@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -143,6 +144,8 @@ def section_shape(section: str) -> SectionShape | None:
     """
     return SECTION_SHAPES.get(section)
 
+
+log = logging.getLogger(__name__)
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 _ENTITY_ID_FIELDS = (
@@ -360,7 +363,10 @@ class Recorder:
 
         Fragments written before this digest existed keep their old name: a
         resumed session must go on updating the file it already wrote, not
-        start a second one for the same key.
+        start a second one for the same key. That reuse is only safe when the
+        key survived sanitizing untouched -- otherwise the legacy file could
+        belong to any of the keys that fold onto that name, and adopting it
+        would merge two entities, which is the bug the digest exists to stop.
 
         Args:
             section (str): The breakdown section name.
@@ -369,11 +375,24 @@ class Recorder:
         Returns:
             str: The fragment filename to write within the spool directory.
         """
-        prefix = f"{_slug(section)}__{self._producer}__{_slug(key)}"
+        slug = _slug(key)
+        prefix = f"{_slug(section)}__{self._producer}__{slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
         filename = f"{prefix}-{digest}.json"
-        if not (self._dir / filename).exists() and (self._dir / f"{prefix}.json").exists():
-            return f"{prefix}.json"
+        legacy = self._dir / f"{prefix}.json"
+        if slug != key:
+            if legacy.exists():
+                log.warning(
+                    "breakdown recorder: not reusing %s for key %r -- the name is "
+                    "ambiguous after sanitizing; writing %s instead. The legacy "
+                    "fragment stays on disk and may hold a different key.",
+                    legacy.name,
+                    key,
+                    filename,
+                )
+            return filename
+        if not (self._dir / filename).exists() and legacy.exists():
+            return legacy.name
         return filename
 
     def record_upsert_item(

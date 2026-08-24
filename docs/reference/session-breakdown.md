@@ -445,10 +445,27 @@ T+90 min" charts.
 ## `capability_summary` — `CapabilitySummary`
 
 One card per live capability (`geak`, `forge`, `explore`, `sweep`,
-`specialist`) with: `status`, `attempts`, `keeps`, `tested`,
-`best_gain_pct`, `reason`. Legacy `backends`, `params`, and
-`validate_stack` rows can appear when archived sessions are rebuilt.
-Drives the per-session UI cards in Primus-Claw.
+`specialist`) with: `status`, `attempts`, `keeps`, `micro_only_keeps`,
+`pending_integrate`, `reverts`, `e2e_gain_pct`, `tested`, `best_gain_pct`,
+`reason`. Legacy `backends`, `params`, and `validate_stack` rows can appear
+when archived sessions are rebuilt. Drives the per-session UI cards in
+Primus-Claw.
+
+For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
+
+- `keeps` — **distinct kernels adopted at integrate**, i.e. end-to-end
+  verified. A kernel re-tried across runs counts once.
+- `micro_only_keeps` — kernels that cleared the micro benchmark but never
+  reached integrate. Not adoptions: a faster kernel in isolation does not
+  imply a faster service.
+- `pending_integrate` — kernels whose integrate verdict is `NEEDS_REVIEW` or
+  not yet recorded. Undecided, not successful.
+- `reverts` — kernels integrate rejected (end-to-end regression).
+- `attempts` — **invocation rows**, not distinct kernels: how many tries the
+  lane made. Deliberately a different unit from `keeps`.
+
+The `specialist` row uses `keeps` / `attempts` differently: see
+`CapabilitySummary` in `schema.py`.
 
 ---
 
