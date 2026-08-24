@@ -31,13 +31,7 @@ def test_resolve_framework_root_explicit_dir(tmp_path, monkeypatch):
 def test_resolve_framework_root_create_requires_explicit_root(tmp_path, monkeypatch):
     root = tmp_path / "framework"
     root.mkdir()
-    create = (
-        "diff --git a/new.py b/new.py\n"
-        "--- /dev/null\n"
-        "+++ b/new.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+new\n"
-    )
+    create = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(root)])
     monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
 
@@ -50,14 +44,7 @@ def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch)
     for root in roots:
         root.mkdir()
         (root / "file.py").write_text("old\n", encoding="utf-8")
-    patch = (
-        "diff --git a/file.py b/file.py\n"
-        "--- a/file.py\n"
-        "+++ b/file.py\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
+    patch = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
     monkeypatch.setattr(
         ip,
         "resolve_source_file_allowlist",

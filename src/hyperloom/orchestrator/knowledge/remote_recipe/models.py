@@ -110,13 +110,9 @@ class RecipeScope:
                 indexes, or a workload dimension is missing.
         """
         if self.kernel_optimizer not in {"forge", "geak"}:
-            raise RemoteRecipeValidationError(
-                f"unsupported kernel_optimizer: {self.kernel_optimizer!r}"
-            )
+            raise RemoteRecipeValidationError(f"unsupported kernel_optimizer: {self.kernel_optimizer!r}")
         if min(self.tp, self.conc, self.isl, self.osl) <= 0:
-            raise RemoteRecipeValidationError(
-                "Recipe scope tp/conc/isl/osl must be positive"
-            )
+            raise RemoteRecipeValidationError("Recipe scope tp/conc/isl/osl must be positive")
 
     def as_dict(self) -> dict[str, Any]:
         """Return the scope as the Store's query / payload mapping."""

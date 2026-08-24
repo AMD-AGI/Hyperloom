@@ -1302,6 +1302,7 @@ async def test_rearm_advanced_merges_args_by_flag_not_substring():
 
 # ---- advanced: artifact stacking (issue 2) ----------------------------------
 
+
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_artifacts(monkeypatch):
     """Artifacts applied in an advanced round must be recorded in kept_artifacts

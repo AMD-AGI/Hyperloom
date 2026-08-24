@@ -71,13 +71,7 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     assert res.is_garbage
 
 
-_CREATE_ONLY_DIFF = (
-    "diff --git a/new.py b/new.py\n"
-    "--- /dev/null\n"
-    "+++ b/new.py\n"
-    "@@ -0,0 +1 @@\n"
-    "+new\n"
-)
+_CREATE_ONLY_DIFF = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
 
 
 def test_pure_create_needs_a_root_the_caller_already_knows(tmp_path):

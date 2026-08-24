@@ -342,8 +342,7 @@ def trusted_explicit_root(explicit: str) -> Path | None:
     if any(resolved_within(explicit, root) for root in resolve_source_file_allowlist()):
         return resolved
     log.warning(
-        "integrate_patch: framework_source_root override %r rejected "
-        "(outside trusted source scope)",
+        "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
         explicit,
     )
     return None
@@ -401,11 +400,7 @@ def _resolve_framework_root(
             log.warning(
                 "integrate_patch: Patch root resolution rejected: %s%s",
                 resolution.reason,
-                (
-                    f" matches={[str(root) for root in resolution.matches]!r}"
-                    if resolution.matches
-                    else ""
-                ),
+                (f" matches={[str(root) for root in resolution.matches]!r}" if resolution.matches else ""),
             )
         return resolution.root
 
@@ -2310,9 +2305,7 @@ class IntegratePatchExecutor:
                 # trusted one that simply lacks the files is the patches' fault.
                 trusted_root = trusted_explicit_root(explicit_framework_root)
                 missing_records = (
-                    _preflight_missing_targets(trusted_root, patch_paths)
-                    if trusted_root is not None
-                    else []
+                    _preflight_missing_targets(trusted_root, patch_paths) if trusted_root is not None else []
                 )
                 if missing_records:
                     _error_class = "patch_target_missing"
