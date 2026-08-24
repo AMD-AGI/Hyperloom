@@ -331,7 +331,7 @@ def force_restart_local_cluster(
     """
     # Raise the open-files limit before the fresh raylet starts.
     ensure_fd_limit(log_path=log_path)
-    stop_cmd = ["ray", "stop", "--force"]
+    _stop_ray_force(log_path=log_path, reason="Stopping foreign cluster before version-mismatch recovery")
     # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster).
     gcs_port, iso_args = _isolated_head_port_args()
     start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
@@ -344,13 +344,10 @@ def force_restart_local_cluster(
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"$ {' '.join(stop_cmd)}  # issue #432 version-mismatch recovery\n")
-            subprocess.run(stop_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"$ {' '.join(start_cmd)}\n")
             proc = subprocess.run(start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"\n[ray_restart_exit_code] {proc.returncode}\n")
     else:
-        subprocess.run(stop_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
         proc = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
