@@ -71,23 +71,26 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     assert res.is_garbage
 
 
-def test_pure_create_requires_explicit_root(tmp_path):
+_CREATE_ONLY_DIFF = (
+    "diff --git a/new.py b/new.py\n"
+    "--- /dev/null\n"
+    "+++ b/new.py\n"
+    "@@ -0,0 +1 @@\n"
+    "+new\n"
+)
+
+
+def test_pure_create_needs_a_root_the_caller_already_knows(tmp_path):
+    """No pre-image can pick a candidate, so scanning them is refused."""
     root = _checkout(tmp_path / "root", "existing.py")
-    create = (
-        "diff --git a/new.py b/new.py\n"
-        "--- /dev/null\n"
-        "+++ b/new.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+new\n"
-    )
 
     rejected = _ps.resolve_patch_apply_root(
-        (create,),
+        (_CREATE_ONLY_DIFF,),
         explicit_root=None,
         candidate_roots=(root,),
     )
     accepted = _ps.resolve_patch_apply_root(
-        (create,),
+        (_CREATE_ONLY_DIFF,),
         explicit_root=root,
         candidate_roots=(),
     )
@@ -95,6 +98,23 @@ def test_pure_create_requires_explicit_root(tmp_path):
     assert rejected.root is None
     assert rejected.reason == "pure_create_requires_explicit_root"
     assert accepted.root == root.resolve()
+
+
+def test_pure_create_lands_in_the_worktree_base(tmp_path):
+    """Adding a source file is a normal repair; the base is not a guess."""
+    base = _checkout(tmp_path / "base", "existing.py")
+    other = _checkout(tmp_path / "other", "existing.py")
+    patch = tmp_path / "create.patch"
+    patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
+
+    kept, dropped, grounding = _ps.vet_patches(
+        [str(patch)],
+        base_checkout=base,
+        candidate_roots=(other,),
+    )
+
+    assert kept == [str(patch)]
+    assert dropped == []
 
 
 def test_all_preimages_must_share_one_unique_root(tmp_path):

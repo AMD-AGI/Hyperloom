@@ -307,42 +307,76 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
+def trusted_explicit_root(explicit: str) -> Path | None:
+    """Resolve a declared framework root, or ``None`` when it is not trusted.
+
+    A root outside the allowlisted source scope is refused whatever its tree
+    holds, so callers must ask this before blaming the patches for not
+    matching it.
+
+    Args:
+        explicit: The declared ``framework_source_root``.
+
+    Returns:
+        The resolved directory, or ``None`` when it is unreadable, absent, or
+        outside the trusted source scope.
+    """
+    try:
+        resolved = Path(explicit).resolve()
+    except (OSError, RuntimeError):
+        log.warning(
+            "integrate_patch: framework_source_root override %r could not be resolved",
+            explicit,
+        )
+        return None
+    if not resolved.is_dir():
+        log.warning(
+            "integrate_patch: framework_source_root override %r does not exist",
+            explicit,
+        )
+        return None
+    for raw in resolve_source_file_allowlist():
+        try:
+            root = Path(raw).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if _is_within(resolved, root):
+            return resolved
+    log.warning(
+        "integrate_patch: framework_source_root override %r rejected "
+        "(outside trusted source scope)",
+        explicit,
+    )
+    return None
+
+
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
     patch_texts: list[str] | None = None,
 ) -> Path | None:
-    """Pick one unambiguous framework root under the shared Patch rules."""
+    """Pick one unambiguous framework root under the shared Patch rules.
+
+    With patches to place, the decision is
+    :func:`~...specialists.patch_safety.resolve_patch_apply_root`'s and it fails
+    closed. Without any, there is nothing to match a tree against, so the
+    session's declared root wins and the allowlist order is the last resort.
+
+    Args:
+        explicit: Declared framework root. Rejected when it resolves outside
+            the trusted source scope.
+        patch_paths: Patch files to place; unreadable ones are skipped.
+        patch_texts: Patch diffs already in memory, placed alongside
+            ``patch_paths``.
+
+    Returns:
+        The resolved root, or ``None`` when the patches name no single tree.
+    """
     roots = [Path(root) for root in resolve_source_file_allowlist()]
     explicit_path: Path | None = None
     if explicit:
-        try:
-            explicit_path = Path(explicit).resolve()
-        except (OSError, RuntimeError):
-            log.warning(
-                "integrate_patch: framework_source_root override %r could not be resolved",
-                explicit,
-            )
-            return None
-        if not explicit_path.is_dir():
-            log.warning(
-                "integrate_patch: framework_source_root override %r does not exist",
-                explicit,
-            )
-            return None
-        for root_value in roots:
-            try:
-                root = root_value.resolve()
-            except (OSError, RuntimeError):
-                continue
-            if _is_within(explicit_path, root):
-                break
-        else:
-            log.warning(
-                "integrate_patch: framework_source_root override %r rejected "
-                "(outside trusted source scope)",
-                explicit,
-            )
+        explicit_path = trusted_explicit_root(explicit)
+        if explicit_path is None:
             return None
 
     texts = [str(text) for text in (patch_texts or []) if str(text).strip()]
@@ -362,6 +396,7 @@ def _resolve_framework_root(
             texts,
             explicit_root=explicit_path,
             candidate_roots=candidates,
+            default_root=Path(session_root) if session_root else None,
         )
         if resolution.root is None:
             log.warning(
@@ -2288,10 +2323,12 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                explicit_path = Path(explicit_framework_root)
+                # An untrusted root is refused on that ground alone; only a
+                # trusted one that simply lacks the files is the patches' fault.
+                trusted_root = trusted_explicit_root(explicit_framework_root)
                 missing_records = (
-                    _preflight_missing_targets(explicit_path, patch_paths)
-                    if explicit_path.is_dir()
+                    _preflight_missing_targets(trusted_root, patch_paths)
+                    if trusted_root is not None
                     else []
                 )
                 if missing_records:

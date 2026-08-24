@@ -13,7 +13,7 @@ import math
 import os
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
     JournalEntry,
@@ -28,6 +28,9 @@ from ..loop.coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 from .base import PhaseHandler
+
+if TYPE_CHECKING:
+    from ..framework.paths import WarmReplayRootResolution
 
 log = _logging.getLogger(__name__)
 
@@ -833,10 +836,21 @@ class PreludePhase(PhaseHandler):
     def _warm_replay_root_skip_outcome(
         *,
         reason: str,
-        resolution: Any,
+        resolution: "WarmReplayRootResolution",
         root_kind: str,
         rollback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Record why warm replay stopped, with the roots it was allowed to use.
+
+        Args:
+            reason: The resolution failure to surface in SBD.
+            resolution: The failed resolution, for its source and allowlist.
+            root_kind: ``framework`` or ``kernel``; names the reported keys.
+            rollback: Outcome of undoing patches already applied, when any were.
+
+        Returns:
+            The ``warm_replay_outcome`` mapping.
+        """
         outcome: dict[str, Any] = {
             "status": (
                 "skipped"
@@ -847,8 +861,6 @@ class PreludePhase(PhaseHandler):
             f"{root_kind}_patch_root_source": str(resolution.source or ""),
             f"{root_kind}_patch_root_allowlist": list(resolution.allowlist or ()),
         }
-        if resolution.root:
-            outcome[f"active_{root_kind}_patch_root"] = str(resolution.root).rstrip("/")
         if rollback is not None:
             outcome["rollback"] = rollback
         return outcome
