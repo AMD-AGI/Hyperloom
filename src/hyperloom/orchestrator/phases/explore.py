@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
+    validate_freeform_wave_task,
 )
 from ..loop.maintenance import run_lease_and_db_reclaim
 from ..loop.sub_agent_runner import SubAgentResult
@@ -645,7 +646,8 @@ class ExplorePhase(PhaseHandler):
         standard free-form specialist dispatches (scope=freeform, lane=cpu,
         mode=research defaults). Each fanned task is re-dispatched through the
         normal ``_handle_delegate`` path. Per-task idempotency keys derive from
-        the wave key; non-dict / empty-description entries are skipped.
+        the wave key. Each entry must pass the same structural checks as
+        :func:`validate_freeform_wave_task` (the PolicyGate runs these first).
 
         Args:
             source: The agent issuing the wave delegate.
@@ -656,11 +658,7 @@ class ExplorePhase(PhaseHandler):
         shared = {k: v for k, v in params.items() if k != "tasks"}
         base_key = str(intent.payload.get("idempotency_key") or "").strip()
         for idx, task in enumerate(tasks):
-            if not isinstance(task, dict):
-                continue
-            desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-            if not desc:
-                continue
+            desc = validate_freeform_wave_task(task, index=idx)
             sub_params = dict(shared)
             sub_params["scope"] = "freeform"
             sub_params["task_description"] = desc

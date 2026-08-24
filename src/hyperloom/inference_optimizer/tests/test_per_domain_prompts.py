@@ -691,22 +691,24 @@ def test_R2_max_turns_zero_allowed_unbounded(gate):
     )
 
 
-def test_R2_max_turns_negative_allowed(gate):
-    """A negative max_turns is self-limiting (empty turn range), so it is not denied."""
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": {
-                    "domain": "serving_specialist",
-                    "gap_canonical_id": "gap.x",
-                    "max_turns": -1,
+def test_R2_max_turns_negative_denied(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.x",
+                        "max_turns": -1,
+                    },
                 },
-            },
-        ),
-    )
+            ),
+        )
+    assert exc.value.rule == "specialist_dispatch_source"
+    assert "max_turns" in str(exc.value)
 
 
 # research_lane lane registration.

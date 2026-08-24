@@ -1739,6 +1739,16 @@ class PolicyGate:
                 ) from exc
             # The in-process backend's turn loop has no wall-clock check, so this
             # cap is the only bound on that path.
+            if max_turns < 0:
+                raise PolicyDenied(
+                    f"delegate{{action='specialist'}}: max_turns={max_turns} must be >= 0",
+                    rule="specialist_dispatch_source",
+                    hint=(
+                        "Use a non-negative integer. "
+                        "0 = unbounded (bounded by the wall-clock budget); "
+                        "omit max_turns to use the default turn cap."
+                    ),
+                )
             if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
                 raise PolicyDenied(
                     f"delegate{{action='specialist'}}: max_turns={max_turns} "
@@ -1972,11 +1982,7 @@ class PolicyGate:
                     hint=(f"Split the wave into batches of at most {SPECIALIST_FREEFORM_WAVE_MAX} tasks."),
                 )
             for i, task in enumerate(wave):
-                if not isinstance(task, dict):
-                    continue
-                desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-                if desc:
-                    self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+                validate_freeform_wave_task(task, index=i)
             return
         desc = str(params.get("task_description") or "").strip()
         self._check_freeform_task_description(desc, where="params")
@@ -2488,6 +2494,38 @@ def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
     return "\n".join(lines)
 
 
+def validate_freeform_wave_task(task: Any, *, index: int) -> str:
+    """Validate one entry in a freeform specialist ``tasks`` wave.
+
+    Args:
+        task: One wave entry; must be a dict with a non-empty description.
+        index: Zero-based index used in error messages.
+
+    Returns:
+        The normalized task description.
+
+    Raises:
+        PolicyDenied: When the entry is malformed or the description is
+            empty / too long.
+    """
+    if not isinstance(task, dict):
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] must be a dict",
+            rule="specialist_freeform_wave_invalid_task",
+            hint="Each wave entry must be an object with task_description.",
+        )
+    desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
+    if not desc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: "
+            f"tasks[{index}] task_description must be non-empty",
+            rule="specialist_freeform_empty_description",
+            hint=("Each freeform task needs a natural-language task_description (the whole mandate)."),
+        )
+    PolicyGate._check_freeform_task_description(desc, where=f"tasks[{index}]")
+    return desc
+
+
 __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
@@ -2502,6 +2540,7 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
+    "validate_freeform_wave_task",
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",

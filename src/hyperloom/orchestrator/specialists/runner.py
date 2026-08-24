@@ -59,6 +59,27 @@ from ..prompts.specialist_prompt_builder import (
 log = logging.getLogger(__name__)
 
 
+def resolve_specialist_max_turns(raw: Any, *, default: int) -> int:
+    """Resolve the specialist turn budget from dispatch params.
+
+    ``None`` and ``0`` both mean unbounded depth bounded by the wall-clock
+    budget, implemented as the configured default cap.
+
+    Args:
+        raw: The ``max_turns`` value from dispatch params, or ``None``.
+        default: The runner default when ``raw`` is omitted or zero.
+
+    Returns:
+        The resolved non-negative turn budget.
+    """
+    if raw is None:
+        return int(default)
+    max_turns = int(raw)
+    if max_turns == 0:
+        return int(default)
+    return max_turns
+
+
 def _extra_focus_tags(
     params: dict[str, Any],
     domain: "SpecialistDomain",
@@ -462,7 +483,7 @@ class SpecialistRunner:
             if resolved_tags:
                 domain_key = resolved_tags[0]
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
-        max_turns = int(params.get("max_turns") or self.default_max_turns)
+        max_turns = resolve_specialist_max_turns(params.get("max_turns"), default=self.default_max_turns)
         # Resolve by anchor first then key so a domain carrying the KB anchor matches its entry.
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params, domain=domain)
