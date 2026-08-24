@@ -95,6 +95,11 @@ from ._inferencex_patcher import (
     failed_patch_anchors,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
+from ._patch_snapshot import (
+    _create_patch_snapshot,
+    _patch_touched_paths_from_text as _patch_touched_paths,
+    _restore_patch_snapshot,
+)
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -1001,156 +1006,7 @@ def _patch_present_in_committed_head(
         Path(f"{index_path}.lock").unlink(missing_ok=True)
 
 
-def _patch_touched_paths(patch_content: str) -> list[str]:
-    """Return safe repo-relative paths named by a text diff."""
-    paths: list[str] = []
-    for line in patch_content.splitlines():
-        if not line.startswith(("--- ", "+++ ")):
-            continue
-        raw = line[4:].split("\t", 1)[0].strip()
-        if raw == "/dev/null":
-            continue
-        if raw.startswith(("a/", "b/")):
-            raw = raw[2:]
-        path = Path(raw)
-        if raw and not path.is_absolute() and ".." not in path.parts:
-            paths.append(path.as_posix())
-    return list(dict.fromkeys(paths))
 
-
-def _create_patch_snapshot(
-    repo_path: str,
-    patch_contents: list[str],
-    output_dir: Path,
-) -> dict[str, Any]:
-    """Snapshot only patch-touched worktree and index paths."""
-    touched = list(
-        dict.fromkeys(
-            path
-            for content in patch_contents
-            for path in _patch_touched_paths(content)
-        )
-    )
-    if not touched:
-        raise ValueError("patch has no touched text paths")
-    snapshot_dir = output_dir / "warm_patch_snapshot"
-    if snapshot_dir.exists():
-        shutil.rmtree(snapshot_dir)
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
-    root = Path(repo_path).resolve()
-    rows: list[dict[str, Any]] = []
-    for index, rel in enumerate(touched):
-        target = (root / rel).resolve()
-        target.relative_to(root)
-        if (root / rel).is_symlink():
-            raise ValueError(f"patch target must not be a symlink: {rel}")
-        backup = snapshot_dir / f"{index:04d}.bin"
-        existed = target.is_file() and not target.is_symlink()
-        mode = target.stat().st_mode & 0o7777 if existed else None
-        if existed:
-            backup.write_bytes(target.read_bytes())
-        index_result = subprocess.run(
-            [
-                "git",
-                *safe_directory_args(
-                    ["ls-files", "-s", "--", rel],
-                    cwd=repo_path,
-                ),
-            ],
-            cwd=repo_path,
-            capture_output=True,
-            timeout=15,
-            check=True,
-        )
-        index_entry = index_result.stdout.decode(errors="replace").strip()
-        rows.append(
-            {
-                "path": rel,
-                "existed": existed,
-                "mode": mode,
-                "backup": str(backup) if existed else "",
-                "index_entry": index_entry,
-            }
-        )
-    manifest_path = snapshot_dir / "manifest.json"
-    manifest = {
-        "repo_path": str(root),
-        "paths": rows,
-        "manifest_path": str(manifest_path),
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return manifest
-
-
-def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
-    """Restore exact touched paths/index entries; never reset unrelated work."""
-    if isinstance(manifest, (str, Path)):
-        try:
-            manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
-            return {"ok": False, "errors": [f"manifest_read:{exc}"]}
-    if not isinstance(manifest, dict):
-        return {"ok": False, "errors": ["missing_manifest"]}
-    repo = str(manifest.get("repo_path") or "")
-    errors: list[str] = []
-    for row in manifest.get("paths") or []:
-        if not isinstance(row, dict):
-            continue
-        rel = str(row.get("path") or "")
-        target = Path(repo) / rel
-        try:
-            if row.get("existed"):
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(Path(str(row.get("backup") or "")).read_bytes())
-                if row.get("mode") is not None:
-                    target.chmod(int(row["mode"]))
-            elif target.exists() or target.is_symlink():
-                target.unlink()
-            entry = str(row.get("index_entry") or "").strip()
-            if entry:
-                metadata, entry_path = entry.split("\t", 1)
-                mode, blob, stage = metadata.split()
-                if stage != "0" or entry_path != rel:
-                    raise ValueError("unsupported pre-existing unmerged index entry")
-                subprocess.run(
-                    ["git", "update-index", "--cacheinfo", mode, blob, rel],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-            else:
-                subprocess.run(
-                    ["git", "update-index", "--force-remove", "--", rel],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-            if row.get("existed"):
-                expected = Path(str(row.get("backup") or "")).read_bytes()
-                if not target.is_file() or target.read_bytes() != expected:
-                    raise OSError("worktree restore verification failed")
-            elif target.exists() or target.is_symlink():
-                raise OSError("removed path still exists after restore")
-            actual_index = subprocess.run(
-                [
-                    "git",
-                    *safe_directory_args(
-                        ["ls-files", "-s", "--", rel],
-                        cwd=repo,
-                    ),
-                ],
-                cwd=repo,
-                capture_output=True,
-                timeout=15,
-                check=True,
-            ).stdout.decode(errors="replace").strip()
-            if actual_index != entry:
-                raise OSError("index restore verification failed")
-        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            errors.append(f"{rel}:{type(exc).__name__}:{exc}")
-    return {"ok": not errors, "errors": errors}
 
 
 def _revert_patches(
@@ -1390,11 +1246,8 @@ def _revert_warm_patch_state(
     if nogit_backups:
         from ._nogit_patch import _revert_patches_no_git
 
-        try:
-            _revert_patches_no_git(list(nogit_backups))
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "errors": [repr(exc)], "channel": "nogit"}
-        return {"ok": True, "errors": [], "channel": "nogit"}
+        ok, errors = _revert_patches_no_git(list(nogit_backups))
+        return {"ok": ok, "errors": errors, "channel": "nogit"}
     return _revert_patches(target_repo, pre_sha, snapshot_manifest)
 
 

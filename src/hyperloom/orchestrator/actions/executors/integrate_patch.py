@@ -24,7 +24,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
-from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
+from ...specialists.patch_safety import patch_targets_missing
 from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
@@ -41,13 +41,12 @@ from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._nogit_patch import (
     _P_LEVELS,
-    _PATCH_DEV_NULL,
     _apply_patch_no_git,
     _is_git_tree,
     _is_within,
     _revert_patches_no_git,
-    _strip_path_prefix,
 )
+from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     GridVariant,
@@ -1043,147 +1042,6 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     if cp2 is None:
         return False, "git clean spawn failed"
     return cp2.returncode == 0, cp2.stderr.strip()
-
-
-def _commit_strip_level(
-    framework_root: Path,
-    pairs: list[tuple[str, str]],
-) -> int:
-    """Pick the ``-p`` strip level resolving the most targets to existing files.
-
-    The patch has already been applied, so modify/create targets exist in the
-    tree; the level that maximises those hits is the one the forward apply used.
-
-    Args:
-        framework_root: The git checkout the patch was applied into.
-        pairs: ``(old_path, new_path)`` header pairs from the patch.
-
-    Returns:
-        The ``-p`` strip level resolving the most targets to existing files.
-    """
-    best_lvl, best_hits = 1, -1
-    for lvl in _P_LEVELS:
-        hits = 0
-        for old, new in pairs:
-            for raw in (new, old):
-                if not raw or raw == _PATCH_DEV_NULL:
-                    continue
-                try:
-                    if (framework_root / _strip_path_prefix(raw, lvl)).exists():
-                        hits += 1
-                except OSError:
-                    continue
-        if hits > best_hits:
-            best_hits, best_lvl = hits, lvl
-    return best_lvl
-
-
-def _patch_touched_paths(
-    framework_root: Path,
-    patches: list[Path],
-) -> list[str]:
-    """Repo-relative paths the applied ``patches`` created / modified / deleted.
-
-    Used to scope the commit-on-KEEP to only the files this patch touched.
-
-    Per header pair (``old`` ``---``, ``new`` ``+++``):
-      * created / modified → the ``new`` target exists post-apply → emit it.
-      * deleted → ``new`` is ``/dev/null`` (or its target is gone)
-        and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
-        ``git add -A -- <path>`` stages the removal of a tracked file.
-    A header that resolves to neither is dropped so ``git add`` cannot error.
-
-    Args:
-        framework_root: The git checkout the patches were applied into.
-        patches: The applied patch files to inspect.
-
-    Returns:
-        The repo-relative paths the patches created/modified (existing
-        post-apply) plus the old paths of pure deletions, so the subsequent
-        ``git add`` stages removals too.
-    """
-    out: list[str] = []
-    for patch in patches:
-        try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        pairs = patch_file_targets(text)
-        if not pairs:
-            continue
-        lvl = _commit_strip_level(framework_root, pairs)
-        for old, new in pairs:
-            rel_new = _strip_path_prefix(new, lvl) if new and new != _PATCH_DEV_NULL else None
-            rel_old = _strip_path_prefix(old, lvl) if old and old != _PATCH_DEV_NULL else None
-            try:
-                new_exists = bool(rel_new) and (framework_root / rel_new).exists()
-            except OSError:
-                new_exists = False
-            if rel_new and new_exists:
-                # Created or modified — the post-apply file is on disk.
-                if rel_new not in out:
-                    out.append(rel_new)
-            elif rel_old:
-                # Deletion — new target is gone; stage the removal of old.
-                if rel_old not in out:
-                    out.append(rel_old)
-    return out
-
-
-def _git_commit_kept(
-    framework_root: Path,
-    message: str,
-    paths: list[str],
-) -> tuple[bool, str]:
-    """Commit only the patch-touched ``paths`` to git for cross-cycle durability.
-
-    Committing each KEEP makes wins survive a later cycle's ``git checkout -- .``
-    revert fallback. The commit is scoped to the exact paths the patch touched
-    (never ``git add -A``). Best-effort: a commit failure is non-fatal.
-
-    Args:
-        framework_root: The git checkout to commit in.
-        message: The commit message for the KEEP.
-        paths: The repo-relative patch-touched paths to stage and commit.
-
-    Returns:
-        A ``(ok, note)`` tuple; ``ok`` is ``True`` on a successful commit or a
-        benign no-op (nothing to commit), and ``note`` carries any detail.
-    """
-    if not paths:
-        return True, "no patch-touched paths to commit"
-    cp_add = _run_git_cp(
-        ["-C", str(framework_root), "add", "-A", "--", *paths],
-        timeout=60.0,
-    )
-    if cp_add is None:
-        return False, "git commit spawn failed"
-    if cp_add.returncode != 0:
-        return False, f"git add failed: {cp_add.stderr.strip()}"
-    cp = _run_git_cp(
-        [
-            "-C",
-            str(framework_root),
-            "-c",
-            "user.email=hyperloom@local",
-            "-c",
-            "user.name=Hyperloom",
-            "commit",
-            "-q",
-            "-m",
-            message,
-        ],
-        timeout=60.0,
-    )
-    if cp is None:
-        return False, "git commit spawn failed"
-    if cp.returncode == 0:
-        return True, ""
-    # "nothing to commit" is a benign no-op.
-    out = (cp.stdout + cp.stderr).lower()
-    if "nothing to commit" in out:
-        return True, "nothing to commit"
-    return False, cp.stderr.strip()
 
 
 def _resolve_patch_paths(
@@ -3891,6 +3749,10 @@ class IntegratePatchExecutor:
         """Reverse-apply the applied patches (best-effort); returns those
         actually reverted.
 
+        On non-git trees the backup ledger — not ``applied`` — decides whether a
+        restore is owed: a patch set that fails part-way through its first patch
+        has already mutated the tree while ``applied`` is still empty.
+
         Args:
             framework_root: The source root to revert in, or ``None`` (no-op).
             applied: The patches that were applied this run.
@@ -3900,12 +3762,18 @@ class IntegratePatchExecutor:
             when the checkout fallback fires).
         """
         reverted: list[Path] = []
-        if framework_root is None or not applied:
+        if framework_root is None:
             return reverted
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
         if nogit_backups is not None and not _is_git_tree(framework_root):
-            _revert_patches_no_git(nogit_backups)
+            if nogit_backups:
+                ok, errors = _revert_patches_no_git(nogit_backups)
+                if not ok:
+                    log.error("integrate_patch: non-git revert incomplete in %s: %s", framework_root, errors)
+                    return []
             return list(applied)
+        if not applied:
+            return reverted
         # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
         # committed, so HEAD is exactly the accepted stack: kept work is in
         # commits and survives, candidate work is uncommitted and goes. User
