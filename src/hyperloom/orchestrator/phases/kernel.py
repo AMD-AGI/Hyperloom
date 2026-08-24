@@ -368,7 +368,7 @@ class KernelPhase(PhaseHandler):
                     reprofile_task.state,
                 )
                 return
-            await self.sub.run_task(reprofile_task)
+            await self.run_task_registered(reprofile_task)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return
@@ -921,6 +921,47 @@ class KernelPhase(PhaseHandler):
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
+        async def _replay_succeeded_rebench(task_id: str) -> bool:
+            """Replay a persisted delegated result lost before state writeback."""
+            try:
+                settled_task = await self.tasks.get(task_id)
+                for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                    payload = msg.payload if isinstance(msg.payload, dict) else {}
+                    if str(payload.get("task_id") or "") != task_id:
+                        continue
+                    if str(payload.get("kind") or "") != "explore":
+                        continue
+                    if str(payload.get("state") or "").lower() != "succeeded":
+                        continue
+                    result = payload.get("result")
+                    if not isinstance(result, dict) or not self._is_promotable_result(
+                        "explore", result
+                    ):
+                        return False
+
+                    replay_pending = (
+                        dict(state.geak_pending)
+                        if isinstance(state.geak_pending, dict)
+                        else {}
+                    )
+                    replay_pending["status"] = "awaiting_rebench"
+                    replay_pending["revalidation_task_id"] = task_id
+                    replay_pending.pop("revalidation_error", None)
+                    state.geak_pending = replay_pending
+                    state.save(self.session_dir)
+                    await self._promote_to_shared_state(
+                        "explore",
+                        result,
+                        task=settled_task,
+                    )
+                    return True
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                log.exception(
+                    "geak: failed to replay delegated result for succeeded rebench %s",
+                    task_id,
+                )
+            return False
+
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
             # Reserve the pending slot BEFORE the task exists. The rebench runs
@@ -988,6 +1029,7 @@ class KernelPhase(PhaseHandler):
 
             task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
             task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
+            existing = bool(isinstance(summary, dict) and summary.get("existing"))
             pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             if task_id and task_state in {"queued", "running"}:
                 pending["status"] = "awaiting_rebench"
@@ -996,13 +1038,50 @@ class KernelPhase(PhaseHandler):
                 state.save(self.session_dir)
                 return True
 
+            if task_id and existing and task_state == "succeeded":
+                # create_or_return_existing returned a task that already ran
+                # under this cycle's idempotency key (#1240). Reconcile the
+                # reservation from the persisted verdict rather than replacing
+                # it with the misleading "settled before dispatch" status.
+                prior_geak_result = (
+                    state.geak_result
+                    if isinstance(getattr(state, "geak_result", None), dict)
+                    else {}
+                )
+                settled_status = str(prior_geak_result.get("revalidation_status") or "")
+                if settled_status in {"no_material", "no_promote"} or self._geak_win_already_recorded():
+                    state.geak_pending = {}
+                    state.save(self.session_dir)
+                    return True
+                if await _replay_succeeded_rebench(task_id):
+                    log.info(
+                        "geak: replayed persisted result for already-succeeded rebench %s",
+                        task_id,
+                    )
+                    return True
+                pending["status"] = "rebench_unavailable"
+                if pending.get("revalidation_task_id") in placeholder_keys:
+                    pending.pop("revalidation_task_id", None)
+                pending["revalidation_error"] = (
+                    f"rebench task {task_id} already succeeded but its verdict could not be reconciled"
+                )[:500]
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                log.warning(
+                    "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
+                    pending["revalidation_error"],
+                )
+                return False
+
             pending["status"] = "rebench_unavailable"
             # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
             if pending.get("revalidation_task_id") in placeholder_keys:
                 pending.pop("revalidation_task_id", None)
-            pending["revalidation_error"] = str(
-                (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
-            )[:500]
+            if task_state == "cancelled":
+                default_reason = f"rebench cancelled before completion ({task_id or 'unknown'})"
+            else:
+                default_reason = f"rebench task settled without a usable result (state={task_state or 'unknown'})"
+            pending["revalidation_error"] = str((summary or {}).get("reason") or default_reason)[:500]
             state.geak_pending = pending
             state.save(self.session_dir)
             log.warning(
@@ -1016,16 +1095,18 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        # Tombstone: a result already dropped by 2b as no-material must not be
-        # re-recovered from the stale (still status=ok) result.json, else each
-        # KERNEL entry re-enqueues a wasted rebench in a loop.
+        # Tombstone a result already adjudicated by 2b so stale result.json
+        # cannot re-enqueue a settled candidate on a later KERNEL entry.
         prev_geak = (
             self.shared_state.geak_result
             if isinstance(getattr(self.shared_state, "geak_result", None), dict)
             else {}
         )
-        dropped_no_material = str(prev_geak.get("revalidation_status") or "") == "no_material"
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not dropped_no_material:
+        already_adjudicated = str(prev_geak.get("revalidation_status") or "") in {
+            "no_material",
+            "no_promote",
+        }
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not already_adjudicated:
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -3590,7 +3671,7 @@ class KernelPhase(PhaseHandler):
                 _derive_collective_attempt_id(recorded)
             )
         if kept:
-            recorded["integration_status"] = "pending"
+            recorded["patch_cleanup_status"] = "pending"
             if not str(recorded.get("integration_id") or "").strip():
                 seed = (
                     recorded["collective_attempt_id"]
@@ -3792,12 +3873,10 @@ class KernelPhase(PhaseHandler):
             integ.get("revert_result")
         )
         integration_complete = revert_complete and not recovery_uncertain
-        integ["integration_status"] = (
+        integ["patch_cleanup_status"] = (
             "complete" if integration_complete else "recovery_required"
         )
-        integ["integration_recovery_action"] = (
-            "" if integration_complete else "revert"
-        )
+        integ["patch_cleanup_action"] = "" if integration_complete else "revert"
         return decision
 
     async def _integrate_collective(self, result: dict) -> None:
@@ -3882,6 +3961,7 @@ class KernelPhase(PhaseHandler):
                 revert_complete = _collective_recovery.patch_lifecycle_complete(
                     revert_result
                 )
+                revert_action = "" if revert_complete else "revert"
                 integ.update(
                     {
                         "status": "failed",
@@ -3889,14 +3969,12 @@ class KernelPhase(PhaseHandler):
                         "error_class": "collective_promotion_invalid",
                         "error": repr(exc),
                         "revert_result": revert_result,
-                        "integration_status": (
+                        "patch_cleanup_status": (
                             "complete"
                             if revert_complete
                             else "recovery_required"
                         ),
-                        "integration_recovery_action": (
-                            "" if revert_complete else "revert"
-                        ),
+                        "patch_cleanup_action": revert_action,
                     }
                 )
                 decision = "REVERT"
@@ -3908,8 +3986,8 @@ class KernelPhase(PhaseHandler):
             gain,
         )
         if decision == "KEEP":
-            integ["integration_status"] = "recovery_required"
-            integ["integration_recovery_action"] = "finalize"
+            integ["patch_cleanup_status"] = "recovery_required"
+            integ["patch_cleanup_action"] = "finalize"
         try:
             self.shared_state.record_collective_integration(
                 integ,
@@ -3924,28 +4002,29 @@ class KernelPhase(PhaseHandler):
 
         if decision == "KEEP":
             finalize_result = integ.get("finalize_result")
-            if not _collective_recovery.patch_lifecycle_complete(finalize_result):
+            # Settled, not complete: an already-finalized manifest must not be
+            # finalized again even when its sweep was partial.
+            if not _collective_recovery.patch_finalize_settled(finalize_result):
                 finalize_result = await asyncio.to_thread(
                     _maybe_finalize_kernel_patch,
                     apply_result,
                 )
                 integ["finalize_result"] = finalize_result
-            finalize_complete = _collective_recovery.patch_lifecycle_complete(
+            finalize_complete = _collective_recovery.patch_finalize_settled(
                 finalize_result
             )
-            integ["integration_status"] = (
+            finalize_action = "" if finalize_complete else "finalize"
+            integ["patch_cleanup_status"] = (
                 "complete" if finalize_complete else "recovery_required"
             )
-            integ["integration_recovery_action"] = (
-                "" if finalize_complete else "finalize"
-            )
+            integ["patch_cleanup_action"] = finalize_action
             self.shared_state.record_collective_integration(
                 integ,
                 self.session_dir,
                 integration_id=integration_id,
             )
 
-        if integ["integration_status"] == "complete":
+        if integ["patch_cleanup_status"] == "complete":
             apply_checkpoint.unlink(missing_ok=True)
         try:
             await self.bus.append_and_seq(

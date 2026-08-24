@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -447,10 +446,10 @@ def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
 # AITER: result.json round-trip + driver
 # ---------------------------------------------------------------------------
 
-def test_result_json_round_trip_through_poll_build(tmp_path):
-    """Driver writes result.json; poll_build reads it as a rich BuildResult."""
+def test_result_json_round_trip_through_classify_build_exit(tmp_path):
+    """Driver writes result.json; the classifier reads it as a rich BuildResult."""
     from hyperloom.orchestrator.framework.build_actions import BuildResult, FrameworkRuntime
-    from hyperloom.orchestrator.framework.targeted_build import BuildHandle, poll_build
+    from hyperloom.orchestrator.framework.targeted_build import BuildHandle, classify_build_exit
 
     root = tmp_path / "attempt"
     root.mkdir()
@@ -478,10 +477,9 @@ def test_result_json_round_trip_through_poll_build(tmp_path):
         proc=proc,
         pid=12345,
         pgid=12345,
-        deadline=time.monotonic() + 3600,
     )
 
-    result = poll_build(handle)
+    result = classify_build_exit(handle, 0)
     assert result is not None
     assert result.ok is True
     assert result.installed_versions["aiter_ref"] == "v0.1.0"

@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 
 from hyperloom.common.env import is_truthy
 
@@ -305,7 +306,7 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 # xDiT (diffusion) do-not-set blacklist — env knobs that crash or regress on
 # FLUX.2-class DiT models with Ulysses SP. Each entry maps an env key to the
 # set of forbidden values (``"*"`` = any truthy value) and a short reason.
-# Enforced for the ``xdit`` framework only, in :func:`apply_compatibility_filter`.
+# Applied for the ``xdit`` framework only, by :func:`apply_compatibility_filter`.
 _XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
     "XDIT_ATTENTION_BACKEND": (
         frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
@@ -357,22 +358,24 @@ def xdit_blacklist_reason(
 
 _HELP_TEXT_CACHE: dict[str, str] = {}
 
+# Framework -> monotonic deadline before which a failed probe is not retried.
+_HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
+_HELP_PROBE_RETRY_SEC: float = 300.0
+
 # Per-framework ``--help`` extraction commands. Each is a single-shot
 # ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
+# Argv tails; the interpreter is resolved per framework at call time.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "sglang": (
-        "python3",
         "-c",
         "from sglang.launch_server import parser; parser.print_help()",
     ),
     "vllm": (
-        "python3",
         "-c",
         "from vllm.entrypoints.openai.api_server import make_arg_parser; make_arg_parser(None).print_help()",
     ),
     # atom exposes EngineArgs.add_cli_args (mirrors vLLM).
     "atom": (
-        "python3",
         "-c",
         "import argparse; from atom.model_engine.arg_utils import EngineArgs; "
         "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p); "
@@ -386,7 +389,11 @@ def _probe_server_help_text(framework: str) -> str:
 
     Supported: ``sglang``, ``vllm``, ``atom``; unknown values return ``""``.
     Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
-    fall through to NOT filtering. Empty results are NOT cached.
+    fall through to NOT filtering.
+
+    A failure is held off for ``_HELP_PROBE_RETRY_SEC`` rather than re-paying a
+    ten-second import on every variant, and is logged once: a silently empty
+    probe means the flag rules stopped running with nothing to say so.
 
     Args:
         framework (str): Framework name; matched case-insensitively.
@@ -398,22 +405,42 @@ def _probe_server_help_text(framework: str) -> str:
     fw = (framework or "").strip().lower()
     if fw in _HELP_TEXT_CACHE:
         return _HELP_TEXT_CACHE[fw]
-    cmd = _HELP_PROBE_COMMANDS.get(fw)
-    if cmd is None:
+    argv_tail = _HELP_PROBE_COMMANDS.get(fw)
+    if argv_tail is None:
         return ""
+    expiry = _HELP_PROBE_FAILED_UNTIL.get(fw)
+    if expiry is not None and time.monotonic() < expiry:
+        return ""
+    # Deferred: _grid_runner imports this module at module scope.
+    from ._grid_runner import _resolve_probe_python
+
     try:
+        interpreter = _resolve_probe_python(fw)
         proc = subprocess.run(
-            list(cmd),
+            [interpreter, *argv_tail],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        out = (proc.stdout or "") + (proc.stderr or "")
-    except Exception:  # noqa: BLE001 — best-effort, see docstring
-        out = ""
+        # Only a clean exit is help text. stderr on a failed run is a
+        # traceback, and treating that as help makes every flag look absent,
+        # which drops the variants carrying them rather than sparing them.
+        out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
+        reason = f"exit={proc.returncode}"
+    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+        out, reason = "", repr(exc)
     if out:
         _HELP_TEXT_CACHE[fw] = out
-    return out
+        return out
+    if fw not in _HELP_PROBE_FAILED_UNTIL:
+        log.warning(
+            "compatibility probe for %s produced no help text (%s); "
+            "flag-version drops are disabled for it",
+            fw,
+            reason,
+        )
+    _HELP_PROBE_FAILED_UNTIL[fw] = time.monotonic() + _HELP_PROBE_RETRY_SEC
+    return ""
 
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
@@ -451,31 +478,35 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
 
 def apply_compatibility_filter(
     grid: list["GridVariant"],
+    *,
+    framework: str,
+    model_path: str,
 ) -> tuple[list["GridVariant"], list[dict]]:
-    """Skip variants known to be incompatible with current model/sglang.
+    """Skip variants known to be incompatible with current model/framework.
 
-    Two dimensions, each conservative (assume compatible) on probe failure:
-    model class (MLA / MoE flags dropped when ``$MODEL_PATH`` lacks the family
-    keyword), and sglang version (flags absent from ``launch_server --help``
-    dropped). Returns the ``(kept, dropped)`` shape of ``apply_user_skip_list``.
+    Three dimensions, each conservative (assume compatible) when it cannot
+    tell: the xDiT do-not-set list, model class (MLA / MoE flags dropped when
+    the model path lacks the family keyword), and framework version (flags
+    absent from the server's ``--help`` dropped). Returns the ``(kept,
+    dropped)`` shape of ``apply_user_skip_list``.
 
     Args:
         grid (list[GridVariant]): The candidate variants to filter.
+        framework (str): Framework the grid will run against.
+        model_path (str): Model the grid will run against; ``""`` means unknown,
+            which keeps every model-class-gated flag.
 
     Returns:
         tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
         entries carry ``name``/``source``/``reason``.
     """
-    model_path = os.environ.get("MODEL_PATH", "")
     if model_path:
         is_mla, is_moe = _detect_model_class(model_path)
     else:
-        # No MODEL_PATH set -> can't detect -> assume compatible.
+        # Cannot detect -> assume compatible.
         is_mla, is_moe = True, True
 
-    # Live framework's --help text; defaults to sglang for fixtures/callers
-    # that don't thread ``benchmark.framework``.
-    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+    fw = framework.strip().lower()
     help_text = _probe_server_help_text(fw)
     help_available = bool(help_text)
 

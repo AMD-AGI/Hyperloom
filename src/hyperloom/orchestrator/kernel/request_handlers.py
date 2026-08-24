@@ -46,6 +46,7 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
+from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
 from ..trace.parse_usage import (
@@ -260,9 +261,11 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
-    """Framework install roots for patchability checks.
+    """Framework install roots for the runtime-generated kernel classifier.
 
-    Emits a lower-case variant per root for case-insensitive matching.
+    Emits a lower-case variant per root because that classifier matches against
+    a lower-cased source path. Path containment uses
+    :func:`~hyperloom.orchestrator.framework.paths.resolved_within` instead.
 
     Returns:
         The de-duplicated framework install roots (each with a lower-case
@@ -281,27 +284,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
     return tuple(out)
 
 
-def _source_escapes_reusable_roots(source_file: str) -> bool:
-    """True only for a source_file that the substring check accepts but which
-    actually escapes the framework tree via ``..`` traversal.
-
-    Deliberately narrow: this adds *rejection* on top of the existing substring
-    match to close a trace-supplied ``kernel_file`` that embeds ``..`` to climb
-    out of the tree (the substring can still be present in the un-normalised
-    string). It never rejects a path the substring check would not already
-    accept, so no legitimate in-tree source is newly refused.
-    """
-    raw = str(source_file or "")
-    if ".." not in Path(raw).parts:
-        return False
-    # Contains a ``..`` segment: only escape if, after normalisation, it no
-    # longer lands under any reusable root.
-    try:
-        sf = Path(raw).resolve()
-    except (OSError, RuntimeError):
-        return True
-    lower = str(sf).lower()
-    return not any(root in lower for root in _reusable_source_roots())
 
 
 _APPLY_TOOL_MODULE: Any | None = None
@@ -895,11 +877,17 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "kernel_name": name,
             "source_file": source_file,
         }
-    lower_file = source_file.lower()
-    # Substring accept (unchanged for legitimate in-tree sources) plus a narrow
-    # traversal-escape rejection: a trace-supplied kernel_file that keeps a root
-    # substring but uses ``..`` to climb out of the tree is refused.
-    if not any(root in lower_file for root in _reusable_source_roots()) or _source_escapes_reusable_roots(source_file):
+    from ..framework.paths import (
+        resolve_patch_target_roots,
+        resolved_within,
+        source_file_candidates,
+    )
+
+    if not any(
+        resolved_within(candidate, root)
+        for candidate in source_file_candidates(source_file)
+        for root in resolve_patch_target_roots()
+    ):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
@@ -8122,8 +8110,8 @@ async def integrate_handler(
     # ONLY for a candidate that already cleared the throughput bar, so a
     # regressing patch never spends a verdict on itself, and graded from the
     # re-baseline's own eval output, so the verdict costs no extra GPU time.
-    # Placed ahead of the optional source-import / paired-A/B passes so a patch
-    # that loses accuracy short-circuits before they run.
+    # Placed ahead of the optional source-import pass so a patch that loses
+    # accuracy short-circuits before it runs.
     # An apply-back carries only reference correctness, so this run is the sole
     # end-to-end evidence it will ever get.
     # Anything other than a recorded pass still owes the verdict, so an absent or
@@ -8191,98 +8179,10 @@ async def integrate_handler(
             decision = "NEEDS_REVIEW"
             source_not_imported_downgrade = True
 
-    # Paired same-config A/B confirmation (opt-in via its own flag; does a second
-    # server launch + revert/re-apply). When a candidate clears KEEP against the
-    # stored base_tput scalar, re-confirm it against a paired pristine baseline
-    # measured under the same config: revert -> measure pristine -> recompute
-    # gain. A confirmed KEEP is re-applied; a disconfirmed KEEP drops to
-    # NEEDS_REVIEW. Any failure restores the applied state and keeps the stored
-    # decision, so it never breaks a run.
-    paired_ab: dict[str, Any] | None = None
-    paired_pristine_revert: HandlerResult | None = None
-    if env_bool("HL_INTEGRATE_PAIRED_AB", False) and decision == "KEEP" and apply_result.get("status") == "ok":
-        paired_ab = {"status": "attempted"}
-        try:
-            paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
-            paired_ws = unique_runs_dir(session_dir, "integrate", f"{fake_task_id}-pairedbase")
-            paired_task = Task(
-                task_id=f"{fake_task_id}-pairedbase",
-                kind="baseline",
-                state="running",
-                params={
-                    "config_path": payload.get("config_path"),
-                    "output_dir": str(paired_ws),
-                    "timeout_sec": rebaseline_timeout_sec,
-                    "extra_server_args": extra_args,
-                    "extra_envs": dict(payload.get("extra_envs") or {}),
-                    # Pristine arm of the paired A/B: compares against the
-                    # anchored baseline, never establishes it.
-                    "quality_ref_exempt": True,
-                },
-                idempotency_key=f"{fake_task_id}-pairedbase",
-            )
-            paired_bench = await _run_integrate_rebaseline_with_lock_retry(
-                baseline_executor,
-                RunnerContext(task=paired_task, lease=None),
-                workspace=paired_ws,
-                reason=f"integrate {kernel_id or 'anonymous'} paired pristine baseline",
-            )
-            if is_valid_measurement(paired_bench):
-                paired_base_tput = float(paired_bench.get("output_throughput") or 0.0)
-                paired_gain = gain_pct_or_zero(new_tput, paired_base_tput)
-                paired_ab.update(
-                    {
-                        "status": "ok",
-                        "paired_base_tput": paired_base_tput,
-                        "paired_gain_pct": paired_gain,
-                        "stored_base_tput": base_tput,
-                        "stored_gain_pct": gain_pct,
-                    }
-                )
-                if paired_gain > keep_threshold_pct:
-                    # Confirmed: re-apply so the KEEP lands the patch.
-                    reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
-                    if reapply.get("status") == "ok":
-                        apply_result = reapply
-                        paired_pristine_revert = None  # patch is back
-                        base_tput = paired_base_tput
-                        gain_pct = paired_gain
-                        paired_ab["confirmed"] = True
-                    else:
-                        paired_ab.update({"confirmed": False, "reapply_failed": True})
-                        decision = "NEEDS_REVIEW"
-                else:
-                    # Disconfirmed: leave reverted, drop to NEEDS_REVIEW.
-                    base_tput = paired_base_tput
-                    gain_pct = paired_gain
-                    decision = "NEEDS_REVIEW"
-                    paired_ab["confirmed"] = False
-            else:
-                # Paired measurement failed: restore applied state, keep decision.
-                reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
-                if reapply.get("status") == "ok":
-                    apply_result = reapply
-                    paired_pristine_revert = None
-                paired_ab["status"] = "measurement_failed"
-        except Exception as exc:  # noqa: BLE001 — never break integrate on paired-AB
-            log.exception("paired A/B confirmation failed; falling back to stored-scalar decision")
-            try:
-                reapply = _maybe_apply_kernel_patch(payload, session_dir=session_dir, kernel_id=kernel_id)
-                if reapply.get("status") == "ok":
-                    apply_result = reapply
-                    paired_pristine_revert = None
-            except Exception:  # noqa: BLE001
-                pass
-            paired_ab = {"status": "error", "error": repr(exc)}
-
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
         if decision == "KEEP"
-        # If the paired pass already reverted, reuse that result instead of
-        # double-reverting an already-reverted manifest.
-        else (
-            paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
-        )
+        else _maybe_revert_kernel_patch(apply_result)
     )
     defer_patch_finalize = bool(payload.get("defer_patch_finalize", False))
     finalize_result = (
@@ -8295,17 +8195,18 @@ async def integrate_handler(
         )
     )
     revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
-    revert_complete = (
-        not revert_required
-        or revert_result.get("status") in {"ok", "partial"}
+    top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
+        decision=decision,
+        revert_result=revert_result,
+        finalize_result=finalize_result,
+        revert_required=revert_required,
     )
 
     result: dict[str, Any] = {
-        # Clean finish including any owed revert; the verdict is ``decision``,
-        # which every in-tree consumer reads, so a REVERT that reverted cleanly
-        # still reports ``ok``.
-        "status": "ok" if revert_complete else "failed",
+        "status": top_status,
         "decision": decision,
+        "patch_cleanup_status": patch_cleanup_status,
+        "patch_cleanup_action": patch_cleanup_action,
         "kernel_id": kernel_id,
         "patch_path": patch_path,
         "target_file": payload.get("target_file") or payload.get("source_file"),
@@ -8324,7 +8225,7 @@ async def integrate_handler(
         "identity_route": str(payload.get("identity_route") or ""),
         "integration_id": str(payload.get("integration_id") or ""),
     }
-    if not revert_complete:
+    if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(
             revert_result.get("error")
@@ -8340,10 +8241,6 @@ async def integrate_handler(
         result["source_import_evidence"] = source_import_evidence
     if source_not_imported_downgrade:
         result["decision_reason"] = "source_not_confirmed_imported"
-    if paired_ab is not None:
-        result["paired_ab"] = paired_ab
-        if paired_ab.get("confirmed") is False:
-            result["decision_reason"] = "paired_ab_disconfirmed"
     # Recorded last so a blocking accuracy verdict owns ``decision_reason``: it
     # is the reason this candidate lost its KEEP, outranking the throughput-side
     # annotations above.

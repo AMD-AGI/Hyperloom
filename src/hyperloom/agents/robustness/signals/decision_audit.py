@@ -11,7 +11,7 @@ decisions that bypassed Critic via programmatic paths (``integrate`` executor,
 Severity: HIGH + escalate/prune — G1 empty patch KEEP, G3 dispatch bypassed,
 G4 negative-delta kernel kept, G5 ci_metrics baseline=0 without
 ``status=baseline_failed``. MEDIUM + alert — G2 sub-threshold
-KEEP, G6 ci_metrics schema drift. These are audit, not recovery: no auto-delegate(report).
+KEEP, G6 ci_metrics schema drift.
 """
 
 from __future__ import annotations

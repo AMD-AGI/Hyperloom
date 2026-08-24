@@ -65,6 +65,10 @@ class _StubTaskRow:
     state: str
     params: dict
     idempotency_key: str
+    # Mirrors the real ``Task``: the dispatch path reads both before running a
+    # row. Closing steps take no lanes.
+    requires_lanes: list = field(default_factory=list)
+    lease_ttl_sec: int = 0
 
 
 class _StubTaskRegistry:

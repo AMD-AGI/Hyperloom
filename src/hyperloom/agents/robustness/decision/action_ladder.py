@@ -8,11 +8,10 @@ Three tiers by severity:
 1. **observe** (low) — ``send_message(topic="observation")``: visibility, no pause.
 2. **diagnose** (medium) — ``alert(severity="medium")`` carrying evidence.
 3. **recommend** (high) — ``alert(severity="high")`` plus, for some symptoms, a
-   symptom-specific remediation intent: ``kill_task`` (stale_lease),
-   ``delegate(recover)`` (gpu_memory_leaked), ``delegate(report)``
-   (``deadline_*`` wind-down and ``recover_unsuccessful`` finalization), or
-   ``prune_branch`` (stuck / no-lever families in ``_PRUNE_SYMPTOMS``). Every
-   other HIGH symptom is strategic: the alert alone, and Orchestration decides.
+   symptom-specific remediation intent: ``delegate(recover)`` (gpu_memory_leaked,
+   local_server_unreachable), or ``prune_branch`` (stuck / no-lever families in
+   ``_PRUNE_SYMPTOMS``). Every other HIGH symptom is strategic: the alert alone,
+   and Orchestration decides.
 
 Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
 cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
@@ -21,6 +20,7 @@ Findings — one record per intent batch — go to :class:`FindingSink`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
@@ -32,7 +32,6 @@ from ..role.envelope import (
     build_alert,
     build_delegate,
     build_heartbeat,
-    build_kill_task,
     build_prune_branch,
     build_send_message,
 )
@@ -270,8 +269,8 @@ class ActionLadder:
         """Build high-severity intents, adding policing intents per symptom.
 
         Always emits a high-severity alert; depending on ``sym.name`` it may
-        append a kill_task / delegate / prune_branch intent that encodes the
-        concrete remediation for that symptom.
+        append a delegate / prune_branch intent that encodes the concrete
+        remediation for that symptom.
 
         Args:
             sym (Symptom): The high-severity symptom.
@@ -280,13 +279,6 @@ class ActionLadder:
             list[Intent]: The alert plus any symptom-specific policing intents.
         """
         intents: list[Intent] = [build_alert("high", sym.summary, detail=_detail(sym))]
-        # Resource-safety: stale lease holds a lane on a dead PID -> kill_task.
-        if sym.name == "stale_lease":
-            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            task_id = str(evidence.get("task_id") or "").strip()
-            if task_id and task_id != "unknown":
-                intents.append(build_kill_task(task_id=task_id, reason="stale_lease"))
-            return intents
         # Resource-safety: GPU leak -> ``delegate(recover, force_gpu_cleanup=True)``.
         if sym.name == "gpu_memory_leaked":
             evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
@@ -302,22 +294,35 @@ class ActionLadder:
                 )
             )
             return intents
-        # Wall-clock wind-down: ``delegate(report)`` lands a deterministic
-        # report in the remaining budget before the deadline supervisor
-        # SIGTERMs work; ``recover_unsuccessful`` is the finalization path.
-        if sym.name in {
-            "deadline_warning",
-            "deadline_imminent",
-            "deadline_hard_cutoff",
-            "recover_unsuccessful",
-        }:
+        # Dead inference server -> ``delegate(recover, force_gpu_cleanup=True)``.
+        # ``recover``'s owner-pattern kill list already covers the atom/Magpie
+        # server process names (Magpie, EngineCore); this is the same remedy
+        # as gpu_memory_leaked, just triggered by an unreachable health check
+        # instead of a VRAM leak. ("server_lifecycle", named in this
+        # symptom's own suggestion text, is an internal warm-reuse config
+        # helper, not a real dispatchable action — PolicyGate would reject it
+        # as unknown_action.)
+        if sym.name == "local_server_unreachable":
             evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            slug = sym.name.replace("_", "-")
+            # `_server_unreachable` emits one symptom per unreachable probe
+            # target and marks all of them HIGH together, so a tick-only key
+            # would collide across targets: the first delegate creates the
+            # task and the rest come back as duplicate-idempotency
+            # PolicyDenied, which incorrectly books a working recovery as a
+            # repeated policy denial. Disambiguate with the target itself.
+            target = str(sym.subject.get("url") or evidence.get("url") or "unknown")
+            target_key = hashlib.sha1(target.encode("utf-8")).hexdigest()[:8]
             intents.append(
                 build_delegate(
-                    action_name="report",
-                    params={"reason": sym.name, "evidence": evidence},
-                    idempotency_key=(f"report-{slug}-tick-{self._last_tick_index}"),
+                    action_name="recover",
+                    params={
+                        "reason": "local_server_unreachable",
+                        "force_gpu_cleanup": True,
+                        "evidence": evidence,
+                    },
+                    idempotency_key=(
+                        f"recover-server-unreachable-tick-{self._last_tick_index}-{target_key}"
+                    ),
                 )
             )
             return intents

@@ -23,7 +23,11 @@ from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
+from ...framework.paths import (
+    resolve_session_framework_root,
+    resolve_source_file_allowlist,
+    resolved_within,
+)
 from ...specialists.patch_safety import (
     patch_file_targets,
     patch_targets_missing,
@@ -335,13 +339,8 @@ def trusted_explicit_root(explicit: str) -> Path | None:
             explicit,
         )
         return None
-    for raw in resolve_source_file_allowlist():
-        try:
-            root = Path(raw).resolve()
-        except (OSError, RuntimeError):
-            continue
-        if _is_within(resolved, root):
-            return resolved
+    if any(resolved_within(explicit, root) for root in resolve_source_file_allowlist()):
+        return resolved
     log.warning(
         "integrate_patch: framework_source_root override %r rejected "
         "(outside trusted source scope)",

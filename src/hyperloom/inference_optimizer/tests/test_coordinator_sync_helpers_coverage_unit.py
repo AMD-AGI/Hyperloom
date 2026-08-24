@@ -105,6 +105,8 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
 
     class _Task:
         task_id = "tg-ok"
+        kind = "explore"
+        requires_lanes: list = []
 
     async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
         return "RESULT"
@@ -116,7 +118,7 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
     coord.gpu_specialist_pool.release = _fake_release
     sentinel_lease = object()
     out = asyncio.run(
-        coord._run_dispatched_with_gpu_release(
+        coord.run_task_registered(
             _Task(),
             prebound_lease=None,
             extra_context={},
@@ -134,6 +136,8 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
 
     class _Task:
         task_id = "tg-boom"
+        kind = "explore"
+        requires_lanes: list = []
 
     async def _boom(task, *, prebound_lease=None, extra_context=None):
         raise RuntimeError("subprocess crashed")
@@ -146,7 +150,7 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
     sentinel_lease = object()
     with pytest.raises(RuntimeError, match="subprocess crashed"):
         asyncio.run(
-            coord._run_dispatched_with_gpu_release(
+            coord.run_task_registered(
                 _Task(),
                 prebound_lease=None,
                 extra_context={},
@@ -164,6 +168,8 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
 
     class _Task:
         task_id = "tc-cpu"
+        kind = "report"
+        requires_lanes: list = []
 
     async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
         return "CPU"
@@ -174,7 +180,7 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     coord.sub.run_task = _fake_run_task
     coord.gpu_specialist_pool.release = _fake_release
     out = asyncio.run(
-        coord._run_dispatched_with_gpu_release(
+        coord.run_task_registered(
             _Task(),
             prebound_lease=None,
             extra_context={},

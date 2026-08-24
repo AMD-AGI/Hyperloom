@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Framework source-root resolution for PolicyGate and flag discovery.
+"""Framework source-root resolution and path containment.
 
 Centralises probe order across container layouts (``/sgl-workspace/...``,
 ``/app/ATOM/atom``, ``/app/xDiT``, site/dist-packages) so PolicyGate, AST
 discovery, install.sh, and ``apply_kernel_patch`` all agree. First-class
 frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is in the
 allowlist as a shared kernel library.
+
+Owning the roots and the containment test together keeps every caller on one
+boundary rule: :func:`resolved_within` against a root from this module.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import site
 import sys
 import sysconfig
@@ -768,6 +772,61 @@ def resolve_warm_replay_kernel_root(
     )
 
 
+# A profile trace names a frame as ``<path>(<line>): <function>``. The suffix is
+# not part of the path and the path is relative to the tree being profiled.
+_TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
+
+
+def resolved_within(value: str, root: str) -> bool:
+    """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
+
+    Resolving both sides is what rejects ``..`` traversal, symlink escapes, a
+    root substring embedded in an unrelated directory, and shared-prefix
+    boundary tricks such as ``/x/aiter`` versus ``/x/aiterX``.
+
+    Args:
+        value (str): the candidate path string.
+        root (str): an allowlist root (may carry a trailing slash).
+
+    Returns:
+        bool: True when the resolved ``value`` equals or is nested under the
+            resolved ``root``; False on any resolution error or escape.
+    """
+    try:
+        v = Path(str(value)).resolve()
+        r = Path(str(root)).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return v == r or v.is_relative_to(r)
+
+
+def source_file_candidates(value: str) -> tuple[str, ...]:
+    """Return the path forms a ``source_file`` value may legitimately take.
+
+    Roofline evidence reaches the orchestration prompt as trace frames and the
+    model cites them verbatim, so a relative frame must be resolved against the
+    session's framework tree rather than the process CWD, or every citation is
+    denied. Each candidate is still bounded by :func:`resolved_within`.
+
+    Args:
+        value (str): The raw field value.
+
+    Returns:
+        tuple[str, ...]: ``value`` first, then the de-annotated form, then that
+            form resolved against the tree this session is optimizing.
+    """
+    raw = str(value).strip()
+    out: list[str] = [raw]
+    bare = _TRACE_FRAME_SUFFIX.sub("", raw).strip()
+    if bare and bare != raw:
+        out.append(bare)
+    if bare and not Path(bare).is_absolute():
+        root = resolve_session_framework_root()
+        if root:
+            out.append(str(Path(root) / bare))
+    return tuple(out)
+
+
 __all__ = [
     "WarmReplayPatchSource",
     "WarmReplayRootResolution",
@@ -778,6 +837,8 @@ __all__ = [
     "resolve_source_file_allowlist",
     "resolve_warm_replay_framework_root",
     "resolve_warm_replay_kernel_root",
+    "resolved_within",
+    "source_file_candidates",
     "summarise_framework_root_discovery",
     "warm_replay_patch_sources",
 ]

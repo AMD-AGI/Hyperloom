@@ -240,12 +240,35 @@ The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration may
 send kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
+What the phase actually does depends on the kernel backend, and the branches
+look very different from Orchestration's side:
+
+- **Default (`geak`)**: entering the phase hands it to a single
+  Coordinator-owned whole-pipeline GEAK e2e run, which then sets the
+  `skip_to_sweep` escalate hint. When the run produces no win, `exit_normal_kernel`
+  honours the hint immediately and the phase closes without Orchestration ever
+  taking a turn in it.
+- **On a GEAK win**, the Coordinator enqueues a same-harness revalidation
+  rebench and marks `geak_pending.status = "awaiting_rebench"` with the task id.
+  `kernel_work_pending` then reports `True`, and `exit_normal_kernel` refuses the
+  `skip_to_sweep` handoff while work is pending — so KERNEL stays open, and
+  Orchestration does tick until the rebench lands (or the revalidation turns out
+  to be unavailable, which drops the pending slot and lets the exit through).
+- **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
+  KERNEL-entry ladder — GEMM tuning, the fusion and collective lanes, then
+  per-kernel `kernel_opt` — and Orchestration drives the remaining kernel work
+  through the request channel.
+
+See [Kernel optimization execution path](kernel-execution-path.md) for the
+entry-hook branch order.
+
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
 admits these actions:
 
 - `kernel_opt`
 - `integrate`
 - `gemm_tuning`
+- `specialist`
 - `roofline`
 - `profile`
 - `recover`

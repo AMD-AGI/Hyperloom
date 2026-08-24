@@ -51,11 +51,12 @@ from .symptom import Symptom, SymptomSeverity
 log = logging.getLogger(__name__)
 
 
-# Agents tracked for stall detection; robustness excludes itself.
+# Reactor roles tracked for stall detection; robustness excludes itself.
+# ``kernel_agent`` is not one — it has no turn and no heartbeat, only a
+# completion receipt the Coordinator signs for it.
 _TRACKED_AGENTS: frozenset[str] = frozenset(
     {
         "orchestration",
-        "kernel_agent",
         "critic",
     }
 )

@@ -15,9 +15,22 @@ the Arbor paper (arXiv:2606.12563) — "Arbor" being the research name for
 this orchestration, so a specialist here *is* an Arbor Domain Specialist.
 Unlike the deterministic Python executors (`baseline` / `explore`
 / …) the specialist is *LLM-driven*: SpecialistRunner spawns a fresh
-Claude subprocess with the per-tag prompt context, an isolated
-`runs/specialist/<task_id>/worktree/` (a `git worktree` rooted at
-`INFERENCEX_PATH`), and a tight tool whitelist.
+Claude subprocess with the per-tag prompt context and an optional isolated
+`runs/specialist/<task_id>/worktree/` (a `git worktree` when
+`INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` resolves to a git checkout).
+
+**Containment model (as implemented)**: The specialist runs under
+`--permission-mode bypassPermissions` and has access to all built-in
+tools except `KillShell` and `SlashCommand` (which are denied via
+`--disallowedTools` to enforce the prompt rule against global process
+cleanup). The framework checkout listed in `framework_source_roots` is
+readable and writable from the subprocess. There is no file-system
+containment. Behavioural constraints are enforced by the prompt iron-rules
+(MUST NOT write directly to `framework_source_roots`; patches go through
+`integrate_patch`) and by post-hoc Critic + PolicyGate review.
+The worktree is a best-effort isolation aid for deployments where the
+framework is installed as a git checkout; it is absent when the framework
+is pip-installed (the default; logged as `no_git_framework_source_root`).
 
 ## Inv-5.1 update (specialist-as-patch-author, PR-A1)
 

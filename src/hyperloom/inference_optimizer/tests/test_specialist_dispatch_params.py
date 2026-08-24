@@ -575,27 +575,15 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
 
 
 # --------------------------------------------------------------------------- #
-# Tool surface: TodoWrite and Task are granted.
+# Tool surface: TaskKill and SlashCommand are denied.
 # --------------------------------------------------------------------------- #
-def test_task_tool_granted_and_todowrite_granted():
-    from hyperloom.orchestrator.specialists.runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SPECIALIST_TOOL_DENYLIST,
-        SpecialistRunner,
-    )
+def test_denylist_blocks_process_kill_tools():
+    from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
 
-    assert "TodoWrite" in DEFAULT_SPECIALIST_TOOLS
-    assert "Task" in DEFAULT_SPECIALIST_TOOLS
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
     assert "Task" not in SPECIALIST_TOOL_DENYLIST
-
-    runner = SpecialistRunner(backend_factory=lambda *a, **k: None)
-
-    default_resolved = runner._resolve_tools(None)
-    assert "Task" in default_resolved
-    assert "TodoWrite" in default_resolved
-
-    resolved = runner._resolve_tools(["Read", "Task", "TodoWrite", "Bash"])
-    assert {"Read", "Task", "TodoWrite", "Bash"} <= set(resolved)
+    assert "TodoWrite" not in SPECIALIST_TOOL_DENYLIST
 
 
 # --------------------------------------------------------------------------- #
@@ -714,36 +702,36 @@ def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_
 
 
 # --------------------------------------------------------------------------- #
-# readonly param + domain.readonly → mode=research, lane=cpu
+# domain.default_mode → mode=research, lane=cpu
 # --------------------------------------------------------------------------- #
-def test_readonly_param_forces_research_mode():
-    """params['readonly']=True must override any mode/lane dial."""
-    profile = resolve_specialist_profile({"readonly": True, "domain": "serving_specialist"})
+def test_research_mode_param_forces_research_mode():
+    """params['mode']='research' must override the global default."""
+    profile = resolve_specialist_profile({"mode": "research", "domain": "serving_specialist"})
     assert profile.mode == MODE_RESEARCH
     assert profile.lane == LANE_CPU
     assert profile.bench is False
 
 
-def test_readonly_domain_flag_forces_research_mode():
-    """Domains marked readonly=True yield mode=research even without the param."""
+def test_research_default_mode_domain_resolves_to_research():
+    """Domains with default_mode='research' yield mode=research when no explicit mode is given."""
     from hyperloom.orchestrator.specialists.domains import get_domain
 
     for key in ("research_scout_specialist", "static_recon_specialist", "pr_intel_specialist"):
         domain = get_domain(key)
         assert domain is not None
-        assert domain.readonly is True
+        assert domain.default_mode == "research"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_RESEARCH, f"{key} should resolve to research mode"
         assert profile.lane == LANE_CPU, f"{key} should resolve to cpu lane"
 
 
-def test_patch_capable_domains_unaffected_by_readonly_flag():
-    """Patch-capable domains must NOT be marked readonly."""
+def test_patch_capable_domains_default_to_patch():
+    """Patch-capable domains have default_mode='patch'."""
     from hyperloom.orchestrator.specialists.domains import get_domain
 
     for key in ("serving_specialist", "kernel_switch_specialist", "comm_specialist"):
         domain = get_domain(key)
         assert domain is not None
-        assert domain.readonly is False
+        assert domain.default_mode == "patch"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_PATCH

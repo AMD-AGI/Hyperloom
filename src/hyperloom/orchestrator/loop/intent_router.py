@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
@@ -62,7 +63,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.DELEGATE: "_handle_delegate",
     IntentType.REQUEST: "_handle_request",
     IntentType.RESPONSE: "_handle_response",
-    IntentType.KILL_TASK: "_handle_kill_task",
     IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
@@ -70,6 +70,10 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.ALERT: "_handle_alert",
     IntentType.UPDATE_STATE: "_handle_update_state",
 }
+
+
+# Half the robustness stall threshold, so one dropped beat cannot trip it.
+_KERNEL_HEARTBEAT_SEC: float = 150.0
 
 
 class IntentRouter:
@@ -87,8 +91,7 @@ class IntentRouter:
 
         Runs the intent through :meth:`PolicyGate.validate_intent`; a
         :class:`PolicyDenied` is recorded and the intent dropped. Valid intents
-        are dispatched to the matching ``_handle_*`` method by type, and the
-        agent's message cursor is advanced to the latest sequence afterward.
+        are dispatched to the matching ``_handle_*`` method by type.
 
         Args:
             source (str): The agent that emitted the intent.
@@ -112,7 +115,6 @@ class IntentRouter:
                     "observation",
                     {"intent": it.value, "payload": intent.payload},
                 )
-            await self._cursor_advance_to_latest(source)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as exc:  # noqa: BLE001
@@ -647,12 +649,61 @@ class IntentRouter:
             )
         )
 
+    @asynccontextmanager
+    async def _kernel_step_heartbeat(self, kind: str, started: float):
+        """Keep orchestration's bus timestamp moving through an inline step.
+
+        The task-progress heartbeat cannot cover these: it reads the ``tasks``
+        table, and an inline kernel request never becomes a row.
+
+        Args:
+            kind (str): Request kind, echoed so an operator can tell what the
+                loop is blocked on.
+            started (float): ``time.monotonic()`` at the step's start.
+        """
+
+        async def _beat() -> None:
+            while True:
+                await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
+                await self.bus.append_and_seq(
+                    Message.new(
+                        "orchestration",
+                        "*",
+                        "observation",
+                        {
+                            "kind": "kernel_step_running",
+                            "step": kind,
+                            "elapsed_sec": round(time.monotonic() - started, 1),
+                        },
+                    )
+                )
+
+        task = asyncio.create_task(_beat())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
+        """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.
+
+        Args:
+            kind: The request kind, recorded as the failing action.
+            request_msg_id: The request message id, standing in for a task id.
+            result: The failure envelope carrying ``error_class`` and ``error``.
+        """
+        self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
+        self.shared_state.save(self.session_dir)
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler.
 
         Applies the execution-order gate, records the request on the bus, and
         dispatches to the registered handler or auto-rejects with a RESPONSE so
-        the requester never hangs.
+        the requester never hangs. Every failure is also appended to
+        ``last_action_failures``.
 
         Args:
             source (str): The agent issuing the request.
@@ -679,6 +730,11 @@ class IntentRouter:
 
         if target_agent == "kernel_agent":
             if not bool(getattr(self.shared_state, "kernel_enabled", True)):
+                _fail_result = {
+                    "status": "failed",
+                    "error_class": "agent_disabled",
+                    "error": "kernel_agent is disabled for this session (--no-kernel)",
+                }
                 await self.bus.append_and_seq(
                     Message.new(
                         target_agent,
@@ -688,21 +744,23 @@ class IntentRouter:
                             "in_reply_to": request_msg.msg_id,
                             "kind": f"{kind}_done",
                             "status": "failed",
-                            "result": {
-                                "status": "failed",
-                                "error_class": "agent_disabled",
-                                "error": "kernel_agent is disabled for this session (--no-kernel)",
-                            },
+                            "result": _fail_result,
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
                         priority=1,
                     )
                 )
-                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             handler = get_handler(kind)
             if handler is None:
+                _fail_result = {
+                    "status": "failed",
+                    "error_class": "unknown_kernel_kind",
+                    "error": f"no programmatic handler for kind={kind!r}",
+                    "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
+                }
                 await self.bus.append_and_seq(
                     Message.new(
                         target_agent,
@@ -712,19 +770,14 @@ class IntentRouter:
                             "in_reply_to": request_msg.msg_id,
                             "kind": f"{kind}_done",
                             "status": "failed",
-                            "result": {
-                                "status": "failed",
-                                "error_class": "unknown_kernel_kind",
-                                "error": f"no programmatic handler for kind={kind!r}",
-                                "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
-                            },
+                            "result": _fail_result,
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
                         priority=1,
                     )
                 )
-                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
@@ -801,10 +854,11 @@ class IntentRouter:
                         artifacts=_lifecycle_paths(merged_payload),
                     )
                     try:
-                        result = await handler(
-                            merged_payload,
-                            **handler_kwargs,
-                        )
+                        async with self._kernel_step_heartbeat(kind, _lc_t0):
+                            result = await handler(
+                                merged_payload,
+                                **handler_kwargs,
+                            )
                     except Exception as exc:  # noqa: BLE001
                         log.exception(
                             "kernel_request_handler[%s] crashed for source=%s",
@@ -855,6 +909,8 @@ class IntentRouter:
                     priority=1,
                 )
             )
+            if str(result.get("status", "")).lower() in ("failed", "error"):
+                self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
             # Cache trace_analyze output (successful runs only).
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
@@ -880,13 +936,12 @@ class IntentRouter:
                             result["gap_canonical_id"] = payload_gap
                     await self._record_integrate_keep(result)
                 self.shared_state.save(self.session_dir)
-            # Advance the kernel cursor past this request seq.
-            await self.cursors.advance(
-                target_agent,
-                seq=request_msg.seq,
-                msg_id=request_msg.msg_id,
-            )
         else:
+            _fail_result = {
+                "status": "failed",
+                "error_class": "unknown_target_agent",
+                "error": f"no handler registered for target_agent={target_agent!r}",
+            }
             await self.bus.append_and_seq(
                 Message.new(
                     target_agent,
@@ -896,18 +951,14 @@ class IntentRouter:
                         "in_reply_to": request_msg.msg_id,
                         "kind": f"{kind}_done",
                         "status": "failed",
-                        "result": {
-                            "status": "failed",
-                            "error_class": "unknown_target_agent",
-                            "error": f"no handler registered for target_agent={target_agent!r}",
-                        },
+                        "result": _fail_result,
                         "source": "coordinator_auto_reject",
                     },
                     in_reply_to=request_msg.msg_id,
                     priority=1,
                 )
             )
-            await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+            self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         """Route a RESPONSE intent back to the original requester.
@@ -932,54 +983,6 @@ class IntentRouter:
                 dict(intent.payload),
                 in_reply_to=in_reply_to,
                 priority=1,
-            )
-        )
-
-    async def _handle_kill_task(self, source: str, intent: Intent) -> None:
-        """Cancel a queued/running task in response to a kill_task intent.
-
-        Records an observation for unknown task ids, transitions a
-        queued/running task to ``cancelled``, and broadcasts a ``kill`` event.
-
-        Args:
-            source (str): The agent (typically robustness) issuing the kill.
-            intent (Intent): The KILL_TASK intent; ``payload`` carries
-                ``task_id`` and optional ``reason``.
-        """
-        task_id = intent.payload["task_id"]
-        try:
-            task = await self.tasks.get(task_id)
-        except Exception:  # noqa: BLE001 — TaskNotFound
-            await self._record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "kill_task_unknown", "task_id": task_id, "source": source},
-            )
-            return
-        if task.state in ("queued", "running"):
-            await self.tasks.transition(
-                task_id,
-                "cancelled",
-                evidence={"reason": intent.payload.get("reason"), "by": source},
-            )
-            # Defensive audit (log-only): emit an audit trail for KILL_TASK
-            # so kills are traceable. Behaviour is unchanged.
-            try:
-                log.warning(
-                    "kill_task audit: source=%s task_id=%s prior_state=%s reason=%r",
-                    source,
-                    task_id,
-                    task.state,
-                    intent.payload.get("reason"),
-                )
-            except Exception:  # noqa: BLE001 - audit log must never affect flow
-                pass
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                "*",
-                "kill",
-                {"task_id": task_id, "reason": intent.payload.get("reason")},
             )
         )
 
