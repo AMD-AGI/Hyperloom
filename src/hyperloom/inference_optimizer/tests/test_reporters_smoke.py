@@ -499,19 +499,27 @@ def test_every_section_drifting_at_once_still_yields_a_report() -> None:
     assert r.global_facts.kernel_pipeline_funnel["detected"] == 0
 
 
-def test_a_failed_global_fact_degrades_without_losing_the_pack() -> None:
-    r = render_session_report({"session": {"session_id": "s"}, "kernel_lifecycle": ["not", "a", "dict"]})
+def test_a_drifted_section_yields_neutral_facts() -> None:
+    r = render_session_report(
+        {
+            "session": {"session_id": "s", "stop_reason": "target_reached"},
+            "kernel_lifecycle": ["not", "a", "dict"],
+        }
+    )
 
     facts = r.global_facts
-    assert set(facts.kernel_pipeline_funnel) == {
-        "detected",
-        "recommended",
-        "optimized",
-        "adopted",
-        "partial",
-        "reverted",
-        "rejected",
-    }
-    assert any("kernel_pipeline_funnel` could not be computed" in f for f in facts.data_quality_flags)
-    # The facts that did not depend on the broken section survive.
-    assert facts.stop_reason == ""
+    assert facts.kernel_pipeline_funnel["detected"] == 0
+    # Facts that do not depend on the drifted section keep their values.
+    assert facts.stop_reason == "target_reached"
+
+
+def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
+    r = render_session_report(
+        {
+            "session": {"session_id": "s"},
+            "baseline": {"throughput_tok_s_per_gpu": "2205"},
+            "final": {"throughput_tok_s_per_gpu": "2447", "cumulative_gain_pct_validated": "10.99"},
+        }
+    )
+
+    assert "+10.99% validated gain" in r.global_facts.headline
