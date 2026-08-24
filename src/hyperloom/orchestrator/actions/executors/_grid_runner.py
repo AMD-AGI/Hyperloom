@@ -2662,8 +2662,6 @@ async def run_grid(
 
         if rc != 0:
             nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
-            if not nonzero_error.strip():
-                nonzero_error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
@@ -2672,9 +2670,7 @@ async def run_grid(
                 extra_args=variant.extra_server_args,
             )
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: magpie_nonzero_after_valid_measurement (rc=%d)",
-                i + 1,
-                len(grid),
+                "grid_runner: variant %s aborted: magpie_nonzero_after_valid_measurement (rc=%d)",
                 variant.name,
                 rc,
             )

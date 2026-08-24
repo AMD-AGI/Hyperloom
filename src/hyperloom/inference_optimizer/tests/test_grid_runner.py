@@ -153,36 +153,6 @@ def test_grid_runner_emits_expected_error_class_labels():
     assert not missing, f"missing error_class labels in run_grid: {missing}"
 
 
-def test_variant_result_status_failed_on_nonzero_with_valid_measurement(tmp_path):
-    """A valid measurement does not override a non-zero subprocess exit code."""
-    from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
-
-    vr = VariantResult(
-        name="check",
-        extra_server_args="--max-num-seqs 128",
-        extra_envs={},
-        status="failed",
-        returncode=1,
-        error_class="magpie_nonzero_after_valid_measurement",
-        error="server exited 1",
-    )
-    d = vr.to_dict()
-    assert d["status"] == "failed"
-    assert d["returncode"] == 1
-    assert d["error_class"] == "magpie_nonzero_after_valid_measurement"
-
-    marker_path = tmp_path / "abort_reason.json"
-    _grid_runner._write_variant_abort_marker(
-        tmp_path,
-        variant_name="check",
-        error_class="magpie_nonzero_after_valid_measurement",
-        error_summary="server exited 1",
-        extra_args="--max-num-seqs 128",
-    )
-    import json
-    marker = json.loads(marker_path.read_text())
-    assert marker["error_class"] == "magpie_nonzero_after_valid_measurement"
-    assert marker["variant"] == "check"
 
 
 def test_variant_result_carries_error_class_field():

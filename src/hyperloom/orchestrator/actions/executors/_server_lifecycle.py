@@ -250,7 +250,9 @@ def teardown_lifecycle_server(
     """Best-effort teardown of a persistent server left by a lifecycle round.
 
     Idempotent and never raises (safe in ``finally``); a no-op on the happy
-    path, real work only on abnormal paths.
+    path, real work only on abnormal paths. The recorded pid is signalled only
+    when its cmdline still names a Hyperloom server, so a recycled pid is not
+    killed; the pid/meta files are removed either way.
 
     Args:
         pid_dir: Directory holding the server pid/meta files.
@@ -277,8 +279,7 @@ def teardown_lifecycle_server(
     if server_pid is not None and os.name == "posix":
         if not _looks_like_server_process(server_pid):
             log.warning(
-                "server_lifecycle teardown — pid %d does not look like a Hyperloom server "
-                "(possible pid reuse); skipping signal, removing stale pid files only",
+                "server_lifecycle teardown — pid %d is not a Hyperloom server (pid reuse); not signalling",
                 server_pid,
             )
         else:
