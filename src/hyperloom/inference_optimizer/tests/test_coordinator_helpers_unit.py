@@ -179,8 +179,7 @@ def test_dedupe_preserves_json_and_collapses_other_flags():
         "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
     )
     assert ch._dedupe_extra_server_args(args) == (
-        '--json-model-override-args {"rope_scaling":null} '
-        "--attention-backend ROCM_AITER_FA"
+        '--json-model-override-args {"rope_scaling":null} --attention-backend ROCM_AITER_FA'
     )
 
 
@@ -236,8 +235,7 @@ def test_merge_preserves_json_while_deduping_other_flags():
         "--attention-backend ROCM_ATTN --attention-backend ROCM_AITER_FA"
     )
     assert _merge("", args, "") == (
-        '--json-model-override-args {"rope_scaling":null} '
-        "--attention-backend ROCM_AITER_FA"
+        '--json-model-override-args {"rope_scaling":null} --attention-backend ROCM_AITER_FA'
     )
 
 

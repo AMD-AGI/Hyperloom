@@ -33,13 +33,20 @@ def _mk(root: Path, rel: str, text: str) -> None:
     p.write_text(text)
 
 
-def _host(root: Path, *, cpus: int = 4, sockets: int = 2, nodes: int = 8,
-          smt: str = "1", governor: str = "performance", boost: str = "1") -> Path:
+def _host(
+    root: Path,
+    *,
+    cpus: int = 4,
+    sockets: int = 2,
+    nodes: int = 8,
+    smt: str = "1",
+    governor: str = "performance",
+    boost: str = "1",
+) -> Path:
     """A plausible two-socket EPYC host."""
     _mk(root, "sys/devices/system/cpu/smt/active", smt)
     for i in range(cpus):
-        _mk(root, f"sys/devices/system/cpu/cpu{i}/topology/physical_package_id",
-            str(i % sockets))
+        _mk(root, f"sys/devices/system/cpu/cpu{i}/topology/physical_package_id", str(i % sockets))
     for i in range(nodes):
         (root / f"sys/devices/system/node/node{i}").mkdir(parents=True, exist_ok=True)
     _mk(root, "sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", governor)
@@ -142,8 +149,14 @@ def test_gpus_outside_pci_domain_zero_are_counted(tmp_path):
     ``0000:`` alone reported no accelerators on exactly those machines."""
     root = _amdgpu(
         tmp_path,
-        "0002:00:01.0", "0002:00:02.0", "0002:00:03.0", "0002:00:04.0",
-        "0003:00:01.0", "0003:00:02.0", "0003:00:03.0", "0003:00:04.0",
+        "0002:00:01.0",
+        "0002:00:02.0",
+        "0002:00:03.0",
+        "0002:00:04.0",
+        "0003:00:01.0",
+        "0003:00:02.0",
+        "0003:00:03.0",
+        "0003:00:04.0",
     )
     assert amdgpu_device_count(root=root) == 8
 

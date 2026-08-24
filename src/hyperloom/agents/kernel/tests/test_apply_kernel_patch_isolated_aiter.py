@@ -127,9 +127,7 @@ def test_installed_aiter_strategy_preserves_symlinked_site_packages(
 
     assert strategy["root"] == str(linked_site.absolute())
     assert strategy["rebuild_mode"] == "runtime_jit"
-    assert strategy["jit_build_dir"] == str(
-        linked_site.absolute() / "aiter" / "jit" / "build"
-    )
+    assert strategy["jit_build_dir"] == str(linked_site.absolute() / "aiter" / "jit" / "build")
 
 
 def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
@@ -183,10 +181,7 @@ def test_editable_root_without_package_markers_is_rejected(
     (checkout / "aiter" / "jit" / "build").mkdir(parents=True)
     monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
 
-    assert (
-        akp._trusted_aiter_jit_build_dir(checkout / "aiter" / "jit" / "build")
-        is False
-    )
+    assert akp._trusted_aiter_jit_build_dir(checkout / "aiter" / "jit" / "build") is False
 
 
 def test_symlinked_site_packages_wheel_stays_trusted(akp, tmp_path):
@@ -196,9 +191,7 @@ def test_symlinked_site_packages_wheel_stays_trusted(akp, tmp_path):
     linked_site.mkdir(parents=True)
     (linked_site / "site-packages").symlink_to(aiter_pkg.parent)
 
-    trusted = akp._trusted_aiter_jit_build_dir(
-        linked_site / "site-packages" / "aiter" / "jit" / "build"
-    )
+    trusted = akp._trusted_aiter_jit_build_dir(linked_site / "site-packages" / "aiter" / "jit" / "build")
 
     assert trusted is True
 
@@ -454,10 +447,7 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
         encoding="utf-8",
     )
     patch = tmp_path / "v1_forge.cu"
-    optimized = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n'
-    )
+    optimized = '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n'
     patch.write_text(optimized, encoding="utf-8")
     (aiter_pkg / "jit" / "build" / "stale.so").write_text(
         "stale",
@@ -480,9 +470,7 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     manifest = json.loads(Path(result["manifest_path"]).read_text())
     assert manifest["status"] == "applied"
     assert manifest["strategy"]["rebuild_modes"] == ["runtime_jit"]
-    assert manifest["strategy"]["jit_build_dirs"] == [
-        str(aiter_pkg / "jit" / "build")
-    ]
+    assert manifest["strategy"]["jit_build_dirs"] == [str(aiter_pkg / "jit" / "build")]
 
     monkeypatch.setattr(
         akp,
@@ -574,8 +562,7 @@ def test_revert_exposes_runtime_jit_restore_failure(
     target.write_text(original, encoding="utf-8")
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n',
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
         encoding="utf-8",
     )
     (aiter_pkg / "jit" / "build" / "stale.so").write_text(
@@ -627,10 +614,7 @@ def test_finalize_keeps_patch_and_deletes_local_backups(
         encoding="utf-8",
     )
     patch = tmp_path / "v1_forge.cu"
-    optimized = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n'
-    )
+    optimized = '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n'
     patch.write_text(optimized, encoding="utf-8")
     (aiter_pkg / "jit" / "build" / "baseline.so").write_text(
         "baseline",
@@ -673,8 +657,7 @@ def test_finalize_rejects_reverted_manifest(
     )
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n',
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
         encoding="utf-8",
     )
     applied = akp.apply_kernel_patch(
@@ -777,10 +760,7 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
                     {
                         "host": "pod-a",
                         "target_path": str(kwargs["target_file"]),
-                        "backup_path": (
-                            "/var/kernel_patch_backups/"
-                            f"{Path(kwargs['target_file']).name}.bak"
-                        ),
+                        "backup_path": (f"/var/kernel_patch_backups/{Path(kwargs['target_file']).name}.bak"),
                         "jit_backup": (
                             {
                                 "status": "clean",
@@ -823,10 +803,7 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
         records = result["multinode"]["records_by_host"]["pod-a"]
         assert len(records) == 2
         assert len({record["backup_path"] for record in records}) == 2
-        assert sum(
-            (record.get("jit_backup") or {}).get("status") == "clean"
-            for record in records
-        ) == 1
+        assert sum((record.get("jit_backup") or {}).get("status") == "clean" for record in records) == 1
 
 
 @pytest.mark.parametrize("explicit_repo_root", (False, True))
@@ -942,14 +919,7 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
     monkeypatch,
 ):
     _venv_root, target_aiter = _make_isolated_aiter(tmp_path / "target")
-    import_aiter = (
-        tmp_path
-        / "imported"
-        / "lib"
-        / "python3.12"
-        / "site-packages"
-        / "aiter"
-    )
+    import_aiter = tmp_path / "imported" / "lib" / "python3.12" / "site-packages" / "aiter"
     imported_build = import_aiter / "jit" / "build"
     imported_build.mkdir(parents=True)
     (imported_build / "unrelated.so").write_text("unrelated", encoding="utf-8")
@@ -957,9 +927,7 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
     monkeypatch.setattr(
         akp.importlib.util,
         "find_spec",
-        lambda name: types.SimpleNamespace(
-            submodule_search_locations=[str(import_aiter)]
-        ),
+        lambda name: types.SimpleNamespace(submodule_search_locations=[str(import_aiter)]),
     )
     site = target_aiter.parent
     monkeypatch.setattr(
@@ -969,10 +937,7 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
     )
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
     original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
-    optimized = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n'
-    )
+    optimized = '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n'
     target.write_text(original, encoding="utf-8")
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(optimized, encoding="utf-8")
@@ -989,9 +954,7 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
     )
 
     assert result["status"] == "ok", result
-    assert result["jit_build_backup"]["src"] == str(
-        target_aiter / "jit" / "build"
-    )
+    assert result["jit_build_backup"]["src"] == str(target_aiter / "jit" / "build")
     assert not (target_aiter / "jit" / "build").exists()
     assert (imported_build / "unrelated.so").is_file()
 
@@ -1013,8 +976,7 @@ def test_runtime_jit_rejects_unverified_cache_invalidation(
     target.write_text(original, encoding="utf-8")
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n',
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1058,8 +1020,7 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
     )
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void kernel() { int x = 2; }\n',
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
         encoding="utf-8",
     )
     local_stale = aiter_pkg / "jit" / "build" / "local.so"

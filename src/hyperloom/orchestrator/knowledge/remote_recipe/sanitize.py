@@ -109,16 +109,16 @@ def _is_secret_option(value: str) -> bool:
         return True
     if not parts or "token" not in parts:
         return False
-    return len(parts) == 1 or parts[-1] == "token" or bool(
-        {"api", "auth", "bearer", "access", "refresh", "hf", "gbrain"} & set(parts)
+    return (
+        len(parts) == 1
+        or parts[-1] == "token"
+        or bool({"api", "auth", "bearer", "access", "refresh", "hf", "gbrain"} & set(parts))
     )
 
 
 def _is_absolute_path_text(value: str) -> bool:
     text = str(value or "").strip()
-    return text.startswith(("/", "~/", "file://")) or bool(
-        _WINDOWS_ABSOLUTE_RE.match(text)
-    )
+    return text.startswith(("/", "~/", "file://")) or bool(_WINDOWS_ABSOLUTE_RE.match(text))
 
 
 def _redact_embedded_paths(value: str) -> str:
@@ -216,9 +216,7 @@ def _sanitize_value(value: Any, *, key: str = "") -> Any:
     if key == "extra_server_args":
         return sanitize_publish_server_args(str(value or ""))
     if key == "extra_envs":
-        return sanitize_publish_env_mapping(
-            value if isinstance(value, Mapping) else None
-        )
+        return sanitize_publish_env_mapping(value if isinstance(value, Mapping) else None)
     if isinstance(value, Mapping):
         safe: dict[str, Any] = {}
         for raw_key, nested in value.items():

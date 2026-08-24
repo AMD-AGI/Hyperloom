@@ -22,40 +22,37 @@ def test_resolve_framework_ignores_serving_and_language_backends():
 
 
 def test_resolve_framework_from_kernel_path_when_candidate_silent():
-    fw = forge_submit._resolve_framework(
-        {}, "/ws/worktree/vllm/model_executor/layers/fused_moe/x.py")
+    fw = forge_submit._resolve_framework({}, "/ws/worktree/vllm/model_executor/layers/fused_moe/x.py")
     assert fw == "vllm"
 
 
 def test_resolve_framework_owning_package_not_deep_subdir():
     # Kernel lives directly in vllm; the owning package (shallowest) wins, not a
     # deep dir. Mirrors the arena side for the same operator.
-    fw = forge_submit._resolve_framework(
-        {}, "/ws/worktree/vllm/v1/attention/ops/paged.py")
+    fw = forge_submit._resolve_framework({}, "/ws/worktree/vllm/v1/attention/ops/paged.py")
     assert fw == "vllm"
 
 
 def test_resolve_framework_aiter_meta_maps_to_aiter():
-    assert forge_submit._resolve_framework(
-        {}, "/ws/worktree/aiter_meta/csrc/gemm.cu") == "aiter"
+    assert forge_submit._resolve_framework({}, "/ws/worktree/aiter_meta/csrc/gemm.cu") == "aiter"
 
 
 def test_logical_operator_priority_and_namespace_normalization():
-    assert forge_submit._logical_operator(
-        {
-            "task_group": {
-                "operator_identity": {"operation": "vllm :: unified_attention"}
-            },
-            "operation": "fallback_operation",
-            "name": "fallback_name",
-        }
-    ) == "vllm::unified_attention"
-    assert forge_submit._logical_operator(
-        {"operation": "aiter::fused_moe", "name": "fallback"}
-    ) == "aiter::fused_moe"
-    assert forge_submit._logical_operator(
-        {"operation": "aiter::Attention<ck::Tile<64, 128>>::forward"}
-    ) == "aiter::Attention::forward"
+    assert (
+        forge_submit._logical_operator(
+            {
+                "task_group": {"operator_identity": {"operation": "vllm :: unified_attention"}},
+                "operation": "fallback_operation",
+                "name": "fallback_name",
+            }
+        )
+        == "vllm::unified_attention"
+    )
+    assert forge_submit._logical_operator({"operation": "aiter::fused_moe", "name": "fallback"}) == "aiter::fused_moe"
+    assert (
+        forge_submit._logical_operator({"operation": "aiter::Attention<ck::Tile<64, 128>>::forward"})
+        == "aiter::Attention::forward"
+    )
     assert forge_submit._logical_operator({"name": "direct_triton"}) == "direct_triton"
 
 
@@ -64,9 +61,7 @@ def test_resolve_framework_follows_kernel_sources_across_packages():
     # the real kernel is defined in aiter (kernel_sources). Must resolve 'aiter'
     # to match the arena producer, not 'vllm' (the caller).
     candidate = {
-        "kernel_sources": [
-            "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/unified.py"
-        ],
+        "kernel_sources": ["/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/unified.py"],
     }
     anchor = "/ws/worktree/vllm/attention/ops/entry.py"
     assert forge_submit._resolve_framework(candidate, anchor) == "aiter"
@@ -122,12 +117,8 @@ def test_direct_triton_uses_concrete_symbols_not_logical_operator(tmp_path):
         candidate,
         source_files=[str(source)],
     )
-    assert symbols == [
-        "attention_kernel"
-    ]
-    assert forge_submit._logical_operator(candidate) not in (
-        symbols
-    )
+    assert symbols == ["attention_kernel"]
+    assert forge_submit._logical_operator(candidate) not in (symbols)
 
 
 def test_gpu_target_normalization_extracts_canonical_gfx_arch():

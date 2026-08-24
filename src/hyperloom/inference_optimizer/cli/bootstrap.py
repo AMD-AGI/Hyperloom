@@ -614,16 +614,13 @@ def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> 
     elapsed_h = state.elapsed_minutes() / 60.0
     remaining_min = state.remaining_minutes()
     lines = [
-        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
-        f"the persisted deadline is kept",
+        f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): the persisted deadline is kept",
     ]
     if remaining_min is None:
         lines.append(f"  → {elapsed_h:.2f}h elapsed; no persisted deadline")
         return lines
     remaining_h = remaining_min / 60.0
-    lines.append(
-        f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp"
-    )
+    lines.append(f"  → budget: {elapsed_h:.2f}h elapsed, {remaining_h:.2f}h left on the persisted stamp")
     cli_hours = float(max_hours or 0.0)
     if remaining_min <= 0.0:
         lines.append(
@@ -637,10 +634,7 @@ def _clean_stop_resume_budget_lines(state: SharedState, *, max_hours: float) -> 
     elif cli_hours > 0.0:
         cli_left_min = cli_hours * 60.0 - elapsed_h * 60.0
         if abs(cli_left_min - remaining_min) > 1.0:
-            lines.append(
-                f"  → this invocation's --max-hours {cli_hours:.2f} does not "
-                f"extend or shrink that stamp"
-            )
+            lines.append(f"  → this invocation's --max-hours {cli_hours:.2f} does not extend or shrink that stamp")
     return lines
 
 

@@ -219,9 +219,7 @@ def test_load_model_meta_reads_the_dense_shape(tmp_path):
 def test_load_model_meta_prefers_the_safetensors_index_over_the_shard_sizes(tmp_path):
     """The index records the byte-exact total; the shards on disk may be sparse."""
     d = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=10)
-    (d / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {"total_size": 123456}}), encoding="utf-8"
-    )
+    (d / "model.safetensors.index.json").write_text(json.dumps({"metadata": {"total_size": 123456}}), encoding="utf-8")
     assert rc.load_model_meta(d).weight_bytes == 123456
 
 
@@ -293,9 +291,7 @@ def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
         "num_hidden_layers": 4,
         "moe_intermediate_size": 256,
     }
-    active, total, experts, per_tok = rc._compute_expert_decomposition(
-        cfg, weight_bytes=1024, dtype_bytes=2.0
-    )
+    active, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=1024, dtype_bytes=2.0)
     assert (active, total, experts, per_tok) == (1024, 0, 0, 0)
 
 

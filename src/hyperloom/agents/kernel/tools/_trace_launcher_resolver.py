@@ -175,12 +175,8 @@ def _has_symbol_boundaries(event_name: str, name: str) -> bool:
         if start < 0:
             return False
         end = start + len(name)
-        left_ok = start == 0 or not (
-            event_name[start - 1].isalnum() or event_name[start - 1] == "_"
-        )
-        right_ok = end == len(event_name) or not (
-            event_name[end].isalnum() or event_name[end] == "_"
-        )
+        left_ok = start == 0 or not (event_name[start - 1].isalnum() or event_name[start - 1] == "_")
+        right_ok = end == len(event_name) or not (event_name[end].isalnum() or event_name[end] == "_")
         if left_ok and right_ok:
             return True
         start += 1
@@ -193,9 +189,7 @@ def _has_elided_prefix_boundary(event_name: str, prefix: str) -> bool:
         start = event_name.find(prefix, start)
         if start < 0:
             return False
-        if start == 0 or not (
-            event_name[start - 1].isalnum() or event_name[start - 1] == "_"
-        ):
+        if start == 0 or not (event_name[start - 1].isalnum() or event_name[start - 1] == "_"):
             return True
         start += 1
 
@@ -237,10 +231,7 @@ def _match_kernel(event_name: str, wanted: Iterable[str]) -> str | None:
         # check and bind to an arbitrary sibling symbol.
         elif _is_elided(name):
             probe = name.rstrip(". ")
-            if (
-                len(probe) >= _MIN_ELIDED_PREFIX
-                and _has_elided_prefix_boundary(event_name, probe)
-            ):
+            if len(probe) >= _MIN_ELIDED_PREFIX and _has_elided_prefix_boundary(event_name, probe):
                 elided.append(name)
     if exact:
         return exact[0]
@@ -333,16 +324,10 @@ def _collect_probes(
 
     # Any non-exact name spanning distinct complete symbols is ambiguous: the
     # launcher of one could be reported as the launcher of another.
-    ambiguous = {
-        name
-        for name, symbols in matched_symbols.items()
-        if len(symbols) > 1
-    }
+    ambiguous = {name for name, symbols in matched_symbols.items() if len(symbols) > 1}
     if ambiguous:
         corr_to_kernel = {
-            corr: kernel
-            for corr, kernel in corr_to_kernel.items()
-            if kernel not in ambiguous or corr in exact_corr
+            corr: kernel for corr, kernel in corr_to_kernel.items() if kernel not in ambiguous or corr in exact_corr
         }
 
     eager: dict[str, list[tuple[int, int, float, str]]] = defaultdict(list)
@@ -606,10 +591,7 @@ def resolve_launchers_from_trace(
             barren = 0
 
     if callable(log):
-        log(
-            f"trace_launcher_resolver: resolved {len(resolved)}/{len(wanted)} "
-            f"kernel(s) from {scanned} trace file(s)"
-        )
+        log(f"trace_launcher_resolver: resolved {len(resolved)}/{len(wanted)} kernel(s) from {scanned} trace file(s)")
     return resolved
 
 

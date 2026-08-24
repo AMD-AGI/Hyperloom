@@ -215,10 +215,7 @@ def test_record_kernel_opt_vendor_playbook_keep_is_deploy_blocked(state: SharedS
         "KEEP",
         1.25,
         source_file="/opt/venv/lib/python3.12/site-packages/mori/ops/dispatch_combine.py",
-        artifact=(
-            "/tmp/forge/session1/attempt_dispatch/optimized_versions/"
-            "mori_ep_dispatch_combine_dispatch.py"
-        ),
+        artifact=("/tmp/forge/session1/attempt_dispatch/optimized_versions/mori_ep_dispatch_combine_dispatch.py"),
     )
     result["attempts"] = [
         {
@@ -233,9 +230,7 @@ def test_record_kernel_opt_vendor_playbook_keep_is_deploy_blocked(state: SharedS
     assert state.last_kernel_opt["vendor_playbook_deploy_blocked"] is True
     assert state.last_kernel_opt["vendor_playbook_id"] == "mori_ep_dispatch_combine"
     assert state.kernel_opt_attempts["k010"]["vendor_playbook_deploy_blocked"] is True
-    assert state.pending_kernel_integrations == {}, (
-        "a vendor-playbook KEEP must never be auto-queued for integration"
-    )
+    assert state.pending_kernel_integrations == {}, "a vendor-playbook KEEP must never be auto-queued for integration"
 
 
 def test_record_kernel_opt_non_vendor_keep_is_not_deploy_blocked(state: SharedState):
@@ -632,9 +627,7 @@ def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: Sha
     # `::combine`) -- so neither the group-key dedup nor the identity-dedup
     # fallback collapses them into one; both remain distinct, separately
     # gated rows.
-    assert set(untried) == {"k010", "k011"}, (
-        "vendor-playbook group must not be dropped as below_min_gpu_pct"
-    )
+    assert set(untried) == {"k010", "k011"}, "vendor-playbook group must not be dropped as below_min_gpu_pct"
 
 
 def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedState):

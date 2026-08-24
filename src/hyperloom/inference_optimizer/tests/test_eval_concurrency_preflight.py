@@ -44,9 +44,7 @@ def test_absent_magpie_path_is_passed_through_as_none(monkeypatch):
 
 
 def test_unpatchable_script_warns_and_reports_failure(monkeypatch, capsys):
-    monkeypatch.setattr(
-        patcher_mod, "ensure_eval_concurrency_compat", lambda *_a: False
-    )
+    monkeypatch.setattr(patcher_mod, "ensure_eval_concurrency_compat", lambda *_a: False)
 
     assert preflight_mod._ensure_eval_concurrency_compat("/m", "/ix") is False
 

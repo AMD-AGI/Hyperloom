@@ -82,10 +82,7 @@ class KernelExperienceBridge:
             "read_applied": bool(read.get("applied")),
             "write_attempted": bool(write) or bool(exp.get("write_attempted")),
             "experience_id": str(
-                exp.get("experience_id")
-                or read.get("experience_id")
-                or write.get("experience_id")
-                or ""
+                exp.get("experience_id") or read.get("experience_id") or write.get("experience_id") or ""
             ),
             "provenance": {
                 "component": "kernelforge",

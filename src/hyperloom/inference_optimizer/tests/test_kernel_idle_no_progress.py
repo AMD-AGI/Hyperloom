@@ -18,6 +18,7 @@ protection against ending KERNEL mid-build now lives where the evidence is: the
 phase machine freezes the streak while a kernel-lane task is in flight (see
 ``test_kernel_idle_streak.py``).
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -40,9 +41,7 @@ def _patch(monkeypatch, *, work_pending, hint=""):
     monkeypatch.setattr(ms, "kernel_work_pending", lambda s: work_pending)
     monkeypatch.setattr(ms, "_pending_escalate_hint", lambda s: hint)
     # Keep the hard budget/cap exits inert so only the idle logic decides.
-    monkeypatch.setattr(
-        ms, "phase_budget_remaining_seconds", lambda s, **k: 9_999.0
-    )
+    monkeypatch.setattr(ms, "phase_budget_remaining_seconds", lambda s, **k: 9_999.0)
     monkeypatch.setattr(ms, "phase_cap_exceeded", lambda s, **k: False)
 
 

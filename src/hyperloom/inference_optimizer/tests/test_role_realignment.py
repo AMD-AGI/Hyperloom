@@ -690,7 +690,14 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
         await c.db.execute(
             "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
             "VALUES (?,?,?,?,?,?)",
-            (0, f"h-gpu-{task.task_id}", task.task_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:30:00+00:00", "2026-01-01T00:00:00+00:00"),
+            (
+                0,
+                f"h-gpu-{task.task_id}",
+                task.task_id,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:30:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
         )
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
         await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
@@ -1015,7 +1022,14 @@ async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
         await c.db.execute(
             "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
             "VALUES (?,?,?,?,?,?)",
-            (0, "h-gpu", task.task_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:30:00+00:00", "2026-01-01T00:00:00+00:00"),
+            (
+                0,
+                "h-gpu",
+                task.task_id,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:30:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
         )
 
         await c._handle_intent(

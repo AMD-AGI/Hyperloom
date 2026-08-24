@@ -152,9 +152,7 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "")
-    )
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
     from hyperloom.orchestrator.policy import gate as policy
 
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)

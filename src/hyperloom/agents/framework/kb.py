@@ -70,6 +70,7 @@ def _default_workspace_root() -> str:
         return _DEFAULT_WORKSPACE_ROOT
     return os.path.join(os.getcwd(), "session")
 
+
 #: Withdrawn override. Only the reader honoured it, so setting it split the KB
 #: in two. ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where
 #: this skill is installed", is used for other purposes, and never reached the

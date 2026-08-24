@@ -609,9 +609,7 @@ class TestForgeGemmHelperCoverage:
             )
         )
 
-        assert (snapshot / "vllm" / "model.py").read_text(
-            encoding="utf-8"
-        ) == "new = 2\n"
+        assert (snapshot / "vllm" / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
         """A created file whose ``+++`` line carries a tab-suffixed timestamp
@@ -826,9 +824,7 @@ class TestForgeGemmHelperCoverage:
             }
         ) == ("codex", "gpt-explicit")
 
-    def test_resolve_forge_agent_prefers_forge_claude_model_over_claude_model(
-        self, monkeypatch
-    ):
+    def test_resolve_forge_agent_prefers_forge_claude_model_over_claude_model(self, monkeypatch):
         """FORGE_CLAUDE_MODEL mirrors GEAK_CLAUDE_MODEL for the Claude forge path."""
         _pin_fusion_provider_env(
             monkeypatch,
@@ -844,9 +840,7 @@ class TestForgeGemmHelperCoverage:
             "claude-forge-only",
         )
 
-    def test_resolve_forge_agent_prefers_forge_codex_model_over_codex_model(
-        self, monkeypatch
-    ):
+    def test_resolve_forge_agent_prefers_forge_codex_model_over_codex_model(self, monkeypatch):
         """FORGE_CODEX_MODEL overrides CODEX_MODEL when the forge backend is Codex."""
         _pin_fusion_provider_env(
             monkeypatch,
@@ -862,9 +856,7 @@ class TestForgeGemmHelperCoverage:
             "gpt-forge-only",
         )
 
-    def test_resolve_forge_agent_forge_model_loses_to_payload_llm_model(
-        self, monkeypatch
-    ):
+    def test_resolve_forge_agent_forge_model_loses_to_payload_llm_model(self, monkeypatch):
         """Request ``llm_model`` still outranks the forge-specific env knobs."""
         _pin_fusion_provider_env(
             monkeypatch,
@@ -875,13 +867,9 @@ class TestForgeGemmHelperCoverage:
             },
         )
 
-        assert krh._resolve_forge_agent(
-            {"llm_model": "claude-payload"}
-        ) == ("claude", "claude-payload")
+        assert krh._resolve_forge_agent({"llm_model": "claude-payload"}) == ("claude", "claude-payload")
 
-    def test_resolve_forge_agent_ignores_other_backend_forge_model(
-        self, monkeypatch
-    ):
+    def test_resolve_forge_agent_ignores_other_backend_forge_model(self, monkeypatch):
         """A Codex forge override must not leak onto the Claude forge path."""
         _pin_fusion_provider_env(
             monkeypatch,
@@ -1215,9 +1203,7 @@ class TestForgeGemmHelperCoverage:
 
         await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
         input_payload = json.loads(
-            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(
-                encoding="utf-8"
-            )
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["tp"] == 8
         assert input_payload["block_size"] == 128
@@ -1327,9 +1313,7 @@ class TestForgeGemmHelperCoverage:
                     {
                         "status": "ok",
                         "micro_decision": "candidate",
-                        "recommended_env": {
-                            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
-                        },
+                        "recommended_env": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"},
                     }
                 )
                 + "\nFORGE_GEMM_TUNE_RESULT_END\n"
@@ -1342,9 +1326,7 @@ class TestForgeGemmHelperCoverage:
         result = await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = json.loads(
-            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
-        )
+        written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["model_path"] == str(snapshot)
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
@@ -1551,17 +1533,13 @@ class TestForgeGemmHelperCoverage:
         assert "Unsupported data type" in str(result.get("error") or "")
 
     @pytest.mark.asyncio
-    async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(self, tmp_path, monkeypatch):
         """One tuner crashed, another delivered: forge reports ``candidate``, so
         the env is measured and the crash is still named. Promotability keys on
         ``status``, so a named crash must not demote the run."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(
-            krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), "")
-        )
+        monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), ""))
         sentinel = (
             "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
             + json.dumps(
@@ -1592,9 +1570,7 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] != "failed"
 
     @pytest.mark.asyncio
-    async def test_a_malformed_tuners_run_does_not_break_the_run(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_a_malformed_tuners_run_does_not_break_the_run(self, tmp_path, monkeypatch):
         """``tuners_run`` is forge's JSON and may be any shape; lifting a reason
         out of it must not turn a run that happened into a reported crash."""
         self._moe_state(tmp_path)
@@ -1632,11 +1608,7 @@ class TestForgeGemmHelperCoverage:
         """No wording at all is not a verdict; the bridge must not invent one."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
-        sentinel = (
-            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
-            + json.dumps({"status": "ok"})
-            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
-        )
+        sentinel = "FORGE_GEMM_TUNE_RESULT_BEGIN\n" + json.dumps({"status": "ok"}) + "\nFORGE_GEMM_TUNE_RESULT_END\n"
 
         async def _fake_subprocess(cmd, *, timeout_sec):
             return 0, sentinel, ""
@@ -1684,9 +1656,7 @@ class TestForgeGemmHelperCoverage:
         )
 
     @pytest.mark.asyncio
-    async def test_moe_key_travels_from_the_log_into_the_forge_payload(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
         """The values must come from the log, not from the config: a
         config-derived key is what aiter would never look up."""
         self._moe_state(tmp_path)
@@ -1706,9 +1676,7 @@ class TestForgeGemmHelperCoverage:
         await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = json.loads(
-            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
-        )
+        written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         csv_path = Path(written["moe_untuned_csv"])
         assert csv_path.is_file(), "the payload must name a CSV that exists"
 
@@ -1770,9 +1738,7 @@ class TestForgeGemmHelperCoverage:
         # The handler hands the tool an input JSON; the tool builds forge's argv
         # from it. Assert the field the tool reads is the CSV that was derived.
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = json.loads(
-            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
-        )
+        written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["moe_untuned_csv"].endswith("untuned_fmoe_from_runtime.csv")
         assert str(workspace) in written["moe_untuned_csv"]
 
@@ -1798,15 +1764,11 @@ class TestForgeGemmHelperCoverage:
         await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = json.loads(
-            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
-        )
+        written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["moe_untuned_csv"] == str(supplied)
 
     @pytest.mark.asyncio
-    async def test_a_stale_moe_csv_path_falls_back_to_the_log(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_a_stale_moe_csv_path_falls_back_to_the_log(self, tmp_path, monkeypatch):
         """A path that no longer exists must not be forwarded to forge."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
@@ -1826,9 +1788,7 @@ class TestForgeGemmHelperCoverage:
         await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
-        written = json.loads(
-            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
-        )
+        written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["moe_untuned_csv"] != str(tmp_path / "gone.csv")
         assert Path(written["moe_untuned_csv"]).is_file()
 
@@ -2193,16 +2153,9 @@ class TestForgeCollectiveCoverage:
         if payload == "no-sentinel":
             stdout = "wrapper emitted no markers"
         elif payload == "malformed":
-            stdout = (
-                "FORGE_COLLECTIVE_RESULT_BEGIN\nnot-json"
-                "\nFORGE_COLLECTIVE_RESULT_END"
-            )
+            stdout = "FORGE_COLLECTIVE_RESULT_BEGIN\nnot-json\nFORGE_COLLECTIVE_RESULT_END"
         else:
-            stdout = (
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
-                + json.dumps(payload)
-                + "\nFORGE_COLLECTIVE_RESULT_END"
-            )
+            stdout = "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_COLLECTIVE_RESULT_END"
 
         with pytest.raises(ValueError, match=error):
             krh._parse_forge_collective_sentinel(stdout)
@@ -2233,9 +2186,7 @@ class TestForgeCollectiveCoverage:
         """Shape a malformed candidate artifact as a skipped result."""
         candidates = tmp_path / "collective_candidates.json"
         candidates.write_text("not-json", encoding="utf-8")
-        SharedState(
-            last_trace_analyze={"candidates_path": str(candidates)}
-        ).save(tmp_path)
+        SharedState(last_trace_analyze={"candidates_path": str(candidates)}).save(tmp_path)
 
         result = await krh._run_forge_collective({}, session_dir=tmp_path)
 
@@ -2258,9 +2209,7 @@ class TestForgeCollectiveCoverage:
     @pytest.mark.asyncio
     async def test_run_forge_collective_rejects_unsupported_contract(self, tmp_path):
         """Reject collectives with no distributed reference in the driver."""
-        candidate = _collective_candidate(
-            kernel_contract={"kind": "collective", "collective_op": "all_to_all"}
-        )
+        candidate = _collective_candidate(kernel_contract={"kind": "collective", "collective_op": "all_to_all"})
 
         result = await krh._run_forge_collective(
             {"candidate": candidate},
@@ -2324,9 +2273,7 @@ class TestForgeCollectiveCoverage:
         monkeypatch,
     ):
         """Reject a source path with no explicit or discoverable repository."""
-        candidate = _collective_candidate(
-            source_file=str(tmp_path / "outside" / "all_reduce.py")
-        )
+        candidate = _collective_candidate(source_file=str(tmp_path / "outside" / "all_reduce.py"))
         candidate.pop("kernel_repo")
         monkeypatch.setattr(krh, "_find_repo_root_for_source", lambda _path: "")
 
@@ -2485,9 +2432,7 @@ class TestForgeCollectiveCoverage:
             }
             return (
                 0,
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
-                + json.dumps(wrapper_result)
-                + "\nFORGE_COLLECTIVE_RESULT_END\n",
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(wrapper_result) + "\nFORGE_COLLECTIVE_RESULT_END\n",
                 "",
             )
 
@@ -2503,13 +2448,7 @@ class TestForgeCollectiveCoverage:
             session_dir=tmp_path,
         )
 
-        workspace = (
-            tmp_path
-            / "runs"
-            / "collective"
-            / "collective-task"
-            / "attempt-123"
-        )
+        workspace = tmp_path / "runs" / "collective" / "collective-task" / "attempt-123"
         assert captured["cmd"] == [
             "python3",
             str(tool_path),
@@ -2658,9 +2597,7 @@ class TestForgeCollectiveCoverage:
             }
             return (
                 0,
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
-                + json.dumps(wrapper_result)
-                + "\nFORGE_COLLECTIVE_RESULT_END\n",
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(wrapper_result) + "\nFORGE_COLLECTIVE_RESULT_END\n",
                 "",
             )
 
@@ -2716,9 +2653,7 @@ class TestForgeCollectiveCoverage:
             }
             return (
                 0,
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n"
-                + json.dumps(wrapper_result)
-                + "\nFORGE_COLLECTIVE_RESULT_END\n",
+                "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(wrapper_result) + "\nFORGE_COLLECTIVE_RESULT_END\n",
                 "",
             )
 

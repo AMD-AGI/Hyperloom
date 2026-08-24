@@ -403,7 +403,6 @@ class SpecialistRunner:
         self.session_dir = Path(session_dir) if session_dir else None
         self.default_max_turns = int(default_max_turns)
 
-
     # Public entry point — dispatches to in-process or subprocess path
     async def run(
         self,
