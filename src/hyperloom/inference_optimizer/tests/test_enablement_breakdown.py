@@ -340,6 +340,7 @@ def test_collect_enablement_setting_script_absent_when_no_file(tmp_path):
 
 # ---- kept_artifacts in collect_enablement ----------------------------------
 
+
 def test_collect_enablement_kept_artifacts_included():
     """Well-formed kept_artifacts entries appear in the output."""
     out = collect_enablement(

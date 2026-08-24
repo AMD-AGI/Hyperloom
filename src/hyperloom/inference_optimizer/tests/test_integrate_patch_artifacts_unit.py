@@ -268,6 +268,7 @@ def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_
 
 # ---- _replay_base_artifacts: sandbox + stash-ordering ----------------------
 
+
 def _make_executor(session_dir: Path) -> IntegratePatchExecutor:
     return IntegratePatchExecutor(session_dir=session_dir)
 
@@ -318,9 +319,7 @@ def test_replay_base_artifacts_rejects_target_outside_allowlist(tmp_path, monkey
     outside = tmp_path / "etc" / "passwd"
     params = {
         "enablement": True,
-        "enablement_base_artifacts": [
-            {"source": str(source), "target": str(outside), "rel_target": "passwd"}
-        ],
+        "enablement_base_artifacts": [{"source": str(source), "target": str(outside), "rel_target": "passwd"}],
     }
     ex = _make_executor(session_dir)
     ex._replay_base_artifacts(params)

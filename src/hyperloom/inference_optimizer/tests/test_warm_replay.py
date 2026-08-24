@@ -208,12 +208,7 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
         patch = warm_dir / "files" / ref
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text(
-            f"diff --git a/{target} b/{target}\n"
-            f"--- a/{target}\n"
-            f"+++ b/{target}\n"
-            "@@ -1 +1 @@\n"
-            "-old\n"
-            "+new\n",
+            f"diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n",
             encoding="utf-8",
         )
     table_ref = "kernel/gemm/table.json"
@@ -1261,9 +1256,7 @@ def test_kernel_target_uses_allowlist_when_framework_root_does_not_match(
         "resolution_error": "old failure",
         "resolution_reason": "explicit_root_target_mismatch",
     }
-    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [
-        str(stale_target)
-    ]
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [str(stale_target)]
     assert "resolution_error" not in entry
     assert "resolution_reason" not in entry
 
@@ -1315,9 +1308,7 @@ def test_restored_kernel_plan_reresolves_root_before_blocking(
         _resolve,
     )
 
-    assert coord.phase_prelude._warm_replay_kernel_root_block_reason(
-        coord.shared_state
-    ) is None
+    assert coord.phase_prelude._warm_replay_kernel_root_block_reason(coord.shared_state) is None
     assert calls == [[entry]]
 
 
@@ -1340,9 +1331,7 @@ def test_kernel_plan_blocks_on_any_unresolved_patch_root(tmp_path, monkeypatch):
         ),
     )
 
-    outcome = coord.phase_prelude._warm_replay_kernel_root_block_reason(
-        coord.shared_state
-    )
+    outcome = coord.phase_prelude._warm_replay_kernel_root_block_reason(coord.shared_state)
 
     assert outcome is not None
     assert outcome["reason"] == "ambiguous_root"

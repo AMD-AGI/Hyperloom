@@ -385,14 +385,10 @@ def _bootstrap_recipe_kb(
                 recipe_scope = RecipeScope.from_state(state)
             except RemoteRecipeValidationError as exc:
                 print(
-                    f"WARNING: Remote Recipe KB scope is invalid: {exc}\n"
-                    "Continuing without warm-start.",
+                    f"WARNING: Remote Recipe KB scope is invalid: {exc}\nContinuing without warm-start.",
                     file=sys.stderr,
                 )
-                args.kb_degraded_reason = (
-                    getattr(args, "kb_degraded_reason", None)
-                    or "recipe_scope_invalid"
-                )
+                args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "recipe_scope_invalid"
                 return kb
             t0_kb = RemoteWarmRecipeAdapter(
                 HyperloomRemoteKB.from_env(),

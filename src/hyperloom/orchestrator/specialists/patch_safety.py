@@ -346,11 +346,7 @@ def resolve_patch_apply_root(
             continue
         seen.add(root)
         roots.append(root)
-    matches = tuple(
-        root
-        for root in roots
-        if not any(patch_targets_missing(text, root) for text in texts)
-    )
+    matches = tuple(root for root in roots if not any(patch_targets_missing(text, root) for text in texts))
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
     if len(matches) > 1:
@@ -644,8 +640,7 @@ def ground_patch_text(
         return PatchGroundingResult(GROUND_PATH_ESCAPE, f"path={escape!r}")
     candidates = tuple(
         root
-        for root in ((base_checkout,) if base_checkout is not None else ())
-        + tuple(candidate_roots)
+        for root in ((base_checkout,) if base_checkout is not None else ()) + tuple(candidate_roots)
         if Path(root).is_dir()
     )
     if explicit_root is None and not candidates:
@@ -846,8 +841,7 @@ def vet_patches(
         return kept, dropped, grounding
     candidates = tuple(
         root
-        for root in ((base_checkout,) if base_checkout is not None else ())
-        + tuple(candidate_roots)
+        for root in ((base_checkout,) if base_checkout is not None else ()) + tuple(candidate_roots)
         if Path(root).is_dir()
     )
     resolution = resolve_patch_apply_root(

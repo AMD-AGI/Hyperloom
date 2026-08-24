@@ -1355,9 +1355,7 @@ class SpecialistRunner:
             tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
             base_checkout,
         )
-        explicit_value = str(
-            (ctx.task.params or {}).get("framework_source_root") or ""
-        ).strip()
+        explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
         kept, dropped, grounding = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
@@ -1367,9 +1365,7 @@ class SpecialistRunner:
         # Every patch dropped for a target no tree holds: a distinct outcome from
         # "the specialist wrote none", and the next round has to be told which.
         all_dropped_by_grounding = bool(
-            deduped
-            and not kept
-            and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
+            deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
