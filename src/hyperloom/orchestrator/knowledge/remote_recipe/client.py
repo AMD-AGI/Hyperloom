@@ -550,6 +550,14 @@ class RemoteRecipeClient:
                     metric=metric,
                     value=optimized_throughput,
                 )
+            else:
+                return RemoteWriteResult(
+                    "written",
+                    "champion_not_promoted",
+                    canonical_id,
+                    session_id,
+                    optimized_throughput,
+                )
         return RemoteWriteResult(
             "written",
             "",
