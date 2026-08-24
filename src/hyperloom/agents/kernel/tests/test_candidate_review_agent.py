@@ -22,6 +22,7 @@ benchmark that follows measuring an unrecorded change.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -740,6 +741,35 @@ class TestRunCandidateReview:
             **self._args(tmp_path), attempts=1, session_runner=lambda **_kwargs: "no answer"
         )
         assert not out.ok
+
+    def test_an_async_caller_awaits_the_coroutine(self, tmp_path):
+        """Both backends are async SDKs; a caller owning a loop awaits directly."""
+
+        async def _runner(*, prompt, run_dir, model, timeout_sec):
+            (run_dir / cra.REVISIONS_FILENAME).write_text(
+                json.dumps({"revisions": [{"kernel_id": "k001", "action": "keep"}]}),
+                encoding="utf-8",
+            )
+            return ""
+
+        out = asyncio.run(
+            cra.run_candidate_review_async(
+                **self._args(tmp_path), session_runner=_runner
+            )
+        )
+        assert out.ok and out.revisions == [{"kernel_id": "k001", "action": "keep"}]
+
+    def test_the_sync_wrapper_says_what_to_await_instead(self, tmp_path):
+        """It owns the loop, so inside one it names the coroutine rather than
+        failing deep in ``asyncio.run``."""
+
+        async def _from_a_loop():
+            with pytest.raises(RuntimeError, match="run_candidate_review_async"):
+                cra.run_candidate_review(
+                    **self._args(tmp_path), session_runner=lambda **_kwargs: ""
+                )
+
+        asyncio.run(_from_a_loop())
 
 
 # --- tool scope: the session investigates, it does not patch ----------------

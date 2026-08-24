@@ -51,6 +51,7 @@ applied: the benchmark that follows would otherwise measure an unrecorded edit.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 from dataclasses import dataclass, field
@@ -275,9 +276,12 @@ def build_review_prompt(
     write elsewhere in the framework tree looks impossible; it is merely
     undetected.
     """
-    lines = [
+    task = (
         "Audit the kernel-candidate table produced by the deterministic "
-        "analysis stage and correct it where the evidence disagrees.",
+        "analysis stage and correct it where the evidence disagrees."
+    )
+    lines = [
+        task,
         "",
         f"Candidate table to audit: {raw_candidates_path}",
         "",
@@ -789,7 +793,7 @@ def apply_revisions(
 # ---------------------------------------------------------------------------
 
 
-def run_candidate_review(
+async def run_candidate_review_async(
     *,
     run_dir: Path,
     raw_candidates_path: Path,
@@ -799,7 +803,7 @@ def run_candidate_review(
     timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
     attempts: int = _DEFAULT_ATTEMPTS,
     log: Callable[[str], None] | None = None,
-    session_runner: Callable[..., str] | None = None,
+    session_runner: Callable[..., Any] | None = None,
 ) -> ReviewOutcome:
     """Run the review session and return its parsed revisions.
 
@@ -808,6 +812,11 @@ def run_candidate_review(
     goes unaudited. A definitive failure is reported rather than raised -- the
     deterministic table is still usable, and killing a multi-hour optimization
     over an advisory pass would trade a small loss for a total one.
+
+    This is the real implementation; :func:`run_candidate_review` wraps it for
+    the synchronous CLI path. Both backends are async SDKs, so a caller that
+    already owns an event loop should await this rather than reach for the
+    wrapper.
 
     Args:
         run_dir: Session directory; the only place the agent may write.
@@ -818,7 +827,8 @@ def run_candidate_review(
         timeout_sec: Wall-clock bound per attempt.
         attempts: Total attempts, including the first.
         log: Optional diagnostics callback.
-        session_runner: Injection point for the session call (tests).
+        session_runner: Injection point for the session call (tests); may be
+            sync or return an awaitable.
 
     Returns:
         ReviewOutcome: The session result; never raises.
@@ -852,30 +862,27 @@ def run_candidate_review(
         _say(f"attempt {attempt}/{attempts} via {backend} ({model})")
         try:
             if session_runner is not None:
-                error = session_runner(
+                produced = session_runner(
                     prompt=prompt,
                     run_dir=Path(run_dir),
                     model=model,
                     timeout_sec=timeout_sec,
                 )
+                error = await produced if inspect.isawaitable(produced) else produced
             elif backend == "codex":
-                error = asyncio.run(
-                    _run_codex_session(
-                        prompt,
-                        run_dir=Path(run_dir),
-                        model=model,
-                        timeout_sec=timeout_sec,
-                    )
+                error = await _run_codex_session(
+                    prompt,
+                    run_dir=Path(run_dir),
+                    model=model,
+                    timeout_sec=timeout_sec,
                 )
             else:
-                error = asyncio.run(
-                    _run_claude_session(
-                        prompt,
-                        run_dir=Path(run_dir),
-                        model=model,
-                        timeout_sec=timeout_sec,
-                        log=log,
-                    )
+                error = await _run_claude_session(
+                    prompt,
+                    run_dir=Path(run_dir),
+                    model=model,
+                    timeout_sec=timeout_sec,
+                    log=log,
                 )
         except Exception as exc:  # noqa: BLE001 - advisory pass, never fatal
             error = _safe_exception_label(exc)
@@ -895,6 +902,57 @@ def run_candidate_review(
     return ReviewOutcome(status="failed", detail=last_detail or "no revisions produced")
 
 
+def run_candidate_review(
+    *,
+    run_dir: Path,
+    raw_candidates_path: Path,
+    reference_paths: dict[str, str],
+    framework_roots: Sequence[str],
+    context_block: str = "",
+    timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
+    attempts: int = _DEFAULT_ATTEMPTS,
+    log: Callable[[str], None] | None = None,
+    session_runner: Callable[..., Any] | None = None,
+) -> ReviewOutcome:
+    """Synchronous entry point for :func:`run_candidate_review_async`.
+
+    Owns the event loop, so it is only usable from a thread that has none. The
+    guard below turns what would otherwise surface as an ``asyncio.run`` failure
+    inside an advisory stage into a message naming the coroutine to await.
+
+    Args:
+        See :func:`run_candidate_review_async`.
+
+    Returns:
+        ReviewOutcome: The session result; never raises for session failures.
+
+    Raises:
+        RuntimeError: When called from a thread that already runs a loop.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "run_candidate_review() owns an event loop; await "
+            "run_candidate_review_async() from async callers"
+        )
+    return asyncio.run(
+        run_candidate_review_async(
+            run_dir=run_dir,
+            raw_candidates_path=raw_candidates_path,
+            reference_paths=reference_paths,
+            framework_roots=framework_roots,
+            context_block=context_block,
+            timeout_sec=timeout_sec,
+            attempts=attempts,
+            log=log,
+            session_runner=session_runner,
+        )
+    )
+
+
 __all__ = [
     "ALLOWED_TOOLS",
     "DERIVED_SHAPE_FIELDS",
@@ -910,5 +968,6 @@ __all__ = [
     "fingerprint_drift",
     "load_revisions",
     "run_candidate_review",
+    "run_candidate_review_async",
     "source_fingerprint",
 ]
