@@ -45,6 +45,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Shell and loader hijack names (`LD_PRELOAD`, `PYTHONPATH`, `PATH`, etc.) are
+  now rejected from the `extra_envs` argument to `materialize_config_with_envs`
+  before the config is persisted to disk.** The predicate was previously
+  `valid_env_key` (key-shape only), which let any name through.  It is now
+  `is_allowed_variant_env_key`, the same predicate already used by `GridVariant`
+  when it accepts per-variant env overrides from LLM proposals.  The credential
+  filter at the persistence boundary (`:1664`) is unchanged.
+
 - **Specialist `config_changes` and `extra_envs` overrides are now filtered at
   the point they enter `integrate_patch`, not only when they reach the benchmark
   subprocess.** Previously the raw LLM-supplied mapping was assembled into

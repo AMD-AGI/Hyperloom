@@ -136,15 +136,18 @@ def test_materialize_drops_credentials_but_preserves_workload_env_keys(tmp_path,
         },
     )
     envs = bench["envs"]
+    # Credentials are dropped by the persistence boundary (BENCHMARK_SECRET_ENV_NAMES).
     assert "ANTHROPIC_API_KEY" not in envs
-    assert envs["LD_PRELOAD"] == "/tmp/evil.so"
     assert "LLM_GATEWAY_KEY" not in envs
     assert "OPENAI_API_KEY" not in envs
-    assert envs["PYTHONSTARTUP"] == "/tmp/pwn.py"
-    assert envs["PYTHONPATH"] == "/tmp/evil"
     assert "DEEPSEEK_API_KEY" not in envs
+    # Loader/shell hijack names from extra_envs are rejected by is_allowed_variant_env_key.
+    assert "LD_PRELOAD" not in envs
+    assert "PYTHONSTARTUP" not in envs
+    # Invalid key shapes are rejected everywhere.
     assert "BAD-NAME" not in envs
     assert "bad key" not in envs
+    # Safe tuning knobs and reference envs land unchanged.
     assert envs["REFERENCE_ONLY_KNOB"] == "1"
     assert envs["SGLANG_USE_AITER"] == "1"
     assert envs["UNKNOWN_VALID_TUNING_KNOB"] == "enabled"
