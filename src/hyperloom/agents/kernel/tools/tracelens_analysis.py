@@ -213,14 +213,11 @@ class OpResolution:
     """One op's resolved editable source, as produced by the active finder.
 
     The finder resolves a single device symbol to a single source, so in the
-    current pipeline it only ever emits ``kind="single"`` with empty
-    ``kernel_kinds`` / ``prebuilt_binaries``. The ``dispatch`` / ``composite`` /
-    fan-out fields and the per-source metadata are retained for the container
-    shape and any external caller; they are inert on the finder path.
+    current pipeline it only ever emits ``kind="single"``.
 
     Attributes:
         op_name: The CPU op name that was looked up.
-        kind: ``single`` / ``dispatch`` / ``composite``.
+        kind: ``single`` / ``dispatch``.
         status: ``resolved`` / ``non_rewritable`` / ``no_kernel`` / ``unresolved``.
         patchable: The curated patchability verdict (may be ``None``).
         framework: Framework that owns the source (``aiter``/``vllm``/...).
@@ -229,11 +226,10 @@ class OpResolution:
             empty when there is no editable source.
         reason: Skip reason (``triton``/``aten``/...) or the entry ``label``.
         matched_route: For ``dispatch``, the ``match`` glob that fired.
-        fanout: For ``composite``, one sub-resolution per route that all run.
         resolution_method: The resolver that produced this verdict (the active
             finder, ``active_finder``); stamped onto candidates for the audit.
-        target_index: Which of ``sources`` this (possibly fanned-out) leaf
-            optimizes; see :meth:`leaf_resolutions`.
+        target_index: Which of ``sources`` this leaf optimizes; see
+            :meth:`leaf_resolutions`.
     """
 
     op_name: str
@@ -244,45 +240,15 @@ class OpResolution:
     sources: list[str] = field(default_factory=list)
     reason: str = ""
     matched_route: str | None = None
-    fanout: list["OpResolution"] = field(default_factory=list)
     resolution_method: str = _ACTIVE_FINDER_METHOD
     target_index: int = 0
-    # Per-source metadata (aligned with ``sources``): the kernel
-    # ``kernel_kind`` (``aiter_ck`` / ``aiter_asm`` / ``triton`` / ...) and the
-    # optional ``prebuilt_binary`` (a hand-written ``.co`` the ``.cu`` dispatcher
-    # loads). Routing reads these to send ASM compute-cores to skip and CK
-    # templates to the ck-fellow instead of the generic hip-fellow.
-    kernel_kinds: list[str] = field(default_factory=list)
-    prebuilt_binaries: list[str] = field(default_factory=list)
-    runtime_backends: list[str] = field(default_factory=list)
 
     @property
     def primary_source(self) -> str:
-        """The editable kernel source this leaf optimizes (``.cu``/``.cuh``/``.hip``/``.h`` or a repo-resident Triton/TileLang ``.py``), or ``""``."""
+        """The editable kernel source this leaf optimizes, or ``""``."""
         if 0 <= self.target_index < len(self.sources):
             return self.sources[self.target_index]
         return self.sources[0] if self.sources else ""
-
-    @property
-    def primary_kernel_kind(self) -> str:
-        """The curated ``kernel_kind`` for :attr:`primary_source` (or ``""``)."""
-        if 0 <= self.target_index < len(self.kernel_kinds):
-            return self.kernel_kinds[self.target_index]
-        return self.kernel_kinds[0] if self.kernel_kinds else ""
-
-    @property
-    def primary_prebuilt_binary(self) -> str:
-        """The curated ``prebuilt_binary`` for :attr:`primary_source` (or ``""``)."""
-        if 0 <= self.target_index < len(self.prebuilt_binaries):
-            return self.prebuilt_binaries[self.target_index]
-        return self.prebuilt_binaries[0] if self.prebuilt_binaries else ""
-
-    @property
-    def primary_runtime_backend(self) -> str:
-        """The production attention/backend identity for the selected source."""
-        if 0 <= self.target_index < len(self.runtime_backends):
-            return self.runtime_backends[self.target_index]
-        return self.runtime_backends[0] if self.runtime_backends else ""
 
     @property
     def is_routable(self) -> bool:
@@ -292,18 +258,9 @@ class OpResolution:
     def leaf_resolutions(self) -> list["OpResolution"]:
         """Expand into one routable leaf per editable source file to optimize.
 
-        ``composite`` flattens its routable sub-routes; a routable
-        ``single``/``dispatch`` with N ``sources`` yields N leaves (one per
-        editable source file); a non-routable resolution yields none. Each leaf
-        routes to its own GEAK run via :attr:`primary_source`.
-
-        ``single`` (N flat ``sources``) and ``composite`` (N ``fanout``
-        sub-routes) therefore expand to the same set of leaves -- one per
-        distinct editable file; the two kinds differ only in ownership
-        semantics, not in the leaves produced here.
+        A routable resolution with N ``sources`` yields N leaves (one per
+        editable source file); a non-routable resolution yields none.
         """
-        if self.kind == "composite" and self.fanout:
-            return [leaf for sub in self.fanout if sub.is_routable for leaf in sub.leaf_resolutions()]
         if not self.is_routable:
             return []
         return [replace(self, target_index=i) for i in range(len(self.sources))]
@@ -317,9 +274,6 @@ class OpResolution:
         item["op_to_source_reason"] = self.reason
         if self.matched_route:
             item["op_to_source_matched_route"] = self.matched_route
-        runtime_backend = self.primary_runtime_backend
-        if runtime_backend:
-            item["runtime_backend"] = runtime_backend
 
     def apply_to(self, item: dict[str, Any]) -> None:
         """Override an item's source with this leaf's editable ``.cu`` (ground truth).
@@ -333,16 +287,6 @@ class OpResolution:
         if launcher and launcher != self.primary_source:
             item["launcher_source_file"] = launcher
             item["source_promoted_from_launcher"] = True
-        # Curated routing metadata for the optimization backends: kernel_kind
-        # distinguishes editable CK templates (aiter_ck) from non-editable
-        # prebuilt assembly compute-cores (aiter_asm), and prebuilt_binary names
-        # the .co the .cu dispatcher loads (present only for the asm path).
-        kk = self.primary_kernel_kind
-        if kk:
-            item["kernel_kind"] = kk
-        pb = self.primary_prebuilt_binary
-        if pb:
-            item["prebuilt_binary"] = pb
         self.stamp_onto(item)
 
 
@@ -7201,16 +7145,6 @@ def main() -> int:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=_default_top_k(),
-        help="Kernel-candidate POOL size written to kernel_candidates.json "
-        "(issue #667). Defaults to a large pool so the dispatch layer "
-        "(source-fn grouping + op dedup + attempt cap) owns the real "
-        "budget. Override the default via HYPERLOOM_KERNEL_CANDIDATES_TOP_K "
-        "(0 or negative = no build-time cap).",
-    )
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument("--runtime-env", default="local")
@@ -8058,7 +7992,7 @@ def main() -> int:
                         )
                     raw_det_candidates = deterministic_extract_hot_kernels(
                         tracelens_dir,
-                        args.top_k,
+                        _default_top_k(),
                         log_path=log_path,
                         fail_on_corrupt_priority=True,
                     )
@@ -8222,7 +8156,7 @@ def main() -> int:
                             )
                         report_cands = parse_analysis_md(
                             skill_result.report_path,
-                            args.top_k,
+                            _default_top_k(),
                         )
                         # Defense-in-depth: recover any high-GPU-time op that
                         # TraceLens filed without a reasoning-candidate block from
@@ -8230,7 +8164,7 @@ def main() -> int:
                         fallback_cands = recover_other_bucket_candidates(
                             skill_result.output_dir,
                             report_cands,
-                            top_k=args.top_k,
+                            top_k=_default_top_k(),
                             total_window_us=_extract_total_time_us_from_gpu_timeline(
                                 skill_result.output_dir,
                             ),
@@ -8349,7 +8283,7 @@ def main() -> int:
                 )
                 candidates = analyze_trace_files(
                     trace_files,
-                    args.top_k,
+                    _default_top_k(),
                     allow_model_tiers=not use_deterministic,
                 )
             else:
