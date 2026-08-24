@@ -92,10 +92,8 @@ class SourceData:
     # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for
     # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
-    # Coordinator bus events: ``{id, agent, topic, payload, ts}`` rows in
-    # chronological (ascending seq) order, newest at the end.
-    # ``id`` equals the ``events.seq`` primary key; detectors use it for
-    # cross-source deduplication with inbox items.
+    # Coordinator bus events: ``{id, agent, topic, payload, ts}``, oldest first.
+    # ``id`` is the ``events.seq`` key detectors dedupe inbox items against.
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
     # In-flight work: ``{running, by_agent: {agent: {last_progress_unix, task,
     # oldest_progress_unix, oldest_task}}}``.

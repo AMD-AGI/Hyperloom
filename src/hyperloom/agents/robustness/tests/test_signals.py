@@ -538,9 +538,7 @@ def test_classifier_config_map_covers_every_registry_slot():
     assert set(classifier.signal_configs) == expected_slots
 
 
-# ---------------------------------------------------------------------------
-# Ordering regressions for recover_unsuccessful and repeated_failure dedup.
-# ---------------------------------------------------------------------------
+# recover_unsuccessful ordering and repeated_failure cross-source dedup
 
 
 def _rec(seq: int, state: str) -> dict:

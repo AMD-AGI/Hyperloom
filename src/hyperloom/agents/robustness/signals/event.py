@@ -147,18 +147,18 @@ def _delegated_failure_symptoms(
             continue
         if ev.payload.get("state") != "failed":
             continue
-        fam = family_of(ev.payload)
-        if not fam:
+        family = family_of(ev.payload)
+        if not family:
             continue
-        family_counts[fam] += 1
-        last_evidence[fam] = {
+        family_counts[family] += 1
+        last_evidence[family] = {
             "task_id": ev.payload.get("task_id"),
             "kind": ev.payload.get("kind"),
             "error": ev.payload.get("error"),
         }
 
     out: list[Symptom] = []
-    for fam, count in family_counts.items():
+    for family, count in family_counts.items():
         if count < cfg.delegated_failure_threshold:
             continue
         severity = (
@@ -168,15 +168,15 @@ def _delegated_failure_symptoms(
             Symptom(
                 name="repeated_failure",
                 severity=severity,
-                summary=(f"action family {fam!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
+                summary=(f"action family {family!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
                 evidence={
-                    "family": fam,
+                    "family": family,
                     "count": count,
-                    "last_failure": last_evidence.get(fam, {}),
+                    "last_failure": last_evidence.get(family, {}),
                 },
-                subject={"family": fam},
+                subject={"family": family},
                 source="coordinator_events",
-                suggestion=f"prune_branch family={fam}",
+                suggestion=f"prune_branch family={family}",
             )
         )
     return out

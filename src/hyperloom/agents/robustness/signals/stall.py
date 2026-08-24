@@ -298,11 +298,6 @@ def _collect_last_seen(
 ) -> dict[str, float]:
     """Compute the latest activity timestamp per tracked agent.
 
-    Folds the shared event view, keeping the most recent timestamp seen for
-    each tracked agent. Timestamps come from ``EventRow.ts``, which is set
-    from ``payload.ts`` for inbox items and from the DB ``ts`` column for
-    coordinator events.
-
     Args:
         view: Shared event view for this tick.
 

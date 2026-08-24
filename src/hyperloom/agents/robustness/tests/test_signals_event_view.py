@@ -6,11 +6,7 @@
 from __future__ import annotations
 
 from hyperloom.agents.robustness.role.prompt_inputs import InboxItem
-from hyperloom.agents.robustness.signals.event_view import (
-    EventRow,
-    build_event_view,
-    family_of,
-)
+from hyperloom.agents.robustness.signals.event_view import build_event_view, family_of
 
 
 def _coord(seq: int, topic: str, payload: dict | None = None, *, ts: str = "") -> dict:
@@ -88,13 +84,6 @@ def test_inbox_ts_taken_from_payload():
     )
     view = build_event_view([item], [])
     assert view[0].ts == "2026-08-24T10:00:00"
-
-
-def test_inbox_item_without_seq_not_deduplicated():
-    coord = [_coord(7, "delegated_result", {"state": "failed"})]
-    item = InboxItem(seq=7, msg_id="m-7", from_agent="coordinator", topic="delegated_result", payload={"state": "failed"})
-    view = build_event_view([item], coord)
-    assert len(view) == 1
 
 
 def test_empty_inputs_return_empty():

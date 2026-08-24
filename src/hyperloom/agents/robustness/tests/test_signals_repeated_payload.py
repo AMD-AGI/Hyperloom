@@ -221,9 +221,7 @@ def test_inbox_and_coordinator_events_combined():
     assert sym.evidence["count"] == 3
 
 
-# ---------------------------------------------------------------------------
-# Ordering regressions: explicit id fields route through the sort path.
-# ---------------------------------------------------------------------------
+# same_payload_loop ordering (ids route these through the sort path)
 
 
 def _dr(seq: int, state: str, grid: str = "g1") -> dict:
