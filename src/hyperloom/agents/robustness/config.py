@@ -236,7 +236,6 @@ class Config:
     # -- external-deps signals --
     # Disable for hosts that audit gateway / mounts externally.
     external_deps_enabled: bool = True
-    external_mount_stat_timeout_s: float = 5.0
     external_gateway_probe_url: str = ""  # empty → derive from OPENAI_BASE_URL
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0

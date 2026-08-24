@@ -142,7 +142,6 @@ def _build_local_probe_config(config: Config) -> LocalProbeConfig:
         max_extra_server_logs=config.server_log_max_extra,
         state_integrity_enabled=config.state_integrity_enabled,
         external_deps_enabled=config.external_deps_enabled,
-        external_mount_stat_timeout_s=(config.external_mount_stat_timeout_s),
         external_gateway_probe_url=config.external_gateway_probe_url,
     )
 
