@@ -248,8 +248,7 @@ class ProgressDetector:
             source="local",
             suggestion=(
                 "consider `escalate_strategy_change(skip_to_close)` or "
-                "`report` to surface the attempted candidates; "
-                "`decision_trace.json` already records what was tried"
+                "`report` to surface the attempted candidates"
             ),
         )
 
