@@ -230,20 +230,31 @@ class MessageBus:
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
 
-    async def replay_for(self, to_agent: str, *, after_seq: int) -> list[Message]:
+    async def replay_for(
+        self,
+        to_agent: str,
+        *,
+        after_seq: int,
+        limit: int = 5000,
+    ) -> list[Message]:
         """Used at resume — returns events in monotonic seq order.
+
+        The result is bounded by ``limit`` (default 5000, matching the bus
+        retention watermark) so a session with an unexpectedly large event
+        backlog cannot load the entire table into memory at once.
 
         Args:
             to_agent (str): Recipient agent id (broadcasts are included).
             after_seq (int): Only return messages with ``seq`` greater than
                 this.
+            limit (int): Maximum rows to return. Defaults to ``5000``.
 
         Returns:
             list[Message]: Matching messages ordered by ascending ``seq``.
         """
         rows = await self.db.fetchall(
-            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
-            (after_seq, to_agent),
+            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC LIMIT ?",
+            (after_seq, to_agent, max(1, int(limit))),
         )
         return [Message.from_row(r) for r in rows]
 
