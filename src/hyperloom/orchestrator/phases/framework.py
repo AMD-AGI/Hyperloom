@@ -2047,6 +2047,7 @@ class FrameworkPhase(PhaseHandler):
         notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
             "domain": "serving_specialist",
+            "source_phase": "EXPLORE",
             "gap_canonical_id": gap_cid,
             "gap_symptom": gap_symptom or f"Retry apply-failed patch for {gap_cid}",
             "gap_layer": "perf_explore",
