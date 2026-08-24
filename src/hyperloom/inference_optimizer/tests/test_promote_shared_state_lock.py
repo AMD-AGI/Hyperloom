@@ -22,6 +22,7 @@ from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
+from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
 from hyperloom.orchestrator.state.shared_state import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task
@@ -619,9 +620,39 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir)
     assert entry["action"] == "integrate_patch"
     assert entry["baseline_enablement"] is True
     assert entry["attribution_eligible"] is False
+    assert entry["recipe_publishable"] is False
     assert s.gain_per_stack_entry == [None]
     assert s.cumulative_gain_validated == 0.0
     assert s.pending_integrate == {}
+
+
+@pytest.mark.asyncio
+async def test_postbaseline_enablement_config_is_not_recipe_publishable(
+    session_dir,
+):
+    coord = _coord(session_dir)
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.current_best = {"action": "baseline", "tput": 100.0}
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "enablement": True,
+            "output_throughput": 110.0,
+            "specialist_task_id": "spec-enable-late",
+            "extra_envs_applied": {"SGLANG_ENABLEMENT_ONLY": "1"},
+        },
+        task=_task(
+            "integrate_patch",
+            task_id="t-enable-late",
+            params={"enablement": True, "source_phase": "FRAMEWORK_AGENT"},
+        ),
+    )
+
+    assert state.optimization_stack[-1]["recipe_publishable"] is False
+    assert has_new_keep(state) is False
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1259,49 @@ def test_lift_applies_unset_envs_before_new_envs(session_dir):
         "KEEP": "new",
         "RESTORE": "new",
     }
+
+
+def test_lift_persists_recipe_delta_separately_from_runtime_config(session_dir):
+    coord = _coord(session_dir)
+    coord.shared_state.current_best = {
+        "action": "baseline",
+        "tput": 1000.0,
+        "extra_server_args": "--hld-only",
+        "extra_envs": {"SGLANG_ENABLEMENT_ONLY": "1"},
+    }
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {
+            "name": "optimized",
+            "candidate_extra_server_args": "--page-size 64",
+            "candidate_extra_envs": {"VLLM_OPTIMIZED": "1"},
+            "recipe_delta": {
+                "extra_server_args": "--page-size 64",
+                "extra_envs": {"VLLM_OPTIMIZED": "1"},
+                "remove_args": [],
+                "unset_envs": [],
+                "args_mode": "append",
+            },
+            "extra_server_args": "--hld-only --page-size 64",
+            "extra_envs": {
+                "SGLANG_ENABLEMENT_ONLY": "1",
+                "VLLM_OPTIMIZED": "1",
+            },
+        },
+    )
+
+    top = coord.shared_state.optimization_stack[-1]
+    assert top["recipe_delta"] == {
+        "extra_server_args": "--page-size 64",
+        "extra_envs": {"VLLM_OPTIMIZED": "1"},
+        "remove_args": [],
+        "unset_envs": [],
+        "args_mode": "append",
+    }
+    assert "--hld-only" in coord.shared_state.current_best["extra_server_args"]
+    assert "--hld-only" not in top["recipe_delta"]["extra_server_args"]
 
 
 def test_lift_is_the_only_writer_so_an_ablated_env_stays_gone(session_dir):
