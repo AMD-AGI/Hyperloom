@@ -17,6 +17,7 @@ from typing import Any
 
 from hyperloom.common.jsonio import read_json
 
+from ...session.paths import is_path_within
 from ._common import (
     _rel,
     _to_float,
@@ -962,7 +963,7 @@ def collect_geak(
             return p
         try:
             pp = Path(str(p))
-            if pp.is_absolute() and str(pp).startswith(str(session_dir)):
+            if pp.is_absolute() and is_path_within(pp, session_dir):
                 return _rel(pp, session_dir)
         except (ValueError, OSError) as exc:
             # Relativizing is cosmetic: keep the absolute path on failure.
