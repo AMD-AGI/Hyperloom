@@ -256,15 +256,12 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
         pass
 
 
-def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
+def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
     """Ensure a Ray cluster is reachable, starting a head node if needed.
 
     Args:
         num_gpus: Optional GPU count to pass to ``ray start --head``.
         log_path: Optional path to append ``ray start`` output.
-
-    Returns:
-        ``True`` if this call started Ray, ``False`` if it was already running.
 
     Raises:
         RuntimeError: If starting the Ray head node fails.
@@ -273,7 +270,7 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     # so a head already started by this session (kernel agent or serving lease)
     # is reused regardless of which free port it bound.
     if ray_status_ok():
-        return False
+        return
     _stop_ray_force(
         log_path=log_path,
         reason="Clearing stale Ray discovery state before starting a local head",
@@ -301,29 +298,6 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
         proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray; see {log_path}")
-    return True
-
-
-def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
-    """Stop Ray only if this process started it.
-
-    A no-op when ``started`` is False, so callers can pair this with
-    :func:`ensure_ray_cluster` without tracking ownership themselves.
-
-    Args:
-        started (bool): The return value from :func:`ensure_ray_cluster`;
-            True means this process owns the cluster and should stop it.
-        log_path (Optional[Path]): When set, ``ray stop --force`` output
-            is appended here.
-    """
-    if not started:
-        return
-    if log_path is not None:
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write("Stopping Ray started by kernel-agent\n")
-            subprocess.run(["ray", "stop", "--force"], stdout=log, stderr=subprocess.STDOUT, text=True)
-    else:
-        subprocess.run(["ray", "stop", "--force"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
