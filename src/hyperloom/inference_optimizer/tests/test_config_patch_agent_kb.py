@@ -29,8 +29,27 @@ from hyperloom.orchestrator.phases.prelude import _merge_current_recipe_configs
 
 
 def _state(stack: list[dict]) -> SimpleNamespace:
+    normalized_stack = []
+    for raw in stack:
+        row = dict(raw)
+        if (
+            str(row.get("action") or "").lower() == "replay_warm_recipe"
+            and "recipe_delta" not in row
+        ):
+            row["recipe_delta"] = {
+                "extra_server_args": str(
+                    row.get("candidate_extra_server_args")
+                    or row.get("extra_server_args")
+                    or ""
+                ),
+                "extra_envs": dict(row.get("extra_envs") or {}),
+                "remove_args": [],
+                "unset_envs": [],
+                "args_mode": "replace",
+            }
+        normalized_stack.append(row)
     return SimpleNamespace(
-        optimization_stack=stack,
+        optimization_stack=normalized_stack,
         current_best={"tput": 130.0},
         cumulative_gain_validated=30.0,
         gain_per_stack_entry=[],
@@ -236,12 +255,22 @@ def test_current_contract_persists_one_final_config(
             {
                 "action": "explore",
                 "source_phase": "EXPLORE",
+                "recipe_delta": {
+                    "extra_server_args": "--explore-old",
+                    "extra_envs": {"VLLM_OWNER": "explore"},
+                    "args_mode": "append",
+                },
                 "extra_server_args": "--explore-old",
                 "extra_envs": {"VLLM_OWNER": "explore"},
             },
             {
                 "action": "framework",
                 "source_phase": "FRAMEWORK_AGENT",
+                "recipe_delta": {
+                    "extra_server_args": "--framework-final",
+                    "extra_envs": {"VLLM_OWNER": "framework"},
+                    "args_mode": "replace",
+                },
                 "extra_server_args": "--framework-final",
                 "extra_envs": {"VLLM_OWNER": "framework"},
             },

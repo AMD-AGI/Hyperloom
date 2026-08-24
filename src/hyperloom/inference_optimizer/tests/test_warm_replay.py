@@ -1983,6 +1983,18 @@ async def test_low_confidence_recipe_does_not_suppress_kernel(tmp_path):
     assert task.params["recipe_extra_envs"] == {}
     assert task.params["extra_server_args"] == "--kernel"
     assert coord.shared_state.warm_replay_outcome["recipe_suppressed"] is True
+    coord._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 612.0},
+        task=task,
+    )
+    assert coord.shared_state.optimization_stack[-1]["recipe_delta"] == {
+        "extra_server_args": "",
+        "extra_envs": {},
+        "remove_args": [],
+        "unset_envs": [],
+        "args_mode": "replace",
+    }
+    assert coord.shared_state.current_best["extra_server_args"] == "--kernel"
 
 
 def _git_repo_for_required_patch(tmp_path: Path) -> tuple[Path, str]:
@@ -2049,8 +2061,10 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
                     "patch_content": patch_content,
                 }
             ],
-            "extra_server_args": "",
-            "extra_envs": {},
+            "extra_server_args": "--recipe --kernel",
+            "extra_envs": {"VLLM_RECIPE": "1", "KERNEL_ONLY": "1"},
+            "recipe_extra_server_args": "--recipe",
+            "recipe_extra_envs": {"VLLM_RECIPE": "1"},
             "warm_kernel_plan": [],
             "warm_kernel_apply_results": [],
         }
@@ -2078,8 +2092,22 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
 
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
-    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(checkout.resolve())
-    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(checkout.resolve())
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(
+        checkout.resolve()
+    )
+    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(
+        checkout.resolve()
+    )
+    entry = coord.shared_state.optimization_stack[-1]
+    assert entry["recipe_delta"] == {
+        "extra_server_args": "--recipe",
+        "extra_envs": {"VLLM_RECIPE": "1"},
+        "remove_args": [],
+        "unset_envs": [],
+        "args_mode": "replace",
+    }
+    assert entry["candidate_extra_server_args"] == "--recipe --kernel"
+    assert coord.shared_state.current_best["extra_envs"]["KERNEL_ONLY"] == "1"
     assert coord.shared_state.warm_replay_pending == {}
 
 

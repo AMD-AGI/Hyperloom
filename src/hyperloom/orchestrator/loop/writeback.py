@@ -2625,6 +2625,11 @@ class WritebackCollaborator:
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
+                    "candidate_extra_envs": (
+                        dict(bv.get("candidate_extra_envs") or {})
+                        if isinstance(bv, dict)
+                        else {}
+                    ),
                     "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
                     # Carry the promoting lane's accuracy verdict onto the stack
@@ -2670,6 +2675,25 @@ class WritebackCollaborator:
                     if _stack_kernels:
                         stack_entry["accepted_kernels"] = _stack_kernels
                 if isinstance(bv, dict):
+                    recipe_delta = bv.get("recipe_delta")
+                    if isinstance(recipe_delta, Mapping):
+                        stack_entry["recipe_delta"] = {
+                            "extra_server_args": str(
+                                recipe_delta.get("extra_server_args") or ""
+                            ).strip(),
+                            "extra_envs": dict(
+                                recipe_delta.get("extra_envs") or {}
+                            ),
+                            "remove_args": to_str_list(
+                                recipe_delta.get("remove_args")
+                            ),
+                            "unset_envs": to_str_list(
+                                recipe_delta.get("unset_envs")
+                            ),
+                            "args_mode": str(
+                                recipe_delta.get("args_mode") or "append"
+                            ).strip().lower(),
+                        }
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
@@ -2708,6 +2732,10 @@ class WritebackCollaborator:
                     for _attr_key in ("baseline_enablement", "attribution_eligible"):
                         if _attr_key in bv:
                             stack_entry[_attr_key] = bool(bv.get(_attr_key))
+                    if "recipe_publishable" in bv:
+                        stack_entry["recipe_publishable"] = bool(
+                            bv.get("recipe_publishable")
+                        )
                     if "framework_agent_authoring" in bv:
                         stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
                     for _origin_key in ("domain", "gap_layer"):
@@ -3844,10 +3872,15 @@ class WritebackCollaborator:
             audit_extras["framework_levers"] = [str(row.get("switch") or "") for row in levers]
             audit_extras["framework_lever_outcome"] = lever_outcome
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
+        enablement_landing = bool(
+            result.get("enablement")
+            or task_params.get("enablement")
+            or task_params.get("enablement_landing")
+        )
         prebaseline_enablement = bool(
             kept_flag
             and float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0) <= 0.0
-            and (result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing"))
+            and enablement_landing
         )
         lifted = False
         if kept_flag:
@@ -3864,7 +3897,39 @@ class WritebackCollaborator:
                 "name": specialist_task_id or "integrate_patch_keep",
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
+                "candidate_extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
+                "recipe_delta": {
+                    "extra_server_args": str(
+                        result.get("extra_server_args_applied") or ""
+                    ),
+                    "extra_envs": dict(
+                        result.get("extra_envs_applied")
+                        or result.get("config_changes_applied")
+                        or {}
+                    ),
+                    "remove_args": to_str_list(
+                        result.get("remove_args_applied")
+                        or task_params.get("remove_args")
+                    ),
+                    "unset_envs": to_str_list(
+                        result.get("unset_envs_applied")
+                        or task_params.get("unset_envs")
+                    ),
+                    "args_mode": str(
+                        result.get("args_mode")
+                        or task_params.get("args_mode")
+                        or "append"
+                    ).strip().lower(),
+                },
+                "extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
                 "tput": float(new_tput),
                 "workspace": result.get("workspace"),
                 "provenance": origin_provenance or "integrate_patch",
@@ -3885,6 +3950,8 @@ class WritebackCollaborator:
                 lift["gap_layer"] = str(task_params.get("gap_layer"))
             if task_params.get("framework_agent_authoring"):
                 lift["framework_agent_authoring"] = True
+            if enablement_landing:
+                lift["recipe_publishable"] = False
             if prebaseline_enablement:
                 lift["baseline_enablement"] = True
                 lift["attribution_eligible"] = False
@@ -3957,8 +4024,16 @@ class WritebackCollaborator:
             "enablement_observed_accuracy": result.get("enablement_observed_accuracy"),
             "provisional": result.get("provisional"),
         }
-        if lifted and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+        if (
+            lifted
+            and not enablement_landing
+            and len(self.shared_state.optimization_stack or []) > stack_len_before
+        ):
+            owner = str(
+                task_params.get("source_phase")
+                or result.get("source_phase")
+                or ""
+            ).strip().upper()
             if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
                 self._enqueue_agent_keep_outbox(
                     owner=owner,
@@ -4485,7 +4560,37 @@ class WritebackCollaborator:
             bv = {
                 "name": sid,
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
+                "candidate_extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
+                "recipe_delta": {
+                    "extra_server_args": str(
+                        result.get("extra_server_args_applied") or ""
+                    ),
+                    "extra_envs": dict(
+                        result.get("extra_envs_applied")
+                        or result.get("config_changes_applied")
+                        or {}
+                    ),
+                    "remove_args": to_str_list(
+                        result.get("remove_args_applied")
+                        or result.get("remove_args")
+                    ),
+                    "unset_envs": to_str_list(
+                        result.get("unset_envs_applied")
+                        or result.get("unset_envs")
+                    ),
+                    "args_mode": str(
+                        result.get("args_mode") or "append"
+                    ).strip().lower(),
+                },
+                "extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
                 "tput": float(tput),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
@@ -4509,6 +4614,8 @@ class WritebackCollaborator:
                 bv["gap_layer"] = gap_layer
             if result.get("framework_agent_authoring"):
                 bv["framework_agent_authoring"] = True
+            if result.get("enablement") or result.get("enablement_landing"):
+                bv["recipe_publishable"] = False
         else:
             return False
         before = len(self.shared_state.optimization_stack or [])
