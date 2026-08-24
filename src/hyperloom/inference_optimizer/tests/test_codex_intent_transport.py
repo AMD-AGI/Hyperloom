@@ -427,3 +427,72 @@ def test_run_codex_turn_defaults_to_no_output_schema(
     )
 
     assert recorder["turn_kwargs"]["output_schema"] is None
+
+
+# ---------------------------------------------------------------------------
+# Value-level validation added to validate_envelope
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+from hyperloom.inference_optimizer.protocol.intent import validate_envelope, IntentValidationError
+
+
+@_pytest.mark.parametrize("severity", [None, "", "CRITICAL", 42, "info"])
+def test_alert_rejects_invalid_severity(severity):
+    with _pytest.raises(IntentValidationError, match="severity"):
+        validate_envelope({
+            "intents": [{"intent_type": "alert", "payload": {"severity": severity, "summary": "x"}}]
+        })
+
+
+@_pytest.mark.parametrize("summary", [None, "", "   "])
+def test_alert_rejects_empty_summary(summary):
+    with _pytest.raises(IntentValidationError, match="summary"):
+        validate_envelope({
+            "intents": [{"intent_type": "alert", "payload": {"severity": "high", "summary": summary}}]
+        })
+
+
+def test_alert_accepts_valid_severity_and_summary():
+    result = validate_envelope({
+        "intents": [{"intent_type": "alert", "payload": {"severity": "medium", "summary": "disk full"}}]
+    })
+    assert len(result) == 1
+    assert result[0].payload["severity"] == "medium"
+
+
+@_pytest.mark.parametrize("extra_sec", ["abc", -1, 0, None, True])
+def test_extend_lease_rejects_invalid_extra_sec(extra_sec):
+    with _pytest.raises(IntentValidationError, match="extra_sec"):
+        validate_envelope({
+            "intents": [{"intent_type": "extend_lease", "payload": {"task_id": "t1", "extra_sec": extra_sec}}]
+        })
+
+
+def test_extend_lease_rejects_empty_task_id():
+    with _pytest.raises(IntentValidationError, match="task_id"):
+        validate_envelope({
+            "intents": [{"intent_type": "extend_lease", "payload": {"task_id": "", "extra_sec": 60}}]
+        })
+
+
+def test_extend_lease_accepts_valid():
+    result = validate_envelope({
+        "intents": [{"intent_type": "extend_lease", "payload": {"task_id": "t1", "extra_sec": 120}}]
+    })
+    assert result[0].payload["extra_sec"] == 120
+
+
+@_pytest.mark.parametrize("verdict", [12345, None, "APPROVE", "maybe"])
+def test_review_verdict_rejects_invalid_verdict_value(verdict):
+    with _pytest.raises(IntentValidationError, match="verdict"):
+        validate_envelope({
+            "intents": [{"intent_type": "review_verdict", "payload": {"target_proposal_msg_id": "m", "verdict": verdict}}]
+        })
+
+
+def test_review_verdict_accepts_valid_verdict():
+    result = validate_envelope({
+        "intents": [{"intent_type": "review_verdict", "payload": {"target_proposal_msg_id": "m", "verdict": "approve"}}]
+    })
+    assert result[0].payload["verdict"] == "approve"
