@@ -338,8 +338,7 @@ def _find_config_donor(
 
     Used when no donor config has been established yet — the identity match
     may have no replayable best_config, or it may have one at a non-exact
-    tier that failed :func:`_donor_is_trustworthy`, or the KG-native
-    cross-model lookup may have come up empty. The identity row still
+    tier that failed :func:`_donor_is_trustworthy`. The identity row still
     supplies priors, but the active warm-replay needs a champion config to
     apply. Search and compatibility checks match the main T0 cascade:
     same-architecture class, same GPU ISA, then nearest non-newer framework
@@ -440,10 +439,6 @@ def _build_warm_start_context(
     config_donor: Mapping[str, Any] | None = None,
     config_donor_tier: str = "",
     config_donor_confidence: float | None = None,
-    model_architectures: "list[str] | None" = None,
-    hardware: str = "",
-    framework: str = "",
-    precision: str = "",
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row.
 
@@ -1350,10 +1345,6 @@ def run_t0_anchor(
             canonical_id=cid,
             source=warm_source,
             recipe=warm_point or None,
-            model_architectures=_architectures_val if isinstance(_architectures_val, list) else None,
-            hardware=hw,
-            framework=_framework or "",
-            precision=_precision or "",
         )
     except Exception:  # noqa: BLE001 — defensive; context is advisory
         log.exception("warm_start_context build failed")
