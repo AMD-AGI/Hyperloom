@@ -8,7 +8,13 @@ import re
 
 import pytest
 
-from hyperloom.common.jsonio import coerce_dict, extract_first_json_with_key, extract_last_json_with_key, read_json, read_jsonl
+from hyperloom.common.jsonio import (
+    coerce_dict,
+    extract_first_json_with_key,
+    extract_last_json_with_key,
+    read_json,
+    read_jsonl,
+)
 
 _BARE = re.compile(r"(\{.*\})", re.DOTALL)
 
