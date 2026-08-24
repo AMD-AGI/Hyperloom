@@ -7,12 +7,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+
 
 def gain_pct(new: float | None, base: float) -> float | None:
-    """``(new-base)/base*100``; None when *new* is not positive-numeric or *base*<=0."""
-    if not isinstance(new, (int, float)) or new <= 0 or base <= 0:
+    """``(new-base)/base*100``; None when *new* is not a positive finite number or *base*<=0."""
+    coerced = to_float(new)
+    if coerced is None or coerced <= 0 or base <= 0:
         return None
-    return (float(new) - base) / base * 100.0
+    return (coerced - base) / base * 100.0
 
 
 def gain_pct_or_zero(new: float, base: float) -> float:
@@ -46,21 +49,28 @@ def conc_pair_comparison(
     Returns:
         A tuple of ``(per_conc_rows, summary_dict)``.
     """
-    by_conc_b = {p["conc"]: p for p in baseline_points}
-    by_conc_o = {p["conc"]: p for p in optimized_points}
+    def _norm_conc(p: dict[str, Any]) -> int | float | str:
+        """Return a comparable, hashable concurrency key, coercing bool to int."""
+        raw = p.get("conc")
+        if isinstance(raw, bool):
+            return int(raw)
+        return raw  # type: ignore[return-value]
+
+    by_conc_b = {_norm_conc(p): p for p in baseline_points}
+    by_conc_o = {_norm_conc(p): p for p in optimized_points}
     rows: list[dict[str, Any]] = []
     speedups: list[float] = []
     successful_pairs = 0
     failed_pairs = 0
-    for c in sorted(set(by_conc_b) | set(by_conc_o)):
+    for c in sorted(set(by_conc_b) | set(by_conc_o), key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x))):
         b = by_conc_b.get(c) or {}
         o = by_conc_o.get(c) or {}
-        bt = b.get("output_throughput")
-        ot = o.get("output_throughput")
+        bt = to_float(b.get("output_throughput"))
+        ot = to_float(o.get("output_throughput"))
         speedup: float | None = None
         delta_pct: float | None = None
-        if isinstance(bt, (int, float)) and bt > 0 and isinstance(ot, (int, float)) and ot > 0:
-            speedup = float(ot) / float(bt)
+        if bt is not None and bt > 0 and ot is not None and ot > 0:
+            speedup = ot / bt
             delta_pct = (speedup - 1.0) * 100.0
             speedups.append(speedup)
             successful_pairs += 1
