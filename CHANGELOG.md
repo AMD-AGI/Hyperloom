@@ -5,6 +5,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **`canonical_fingerprint` now uses pair-aware arg normalization.**
+  The previous implementation sorted all arg tokens as a flat list, which
+  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
+  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
+  and were incorrectly treated as duplicates by the `explore_search` dedup
+  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
+  last-wins semantics for repeated flags, matching the semantics of
+  `_shell_safe_dedupe`.<br/>
+  **Operator note**: this changes the hash for any variant whose `extra_args`
+  contains at least one flag with a value.  All fingerprint keys already
+  persisted in `explore_search.tested`, `accepted`, `rejected`, and
+  `name_index` inside `state.json` are invalidated.  On the next resume the
+  session will re-bench its full explored history.
+
 ### Removed
 
 - **`stop_ray_if_owned` and the ownership return value of `ensure_ray_cluster` are gone.**

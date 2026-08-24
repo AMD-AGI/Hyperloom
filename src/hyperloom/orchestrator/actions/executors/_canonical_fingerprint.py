@@ -7,11 +7,21 @@ A single content-addressed identity for any explore variant so the
 ``explore_search`` ledger has one canonical key per variant and dedup across
 specialist / LLM / default_grid proposals collapses to the same row.
 
-The on-disk fingerprint is content-only: sorted ``extra_args`` tokens + sorted
-``extra_envs`` pairs, plus the removal/replacement controls (``remove_args``,
-``unset_envs``, ``args_mode``) and a canonicalised ``runtime_override`` when any
-of those is non-default. Discriminators such as framework / tp /
-workload_signature are kept as side metadata rather than folded into the hash.
+The on-disk fingerprint is content-only: sorted ``(flag, value)`` arg pairs +
+sorted ``extra_envs`` pairs, plus the removal/replacement controls
+(``remove_args``, ``unset_envs``, ``args_mode``) and a canonicalised
+``runtime_override`` when any of those is non-default.  Discriminators such as
+framework / tp / workload_signature are kept as side metadata rather than folded
+into the hash.
+
+Pairing semantics: repeated flags collapse to the last occurrence (last-wins).
+Two arg strings that assign the same set of flag→value bindings, regardless of
+order, produce the same fingerprint; strings that assign *different* values to
+any flag produce different fingerprints.
+
+**Ledger note**: changing the pairing algorithm invalidates all fingerprint keys
+already persisted in ``explore_search.tested``.  Any session resumed after this
+change will re-bench its full explored history.
 """
 
 from __future__ import annotations
@@ -19,8 +29,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shlex
 from typing import Any
+
+from ._grid_server_args import canonical_args_pairs
 
 
 __all__ = [
@@ -73,10 +84,11 @@ def canonical_fingerprint(
     """Return the canonical 16-char fingerprint for a variant.
 
     Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
-    delegates here. Normalization: args ``shlex.split``
-    → sorted tokens; envs ``(str(k), str(v))`` sorted by key; removal /
-    replacement controls sorted by value; a non-empty ``runtime_override`` folded
-    as an order-independent canonical dict; 16-char SHA-1.
+    delegates here. Normalization: args parsed into sorted ``[flag, value]``
+    pairs (last-wins for repeated flags); envs ``(str(k), str(v))`` sorted by
+    key; removal / replacement controls sorted by value; a non-empty
+    ``runtime_override`` folded as an order-independent canonical dict;
+    16-char SHA-1.
 
     Args:
         extra_args: The variant's extra server args string, or ``None``.
@@ -92,12 +104,7 @@ def canonical_fingerprint(
     Returns:
         The canonical 16-char SHA-1 content fingerprint for the variant.
     """
-    args_text = str(extra_args or "")
-    try:
-        args_tokens = sorted(shlex.split(args_text))
-    except ValueError:
-        # Shell-parse failure: fall back to whitespace split.
-        args_tokens = sorted(args_text.split())
+    args_pairs = canonical_args_pairs(str(extra_args or ""))
     env_pairs = sorted((str(k), str(v)) for k, v in (extra_envs or {}).items())
     mode = str(args_mode or "append").strip().lower()
     if mode not in {"append", "replace"}:
@@ -106,10 +113,10 @@ def canonical_fingerprint(
     unset_list = sorted(_coerce_list(unset_envs))
     rt = _canonical_runtime_override(runtime_override)
     if not remove_list and not unset_list and mode == "append" and rt is None:
-        payload_obj: Any = [args_tokens, [list(p) for p in env_pairs]]
+        payload_obj: Any = [args_pairs, [list(p) for p in env_pairs]]
     else:
         payload_obj = [
-            args_tokens,
+            args_pairs,
             [list(p) for p in env_pairs],
             remove_list,
             unset_list,
