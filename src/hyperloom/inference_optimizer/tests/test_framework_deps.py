@@ -23,9 +23,7 @@ from hyperloom.inference_optimizer import framework_deps as fd
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ASSETS = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets"
 INSTALL_SH = ASSETS / "install.sh"
-PREFLIGHT_PY = (
-    REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "cli" / "preflight.py"
-)
+PREFLIGHT_PY = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "cli" / "preflight.py"
 
 
 # --------------------------------------------------------------------------
@@ -234,8 +232,9 @@ def test_preflight_falls_back_to_env_then_default(monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
 
     seen = []
-    monkeypatch.setattr(fd, "ensure", lambda framework, **kw: (
-        seen.append(framework), fd.Outcome(framework=framework))[1])
+    monkeypatch.setattr(
+        fd, "ensure", lambda framework, **kw: (seen.append(framework), fd.Outcome(framework=framework))[1]
+    )
 
     monkeypatch.setenv("FRAMEWORK", "custom")
     preflight._ensure_framework_deps(argparse.Namespace(framework=None), "py", [])
@@ -254,9 +253,7 @@ def test_install_sh_delegates_to_this_module():
     """install.sh must shell out here rather than reimplement the contract."""
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "hyperloom.inference_optimizer.framework_deps" in text
-    assert re.search(r"^ensure_framework_deps$", text, re.M), (
-        "ensure_framework_deps is defined but never invoked"
-    )
+    assert re.search(r"^ensure_framework_deps$", text, re.M), "ensure_framework_deps is defined but never invoked"
 
 
 def test_pip_extra_keeps_every_dash_prefixed_flag(monkeypatch):
@@ -298,5 +295,3 @@ def test_install_sh_passes_pip_extra_in_the_form_argparse_accepts():
 # --------------------------------------------------------------------------
 # the shipped manifest
 # --------------------------------------------------------------------------
-
-

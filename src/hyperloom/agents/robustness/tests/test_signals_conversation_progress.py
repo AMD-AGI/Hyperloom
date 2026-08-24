@@ -27,11 +27,15 @@ def _ctx(
     no_progress: bool = False,
 ) -> ReactorContext:
     snap = SharedStateSnapshot(closing_phase=closing_phase, stop_reason=stop_reason)
-    cp = None if no_progress else ConversationProgress(
-        ticks_without_progress=ticks,
-        threshold=threshold,
-        severity=severity,
-        last_progress_tick=last_tick,
+    cp = (
+        None
+        if no_progress
+        else ConversationProgress(
+            ticks_without_progress=ticks,
+            threshold=threshold,
+            severity=severity,
+            last_progress_tick=last_tick,
+        )
     )
     return ReactorContext(shared_state=snap, conversation_progress=cp)
 

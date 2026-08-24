@@ -90,8 +90,7 @@ def test_only_the_files_a_patch_set_writes_become_sentinels(tmp_path: Path):
     """A release that stopped shipping a file must not leave a dead sentinel."""
     patch = tmp_path / "annotations.patch"
     patch.write_text(
-        "--- a/python/sglang/srt/managers/scheduler.py\n"
-        "+++ b/python/sglang/srt/managers/scheduler.py\n",
+        "--- a/python/sglang/srt/managers/scheduler.py\n+++ b/python/sglang/srt/managers/scheduler.py\n",
         encoding="utf-8",
     )
     written = _patch_target_paths([patch])
@@ -104,8 +103,7 @@ def test_a_created_file_is_read_from_the_patch_not_the_source_side(tmp_path: Pat
     """New-file patches carry ``/dev/null`` on the source side."""
     patch = tmp_path / "new_file.patch"
     patch.write_text(
-        "--- /dev/null\n"
-        "+++ b/python/sglang/srt/model_executor/step_span_utils.py\n",
+        "--- /dev/null\n+++ b/python/sglang/srt/model_executor/step_span_utils.py\n",
         encoding="utf-8",
     )
     written = _patch_target_paths([patch])

@@ -75,9 +75,8 @@ FMOE_INDEX_COLS = (
     "doweight_stage1",
 )
 
-_KERNEL_DESCRIPTOR_RE = re.compile(
-    r"kernelName1='(?P<kn1>[^']*)'.*?kernelName2='(?P<kn2>[^']*)'"
-)
+_KERNEL_DESCRIPTOR_RE = re.compile(r"kernelName1='(?P<kn1>[^']*)'.*?kernelName2='(?P<kn2>[^']*)'")
+
 
 def aiter_padded_m_fine(m: int) -> int:
     """Return aiter's ``gl=0`` padded M (fine-grained lookup key)."""
@@ -466,10 +465,7 @@ def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
         cols = line.split(",")
         if len(cols) <= max(indices.values()):
             continue
-        record = {
-            name: _normalize_fmoe_field(name, cols[index])
-            for name, index in indices.items()
-        }
+        record = {name: _normalize_fmoe_field(name, cols[index]) for name, index in indices.items()}
         if not all(record.get(field) for field in FMOE_INDEX_COLS[:7]):
             continue
         if kn1_idx is not None and kn1_idx < len(cols):
@@ -514,10 +510,7 @@ def fmoe_tuned_config_coverage(
         if row is None:
             uncovered.append(record)
             continue
-        if (
-            record.get("kernelName1") == row.get("kernelName1")
-            and record.get("kernelName2") == row.get("kernelName2")
-        ):
+        if record.get("kernelName1") == row.get("kernelName1") and record.get("kernelName2") == row.get("kernelName2"):
             covered.append(record)
         else:
             kernel_mismatch += 1

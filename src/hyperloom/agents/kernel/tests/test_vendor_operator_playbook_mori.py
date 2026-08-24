@@ -268,16 +268,10 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
 
     assert dispatch["vendor_playbook_role"] == "dispatch"
     assert combine["vendor_playbook_role"] == "combine"
-    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(
-        combine["vendor_playbook_aggregate_gpu_pct"]
-    )
-    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(
-        dispatch["gpu_pct"] + combine["gpu_pct"]
-    )
+    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(combine["vendor_playbook_aggregate_gpu_pct"])
+    assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(dispatch["gpu_pct"] + combine["gpu_pct"])
     assert dispatch["vendor_playbook_aggregate_gpu_pct"] == pytest.approx(90.909, abs=0.01)
-    assert sorted(dispatch["vendor_playbook_group_kernel_ids"]) == sorted(
-        [dispatch["kernel_id"], combine["kernel_id"]]
-    )
+    assert sorted(dispatch["vendor_playbook_group_kernel_ids"]) == sorted([dispatch["kernel_id"], combine["kernel_id"]])
 
     # An unrelated candidate must be untouched by the vendor-playbook pass.
     assert "patch_strategy" not in other
@@ -319,9 +313,7 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
 def _write_fake_mori_bundle(forge_path: Path) -> Path:
     bundle = forge_path / "examples" / "mori_ep_dispatch_combine"
     bundle.mkdir(parents=True)
-    (bundle / "mori_ep_config.py").write_text(
-        "def get_ep_launch_config():\n    return {}\n", encoding="utf-8"
-    )
+    (bundle / "mori_ep_config.py").write_text("def get_ep_launch_config():\n    return {}\n", encoding="utf-8")
     (bundle / "driver.py").write_text("# real, hand-written mori driver\n", encoding="utf-8")
     (bundle / "program.md").write_text("# mori dispatch/combine task\n", encoding="utf-8")
     return bundle
@@ -581,9 +573,7 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
         "best_ms": combine_result["best_ms"],
     }
     combine_args = argparse.Namespace(
-        source_file=str(
-            tmp_path / "forge" / "session1" / "attempt_dispatch" / "worktree" / "mori_ep_config.py"
-        ),
+        source_file=str(tmp_path / "forge" / "session1" / "attempt_dispatch" / "worktree" / "mori_ep_config.py"),
         kernel_repo="",
         correctness_passed=True,
         accuracy_passed=None,
@@ -591,9 +581,7 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
         e2e_gain_pct=None,
         dry_run=False,
     )
-    combine_verification = ko.build_verification(
-        combine_args, [combine_attempt], benchmark_available=False
-    )
+    combine_verification = ko.build_verification(combine_args, [combine_attempt], benchmark_available=False)
     assert combine_verification["artifact_valid"] is True, combine_verification["artifact_error"]
     combine_proposal = ko.make_proposal(combine_verification)
     assert combine_proposal["decision"] == "KEEP", combine_proposal["reasons"]
@@ -722,9 +710,7 @@ def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch):
     assert anchor_with_forge_path.startswith("/some/checkout/of/KernelForge")
 
 
-def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(
-    monkeypatch, tmp_path
-):
+def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(monkeypatch, tmp_path):
     """The vendor-playbook path reuses one forge-loop run but used to never
     write ``optimization_report.md``, so ``kernel_optimization.py``'s
     correctness extraction (which scans ``cli_workspace``/
@@ -847,9 +833,7 @@ def test_claim_vendor_playbook_run_steals_a_claim_orphaned_by_a_dead_process(tmp
     lock_dir.mkdir(parents=True)
     claim_path = lock_dir / "claimed.lock"
     timeout_s = 3600
-    dead_pid_claimed_at = (
-        time.time() - timeout_s - forge_submit._VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S - 1.0
-    )
+    dead_pid_claimed_at = time.time() - timeout_s - forge_submit._VENDOR_PLAYBOOK_CLAIM_STALE_GRACE_S - 1.0
     claim_path.write_text(
         json.dumps({"pid": 999999, "claimed_at": dead_pid_claimed_at, "nonce": "dead"}),
         encoding="utf-8",

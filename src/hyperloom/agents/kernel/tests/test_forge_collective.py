@@ -2588,8 +2588,6 @@ def test_bandwidth_travels_on_the_forge_result(tmp_path):
 
 def test_a_loop_result_without_bandwidth_reports_none(tmp_path):
     """An older forge-loop still produces a verdict, just no bandwidth."""
-    result = fc._normalize_result(
-        str(tmp_path), 0, {}, result_payload={"improved": True}
-    )
+    result = fc._normalize_result(str(tmp_path), 0, {}, result_payload={"improved": True})
 
     assert "bandwidth" not in result

@@ -55,9 +55,7 @@ def test_geak_kernel_names_reads_the_heads_lane() -> None:
     # Kimi-K3/20260816T122327Z: the acceptance is in accepted_heads alone.
     entry: dict[str, Any] = {
         "accepted_kernels": [],
-        "accepted_heads": [
-            {"short_name": "_fwd_grouped_kernel_stage1", "kind": "authored"}
-        ],
+        "accepted_heads": [{"short_name": "_fwd_grouped_kernel_stage1", "kind": "authored"}],
     }
     assert _geak_kernel_names(entry) == ["_fwd_grouped_kernel_stage1"]
 
@@ -263,9 +261,7 @@ def test_stamp_recovers_kind_by_joining_the_ledger() -> None:
     rows = [{"name": "_mxfp8_linear_kernel", "kernel_id": "mxfp8_linear_kernel"}]
     result = {
         "accepted_kernels": [],
-        "accepted_heads": [
-            {"short_name": "_mxfp8_linear_kernel", "kind": "authored"}
-        ],
+        "accepted_heads": [{"short_name": "_mxfp8_linear_kernel", "kind": "authored"}],
     }
     out = _stamp_journey_kind(rows, result)
     assert out[0]["kind"] == "authored"

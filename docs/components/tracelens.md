@@ -7,7 +7,7 @@ myst:
 # TraceLens
 
 TraceLens is a Python library focused on automating analysis from trace
-files. It turns raw PyTorch / JAX / rocprofv3 traces into hierarchical
+files. It turns raw PyTorch, JAX, or rocprofv3 traces into hierarchical
 performance breakdowns, roofline metrics, and multi-GPU communication analysis.
 
 Within Hyperloom, TraceLens is the profiling brain of the workload

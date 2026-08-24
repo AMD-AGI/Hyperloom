@@ -226,7 +226,7 @@ through `adopted_attempt_id`.
 | `optimization_kind` | The attempt's `kind`. |
 | `name` | Operation name, typically the kernel or variant. |
 | `backend` | Producing engine, e.g. `geak` or `forge`. |
-| `gain_pct` | Gain against the **session baseline**. The only figure that may be summed. |
+| `gain_pct` | Gain against the **session baseline**. The only figure that can be summed. |
 | `gain_method` | How `gain_pct` was arrived at; see below. |
 | `chain_continuous` | `false` when this step recorded no finishing throughput, so the drift across it could not be measured. |
 | `local_gain_pct` | The executor's own figure, kept beside `gain_pct` so the two are visibly different numbers. Not summable. |
@@ -624,7 +624,7 @@ Eval-origin trigger (present when `origin` is `eval`):
 | `probe_config_path`         | string | Materialized config re-run to reproduce the contract.                                        |
 | `trigger_evidence_excerpt`  | string | Tail (2000 chars) of the captured eval-failure evidence.                                     |
 
-Stack actions, runtimes and builds:
+Stack actions, runtimes, and builds:
 
 | Field                 | Type                          | Description                                                                                     |
 |-----------------------|-------------------------------|-------------------------------------------------------------------------------------------------|

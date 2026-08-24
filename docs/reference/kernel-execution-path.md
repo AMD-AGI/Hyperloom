@@ -1,7 +1,14 @@
+---
+myst:
+    html_meta:
+        "description": "Understand how Hyperloom dispatches kernel optimization requests. Covers the request dispatch flow, registered request kinds, KERNEL phase entry, backend selection, and artifact layout."
+        "keywords": "Hyperloom, kernel optimization, GEAK, Forge, request dispatch, kernel execution, AMD GPU, ROCm, KERNEL phase, TraceLens, collective lane, multi-node"
+---
+
 # Kernel optimization execution path
 
-Kernel work in Hyperloom is **not handled by an LLM agent**. Every kernel
-`REQUEST` emitted by Orchestration is intercepted inline by the Coordinator
+Kernel work in Hyperloom is not handled by an LLM agent. Every kernel
+`REQUEST` emitted by orchestration is intercepted inline by the Coordinator
 and routed to a registered Python handler. No LLM turn is consumed.
 
 ## Request dispatch
@@ -15,7 +22,7 @@ before any agent backend runs:
    policy-denied immediately (no bus record).
 2. Records the request on the message bus (`source: "orchestration"`).
 3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
-   `False` (i.e. `--no-kernel`).
+   `False` (that is, `--no-kernel`).
 4. Looks up the handler in `KERNEL_REQUEST_HANDLERS`; auto-rejects with
    `unknown_kernel_kind` (and a `valid_kinds` list) when none is found.
 5. Runs the handler inline: `result = await handler(payload, session_dir=...)`.
@@ -24,7 +31,7 @@ before any agent backend runs:
 
 The requester reads the response from its inbox on its next turn.
 
-No PolicyGate path runs for the RESPONSE because it is written directly via
+No PolicyGate path runs for the RESPONSE because it's written directly through
 `bus.append_and_seq`, not emitted by an LLM.
 
 ## Registered request kinds
@@ -148,7 +155,7 @@ The per-kernel Forge backend is an opt-in:
   ships the line commented out.
 - **Forge (per-kernel)**: set `KERNEL_OPT_BACKEND_ORDER=forge` exactly. Any
   other value (including `--backends` CLI flags, payload `backends` hints, or
-  `GEMM_TUNING_BACKEND`) does not enable Forge.
+  `GEMM_TUNING_BACKEND`) doesn't enable Forge.
 
 `run_gemm_tuning_handler` also defaults to GEAK unless
 `KERNEL_OPT_BACKEND_ORDER=forge` is set. That default applies to an
@@ -161,15 +168,15 @@ FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
 ### Two dispatch paths for kernels
 
-Collective kernels do **not** ride the per-kernel backend. A trace row whose
+Collective kernels do *not* ride the per-kernel backend. A trace row whose
 `kernel_contract.kind == "collective"` is routed as follows:
 
-- **Per-kernel path** (`run_optimization` → GEAK / Forge): the row is dropped up
+- **Per-kernel path** (`run_optimization` → GEAK / Forge): The row is dropped up
   front by `_batch_kernel_candidates` via `is_collective_candidate`, and is also
   withheld from `reusable_native_kernel_ids` so orchestration is never offered
   an id whose dispatch would be an empty batch. The FlyDSL rewrite route refuses
   such candidates independently (`collective_unsupported`).
-- **Collective lane** (`run_collective_handler`): the Coordinator selects the
+- **Collective lane** (`run_collective_handler`): The Coordinator selects the
   hottest source-resolved collective candidate itself at KERNEL entry. Vendor
   RCCL/NCCL symbols never qualify — they are opaque binaries with no rewritable
   source. The supported `collective_op` values are `all_reduce`,
@@ -196,7 +203,7 @@ The lane writes three SharedState fields into `state.json`:
 The kernel tool scripts live under
 `src/hyperloom/agents/kernel/tools/` and are resolved at runtime via the
 `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to `<repo>/src/hyperloom/agents/kernel`
-by the CLI bootstrap). Install everything via:
+by the CLI bootstrap). Install everything using:
 
 ```bash
 export REPO_ROOT="$(pwd)"    # hyperloom repo root
@@ -280,7 +287,7 @@ Cross-task GEAK artifacts keyed by `kernel_id` live at
 | Real backend run | `<attempt_id>_stdout.log` | Raw subprocess stdout (GEAK conversation log) |
 | `--dry-run` | `<attempt_id>_optimized<source_suffix>` (e.g. `.cu`) | Synthetic placeholder for smoke tests |
 
-**Backward compatibility**: prior to 2026-05 the real-backend file shared the
+**Backward compatibility**: Prior to 2026-05 the real-backend file shared the
 `<attempt_id>_optimized<suffix>` name and contained subprocess stdout. That caused
 `_source_text_looks_complete` to false-positive match generic English in transcript
 lines and promote the log to `artifact_source = source_file`. The breakdown

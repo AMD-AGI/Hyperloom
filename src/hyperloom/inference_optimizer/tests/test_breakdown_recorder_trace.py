@@ -218,9 +218,7 @@ def test_a_record_that_was_never_attempted_says_why(tmp_path, traced):
     lines = [record.getMessage() for record in traced.records]
 
     assert any("outcome=skipped" in line and "no session_dir" in line for line in lines)
-    assert any(
-        "outcome=skipped" in line and "no measurement_id" in line for line in lines
-    )
+    assert any("outcome=skipped" in line and "no measurement_id" in line for line in lines)
     assert all("via=instrument.py:" in line for line in lines if "skipped" in line)
 
 
@@ -306,10 +304,7 @@ def test_an_integrate_the_orchestrator_could_not_record_is_named(traced):
 
     lines = [record.getMessage() for record in traced.records]
 
-    assert any(
-        "section=kernel_e2e" in line and "reason=no session_dir" in line
-        for line in lines
-    )
+    assert any("section=kernel_e2e" in line and "reason=no session_dir" in line for line in lines)
 
 
 def test_a_keep_that_no_e2e_confirmed_is_not_mistaken_for_a_lost_record(tmp_path, traced):
@@ -327,7 +322,4 @@ def test_a_keep_that_no_e2e_confirmed_is_not_mistaken_for_a_lost_record(tmp_path
 
     lines = [record.getMessage() for record in traced.records]
 
-    assert any(
-        "section=adoptions" in line and "not an e2e-validated keep" in line
-        for line in lines
-    )
+    assert any("section=adoptions" in line and "not an e2e-validated keep" in line for line in lines)

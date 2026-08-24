@@ -90,9 +90,7 @@ class _GbrainMcp:
         chunks: list[bytes] = []
         buffered = b""
         try:
-            content_type = (
-                resp.headers.get("Content-Type") or ""
-            ).lower()
+            content_type = (resp.headers.get("Content-Type") or "").lower()
             content_length = resp.headers.get("Content-Length") or ""
         except Exception:  # noqa: BLE001 - response shims may omit headers
             content_type = ""
@@ -111,11 +109,14 @@ class _GbrainMcp:
                     break
                 chunks.append(piece)
                 buffered += piece
-                if _select_mcp_response(
-                    buffered.decode("utf-8", "replace"),
-                    self._RPC_ID,
-                    allow_bare_result=allow_bare_result,
-                ) is not None:
+                if (
+                    _select_mcp_response(
+                        buffered.decode("utf-8", "replace"),
+                        self._RPC_ID,
+                        allow_bare_result=allow_bare_result,
+                    )
+                    is not None
+                ):
                     break
             return b"".join(chunks).decode("utf-8", "replace")
 
@@ -130,11 +131,14 @@ class _GbrainMcp:
                 break
             chunks.append(piece)
             buffered += piece
-            if _select_mcp_response(
-                buffered.decode("utf-8", "replace"),
-                self._RPC_ID,
-                allow_bare_result=allow_bare_result,
-            ) is not None:
+            if (
+                _select_mcp_response(
+                    buffered.decode("utf-8", "replace"),
+                    self._RPC_ID,
+                    allow_bare_result=allow_bare_result,
+                )
+                is not None
+            ):
                 break
         return b"".join(chunks).decode("utf-8", "replace")
 
@@ -169,9 +173,7 @@ class _GbrainMcp:
                     allow_bare_result=tool in _BARE_RESULT_TOOLS,
                 )
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise GbrainRemoteError(
-                f"gbrain {tool} transport error: {exc!r}"
-            ) from exc
+            raise GbrainRemoteError(f"gbrain {tool} transport error: {exc!r}") from exc
 
         obj = _select_mcp_response(
             raw,
@@ -181,26 +183,17 @@ class _GbrainMcp:
         if obj is None:
             prefix = raw[:300].replace("\n", "\\n").replace("\r", "\\r")
             raise GbrainRemoteError(
-                f"gbrain {tool} bad envelope: no parseable JSON-RPC "
-                f"response in body; body_prefix={prefix!r}"
+                f"gbrain {tool} bad envelope: no parseable JSON-RPC response in body; body_prefix={prefix!r}"
             )
         if not isinstance(obj, dict):
             return obj
-        if (
-            tool in _BARE_RESULT_TOOLS
-            and "result" not in obj
-            and "error" not in obj
-        ):
+        if tool in _BARE_RESULT_TOOLS and "result" not in obj and "error" not in obj:
             return obj
         if obj.get("error") is not None:
-            raise GbrainRemoteError(
-                f"gbrain {tool} JSON-RPC error: {obj.get('error')!r}"
-            )
+            raise GbrainRemoteError(f"gbrain {tool} JSON-RPC error: {obj.get('error')!r}")
         result = obj.get("result") or {}
         if isinstance(result, dict) and result.get("isError"):
-            raise GbrainRemoteError(
-                f"gbrain {tool} tool error: {result.get('content')!r}"
-            )
+            raise GbrainRemoteError(f"gbrain {tool} tool error: {result.get('content')!r}")
         content = result.get("content") or []
         if content and isinstance(content[0], dict) and content[0].get("text"):
             try:

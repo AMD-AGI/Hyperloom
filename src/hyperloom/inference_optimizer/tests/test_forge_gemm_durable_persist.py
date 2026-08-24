@@ -4,6 +4,7 @@
 aiter config dir + snapshot it (recipe-portable), not reference the ephemeral
 tuner workspace path.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -20,9 +21,7 @@ def _fake_aiter(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(
         importlib.util,
         "find_spec",
-        lambda name: types.SimpleNamespace(origin=str(aiter_pkg / "__init__.py"))
-        if name == "aiter"
-        else None,
+        lambda name: types.SimpleNamespace(origin=str(aiter_pkg / "__init__.py")) if name == "aiter" else None,
     )
     return aiter_pkg
 
@@ -44,18 +43,14 @@ def test_persist_copies_into_aiter_config_and_snapshots(tmp_path, monkeypatch):
     src.write_text("gfx,cu_num,M,N,K,splitK\ngfx950,256,64,5120,5120,2\n", encoding="utf-8")
 
     extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
-    out, snap = rh._persist_forge_gemm_csv_durably(
-        extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws
-    )
+    out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws)
 
     dst = _durable(aiter_pkg, "a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv")
     assert dst.is_file()  # copied where the env var can reach it
     assert out["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == str(dst)  # env repointed to durable path
     assert snap and Path(snap).is_dir()  # durable snapshot dir
     assert (Path(snap) / "manifest.json").is_file()
-    assert (
-        Path(snap) / "files" / "configs" / "model_configs" / "hyperloom" / dst.name
-    ).is_file()
+    assert (Path(snap) / "files" / "configs" / "model_configs" / "hyperloom" / dst.name).is_file()
     # snapshot must live under the DURABLE optimization_stack/src (survives run
     # cleanup), NOT the ephemeral runs/gemm_tuning workspace (#2 recipe-portable).
     assert "optimization_stack" in Path(snap).parts and "src" in Path(snap).parts
@@ -135,9 +130,7 @@ def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
     monkeypatch.setattr(ss, "snapshot_source_layer", _boom)
 
     extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
-    out, snap = rh._persist_forge_gemm_csv_durably(
-        extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws
-    )
+    out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws)
 
     dst = _durable(aiter_pkg, "a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv")
     assert dst.is_file()  # copy committed despite the snapshot failure
@@ -153,9 +146,7 @@ def test_persist_fmoe_csv_uses_tuned_fmoe_stem(tmp_path, monkeypatch):
     src.write_text("cu_num,token,model_dim,inter_dim,quantType\n304,16,4096,512,14\n", encoding="utf-8")
 
     extra = {"AITER_CONFIG_FMOE": str(src)}
-    out, snap = rh._persist_forge_gemm_csv_durably(
-        extra, model_path="/models/DeepSeek-V4-Flash", session_dir=ws
-    )
+    out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/models/DeepSeek-V4-Flash", session_dir=ws)
 
     dst = _durable(aiter_pkg, "tuned_fmoe_deepseek-v4-flash.csv")
     assert dst.is_file()
@@ -176,12 +167,8 @@ def test_persist_copies_dense_and_fmoe_together(tmp_path, monkeypatch):
         "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(dense),
         "AITER_CONFIG_FMOE": str(fmoe),
     }
-    out, snap = rh._persist_forge_gemm_csv_durably(
-        extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws
-    )
+    out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/models/Qwen3-14B-FP8", session_dir=ws)
 
-    assert out["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"].endswith(
-        "a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv"
-    )
+    assert out["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"].endswith("a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv")
     assert out["AITER_CONFIG_FMOE"].endswith("tuned_fmoe_qwen3-14b-fp8.csv")
     assert snap and (Path(snap) / "manifest.json").is_file()

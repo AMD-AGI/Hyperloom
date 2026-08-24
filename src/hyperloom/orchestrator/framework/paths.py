@@ -427,11 +427,7 @@ def _discover_installed_package_roots() -> tuple[str, ...]:
         value = sysconfig.get_path(key)
         if value:
             candidates.append(Path(value))
-    candidates.extend(
-        Path(p)
-        for p in sys.path
-        if p and Path(p).name in {"site-packages", "dist-packages"}
-    )
+    candidates.extend(Path(p) for p in sys.path if p and Path(p).name in {"site-packages", "dist-packages"})
     for env_name in ("VIRTUAL_ENV", "VLLM_VENV_ROOT"):
         root = Path(os.environ.get(env_name, "").strip())
         lib = root / "lib"
@@ -647,9 +643,7 @@ def warm_replay_patch_sources(
             continue
         sources.append(WarmReplayPatchSource(path=path, content=content))
     sources.extend(
-        WarmReplayPatchSource(path=Path(str(path)), content="")
-        for path in (patch_paths or ())
-        if str(path).strip()
+        WarmReplayPatchSource(path=Path(str(path)), content="") for path in (patch_paths or ()) if str(path).strip()
     )
     return tuple(sources)
 
@@ -663,11 +657,7 @@ def _filter_roots_by_tokens(
     roots: Sequence[str],
     tokens: tuple[str, ...],
 ) -> tuple[str, ...]:
-    return tuple(
-        root
-        for root in roots
-        if root and _root_path_matches_tokens(root, tokens)
-    )
+    return tuple(root for root in roots if root and _root_path_matches_tokens(root, tokens))
 
 
 def _warm_replay_framework_patch_roots() -> tuple[str, ...]:
@@ -715,11 +705,7 @@ def _resolve_warm_replay_patch_root(
         resolve_patch_apply_root,
     )
 
-    diffs = [
-        diff
-        for diff in (_patch_source_diff(source) for source in patch_sources)
-        if diff.strip()
-    ]
+    diffs = [diff for diff in (_patch_source_diff(source) for source in patch_sources) if diff.strip()]
     resolution = resolve_patch_apply_root(
         diffs,
         explicit_root=Path(explicit_root.rstrip("/")) if explicit_root else None,

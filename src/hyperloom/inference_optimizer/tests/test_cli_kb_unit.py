@@ -41,6 +41,8 @@ def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     row = json.loads(path.read_text(encoding="utf-8").strip())
     assert row["method"] == "get_recipe"
     assert "ts" in row
+
+
 def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
@@ -119,9 +121,7 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
             reads.append((identity, destination, scope))
             return {
                 "schema_version": 2,
-                "knowledge_schema_version": (
-                    remote_recipe.CURRENT_KNOWLEDGE_SCHEMA_VERSION
-                ),
+                "knowledge_schema_version": (remote_recipe.CURRENT_KNOWLEDGE_SCHEMA_VERSION),
                 "record_kind": remote_recipe.RECORD_KIND_HYPERLOOM_RECIPE,
                 "canonical_id": identity,
                 "session_id": "champion-session",

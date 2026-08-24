@@ -125,9 +125,7 @@ def test_baseline_recovery_detail_only_in_prelude(registry):
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         # Detailed fingerprint text lives in the reference doc, not in any prompt.
-        assert BASELINE_FINGERPRINT not in text, (
-            f"baseline fingerprint detail leaked into {phase} prompt"
-        )
+        assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint detail leaked into {phase} prompt"
         if phase == _ps.PHASE_PRELUDE:
             assert "RULE F1" in text
             assert "RULE F2" in text

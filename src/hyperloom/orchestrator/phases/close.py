@@ -251,11 +251,7 @@ class ClosePhase(PhaseHandler):
             outcome = self.ensure_recipe_finalized(source="close") or {}
             kb_status = str(outcome.get("status") or "done")
             close_status = (
-                "failed"
-                if kb_status == "error"
-                else "skipped"
-                if kb_status in {"disabled", "skipped"}
-                else "done"
+                "failed" if kb_status == "error" else "skipped" if kb_status in {"disabled", "skipped"} else "done"
             )
             detail = " ".join(
                 f"{key}={outcome[key]}"

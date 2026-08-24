@@ -1328,6 +1328,7 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 # ---- patches_dropped_by_grounding forwarding in _no_patches ----------------
 
+
 @pytest.mark.asyncio
 async def test_no_patches_forwards_grounding_drops(tmp_path, monkeypatch):
     """When all patches were grounding-dropped, the integrate result must carry
@@ -1340,13 +1341,13 @@ async def test_no_patches_forwards_grounding_drops(tmp_path, monkeypatch):
     ws.mkdir(parents=True)
     done = ws / "specialist_done.json"
     done.write_text(
-        json.dumps({
-            "patches_written": [],
-            "patches_dropped_by_grounding": [
-                "target file(s) not in any framework tree: sglang_file.py"
-            ],
-            "proposal_set": [{"name": "p1"}],
-        }),
+        json.dumps(
+            {
+                "patches_written": [],
+                "patches_dropped_by_grounding": ["target file(s) not in any framework tree: sglang_file.py"],
+                "proposal_set": [{"name": "p1"}],
+            }
+        ),
         encoding="utf-8",
     )
 

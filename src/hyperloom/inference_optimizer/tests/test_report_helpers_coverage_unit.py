@@ -284,9 +284,5 @@ def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
 
 
 def test_report_gives_the_reason_the_platform_is_missing_when_it_has_one():
-    md = rp._format_md(
-        _summary_without_platform(
-            platform={"status": "unavailable", "reason": "no host CPU sysfs"}
-        )
-    )
+    md = rp._format_md(_summary_without_platform(platform={"status": "unavailable", "reason": "no host CPU sysfs"}))
     assert "not recorded — no host CPU sysfs" in md

@@ -6,12 +6,7 @@ import sys
 from pathlib import Path
 
 
-_SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "multi_node"
-    / "scripts"
-    / "patch_path_safety.py"
-)
+_SCRIPT = Path(__file__).resolve().parents[1] / "multi_node" / "scripts" / "patch_path_safety.py"
 
 
 def _load_module():

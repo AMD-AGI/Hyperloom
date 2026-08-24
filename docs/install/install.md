@@ -4,7 +4,7 @@ myst:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
         "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Claude, Dev Containers, Install, ROCm"
 ---
-# Hyperloom Installation Instructions
+# Hyperloom installation instructions
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
@@ -12,14 +12,14 @@ dedicated workspace, open that directory in Claude Code and
 install the wheel into the current directory with `pip install --target .`. The
 source-clone path is kept at the end for developers and manual debugging.
 
-## Pip Install (Recommended)
+## Pip install (Recommended)
 
 This is the recommended path to install and get started with Hyperloom. The
 current directory is both the install target and the agent workspace. Prepare a
 dedicated clean directory first, then open that directory in Claude Code before
 running the install command.
 
-> **Recommended run mode: Docker.** Running the demos inside the provided
+> **Recommended run mode: Docker** Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
 > ships a validated ROCm + framework stack, gives reproducible results,
 > and keeps your host untouched. Bare-metal mode is for advanced users: it
@@ -28,6 +28,8 @@ running the install command.
 > conflicts. Docker is preferred for a validated, reproducible stack.
 
 ### Prerequisites
+
+Before installing Hyperloom, ensure the following requirements are met.
 
 - Python 3.10+ and `pip`.
 - Access to the Anthropic LLM provider.
@@ -101,7 +103,7 @@ Requirements:
 
 - ROCm runtime and ROCm torch are already installed.
 - `git` is available for dependency checkouts.
-- A serving framework is either already installed, or setup may install one.
+- A serving framework is either already installed, or setup might install one.
 
 In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host:
 
@@ -170,7 +172,7 @@ Common keys:
 - `HYPERLOOM_RUN_MODE`
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`)
 
-Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
+Bare-metal setup might also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
 tag or commit; when unset the installer selects the newest tag compatible with
 the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
@@ -265,7 +267,7 @@ must never be printed.
 - `hipDeviceAttributePciChipId` missing during AITER build means `hipcc` is
   using older ROCm headers; put the matching ROCm `bin` first on `PATH`.
 
-## Source checkout / manual installation
+## Source checkout and manual installation
 
 These instructions are for advanced users and developer. Use this path only
 when developing Hyperloom, testing local source changes, or debugging setup
@@ -324,7 +326,7 @@ same file, so the secret stays in one place:
 ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
 ```
 
-Keep the double quotes. Setup and the launch scripts may load `.env` with a shell
+Keep the double quotes. Setup and the launch scripts might load `.env` with a shell
 `source`, and an unquoted value containing a space and a colon is parsed as a
 command, failing with exit 127.
 
