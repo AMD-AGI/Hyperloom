@@ -2228,8 +2228,15 @@ class WritebackCollaborator:
                     tick=int(getattr(self.shared_state, "tick", 0) or 0),
                     phase=(getattr(self.shared_state, "phase", "") or "") or None,
                 )
-                if scores and scores.get("models"):
+                if scores and (scores.get("models") or scores.get("errors")):
                     round_entry["ensemble_scores"] = scores
+                    input_err = (scores.get("errors") or {}).get("input")
+                    if input_err and not scores.get("models"):
+                        log.warning(
+                            "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
+                            task.task_id,
+                            input_err,
+                        )
             except Exception:  # noqa: BLE001 — advisory; never block
                 log.exception(
                     "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
