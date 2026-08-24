@@ -183,14 +183,64 @@ def test_vet_patches_rejects_a_set_split_across_roots(tmp_path):
     assert set(grounding.values()) == {_ps.GROUND_MISSING_TARGET}
 
 
-def test_sibling_checkouts_excludes_the_base_and_non_repos(tmp_path):
+def test_sibling_checkouts_excludes_the_base_but_keeps_plain_trees(tmp_path):
+    """A pip-installed framework is not a repo and still holds the targets."""
     base = _checkout(tmp_path / "base", "f.py")
     other = _checkout(tmp_path / "other", "g.py")
     plain = tmp_path / "plain"
     plain.mkdir()
+    missing = tmp_path / "missing"
 
-    siblings = _sibling_checkouts((str(base), str(other), str(plain)), base)
-    assert siblings == (other,)
+    siblings = _sibling_checkouts((str(base), str(other), str(plain), str(missing)), base)
+    assert siblings == (other, plain)
+
+
+def test_patch_grounds_against_a_non_git_tree(tmp_path):
+    """Target matching stats files and git apply --check runs outside a repo."""
+    base = _checkout(tmp_path / "base", "base_only.py")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "installed.py").write_text("one\n", encoding="utf-8")
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_diff("installed.py"), encoding="utf-8")
+
+    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=base, candidate_roots=(plain,))
+
+    assert kept == [str(patch)]
+    assert grounding[str(patch)] == _ps.GROUND_APPLIES
+
+
+def test_no_tree_to_ground_against_keeps_the_patch(tmp_path):
+    """Absence of a checkout is not evidence the patch is wrong."""
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_diff("anything.py"), encoding="utf-8")
+
+    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+
+    assert kept == [str(patch)]
+    assert dropped == []
+    assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
+
+
+def test_no_tree_to_ground_against_keeps_a_create_only_patch(tmp_path):
+    patch = tmp_path / "create.patch"
+    patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
+
+    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+
+    assert kept == [str(patch)]
+    assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
+
+
+def test_no_candidate_roots_is_distinct_from_a_miss(tmp_path):
+    """The two must not collapse: only one of them indicts the patch."""
+    root = _checkout(tmp_path / "root", "present.py")
+
+    absent = _ps.resolve_patch_apply_root((_diff("ghost.py"),), explicit_root=None, candidate_roots=(root,))
+    nothing = _ps.resolve_patch_apply_root((_diff("ghost.py"),), explicit_root=None, candidate_roots=())
+
+    assert absent.reason == "no_matching_root"
+    assert nothing.reason == "no_candidate_roots"
 
 
 # Artifact stacking

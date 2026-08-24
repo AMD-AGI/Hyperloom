@@ -146,24 +146,30 @@ def _framework_checkout(framework: str) -> str:
 
 
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the allowlisted git checkouts other than ``base``.
+    """Return the allowlisted source trees other than ``base``.
 
     Grounding falls back to these when the worktree base does not hold a
     patch's targets, which is the normal case for a specialist that patches a
     framework other than the one its worktree was cut from.
+
+    A tree does not have to be a git checkout to be a candidate: target
+    matching only stats files, and ``git apply --check`` runs against a plain
+    directory. Requiring ``.git`` here left a pip-installed framework with no
+    candidate at all, so every patch it wrote was dropped for a target that was
+    on disk the whole time.
 
     Args:
         roots: The configured framework source roots.
         base: The checkout the specialist worktree branched off, if any.
 
     Returns:
-        The remaining roots that are git checkouts, in allowlist order.
+        The remaining roots that exist, in allowlist order.
     """
     base_resolved = base.resolve() if base else None
     out: list[Path] = []
     for raw in roots:
         root = Path(raw)
-        if not (root / ".git").exists() or root.resolve() == base_resolved:
+        if not root.is_dir() or root.resolve() == base_resolved:
             continue
         out.append(root)
     return tuple(out)

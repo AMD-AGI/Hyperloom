@@ -127,6 +127,7 @@ PATCH_ROOT_FAIL_REASONS: tuple[str, ...] = (
     "explicit_root_target_mismatch",  # declared root lacks a pre-image target
     "patch_targets_invalid",  # a diff names no safe target path
     "patch_content_missing",  # no readable diff text to match a root against
+    "no_candidate_roots",  # no tree offered at all -- says nothing about the patch
     "pure_create_requires_explicit_root",  # no pre-image can identify a root
     "no_matching_root",  # no candidate holds every pre-image
     "ambiguous_root",  # more than one candidate holds every pre-image
@@ -287,6 +288,11 @@ def resolve_patch_apply_root(
     ``default_root`` a caller supplies when it has independent grounds for it,
     such as the checkout a specialist's worktree was cut from.
 
+    Having no root to match against at all is reported as ``no_candidate_roots``
+    rather than as a miss, because absence of a tree is not evidence about the
+    patch. Callers decide what that means for them: a vetting gate declines to
+    judge, an applying one still refuses.
+
     Args:
         patch_texts: The diffs to place. Blank entries are ignored.
         explicit_root: The checkout the caller declared, if any.
@@ -324,17 +330,6 @@ def resolve_patch_apply_root(
         if any(patch_targets_missing(text, resolved_explicit) for text in texts):
             return PatchRootResolution(None, "explicit_root_target_mismatch")
         return PatchRootResolution(resolved_explicit)
-    if not has_existing:
-        if default_root is None:
-            return PatchRootResolution(None, "pure_create_requires_explicit_root")
-        try:
-            resolved_default = Path(default_root).resolve()
-        except (OSError, RuntimeError):
-            return PatchRootResolution(None, "pure_create_requires_explicit_root")
-        if not resolved_default.is_dir():
-            return PatchRootResolution(None, "pure_create_requires_explicit_root")
-        return PatchRootResolution(resolved_default)
-
     roots: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidate_roots:
@@ -346,6 +341,27 @@ def resolve_patch_apply_root(
             continue
         seen.add(root)
         roots.append(root)
+
+    resolved_default: Path | None = None
+    if default_root is not None:
+        try:
+            candidate_default = Path(default_root).resolve()
+        except (OSError, RuntimeError):
+            candidate_default = None
+        if candidate_default is not None and candidate_default.is_dir():
+            resolved_default = candidate_default
+
+    # Nothing to match against is not evidence against the patch. Say so
+    # separately so a vetting caller can decline to judge while an applying
+    # caller still refuses to write into a tree it cannot name.
+    if not roots and resolved_default is None:
+        return PatchRootResolution(None, "no_candidate_roots")
+
+    if not has_existing:
+        if resolved_default is None:
+            return PatchRootResolution(None, "pure_create_requires_explicit_root")
+        return PatchRootResolution(resolved_default)
+
     matches = tuple(root for root in roots if not any(patch_targets_missing(text, root) for text in texts))
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
@@ -850,6 +866,14 @@ def vet_patches(
         candidate_roots=candidates,
         default_root=base_checkout,
     )
+    if resolution.reason == "no_candidate_roots":
+        # No tree was available to ground against, so nothing here is evidence
+        # the patches are wrong. Keep them advisory and let integrate_patch,
+        # which resolves its own root, have the deciding say.
+        for path, _text in readable:
+            grounding[path] = GROUND_UNCHECKED
+            kept.append(path)
+        return kept, dropped, grounding
     if resolution.root is None:
         detail = resolution.reason
         if resolution.matches:

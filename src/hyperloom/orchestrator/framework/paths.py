@@ -720,6 +720,9 @@ def _resolve_warm_replay_patch_root(
         )
     reason = {
         "patch_content_missing": missing_patch_reason,
+        # Warm replay writes into the tree, so "no tree offered" is as fatal as
+        # "no tree matched" -- both mean there is nowhere safe to replay.
+        "no_candidate_roots": missing_allowlist_reason,
         "no_matching_root": missing_allowlist_reason,
     }.get(resolution.reason, resolution.reason)
     return WarmReplayRootResolution(
