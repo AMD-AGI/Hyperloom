@@ -95,7 +95,8 @@ def _isolated_head_port_args() -> Tuple[int, list[str]]:
     and client are still probed to avoid their own collisions).
     """
     port_override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
-    gcs_port = int(port_override) if port_override.isdigit() else _free_tcp_port()
+    _port_candidate = int(port_override) if port_override.isdigit() else 0
+    gcs_port = _port_candidate if 1 <= _port_candidate <= 65535 else _free_tcp_port()
     return gcs_port, [
         f"--dashboard-port={_free_tcp_port()}",
         f"--ray-client-server-port={_free_tcp_port()}",
@@ -277,6 +278,8 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
         proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray; see {log_path}")
+    if not ray_status_ok():
+        raise RuntimeError(f"ray start exited 0 but cluster is not reachable; see {log_path}")
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
@@ -461,5 +464,15 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         except Exception:  # noqa: BLE001
             pass
         force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
-        _init()
+        # Connect to the freshly started local head rather than the old stale
+        # RAY_ADDRESS that triggered the version-mismatch.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ray.init(
+                address="auto",
+                ignore_reinit_error=True,
+                log_to_driver=False,
+                logging_level="error",
+                runtime_env=runtime_env,
+            )
     return runtime_env
