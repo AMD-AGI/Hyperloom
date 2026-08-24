@@ -55,10 +55,10 @@ import shlex
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
@@ -1114,7 +1114,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     #: alone, so comparing them makes a perfectly fresh trace read as stale.
     #: ``serving_config`` is excluded here too: it has its own comparison, which
     #: comes from ``current_best`` on both sides and is therefore symmetric.
-    PROFILE_WORKLOAD_IDENTITY_KEYS: tuple[str, ...] = (
+    #:
+    #: ``ClassVar`` because a bare annotation would make this constant a
+    #: dataclass field: it would be written into every ``state.json``, accepted
+    #: back from disk, and writable through ``apply_changes`` since a constant
+    #: is not something ``CORE_STATE_FIELDS`` thinks to lock. None of that
+    #: changes behaviour while the sole reader goes through ``cls``, which is
+    #: exactly what makes it worth closing -- it decides trace staleness, so an
+    #: instance-scoped read added later would let a stored value govern whether
+    #: a profile is reused or re-run.
+    PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
         "framework",
         "precision",
         "model_path",
@@ -1420,7 +1429,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         incoming_version = int(raw.get("schema_version") or 1)
 
         # Filter to known fields; unknown keys dropped, missing keys default.
-        known = {f for f in cls.__dataclass_fields__}
+        # ``fields()`` rather than ``__dataclass_fields__``: the latter also
+        # holds ClassVar pseudo-fields, which ``__init__`` does not accept, so a
+        # state.json naming one would raise here instead of being ignored.
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
         # A pre-telemetry state may already have completed EXPLORE segments,
         # but their exact sum cannot be reconstructed once phase_history has
@@ -1453,7 +1465,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         if incoming_version < 4:
             # Lift flat enablement_* keys from old state.json into EnablementRound.
-            _ENABLEMENT_ROUND_FIELDS = set(EnablementRound.__dataclass_fields__)
+            _ENABLEMENT_ROUND_FIELDS = {f.name for f in fields(EnablementRound)}
             flat = {
                 k[len("enablement_") :]: v
                 for k, v in raw.items()
@@ -2477,8 +2489,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
             core_fields = CORE_STATE_FIELDS
         applied: dict[str, Any] = {}
+        # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is
+        # not writable here. CORE_STATE_FIELDS locks the session fields someone
+        # thought to lock, and nobody thinks to lock a constant.
+        writable = {f.name for f in fields(self)}
         for key, value in changes.items():
-            if key not in self.__dataclass_fields__:
+            if key not in writable:
                 continue
             if key in core_fields:
                 log.warning(
