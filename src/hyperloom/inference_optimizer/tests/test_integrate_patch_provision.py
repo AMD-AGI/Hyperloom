@@ -99,6 +99,7 @@ def _neutralize_disk_preflight(monkeypatch):
 # provision stage: no candidate / skip paths
 # ---------------------------------------------------------------------------
 
+
 async def test_no_candidate_is_noop(_executor):
     ctx = _ctx()
     out = await _executor._stage_provision_attempt_runtime(ctx, {}, "t-1")
@@ -127,6 +128,7 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
 # ---------------------------------------------------------------------------
 # provision ok / fail
 # ---------------------------------------------------------------------------
+
 
 async def test_provision_ok_sets_ctx(_executor, monkeypatch):
     venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
@@ -189,6 +191,7 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
 # decision gate: runtime lands in materialized YAML, not os.environ
 # ---------------------------------------------------------------------------
 
+
 def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch):
     import os
 
@@ -228,6 +231,7 @@ def test_opt_venv_path_never_replaced(tmp_path):
 # ---------------------------------------------------------------------------
 # rearm: KEEP'd stack action survives one rearm cycle
 # ---------------------------------------------------------------------------
+
 
 def test_kept_stack_action_survives_rearm(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -279,9 +283,7 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
         ),
     )
     fake = types.SimpleNamespace(shared_state=state)
-    fake._discover_enablement_candidate_refs = types.MethodType(
-        Coordinator._discover_enablement_candidate_refs, fake
-    )
+    fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     fake._framework_gpu_params = lambda: {}

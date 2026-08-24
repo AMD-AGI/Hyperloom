@@ -255,9 +255,7 @@ class TestVendorPlaybookDeployBlocked:
         assert "_vendor_playbook_deploy_blocked" not in out
 
     @pytest.mark.asyncio
-    async def test_integrate_handler_refuses_before_touching_filesystem(
-        self, session_dir
-    ):
+    async def test_integrate_handler_refuses_before_touching_filesystem(self, session_dir):
         _seed_state(session_dir, baseline_tput=800.0)
         state = SharedState.load_or_init(session_dir)
         state.kernel_opt_attempts = {

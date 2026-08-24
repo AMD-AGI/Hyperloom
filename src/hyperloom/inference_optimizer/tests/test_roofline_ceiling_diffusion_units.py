@@ -36,7 +36,7 @@ def _model(tmp_path: Path, *, transformer: dict | None = None, vae: dict | None 
 
 def test_vae_scale_is_one_stride_two_stage_per_extra_block(tmp_path):
     path = _model(tmp_path, vae={"block_out_channels": [128, 256, 512, 512], "latent_channels": 16})
-    assert rc._read_vae_geometry(path) == (2 ** 3, 16)
+    assert rc._read_vae_geometry(path) == (2**3, 16)
 
 
 @pytest.mark.parametrize(
@@ -146,9 +146,7 @@ def test_dit_meta_declines_an_unusable_transformer(tmp_path):
 
 def test_diffusion_memory_ceiling_reads_the_weights_once_per_step():
     gb = 1024**3
-    img_s = rc.compute_diffusion_mem_img_per_sec(
-        gpu_type="mi300x", num_gpus=1, weight_bytes=10 * gb, num_steps=25
-    )
+    img_s = rc.compute_diffusion_mem_img_per_sec(gpu_type="mi300x", num_gpus=1, weight_bytes=10 * gb, num_steps=25)
     bw = rc.HW_SPECS["mi300x"]["hbm_bw_gbps"] * 1e9
     assert img_s == pytest.approx(1.0 / (25 * (10 * gb / bw)))
 
@@ -188,9 +186,7 @@ def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     linear = 2.0 * kw["dit_params"] * kw["latent_tokens"]
     attn = 4.0 * kw["num_layers"] * kw["latent_tokens"] ** 2 * kw["hidden_size"]
     peak = rc._resolve_achievable_tflops("mi300x", "bf16") * 1e12
-    assert rc.compute_diffusion_compute_img_per_sec(**kw) == pytest.approx(
-        peak / (kw["num_steps"] * (linear + attn))
-    )
+    assert rc.compute_diffusion_compute_img_per_sec(**kw) == pytest.approx(peak / (kw["num_steps"] * (linear + attn)))
 
 
 def test_diffusion_compute_ceiling_scales_with_the_gpu_count():
@@ -293,11 +289,7 @@ def test_diffusion_geometry_accepts_the_custom_workload_aliases(tmp_path):
     cfg = tmp_path / "b.yaml"
     cfg.write_text(
         yaml.safe_dump(
-            {
-                "benchmark": {
-                    "envs": {"CUSTOM_NUM_STEPS": "30", "CUSTOM_HEIGHT": "512", "CUSTOM_WIDTH": "768"}
-                }
-            }
+            {"benchmark": {"envs": {"CUSTOM_NUM_STEPS": "30", "CUSTOM_HEIGHT": "512", "CUSTOM_WIDTH": "768"}}}
         ),
         encoding="utf-8",
     )

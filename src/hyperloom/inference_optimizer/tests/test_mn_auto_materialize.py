@@ -25,9 +25,7 @@ class _FakeTasks:
         self.calls = []
 
     async def create_or_return_existing(self, *, kind, params, idempotency_key, **kwargs):
-        self.calls.append(
-            {"kind": kind, "params": params, "idempotency_key": idempotency_key, **kwargs}
-        )
+        self.calls.append({"kind": kind, "params": params, "idempotency_key": idempotency_key, **kwargs})
         return SimpleNamespace(task_id="explore-task-1"), False
 
 

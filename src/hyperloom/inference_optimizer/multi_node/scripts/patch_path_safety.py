@@ -39,12 +39,8 @@ _DEFAULT_PATCH_TARGET_ROOTS: tuple[str, ...] = (
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
-_ALLOWED_PATCH_PACKAGES = frozenset(
-    {"aiter", "aiter_meta", "sglang", "vllm"}
-)
-_ALLOWED_EDITABLE_ROOTS = frozenset(
-    {"/sgl-workspace/aiter", "/sgl-workspace/sglang", "/sgl-workspace/vllm"}
-)
+_ALLOWED_PATCH_PACKAGES = frozenset({"aiter", "aiter_meta", "sglang", "vllm"})
+_ALLOWED_EDITABLE_ROOTS = frozenset({"/sgl-workspace/aiter", "/sgl-workspace/sglang", "/sgl-workspace/vllm"})
 
 
 def _normalize_root(path: str) -> str:
@@ -94,24 +90,18 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
     for raw in env.split(":") if env else ():
         candidate = Path(raw.strip())
         if not candidate.is_absolute():
-            sys.stderr.write(
-                "WARN ignoring unsafe framework source root for pod patching: "
-                f"{raw!r}\n"
-            )
+            sys.stderr.write(f"WARN ignoring unsafe framework source root for pod patching: {raw!r}\n")
             continue
         resolved = candidate.resolve()
-        is_package = (
-            resolved.name in _ALLOWED_PATCH_PACKAGES
-            and resolved.parent.name in {"site-packages", "dist-packages"}
-        )
+        is_package = resolved.name in _ALLOWED_PATCH_PACKAGES and resolved.parent.name in {
+            "site-packages",
+            "dist-packages",
+        }
         is_editable = str(resolved) in _ALLOWED_EDITABLE_ROOTS
         if is_package or is_editable:
             env_roots.append(_normalize_root(str(resolved)))
         else:
-            sys.stderr.write(
-                "WARN ignoring unsafe framework source root for pod patching: "
-                f"{raw!r}\n"
-            )
+            sys.stderr.write(f"WARN ignoring unsafe framework source root for pod patching: {raw!r}\n")
     return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, tuple(env_roots))
 
 

@@ -181,9 +181,7 @@ class TestDispatchKeyExtraction:
 
     def test_matches_the_wording_that_interposes_kernel_names(self, tmp_path):
         """This form puts its own parenthesised group before the tuple."""
-        keys = krh._aiter_fused_moe_dispatch_keys(
-            _log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES)
-        )
+        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES))
         assert len(keys) == 1
         assert keys[0]["model_dim"] == "7168"
         assert keys[0]["expert"] == "384"
@@ -221,15 +219,11 @@ class TestDtypePairSupport:
             assert krh._aiter_moe_dtype_pair_supported(act, weight), (act, weight)
 
     def test_bf16_activation_with_fp4_weight_is_the_known_rejection(self):
-        assert not krh._aiter_moe_dtype_pair_supported(
-            "torch.bfloat16", "torch.float4_e2m1fn_x2"
-        )
+        assert not krh._aiter_moe_dtype_pair_supported("torch.bfloat16", "torch.float4_e2m1fn_x2")
 
     def test_int8_activation_does_not_qualify_for_the_a8w4_family(self):
         """The a8w4 branch requires an FP8 activation specifically."""
-        assert not krh._aiter_moe_dtype_pair_supported(
-            "torch.int8", "torch.float4_e2m1fn_x2"
-        )
+        assert not krh._aiter_moe_dtype_pair_supported("torch.int8", "torch.float4_e2m1fn_x2")
 
 
 class TestWriteFmoeUntunedCsvFromLog:
@@ -237,12 +231,20 @@ class TestWriteFmoeUntunedCsvFromLog:
         path, report = krh._write_fmoe_untuned_csv_from_log(
             _log(tmp_path, REAL_2STAGE_DEFAULT), [4, 512], tmp_path / "ws"
         )
-        rows = [
-            line for line in open(path, encoding="utf-8").read().splitlines() if line
-        ]
+        rows = [line for line in open(path, encoding="utf-8").read().splitlines() if line]
         assert rows[0].split(",") == [
-            "token", "model_dim", "inter_dim", "expert", "topk", "act_type", "dtype",
-            "q_dtype_a", "q_dtype_w", "q_type", "use_g1u1", "doweight_stage1",
+            "token",
+            "model_dim",
+            "inter_dim",
+            "expert",
+            "topk",
+            "act_type",
+            "dtype",
+            "q_dtype_a",
+            "q_dtype_w",
+            "q_type",
+            "use_g1u1",
+            "doweight_stage1",
         ]
         assert len(rows) == 3  # header + 2 tokens
         assert rows[1] == (

@@ -283,10 +283,7 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
     assert task is not None
-    assert (
-        task.params["extra_server_args"]
-        == "--explore --shared --framework --kernel"
-    )
+    assert task.params["extra_server_args"] == "--explore --shared --framework --kernel"
     assert task.params["extra_envs"] == {
         "EXPLORE": "1",
         "SHARED": "same",
@@ -385,16 +382,12 @@ def _patch_current_sdk_readers(
     monkeypatch.setattr(
         ExploreAgentKB,
         "open",
-        classmethod(
-            lambda cls: _Owner(explore_config or {}, explore_refs)
-        ),
+        classmethod(lambda cls: _Owner(explore_config or {}, explore_refs)),
     )
     monkeypatch.setattr(
         FrameworkAgentKB,
         "open",
-        classmethod(
-            lambda cls: _Owner(framework_config or {}, framework_refs)
-        ),
+        classmethod(lambda cls: _Owner(framework_config or {}, framework_refs)),
     )
     monkeypatch.setattr(
         KernelAgentKB,
@@ -442,9 +435,7 @@ async def test_current_recipe_skips_undersized_context_for_target_workload(
     assert task is None
     assert coord.tasks.calls == []
     assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
-    assert "context_length=6144 < isl+osl=9216" in (
-        coord.shared_state.warm_replay_outcome["reason"]
-    )
+    assert "context_length=6144 < isl+osl=9216" in (coord.shared_state.warm_replay_outcome["reason"])
 
 
 @pytest.mark.asyncio
@@ -453,9 +444,7 @@ async def test_legacy_recipe_skips_undersized_context_for_target_workload(
 ):
     coord = _make_coord(
         tmp_path,
-        warm_start_recipe=_warm_recipe_t1(
-            extra_server_args="--context-length 6144 --watchdog-timeout 1800"
-        ),
+        warm_start_recipe=_warm_recipe_t1(extra_server_args="--context-length 6144 --watchdog-timeout 1800"),
     )
     coord.shared_state.isl = 8192
     coord.shared_state.osl = 1024
@@ -466,9 +455,7 @@ async def test_legacy_recipe_skips_undersized_context_for_target_workload(
     assert task is None
     assert coord.tasks.calls == []
     assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
-    assert "context_length=6144 < isl+osl=9216" in (
-        coord.shared_state.warm_replay_outcome["reason"]
-    )
+    assert "context_length=6144 < isl+osl=9216" in (coord.shared_state.warm_replay_outcome["reason"])
 
 
 @pytest.mark.asyncio
@@ -1263,10 +1250,7 @@ def test_kernel_target_resolution_requires_active_framework_root(tmp_path, monke
     coord = _make_coord(tmp_path)
     patch = tmp_path / "create.patch"
     patch.write_text(
-        "diff --git a/src/new.py b/src/new.py\n"
-        "--- /dev/null\n"
-        "+++ b/src/new.py\n"
-        "@@ -0,0 +1 @@\n+new\n",
+        "diff --git a/src/new.py b/src/new.py\n--- /dev/null\n+++ b/src/new.py\n@@ -0,0 +1 @@\n+new\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1386,10 +1370,7 @@ async def test_dispatch_failure_rolls_back_preapplied_warm_kernel(tmp_path):
             task_id=task.task_id,
             state="failed",
             result={},
-            error=(
-                "replay_warm_recipe target_file='/usr/local/vllm.py' "
-                "escapes session_dir"
-            ),
+            error=("replay_warm_recipe target_file='/usr/local/vllm.py' escapes session_dir"),
         ),
         None,
     )
@@ -1770,9 +1751,7 @@ async def test_combined_replay_prepares_kernel_without_separate_validation(
 @pytest.mark.asyncio
 async def test_dirty_kernel_preparation_stops_recipe_enqueue(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_pending = {
-        "kernel_snapshots": [{"target": "/tmp/kernel.py"}]
-    }
+    coord.shared_state.warm_replay_pending = {"kernel_snapshots": [{"target": "/tmp/kernel.py"}]}
 
     async def _prepare():
         return {
@@ -1817,8 +1796,7 @@ async def test_enqueue_failure_rolls_back_prepared_kernel(tmp_path):
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
         lambda got_applied, got_snapshots=None: (
-            rollbacks.append((got_applied, got_snapshots or []))
-            or {"ok": True, "errors": []}
+            rollbacks.append((got_applied, got_snapshots or [])) or {"ok": True, "errors": []}
         )
     )
     coord.tasks.create_or_return_existing = _raise  # type: ignore[method-assign]
@@ -1865,9 +1843,7 @@ async def test_enqueue_failure_retains_pending_when_kernel_restore_fails(
     assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
 
 
-def test_combined_replay_revert_rolls_back_recipe_and_kernel(
-    tmp_path, monkeypatch
-):
+def test_combined_replay_revert_rolls_back_recipe_and_kernel(tmp_path, monkeypatch):
     coord = _make_coord(
         tmp_path,
         warm_start_recipe=_warm_recipe_t1(),
@@ -1882,23 +1858,15 @@ def test_combined_replay_revert_rolls_back_recipe_and_kernel(
     monkeypatch.setattr(
         baseline_module,
         "_revert_patches",
-        lambda target, sha, manifest=None: (
-            recipe_rollbacks.append((target, sha))
-            or {"ok": True, "errors": []}
-        ),
+        lambda target, sha, manifest=None: recipe_rollbacks.append((target, sha)) or {"ok": True, "errors": []},
     )
     coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: (
-            kernel_rollbacks.append(applied)
-            or {"ok": True, "errors": []}
-        )
+        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
     )
     coord.shared_state.warm_replay_pending = {
         "recipe_patch_target": "/repo",
         "recipe_patch_pre_sha": "abc",
-        "recipe_patch_snapshot_manifest": {
-            "manifest_path": "/repo.json"
-        },
+        "recipe_patch_snapshot_manifest": {"manifest_path": "/repo.json"},
     }
     task = _StubTask(
         task_id="combined",
@@ -1968,9 +1936,7 @@ async def test_no_recipe_after_loaded_kernel_clears_stale_pending(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_combined_threshold_uses_environment_override(
-    tmp_path, monkeypatch
-):
+async def test_combined_threshold_uses_environment_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "2.5")
     coord = _make_coord(tmp_path, warm_start_recipe={})
 
@@ -2112,27 +2078,18 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
 
     assert "persisted = True" in (checkout / "vllm" / "fp8.py").read_text()
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
-    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(
-        checkout.resolve()
-    )
-    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(
-        checkout.resolve()
-    )
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(checkout.resolve())
+    assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(checkout.resolve())
     assert coord.shared_state.warm_replay_pending == {}
 
 
-def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(
-    tmp_path, monkeypatch
-):
+def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monkeypatch):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     kernel_rollbacks: list[list[dict]] = []
     coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
-        lambda applied, snapshots=None: (
-            kernel_rollbacks.append(applied)
-            or {"ok": True, "errors": []}
-        )
+        lambda applied, snapshots=None: kernel_rollbacks.append(applied) or {"ok": True, "errors": []}
     )
     import hyperloom.orchestrator.actions.executors.baseline as baseline_module
 
@@ -2302,9 +2259,7 @@ def test_already_present_required_patch_is_not_republished(tmp_path):
         {
             "status": "succeeded",
             "output_throughput": 612.0,
-            "warm_patches_applied": [
-                {"patch_file": "old.patch", "status": "already_present"}
-            ],
+            "warm_patches_applied": [{"patch_file": "old.patch", "status": "already_present"}],
         },
         task=task,
     )
@@ -2341,9 +2296,5 @@ def test_dirty_worktree_required_patch_is_republished(tmp_path):
         task=task,
     )
 
-    assert coord.shared_state.warm_replay_outcome["replayed_patch_refs"] == [
-        "old.patch"
-    ]
-    assert coord.shared_state.optimization_stack[-1]["replayed_patch_refs"] == [
-        "old.patch"
-    ]
+    assert coord.shared_state.warm_replay_outcome["replayed_patch_refs"] == ["old.patch"]
+    assert coord.shared_state.optimization_stack[-1]["replayed_patch_refs"] == ["old.patch"]

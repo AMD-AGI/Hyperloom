@@ -64,7 +64,6 @@ class RayDashboardError(RuntimeError):
         self.endpoint = endpoint
 
 
-
 def dashboard_url(head_pod_ip: str) -> str:
     """Build the Ray Dashboard base URL for a given head pod IP.
 

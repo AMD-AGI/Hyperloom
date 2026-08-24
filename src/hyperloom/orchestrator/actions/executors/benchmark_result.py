@@ -952,11 +952,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     # verdict and must stay selectable.
     from ._workload_envs import agentx_enabled
 
-    if (
-        agentx_enabled()
-        and "submission_valid" in result
-        and result.get("submission_valid") is not True
-    ):
+    if agentx_enabled() and "submission_valid" in result and result.get("submission_valid") is not True:
         # False = the scenario rejected it. None = the verdict is unknown (no
         # scenario, or an aiperf too old to stamp one); map_aiperf writes the
         # key unconditionally, so None still arrives as a present key. Neither

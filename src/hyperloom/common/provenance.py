@@ -104,9 +104,7 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-def detect_gfx_arch(
-    env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True
-) -> str | None:
+def detect_gfx_arch(env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True) -> str | None:
     """Detect the ROCm gfx arch (e.g. ``gfx950``).
 
     Resolution order, most authoritative first:
@@ -356,9 +354,7 @@ def build_provenance(
         "image": detect_image(env, probe=probe),
         # hardware / parallelism / graph
         "gpu_type": (_arg_first(args, "gpu_type") or _env_first(env, "GPU_TYPE")),
-        "gfx_arch": detect_gfx_arch(
-            env, gpu_type=_arg_first(args, "gpu_type"), probe=probe
-        ),
+        "gfx_arch": detect_gfx_arch(env, gpu_type=_arg_first(args, "gpu_type"), probe=probe),
         "tp": _int_or_none(_arg_first(args, "tp") or _env_first(env, "TP")),
         "ep": _int_or_none(_arg_first(args, "ep") or _env_first(env, "EP")),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),

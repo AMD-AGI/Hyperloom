@@ -47,8 +47,7 @@ class TestFailureReachesTheAuditRow:
                         "elapsed_s": 288.54,
                         "error_class": "subprocess_error",
                         "error": (
-                            "Tuner exited with code 1: [Tuning not Finished] some "
-                            "shapes are not tuned or all failed"
+                            "Tuner exited with code 1: [Tuning not Finished] some shapes are not tuned or all failed"
                         ),
                     }
                 ],
@@ -119,7 +118,11 @@ class TestRowStaysCompact:
 
         (row,) = _rows(tmp_path)
         assert set(row["tuners_run"][0]) == {
-            "tuner", "best_micro_speedup", "kept", "status", "elapsed_s",
+            "tuner",
+            "best_micro_speedup",
+            "kept",
+            "status",
+            "elapsed_s",
         }
 
     def test_the_three_original_keys_survive_being_null(self, tmp_path):

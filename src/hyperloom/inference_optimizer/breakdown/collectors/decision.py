@@ -149,9 +149,7 @@ def _load_llm_calls(
         for shard in shards:
             rows.extend(_load_jsonl_safe(shard, warnings))
     return [
-        r
-        for r in rows
-        if isinstance(r, dict) and str(r.get(_STATUS_KEY) or _STATUS_OK).strip().lower() == _STATUS_OK
+        r for r in rows if isinstance(r, dict) and str(r.get(_STATUS_KEY) or _STATUS_OK).strip().lower() == _STATUS_OK
     ]
 
 

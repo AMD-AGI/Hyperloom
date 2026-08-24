@@ -447,12 +447,8 @@ async def test_serving_priority_defers_gpu_specialist_and_releases_lane(tmp_path
 
     # The SQLite lane lease must have been released — no residual holder.
     holders = await coord.locks.lane_holders()
-    assert holders.get("gpu_research_lane", 0) == 0, (
-        "gpu_research_lane must not remain held after defer"
-    )
-    assert holders.get("research_lane", 0) == 0, (
-        "research_lane must not remain held after defer"
-    )
+    assert holders.get("gpu_research_lane", 0) == 0, "gpu_research_lane must not remain held after defer"
+    assert holders.get("research_lane", 0) == 0, "research_lane must not remain held after defer"
 
 
 @pytest.mark.asyncio

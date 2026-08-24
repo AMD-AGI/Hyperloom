@@ -55,6 +55,7 @@ def _write_minimal_config(path: Path) -> None:
 # _stage_resolve: launch-only bypasses specialist/Critic checks
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_launch_only_skips_missing_specialist_task_id(tmp_path):
     """No specialist_task_id needed in launch-only mode."""
@@ -127,6 +128,7 @@ async def test_launch_only_rejects_mutation_fields(tmp_path, field, value):
 # _stage_apply: launch-only falls through to bench when no patches exist
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_launch_only_does_not_return_no_patches(tmp_path):
     """enablement_launch_only suppresses the no_patches early return."""
@@ -149,6 +151,7 @@ async def test_launch_only_does_not_return_no_patches(tmp_path):
 # ---------------------------------------------------------------------------
 # Gate routing: kept / reverted / advanced
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_launch_only_boot_success_returns_kept(tmp_path):

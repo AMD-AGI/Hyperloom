@@ -691,24 +691,15 @@ def test_detect_strategy_accepts_dist_packages_vllm_py(
 # but never re-JIT'd -> integrate saw a stale binary and REVERT'd
 # (fault_attempts_exhausted; observed 07.25-07.30 on Qwen3-8B/Llama/Mixtral).
 
-_AITER_META_CU = Path(
-    "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu"
-)
-_AITER_META_CPP_ITFS_CU = Path(
-    "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu"
-)
+_AITER_META_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu")
+_AITER_META_CPP_ITFS_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu")
 
 
 def test_target_is_in_aiter_csrc_matches_aiter_meta(apply_tool) -> None:
     # split-wheel layout must be recognised as an aiter csrc source
     assert apply_tool._target_is_in_aiter_csrc(_AITER_META_CU) is True
     # classic layout still recognised
-    assert (
-        apply_tool._target_is_in_aiter_csrc(
-            Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")
-        )
-        is True
-    )
+    assert apply_tool._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
     # unrelated source stays out
     assert (
         apply_tool._target_is_in_aiter_csrc(
@@ -769,5 +760,3 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     assert first["backup_path"] != second["backup_path"]
     assert Path(first["backup_path"]).is_dir()
     assert Path(second["backup_path"]).is_dir()
-
-

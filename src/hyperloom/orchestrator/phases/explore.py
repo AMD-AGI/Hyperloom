@@ -1209,9 +1209,7 @@ class ExplorePhase(PhaseHandler):
             variant = str(row.get("variant_name") or "").strip()
             # Variant discriminator keeps distinct crash causes in distinct gaps.
             key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
-            layer, domain = self._gap_layer_for_action(
-                action, str(getattr(self.shared_state, "framework", "") or "")
-            )
+            layer, domain = self._gap_layer_for_action(action, str(getattr(self.shared_state, "framework", "") or ""))
             excerpt = str(row.get("error_excerpt") or "")
             detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
             symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"

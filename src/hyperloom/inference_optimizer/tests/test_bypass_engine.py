@@ -27,6 +27,7 @@ def _base(**kw):
 # vLLM: backward-compat — no framework_python → bare vllm serve
 # ---------------------------------------------------------------------------
 
+
 def test_vllm_no_framework_python_uses_console_script():
     cmd = build_server_command(framework="vllm", **_base())
     assert cmd[0] == "vllm"
@@ -42,6 +43,7 @@ def test_vllm_no_framework_python_python_exe_ignored():
 # ---------------------------------------------------------------------------
 # vLLM: framework_python set → python -m vllm.entrypoints.openai.api_server
 # ---------------------------------------------------------------------------
+
 
 def test_vllm_framework_python_switches_to_module_launch():
     cmd = build_server_command(
@@ -97,6 +99,7 @@ def test_vllm_framework_python_includes_profiler():
 # sglang: framework_python replaces python_exe
 # ---------------------------------------------------------------------------
 
+
 def test_sglang_framework_python_replaces_python_exe():
     cmd = build_server_command(
         framework="sglang",
@@ -121,6 +124,7 @@ def test_sglang_no_framework_python_uses_python_exe():
 # atom: framework_python replaces python_exe
 # ---------------------------------------------------------------------------
 
+
 def test_atom_framework_python_replaces_python_exe():
     cmd = build_server_command(
         framework="atom",
@@ -134,6 +138,7 @@ def test_atom_framework_python_replaces_python_exe():
 # ---------------------------------------------------------------------------
 # unknown framework raises
 # ---------------------------------------------------------------------------
+
 
 def test_unknown_framework_raises():
     with pytest.raises(ValueError, match="no server launcher"):

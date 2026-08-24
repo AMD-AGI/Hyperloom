@@ -63,12 +63,8 @@ def test_local_search_prefer_reorders_without_dropping(
 
 
 def test_recipe_actionability_and_warm_context() -> None:
-    assert _recipe_is_actionable(
-        {"best_config": {"extra_server_args": "--x 1"}}
-    )
-    assert not _recipe_is_actionable(
-        {"canonical_id": "inference:m:h:f:mt:a:v:p", "best_config": {}}
-    )
+    assert _recipe_is_actionable({"best_config": {"extra_server_args": "--x 1"}})
+    assert not _recipe_is_actionable({"canonical_id": "inference:m:h:f:mt:a:v:p", "best_config": {}})
     context = _build_warm_start_context(
         status="hit",
         tier="exact",

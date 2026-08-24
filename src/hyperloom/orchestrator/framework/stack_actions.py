@@ -24,9 +24,7 @@ from typing import Any, Mapping
 # Acquisition-method vocabulary accepted by ``from_state``; compiled builds are
 # deferred to the targeted-build path. Current adapters provision only wheel or
 # editable_ref — other accepted values are rejected at provision time.
-_ACQUISITION_METHODS: frozenset[str] = frozenset(
-    {"wheel", "editable_ref", "local_tree", "package_source", "none"}
-)
+_ACQUISITION_METHODS: frozenset[str] = frozenset({"wheel", "editable_ref", "local_tree", "package_source", "none"})
 
 
 @dataclass(frozen=True)
@@ -293,9 +291,7 @@ class ProvisionResult:
         """Rehydrate from a plain dict."""
         d = d or {}
         raw_versions = d.get("installed_versions")
-        versions = (
-            {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
-        )
+        versions = {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
         return cls(
             ok=bool(d.get("ok")),
             runtime=FrameworkRuntime.from_state(d.get("runtime")),

@@ -65,6 +65,7 @@ REUSE_PORT_DEFAULT = 8888
 # Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
 SERVER_READY_TIMEOUT_SEC = 2700
 
+
 def _pick_free_port() -> int:
     """Return an OS-assigned free TCP port.
 
@@ -157,9 +158,7 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
         # (e.g. bypass) gets the same stale/co-tenant collision protection
         # instead of falling back to the fixed default port.
         if backend_verdict.get("eligible"):
-            backend_verdict["port"] = _assign_free_port(
-                int(backend_verdict.get("port", REUSE_PORT_DEFAULT))
-            )
+            backend_verdict["port"] = _assign_free_port(int(backend_verdict.get("port", REUSE_PORT_DEFAULT)))
         return backend_verdict
 
     # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
@@ -416,8 +415,7 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             # Live pid but not one of our servers (pid reuse): do not touch the
             # process; leave the pidfile for a later re-evaluation.
             log.info(
-                "orphan-reaper: pid=%d from %s no longer looks like a server "
-                "(cmdline mismatch); leaving it untouched",
+                "orphan-reaper: pid=%d from %s no longer looks like a server (cmdline mismatch); leaving it untouched",
                 server_pid,
                 pid_file,
             )
@@ -431,8 +429,7 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             # The original leader is gone, and the remaining/reused pgid has no
             # server-looking member; do not risk signalling an unrelated group.
             log.info(
-                "orphan-reaper: pid=%d from %s is gone and pgid=%d has no "
-                "server-looking member; leaving it untouched",
+                "orphan-reaper: pid=%d from %s is gone and pgid=%d has no server-looking member; leaving it untouched",
                 server_pid,
                 pid_file,
                 server_pgid,

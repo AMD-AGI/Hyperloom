@@ -447,10 +447,7 @@ def test_flatten_for_prompt_covers_all_splitlines_separators():
             flat = flatten_for_prompt(evil)
             lines = flat.splitlines()
             forged = [ln for ln in lines if _SECTION_RE.match(ln)]
-            assert not forged, (
-                f"U+{cp:04X} ({c!r}) slips through flatten_for_prompt "
-                f"and forges a section header"
-            )
+            assert not forged, f"U+{cp:04X} ({c!r}) slips through flatten_for_prompt and forges a section header"
 
 
 def test_format_variant_line_includes_artifact_refs():
@@ -518,6 +515,7 @@ def test_format_variant_line_excerpt_tail_survives():
 # Verifies the agent_name branch at conversation.py:751.
 # Orchestration must receive variant-level failure rows (max_variant_rows=3);
 # Critic and Robustness must not (max_variant_rows=0).
+
 
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
@@ -624,6 +622,7 @@ async def test_compose_prompt_robustness_does_not_receive_failure_rows(session_d
 
 # --- ws=/log= anchor test with real-length task_id ---
 
+
 def test_format_variant_line_ws_and_log_appear_with_real_task_id():
     """ws= and log= must appear in the rendered line even when task_id is a full uuid4 hex."""
     import uuid
@@ -652,6 +651,7 @@ def test_format_variant_line_ws_and_log_appear_with_real_task_id():
 
 
 # --- KILLED_OVERTIME writeback and gap-mint integration ---
+
 
 def test_killed_overtime_enters_failures_and_mints_gap():
     """_record_explore_variant_failures writes to failures[] and last_action_failures;
@@ -705,12 +705,11 @@ def test_killed_overtime_enters_failures_and_mints_gap():
     # 3. _extract_gaps_from_attempts mints a gap with the expected canonical_id.
     gaps = c._extract_gaps_from_attempts()
     cids = [g["canonical_id"] for g in gaps]
-    assert any("killed_overtime" in cid for cid in cids), (
-        f"Expected a killed_overtime gap, got: {cids}"
-    )
+    assert any("killed_overtime" in cid for cid in cids), f"Expected a killed_overtime gap, got: {cids}"
 
 
 # --- short-session reloop boundary ---
+
 
 def test_short_session_reloop_boundary():
     """A 2h session uses a 1080s floor; just above → True, just below → False."""
