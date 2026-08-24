@@ -85,7 +85,7 @@ async def test_router_degrades_after_threshold_failures(caplog):
         snap_post = await router.collect(ctx=None)
 
     assert primary.calls == 3, "primary should not be retried inside recheck window"
-    assert router._state.state is HealthState.DEGRADED
+    assert router._state is HealthState.DEGRADED
     assert snap_post.local_processes_known is False, "blind tick must mark processes unknown"
 
     transitions = [r for r in caplog.records if "state healthy -> degraded" in r.getMessage()]
@@ -108,7 +108,7 @@ async def test_router_recovers_after_recheck_window(caplog):
 
     for _ in range(3):
         await router.collect(ctx=None)
-    assert router._state.state is HealthState.DEGRADED
+    assert router._state is HealthState.DEGRADED
 
     # Inside recheck window: primary not probed.
     clock.advance(10.0)
@@ -121,7 +121,7 @@ async def test_router_recovers_after_recheck_window(caplog):
     with caplog.at_level(logging.WARNING):
         snap = await router.collect(ctx=None)
     assert primary.calls == 4
-    assert router._state.state is HealthState.HEALTHY
+    assert router._state is HealthState.HEALTHY
     assert snap.local_gpu == {"from": "server"}
     assert snap.local_processes_known is True
     transitions = [r for r in caplog.records if "state degraded -> healthy" in r.getMessage()]
@@ -150,5 +150,5 @@ async def test_router_treats_unexpected_exception_as_failure(caplog):
         for _ in range(3):
             snap = await router.collect(ctx=None)
             assert snap.local_processes_known is False
-    assert router._state.state is HealthState.DEGRADED
+    assert router._state is HealthState.DEGRADED
     assert any("source server raised unexpectedly" in r.getMessage() for r in caplog.records)

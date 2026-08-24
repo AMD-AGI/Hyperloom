@@ -44,8 +44,8 @@ class HealthState(str, Enum):
 class SourceUnavailable(RuntimeError):
     """Raised by a :class:`Source` when its backing service is not reachable.
 
-    DegradeRouter treats it as a countable failure; other exceptions
-    propagate so genuine bugs are not masked.
+    DegradeRouter counts it toward the degrade threshold without a traceback;
+    an unexpected exception counts the same but is logged with one.
     """
 
 
@@ -120,24 +120,6 @@ class Source(Protocol):
         """
 
 
-@dataclass
-class _SourceState:
-    """Mutable per-source bookkeeping tracked by the DegradeRouter.
-
-    Attributes:
-        name (str): The source's name (used in transition logs).
-        state (HealthState): Current routing state of the source.
-        fail_streak (int): Consecutive failure count; reset on success.
-        last_recheck (float): Clock value at the last fetch attempt,
-            used to space out reprobes while DEGRADED.
-    """
-
-    name: str
-    state: HealthState = HealthState.HEALTHY
-    fail_streak: int = 0
-    last_recheck: float = 0.0
-
-
 class DegradeRouter:
     """Single-source router with a backoff state machine.
 
@@ -172,7 +154,9 @@ class DegradeRouter:
         self._fail_threshold = max(1, int(fail_threshold))
         self._recheck_interval_s = max(0.0, float(recheck_interval_s))
         self._clock = clock or time.monotonic
-        self._state = _SourceState(name=primary.name)
+        self._state = HealthState.HEALTHY
+        self._fail_streak = 0
+        self._last_recheck = 0.0
 
     async def collect(self, ctx: Any) -> SourceData:
         """Fetch one tick of source data with backoff on repeated failure.
@@ -209,39 +193,37 @@ class DegradeRouter:
 
     def _should_try_primary(self) -> bool:
         """Decide whether the primary should be attempted this tick."""
-        if self._state.state is HealthState.HEALTHY:
+        if self._state is HealthState.HEALTHY:
             return True
         now = self._clock()
-        if (now - self._state.last_recheck) >= self._recheck_interval_s:
-            self._state.last_recheck = now
+        if (now - self._last_recheck) >= self._recheck_interval_s:
+            self._last_recheck = now
             return True
         return False
 
     def _record_success(self) -> None:
         """Mark the source healthy after a successful fetch."""
-        if self._state.state is not HealthState.HEALTHY:
-            self._maybe_log_transition(HealthState.HEALTHY, "recovered")
-            self._state.state = HealthState.HEALTHY
-        self._state.fail_streak = 0
-        self._state.last_recheck = self._clock()
+        self._transition_to(HealthState.HEALTHY, "recovered")
+        self._fail_streak = 0
+        self._last_recheck = self._clock()
 
     def _record_failure(self, reason: str) -> None:
         """Record a failed fetch and degrade the source past threshold."""
-        self._state.fail_streak += 1
-        self._state.last_recheck = self._clock()
-        if self._state.state is HealthState.HEALTHY and self._state.fail_streak >= self._fail_threshold:
-            self._maybe_log_transition(HealthState.DEGRADED, reason)
-            self._state.state = HealthState.DEGRADED
+        self._fail_streak += 1
+        self._last_recheck = self._clock()
+        if self._state is HealthState.HEALTHY and self._fail_streak >= self._fail_threshold:
+            self._transition_to(HealthState.DEGRADED, reason)
 
-    def _maybe_log_transition(self, target: HealthState, reason: str) -> None:
-        """Emit a single WARN log for a state transition."""
-        if self._state.state is target:
+    def _transition_to(self, target: HealthState, reason: str) -> None:
+        """Move to ``target``, emitting one WARN per actual transition."""
+        if self._state is target:
             return
         log.warning(
             "source %s state %s -> %s (reason=%s, streak=%d)",
-            self._state.name,
-            self._state.state.value,
+            self._primary.name,
+            self._state.value,
             target.value,
             reason,
-            self._state.fail_streak,
+            self._fail_streak,
         )
+        self._state = target
