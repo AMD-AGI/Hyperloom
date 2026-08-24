@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+from hyperloom.common.coerce import to_int as _to_int
+
 log = logging.getLogger(__name__)
 
 _OPENAI_SDK_MISSING = "openai SDK not installed; run `pip install openai>=1.50`"
@@ -228,28 +230,35 @@ def _is_dual_protocol_host(url: str | None) -> bool:
 def dual_protocol_endpoint_pair(base_url: str) -> tuple[str, str]:
     """Return ``(anthropic_base_url, openai_base_url)`` for a dual-protocol gateway.
 
-    The input may name either side (or neither). The sibling is derived by
-    swapping the trailing path segment, so both protocols resolve to a route
-    that exists. Matching is case-insensitive because AMD's own gateway spells
-    the segment ``/Anthropic`` (issue #929).
+    Segment swapping is only performed for hosts listed in
+    ``_DUAL_PROTOCOL_HOSTS`` (currently DeepSeek).  For those hosts the
+    ``/anthropic`` and ``/v1`` sibling paths are real routes; fabricating them
+    for unknown hosts would point callers at endpoints that may not exist.
 
-    A bare host on a known dual-protocol gateway gets both segments appended;
-    for an unknown host the value is kept as the Anthropic side, since that is
-    what the caller named it.
+    Matching is case-insensitive because AMD's gateway spells the segment
+    ``/Anthropic`` (issue #929).
+
+    A bare known-dual-protocol host gets both segments appended.
+    An unknown host is returned as-is on the Anthropic side.
     """
     base = base_url.strip().rstrip("/")
     if not base:
         return _DEEPSEEK_ANTHROPIC_BASE_URL, _DEEPSEEK_OPENAI_BASE_URL
     lowered = base.lower()
-    # rsplit rather than a cased suffix strip: it drops the final segment
-    # whatever its casing, which keeps this identical to the shell installers.
+    # Swap the trailing path segment when a recognized protocol suffix is present.
+    # This works for any host: an operator naming one side implies the other exists.
     if lowered.endswith("/anthropic"):
         return base, f"{base.rsplit('/', 1)[0]}/v1"
     if lowered.endswith("/v1"):
         return f"{base.rsplit('/', 1)[0]}/anthropic", base
+    # No recognized protocol suffix.  Only append segments for known-dual-protocol
+    # hosts where both routes are guaranteed to exist; for unknown hosts return
+    # as-is on both sides to avoid fabricating endpoints that may not exist.
     if _is_dual_protocol_host(base):
-        return f"{base}/anthropic", f"{base}/v1"
-    return base, f"{base}/v1"
+        parsed = urlsplit(base)
+        if not parsed.path or parsed.path == "/":
+            return f"{base}/anthropic", f"{base}/v1"
+    return base, base
 
 
 def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -423,13 +432,15 @@ def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = Non
     text = expanded.strip()
     if not text:
         return {}
-    if text.startswith("{"):
+    if text.startswith(("{", "[")):
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
             parsed = None
-        if isinstance(parsed, dict):
-            return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
+        if parsed is not None:
+            if isinstance(parsed, dict):
+                return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
+            return {}
 
     headers: dict[str, str] = {}
     for line in expanded.splitlines():
@@ -950,11 +961,10 @@ def _sdk_field(obj: object, key: str) -> object:
 
 
 def _sdk_token_count(usage: object, key: str) -> int:
-    """Read one ``usage`` counter as an int; ``0`` when absent or not numeric."""
-    try:
-        return int(_sdk_field(usage, key) or 0)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
+    """Read one ``usage`` counter as a non-negative int; ``0`` when absent, not numeric, or negative."""
+    raw = _sdk_field(usage, key)
+    parsed = _to_int(raw, default=0)
+    return max(0, parsed)  # type: ignore[type-var]
 
 
 @dataclass(frozen=True)
@@ -1073,7 +1083,11 @@ def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
         body = resp.json()  # type: ignore[attr-defined]
     except ValueError as exc:
         raise RuntimeError(f"anthropic messages returned a non-JSON body: {exc!r}") from exc
-    payload = body if isinstance(body, dict) else {}
+    if not isinstance(body, dict):
+        raise RuntimeError(
+            f"anthropic messages returned a non-object JSON body: {type(body).__name__}"
+        )
+    payload = body
     return AnthropicMessageResult(
         text=_anthropic_text_from_content(payload.get("content")),
         stop_reason=payload.get("stop_reason"),
