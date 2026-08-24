@@ -68,20 +68,12 @@ def _build_reactor(
     return Reactor(components), sink
 
 
-def _ctx(
-    crash_count: int = 0,
-    *,
-    now_unix: float = 1.0,
-    stop_reason: str = "",
-) -> ReactorContext:
+def _ctx(crash_count: int = 0) -> ReactorContext:
     return ReactorContext(
         tick_index=0,
-        shared_state=SharedStateSnapshot(
-            crash_count=crash_count,
-            stop_reason=stop_reason,
-        ),
+        shared_state=SharedStateSnapshot(crash_count=crash_count),
         inbox=[],
-        now_unix=now_unix,
+        now_unix=1.0,
     )
 
 
@@ -237,7 +229,3 @@ async def test_sink_no_op_on_empty_iterable(tmp_path: Path):
     sink = FindingSink(FindingSinkConfig(session_dir=tmp_path, session_id="sess"))
     assert await sink.append_many([]) == 0
     assert not sink.file_path.exists()
-
-
-
-

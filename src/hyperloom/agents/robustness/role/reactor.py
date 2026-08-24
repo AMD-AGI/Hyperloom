@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ReactorComponents:
-    """Aggregate constructor argument so callers do not pass 5 positional kw."""
+    """Bundle the reactor's collaborators into one constructor argument."""
 
     router: DegradeRouter
     classifier: Classifier
@@ -172,5 +172,6 @@ class Reactor:
                 "reactor tick=%d state_store flush failed",
                 self._tick_index,
             )
+
 
 __all__ = ["Reactor", "ReactorComponents"]

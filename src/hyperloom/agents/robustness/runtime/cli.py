@@ -220,10 +220,8 @@ def _cmd_tick(args: argparse.Namespace) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the runtime CLI argument parser.
 
-    Registers the ``tick`` subcommand with its options and handler function.
-
     Returns:
-        argparse.ArgumentParser: The configured parser.
+        argparse.ArgumentParser: The parser carrying the ``tick`` subcommand.
     """
     parser = argparse.ArgumentParser(
         prog="robustness-agent-runtime",
