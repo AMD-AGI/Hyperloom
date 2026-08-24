@@ -22,7 +22,6 @@ import os
 import random
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any, Protocol
 
@@ -38,12 +37,7 @@ from .metrics import (
     CRITIC_KB_WRITE_TOTAL,
     get_registry,
 )
-
-
-def _require_http_url(url: str) -> None:
-    scheme = urllib.parse.urlparse(url).scheme
-    if scheme not in {"http", "https"}:
-        raise ValueError(f"unsupported URL scheme: {scheme!r}")
+from hyperloom.common.url_safety import require_http_url as _require_http_url
 
 
 DEFAULT_TIMEOUT_MS = 10_000

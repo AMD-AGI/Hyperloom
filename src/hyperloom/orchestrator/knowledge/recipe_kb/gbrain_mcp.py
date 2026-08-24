@@ -8,11 +8,11 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any
 
 from hyperloom.common.jsonio import iter_sse_objects
+from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
 
 class GbrainRemoteError(RuntimeError):
@@ -60,12 +60,10 @@ def _select_mcp_response(
 
 
 def _require_http_url(url: str) -> None:
-    scheme = urllib.parse.urlparse(url).scheme
-    if scheme not in {"http", "https"}:
-        raise GbrainRemoteError(
-            f"unsupported gbrain URL scheme: {scheme!r}",
-            category="validation",
-        )
+    try:
+        _base_require_http_url(url)
+    except ValueError as exc:
+        raise GbrainRemoteError(str(exc), category="validation") from exc
 
 
 class _GbrainMcp:
