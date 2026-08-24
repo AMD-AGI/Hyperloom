@@ -12,8 +12,6 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
-import shutil
-import subprocess
 import sys
 
 
@@ -23,6 +21,8 @@ STALE_PROCESS_PATTERNS = (
     "sglang.launch_server",
     "vllm.entrypoints",
 )
+
+VRAM_BUSY_FRACTION = 0.01
 
 
 def _read_cmdline(pid: str) -> str:
@@ -61,31 +61,41 @@ def _print_torch_visibility() -> bool:
     return available and count > 0
 
 
-def _print_rocm_snapshot() -> None:
-    """Print a ``rocm-smi`` memory-use snapshot (best-effort, never raises)."""
-    rocm_smi = shutil.which("rocm-smi")
-    if not rocm_smi:
-        print("rocm_smi=missing")
-        return
+def _check_gpu_occupancy() -> bool:
+    """Check VRAM occupancy via rocm-smi and return whether all GPUs are clean.
 
-    try:
-        result = subprocess.run(
-            [rocm_smi, "--showmemuse", "--json"],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
+    A GPU is considered busy when its used VRAM exceeds ``VRAM_BUSY_FRACTION``
+    of its total capacity. rocm-smi absent or non-zero exit is treated as an
+    unknown and reported as failure so the caller aborts rather than launching
+    into an unverified state.
+
+    Returns:
+        ``True`` when every GPU's used VRAM is within the allowed fraction,
+        ``False`` on any occupancy violation or when the GPU state is unknown.
+    """
+    from hyperloom.common.rocm_smi import gpu_vram_usage
+
+    snapshots = gpu_vram_usage()
+    if snapshots is None:
+        print("rocm_smi=unavailable")
+        return False
+
+    clean = True
+    for idx, snap in enumerate(snapshots):
+        if snap.total_mib is None or snap.total_mib == 0.0:
+            print(f"gpu{idx}_vram=unknown (no total reported)")
+            clean = False
+            continue
+        pct = snap.used_mib / snap.total_mib
+        threshold_mib = snap.total_mib * VRAM_BUSY_FRACTION
+        print(
+            f"gpu{idx}_vram_used={snap.used_mib:.1f} MiB  "
+            f"total={snap.total_mib:.1f} MiB  "
+            f"pct={pct:.3%}  threshold={threshold_mib:.1f} MiB"
         )
-    except Exception as exc:
-        print("rocm_smi_error=", type(exc).__name__, str(exc)[:300])
-        return
-
-    print("rocm_smi_rc=", result.returncode)
-    if result.stdout.strip():
-        print(result.stdout.strip()[:2000])
-    if result.stderr.strip():
-        print("rocm_smi_stderr=", result.stderr.strip()[:500])
+        if snap.used_mib > threshold_mib:
+            clean = False
+    return clean
 
 
 def _find_stale_processes() -> list[tuple[str, str]]:
@@ -108,8 +118,9 @@ def _find_stale_processes() -> list[tuple[str, str]]:
 def main() -> int:
     """Run launcher preflight checks and return a process exit code.
 
-    Validates the model path, prints torch/ROCm visibility, and reports any
-    stale optimizer/server processes.
+    Validates the model path, checks torch/ROCm visibility, verifies GPU VRAM
+    occupancy is below the allowed threshold, and reports any stale
+    optimizer/server processes.
 
     Returns:
         ``0`` when every check passes, otherwise ``2``.
@@ -130,7 +141,8 @@ def main() -> int:
     if not _print_torch_visibility():
         ok = False
 
-    _print_rocm_snapshot()
+    if not _check_gpu_occupancy():
+        ok = False
 
     stale = _find_stale_processes()
     for pid, cmdline in stale:
