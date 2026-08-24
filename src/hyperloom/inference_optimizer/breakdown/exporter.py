@@ -899,10 +899,9 @@ def write_minimal_final_report(
         The path of the (existing or newly written) ``final.md`` file.
 
     Raises:
-        OSError: If the destination cannot be read or written. Returning a
-            path to a file that was never written would be worse than
-            failing, so the teardown caller catches this and logs it rather
-            than letting it mask the run's own stop_reason.
+        OSError: If the destination cannot be read or written; returning a
+            path to a file that was never written would be worse. The
+            teardown caller logs it rather than masking the stop_reason.
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
     from ..session.session_paths import reports_dir
@@ -1059,10 +1058,9 @@ def write_minimal_final_json(
         The path of the (existing or newly written) ``final.json`` file.
 
     Raises:
-        OSError: If the destination cannot be read or written. Returning a
-            path to a file that was never written would be worse than
-            failing, so the teardown caller catches this and logs it rather
-            than letting it mask the run's own stop_reason.
+        OSError: If the destination cannot be read or written; returning a
+            path to a file that was never written would be worse. The
+            teardown caller logs it rather than masking the stop_reason.
     """
     from datetime import datetime, timezone
 
