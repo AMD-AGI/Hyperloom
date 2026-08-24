@@ -274,9 +274,7 @@ def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
 
 
 def test_a_session_budget_skip_is_described_as_a_sweep_that_did_not_run():
-    state = _SweepState(
-        {"status": "skipped", "was_skipped": True, "skip_reason": "session_time_budget"}
-    )
+    state = _SweepState({"status": "skipped", "was_skipped": True, "skip_reason": "session_time_budget"})
     msg = rp._explain_stop_reason("conc_sweep_done", state)
     assert "did not run" in msg
     assert "session_time_budget" in msg

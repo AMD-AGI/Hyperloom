@@ -40,9 +40,7 @@ class TestIsPythonPackageRoot:
 
 class TestGridRunnerPrepend:
     def test_site_packages_not_prepended(self) -> None:
-        result = _prepend_magpie_pythonpath(
-            "/opt/venv/lib/python3.12/site-packages", "/primus/shuoshuo"
-        )
+        result = _prepend_magpie_pythonpath("/opt/venv/lib/python3.12/site-packages", "/primus/shuoshuo")
         assert result == "/primus/shuoshuo"
         assert "site-packages" not in result
 
@@ -85,9 +83,7 @@ DRY_RUN=1
 source {sourceable!s}
 printf '%s' "$PYTHONPATH"
 """
-        proc = subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, timeout=60
-        )
+        proc = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=60)
         assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
         return proc.stdout.strip()
 

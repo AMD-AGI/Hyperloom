@@ -29,6 +29,7 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 # Fixture: extend the shared build_coord with framework-phase routing methods
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def coord(build_coord):
     """``build_coord`` augmented with the routing-method surface the framework
@@ -59,9 +60,7 @@ def coord(build_coord):
     build_coord._maybe_rearm_enablement = _maybe_rearm_enablement
     build_coord.enqueue_targeted_build = _enqueue_targeted_build
     build_coord._framework_gpu_params = lambda: {}
-    build_coord._framework_authoring_lanes_ttl = (
-        lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
-    )
+    build_coord._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
     build_coord._coerce_needs_gpu = bool
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord
@@ -71,17 +70,22 @@ def coord(build_coord):
 # _derive_gpu_arch
 # ---------------------------------------------------------------------------
 
+
 def test_derive_gpu_arch_mi355x():
     assert _derive_gpu_arch("mi355x") == "gfx950"
+
 
 def test_derive_gpu_arch_mi300x():
     assert _derive_gpu_arch("mi300x") == "gfx942"
 
+
 def test_derive_gpu_arch_unknown():
     assert _derive_gpu_arch("unknown_gpu") == ""
 
+
 def test_derive_gpu_arch_empty():
     assert _derive_gpu_arch("") == ""
+
 
 def test_derive_gpu_arch_case_insensitive():
     assert _derive_gpu_arch("MI355X") == "gfx950"
@@ -103,12 +107,14 @@ def test_targeted_build_repo_match_rejects_wrong_component():
 # _maybe_escalate_to_targeted_build
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch):
     coord.shared_state.gpu_type = "mi355x"
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     hip_kernel_log = "hipErrorNoBinaryForGpu: no kernel image is available"
@@ -126,6 +132,7 @@ async def test_escalate_skipped_for_pure_python_gap(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     python_log = "Model architecture 'DeepseekV4ForCausalLM' is not supported"
@@ -140,6 +147,7 @@ async def test_escalate_skipped_on_multi_node(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
 
     log = "hipErrorNoBinaryForGpu"
@@ -153,6 +161,7 @@ async def test_escalate_idempotent_same_gap(coord, monkeypatch):
     coord.shared_state.gpu_type = "mi300x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     log = "hipErrorNoBinaryForGpu"
@@ -177,12 +186,14 @@ async def test_escalate_disabled_by_env(coord, monkeypatch):
 # (source patches keep hitting the arch wall)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_arch_stall_escalates_to_vllm_source_after_attempts(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi355x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     log = "Model architecture 'DeepseekV4ForCausalLM' is not supported"
@@ -204,6 +215,7 @@ async def test_arch_stall_not_escalated_on_non_vllm(coord, monkeypatch):
     coord.shared_state.framework = "sglang"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     log = "Model architecture 'FooForCausalLM' is not supported"
@@ -217,12 +229,14 @@ async def test_arch_stall_not_escalated_on_non_vllm(coord, monkeypatch):
 # (specialist asks for a compiled / from-source build in specialist_done)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_specialist_requested_build_enqueued(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi355x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     tid = "spec-abc123"
@@ -262,6 +276,7 @@ async def test_specialist_requested_build_enqueued_from_payload(coord, monkeypat
     coord.shared_state.gpu_type = "mi355x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     payload = {
@@ -289,6 +304,7 @@ async def test_specialist_requested_build_rejects_repo_component_mismatch(coord,
     coord.shared_state.gpu_type = "mi355x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     tid = "spec-wrong-repo"
@@ -317,6 +333,7 @@ async def test_specialist_requested_build_defaults_component_to_vllm_source(coor
     coord.shared_state.gpu_type = "mi300x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     tid = "spec-nocomp"
@@ -340,6 +357,7 @@ async def test_specialist_requested_build_noop_without_request(coord, monkeypatc
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     tid = "spec-plain"
@@ -366,6 +384,7 @@ async def test_specialist_requested_build_noop_when_no_task_id(coord, monkeypatc
 # ---------------------------------------------------------------------------
 # _maybe_route_build_outcomes -> _maybe_rearm_enablement routing
 # ---------------------------------------------------------------------------
+
 
 async def _enqueue_and_transition(coord, action, state):
     task_id = await coord._bl.enqueue_targeted_build(action)
@@ -453,8 +472,9 @@ async def test_route_succeeded_missing_result_json_calls_reverted(coord, tmp_pat
     root.mkdir(parents=True, exist_ok=True)
     # No result.json written.
 
-    action = TargetedBuildAction(gap_id="g4", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
+    action = TargetedBuildAction(
+        gap_id="g4", framework="vllm", component="aiter", capability="fp4_moe", ref="v1", attempt_root=str(root)
+    )
     await _enqueue_and_transition(coord, action, "succeeded")
 
     await Coordinator._maybe_route_build_outcomes(coord)
@@ -476,8 +496,9 @@ async def test_route_succeeded_empty_runtime_override_calls_reverted(coord, tmp_
     br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
     (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
 
-    action = TargetedBuildAction(gap_id="g5", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
+    action = TargetedBuildAction(
+        gap_id="g5", framework="vllm", component="aiter", capability="fp4_moe", ref="v1", attempt_root=str(root)
+    )
     await _enqueue_and_transition(coord, action, "succeeded")
 
     await Coordinator._maybe_route_build_outcomes(coord)
@@ -561,8 +582,7 @@ async def test_a_build_whose_probe_ran_and_failed_is_not_probed_again(coord, tmp
 
 @pytest.mark.asyncio
 async def test_route_failed_timeout_calls_advanced(coord):
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1")
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
     # Simulate failure recorded by lifecycle
     coord.shared_state.enablement.last_build_failure = {
@@ -577,8 +597,7 @@ async def test_route_failed_timeout_calls_advanced(coord):
 @pytest.mark.asyncio
 async def test_route_failed_compile_error_novel_calls_advanced(coord):
     """A compile_error not yet in the novelty ledger → advanced (novel attempt)."""
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1")
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
     coord.shared_state.enablement.last_build_failure = {
         "failure_class": "compile_error",
@@ -594,8 +613,7 @@ async def test_route_failed_compile_error_repeat_calls_reverted(coord, tmp_path)
     """A compile_error whose key is already in the novelty ledger → reverted."""
     from hyperloom.orchestrator.framework.build_actions import build_novelty_key
 
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1")
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     # Pre-seed the ledger with this exact novelty key.
     key = list(build_novelty_key(action))
     coord.shared_state.enablement.build_novelty = [key]
@@ -615,12 +633,9 @@ async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
     """Ledger grows on each novel failure and is capped at 20 entries."""
     from hyperloom.orchestrator.framework.build_actions import build_novelty_key
 
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1")
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     # Seed ledger with 20 different entries so the cap truncates old ones.
-    coord.shared_state.enablement.build_novelty = [
-        ["aiter", f"v{i}", "gfx950", []] for i in range(20)
-    ]
+    coord.shared_state.enablement.build_novelty = [["aiter", f"v{i}", "gfx950", []] for i in range(20)]
     await _enqueue_and_transition(coord, action, "failed")
     coord.shared_state.enablement.last_build_failure = {
         "failure_class": "compile_error",
@@ -635,12 +650,9 @@ async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
 
 @pytest.mark.asyncio
 async def test_route_same_row_not_processed_twice(coord):
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
-                                 capability="fp4_moe", ref="v1")
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "compile_error", "failure_summary": "x"
-    }
+    coord.shared_state.enablement.last_build_failure = {"failure_class": "compile_error", "failure_summary": "x"}
     await Coordinator._maybe_route_build_outcomes(coord)
     await Coordinator._maybe_route_build_outcomes(coord)
 
@@ -703,8 +715,10 @@ async def test_route_oldest_unrouted_build_when_newer_already_routed(coord, tmp_
 # _build_enablement_specialist_params injects failure_class into notes/params
 # ---------------------------------------------------------------------------
 
+
 def _make_params_fake(**kw):
     import types
+
     state = types.SimpleNamespace(
         framework=kw.get("framework", "vllm"),
         model_name=kw.get("model_name", "deepseek-ai/DeepSeek-V4"),
@@ -718,9 +732,7 @@ def _make_params_fake(**kw):
         ),
     )
     fake = types.SimpleNamespace(shared_state=state, session_dir="/tmp")
-    fake._build_enablement_specialist_params = types.MethodType(
-        Coordinator._build_enablement_specialist_params, fake
-    )
+    fake._build_enablement_specialist_params = types.MethodType(Coordinator._build_enablement_specialist_params, fake)
     fake._discover_enablement_candidate_refs = lambda req, plan: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
@@ -755,9 +767,7 @@ def test_build_params_no_injection_when_no_build_failure():
 
 
 def test_build_params_failure_class_distinguishes_timeout_vs_defect():
-    fake_timeout = _make_params_fake(
-        enablement_last_build_failure={"failure_class": "timeout", "failure_summary": ""}
-    )
+    fake_timeout = _make_params_fake(enablement_last_build_failure={"failure_class": "timeout", "failure_summary": ""})
     fake_defect = _make_params_fake(
         enablement_last_build_failure={"failure_class": "compile_error", "failure_summary": "bad code"}
     )
@@ -775,10 +785,12 @@ def test_build_params_failure_class_distinguishes_timeout_vs_defect():
 # _maybe_escalate_to_targeted_build: discovery-driven ref selection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_escalate_uses_discovery_ref_when_no_kept_ref(coord, monkeypatch):
     """When no kept/operator ref, top matching candidate from discovery is used."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     coord.shared_state.framework = "vllm"
@@ -801,6 +813,7 @@ async def test_escalate_uses_discovery_ref_when_no_kept_ref(coord, monkeypatch):
 async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
     """When a kept stack action has a ref, discovery candidates are ignored."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     coord.shared_state.framework = "vllm"
@@ -826,6 +839,7 @@ async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
 async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeypatch):
     """aiter component only accepts candidates whose repo contains 'aiter'."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     coord.shared_state.framework = "vllm"

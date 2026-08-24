@@ -113,9 +113,7 @@ class _RenderMixin:
             else ""
         )
         geak_pending_status = (
-            str(self.geak_pending.get("status") or "")
-            if isinstance(getattr(self, "geak_pending", None), dict)
-            else ""
+            str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"

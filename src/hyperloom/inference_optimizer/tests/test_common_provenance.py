@@ -83,8 +83,21 @@ def test_model_name_falls_back_to_basename():
 
 def test_missing_degrades_to_none_never_raises():
     p = build_provenance(args=None, env={}, probe=False)
-    for key in ("model_name", "model_path", "framework", "gpu_type", "gfx_arch", "graph_mode",
-                "tp", "ep", "dtype", "concurrency", "isl", "osl", "max_model_len"):
+    for key in (
+        "model_name",
+        "model_path",
+        "framework",
+        "gpu_type",
+        "gfx_arch",
+        "graph_mode",
+        "tp",
+        "ep",
+        "dtype",
+        "concurrency",
+        "isl",
+        "osl",
+        "max_model_len",
+    ):
         assert p[key] is None
     assert p["stack_fingerprint"] == {"rocm": "unknown", "aiter": "unknown", "sglang": "unknown", "vllm": "unknown"}
     assert p["server_args"] == []
@@ -134,10 +147,7 @@ def test_gfx_resolves_from_gpu_type_without_probing():
 
 def test_gfx_override_beats_gpu_type():
     """An explicit operator override outranks the board table."""
-    assert (
-        detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950"}, gpu_type="mi300x", probe=False)
-        == "gfx950"
-    )
+    assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950"}, gpu_type="mi300x", probe=False) == "gfx950"
 
 
 def test_gfx_gpu_type_short_circuits_the_probe(monkeypatch):
@@ -207,7 +217,8 @@ import hyperloom.common.provenance as _prov  # noqa: E402
 def test_gfx_arch_probe_via_rocminfo(monkeypatch):
     # empty env -> falls through to the rocminfo subprocess probe.
     monkeypatch.setattr(
-        _prov.subprocess, "run",
+        _prov.subprocess,
+        "run",
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="  Name:  gfx950  \n"),
     )
     assert detect_gfx_arch({}, probe=True) == "gfx950"
@@ -222,9 +233,7 @@ def test_gfx_arch_probe_subprocess_absent(monkeypatch):
 
 
 def test_gfx_arch_probe_nonzero_returncode(monkeypatch):
-    monkeypatch.setattr(
-        _prov.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="")
-    )
+    monkeypatch.setattr(_prov.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
     assert detect_gfx_arch({}, probe=True) is None
 
 
@@ -290,9 +299,7 @@ def _installed(venv_root, name: str, version: str):
     site = venv_root / "lib" / "python3.12" / "site-packages"
     info = site / f"{name}-{version}.dist-info"
     info.mkdir(parents=True)
-    (info / "METADATA").write_text(
-        f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n"
-    )
+    (info / "METADATA").write_text(f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n")
     return venv_root
 
 
@@ -308,16 +315,12 @@ def test_a_framework_in_its_own_venv_is_still_versioned(tmp_path):
 
 def test_an_operator_pin_still_wins_over_the_venv(tmp_path):
     root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint(
-        {"VLLM_VENV_ROOT": str(root), "VLLM_VERSION": "0.28.0-rc1"}, probe=True
-    )
+    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root), "VLLM_VERSION": "0.28.0-rc1"}, probe=True)
     assert fp["vllm"] == "0.28.0-rc1"
 
 
 def test_a_venv_root_that_is_not_there_is_not_a_failure(tmp_path):
-    fp = _prov.detect_stack_fingerprint(
-        {"VLLM_VENV_ROOT": str(tmp_path / "gone")}, probe=True
-    )
+    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(tmp_path / "gone")}, probe=True)
     assert fp["vllm"] == "unknown"
 
 

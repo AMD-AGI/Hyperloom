@@ -9,7 +9,7 @@ myst:
 GEAK (Generating Efficient AI-Centric Kernels) is a multi-agent framework for end-to-end GPU kernel
 optimization in real codebases. It runs a closed loop of profiling, optimization, and
 validation, and produces reviewable patches backed by reproducible benchmarks.
-GEAK supports Triton, HIP (and CUDA / Composable Kernel (CK) / HSA Code Object (HSACO)), and FlyDSL
+GEAK supports Triton, HIP (and CUDA, Composable Kernel (CK), and HSA Code Object (HSACO)), and FlyDSL
 kernels. It is driven by [Claude Code](https://www.anthropic.com/claude-code) and ships two
 deterministic JS Workflows — `e2e_workflow` for whole-model serving throughput and `kernel_workflow`
 for single kernels — with a deterministic control plane (budget loop, parallel fan-out, verification,

@@ -451,9 +451,7 @@ def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
 
 
 def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
-    facts, warnings = _render_final(
-        {"status": "awaiting_rebench", "self_reported_gain_pct": 12.5}
-    )
+    facts, warnings = _render_final({"status": "awaiting_rebench", "self_reported_gain_pct": 12.5})
 
     assert any("AWAITING" in f for f in facts)
     assert warnings
@@ -580,17 +578,11 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
         monkeypatch.undo()
 
     queued = await c.tasks.queued()
-    assert not [
-        task
-        for task in queued
-        if gr.is_geak_same_harness_rebench_task(task.kind, task.params)
-    ]
+    assert not [task for task in queued if gr.is_geak_same_harness_rebench_task(task.kind, task.params)]
 
 
 @pytest.mark.asyncio
-async def test_geak_revalidation_collision_with_succeeded_task_reported_honestly(
-    coordinator, tmp_path
-) -> None:
+async def test_geak_revalidation_collision_with_succeeded_task_reported_honestly(coordinator, tmp_path) -> None:
     """A succeeded idempotency collision must not be described as undispatched."""
     c = coordinator
     st = c.shared_state
@@ -625,9 +617,7 @@ async def test_geak_revalidation_collision_with_succeeded_task_reported_honestly
 
 
 @pytest.mark.asyncio
-async def test_geak_revalidation_cancelled_task_reports_cancelled_before_completion(
-    coordinator, tmp_path
-) -> None:
+async def test_geak_revalidation_cancelled_task_reports_cancelled_before_completion(coordinator, tmp_path) -> None:
     c = coordinator
     st = c.shared_state
     _arm_kernel_to_sweep(st)
@@ -661,9 +651,7 @@ async def test_geak_revalidation_cancelled_task_reports_cancelled_before_complet
 
 
 @pytest.mark.asyncio
-async def test_geak_revalidation_collision_replays_persisted_succeeded_result(
-    coordinator, tmp_path
-) -> None:
+async def test_geak_revalidation_collision_replays_persisted_succeeded_result(coordinator, tmp_path) -> None:
     """A succeeded collision replays its delegated result through normal adjudication."""
     c = coordinator
     st = c.shared_state

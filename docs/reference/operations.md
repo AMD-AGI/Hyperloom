@@ -30,7 +30,7 @@ The following resource requirements apply to a single optimization session.
 
 A single Hyperloom optimization session is a long-running Python
 process that drives benchmarks; the heavy GPU work happens in the
-inference server it benchmarks (sglang / vllm) and in the Ray-scheduled
+inference server it benchmarks (sglang or vllm) and in the Ray-scheduled
 GEAK workers. The Coordinator pod itself is small.
 
 | Component                          | CPU       | RAM       | GPU                                       | Disk                                                                                       |
@@ -39,11 +39,11 @@ GEAK workers. The Coordinator pod itself is small.
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
 | GEAK + Ray head (kernel optimization) | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
-| Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
-| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
+| Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X, MI325X, or MI355X             | ~10 GB per attempt for build artifacts                                                     |
+| Inference server (sglang or vllm)  | 16 cores  | 128 GiB   | 1–8 × MI300X, MI325X, or MI355X (matches TP)| weights + KV cache; depends on model                                                      |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
 
-Minimum viable node: one AMD GPU (MI300X / MI325X / MI355X) with
+Minimum viable node: one AMD GPU (MI300X, MI325X, or MI355X) with
 ≥ 256 GiB system RAM, 32 cores, and 500 GB local fast disk for the
 session dir + GEAK build artifacts.
 

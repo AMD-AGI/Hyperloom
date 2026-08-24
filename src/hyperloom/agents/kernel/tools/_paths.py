@@ -38,6 +38,7 @@ def default_workspace_root() -> str:
         return DEFAULT_WORKSPACE_ROOT
     return os.path.join(os.getcwd(), "session")
 
+
 def workspace_root() -> str:
     """Resolve the workspace root for kernel-agent tool outputs.
 

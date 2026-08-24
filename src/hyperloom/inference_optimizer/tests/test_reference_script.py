@@ -402,6 +402,7 @@ def test_render_round_trip_with_enablement_params(tmp_path):
 
 # --- bootstrap._resolve_reference_recipe tests ---
 
+
 def test_resolve_no_flag_returns_empty(monkeypatch):
     """No --reference-script → empty tuple, nothing attempted."""
     monkeypatch.setenv("FRAMEWORK", "vllm")

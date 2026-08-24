@@ -2302,10 +2302,7 @@ class TestCompactJsonServerArgs:
             """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
             "vllm",
         )
-        assert out.strip() == (
-            "--speculative-config "
-            '{"method":"ngram","num_speculative_tokens":7}'
-        )
+        assert out.strip() == ('--speculative-config {"method":"ngram","num_speculative_tokens":7}')
         json.loads(out.split(" ", 1)[1].strip())
 
     def test_unrepairable_json_left_verbatim(self):
@@ -2321,9 +2318,7 @@ class TestCompactJsonServerArgs:
 
     def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert _grid_runner.compact_json_server_args(raw, "sglang") == (
-            '--speculative-config {"method":"eagle"}'
-        )
+        assert _grid_runner.compact_json_server_args(raw, "sglang") == ('--speculative-config {"method":"eagle"}')
 
     def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
         raw = """--json-model-override-args '{"rope_scaling":null}'"""
@@ -2364,10 +2359,7 @@ class TestRemoveServerArgsPreservesJson:
         assert json.loads(blob) == {"cudagraph_mode": "FULL"}
 
     def test_remove_keeps_multikey_speculative_config_valid(self):
-        raw = (
-            '--speculative-config {"method":"ngram","num_speculative_tokens":7} '
-            "--port 8888"
-        )
+        raw = '--speculative-config {"method":"ngram","num_speculative_tokens":7} --port 8888'
         out = _grid_runner.remove_server_args(raw, ["--port"])
         blob = out.split("--speculative-config ", 1)[1].strip()
         assert json.loads(blob) == {"method": "ngram", "num_speculative_tokens": 7}
@@ -2375,9 +2367,7 @@ class TestRemoveServerArgsPreservesJson:
     def test_remove_noop_when_nothing_matches_keeps_json(self):
         raw = '--compilation-config {"cudagraph_mode":"FULL"}'
         out = _grid_runner.remove_server_args(raw, ["--port"])
-        assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {
-            "cudagraph_mode": "FULL"
-        }
+        assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {"cudagraph_mode": "FULL"}
 
 
 # ---------------------------------------------------------------------------

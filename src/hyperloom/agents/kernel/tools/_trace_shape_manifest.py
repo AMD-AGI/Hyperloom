@@ -60,7 +60,10 @@ _OP_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("attention", re.compile(r"attention|flash|fmha|\battn\b|mla|paged")),
     ("rope", re.compile(r"rope|rotary")),
     ("norm", re.compile(r"rmsnorm|rms_norm|layernorm|layer_norm|norm")),
-    ("elementwise", re.compile(r"elementwise|activation|silu|gelu|swiglu|\badd\b|\bmul\b|cast|copy|convert|quant|dequant")),
+    (
+        "elementwise",
+        re.compile(r"elementwise|activation|silu|gelu|swiglu|\badd\b|\bmul\b|cast|copy|convert|quant|dequant"),
+    ),
     ("reduce", re.compile(r"reduce|softmax|topk|argmax|sum\b")),
     ("comm", re.compile(r"all_reduce|allreduce|all_gather|allgather|reduce_scatter|nccl|rccl")),
 )
@@ -137,11 +140,11 @@ def _canon_dims(shapes: Any) -> dict[str, Any]:
             k = dims["K"]
             if len(two_d) >= 2:
                 b = [int(b0) for b0 in two_d[1][:2]]
-                if b[1] == k:            # weight [N, K] (inference layout)
+                if b[1] == k:  # weight [N, K] (inference layout)
                     dims["N"] = b[0]
-                elif b[0] == k:          # weight [K, N] (plain torch.mm)
+                elif b[0] == k:  # weight [K, N] (plain torch.mm)
                     dims["N"] = b[1]
-                else:                    # unknown layout: generic [K, N] fallback
+                else:  # unknown layout: generic [K, N] fallback
                     dims["N"] = b[1]
         batched = [s for s in mats if len(s) >= 3]
         if batched:

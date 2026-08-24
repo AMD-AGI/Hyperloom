@@ -14,7 +14,7 @@ optimize`; the agent launches it in the background and monitors `state.json`
 until a terminal `stop_reason` — success (`target_reached`, `global_converged`,
 `time_exhausted`, `max_ticks`) or early failure (`baseline_failed`,
 `baseline_accuracy_failed`) that ends the run before optimizing. Concept and variable reference:
-`@../hyperloom-remote-demo.md`. Optimizer skill: `@${HYPERLOOM_SKILL_PATH}`
+`@../../../reference/multi-node.md`. Optimizer skill: `@${HYPERLOOM_SKILL_PATH}`
 (fallback `@../../../../src/hyperloom/inference_optimizer/SKILL.md`).
 
 ## Prerequisites
@@ -25,7 +25,7 @@ until a terminal `stop_reason` — success (`target_reached`, `global_converged`
 - **A provisioned cluster**: the platform creates the GPU pods and hands them
   over via `HYPERLOOM_MN_EXT_*` (platform-injected; never passed on the CLI).
   `optimize` adopts that cluster and exits 2 without it.
-  See `@../hyperloom-remote-demo.md`.
+  See `@../../../reference/multi-node.md`.
 
 ### One FLAGS block, two readers
 

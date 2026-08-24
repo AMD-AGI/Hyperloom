@@ -186,9 +186,7 @@ def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
 def test_gate_orchestration_propose_kernel_owned_rejected():
     """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(
-        role_registry=default_role_registry(), shared_state=state, strict_phase=True
-    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     for action in ("kernel_opt", "gemm_tuning", "integrate"):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
@@ -205,9 +203,7 @@ def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
     """Hyperloom does not pre-filter GEAK applicability by precision."""
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(
-        role_registry=default_role_registry(), shared_state=state, strict_phase=True
-    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -220,9 +216,7 @@ def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
 def test_gate_run_gemm_tuning_request_allowed_for_fp8_geak(monkeypatch):
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL_AGENT", precision="fp8", framework="sglang")
-    gate = PolicyGate(
-        role_registry=default_role_registry(), shared_state=state, strict_phase=True
-    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -236,9 +230,7 @@ def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(
-        role_registry=default_role_registry(), shared_state=state, strict_phase=True
-    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
