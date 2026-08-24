@@ -350,7 +350,7 @@ def test_exit_normal_kernel_after_gemm_does_not_exit():
         phase_budget_pct={},
         kernel_integrate_attempts={},
         kernel_opt_task_attempts={},
-        continue_kernel_after_gemm=False,
+        auto_kernel_opt_enabled=False,
         rejected_kernel_ids=[],
         last_gemm_tuning={
             "status": "complete",

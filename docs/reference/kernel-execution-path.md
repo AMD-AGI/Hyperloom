@@ -107,21 +107,22 @@ async def _finish_kernel_entry(self) -> None:
         await self._run_kernel_opt_entry_batch()
 ```
 
-**The source-level dispatch is not downstream of GEMM tuning.** It used to sit
-at the end of the GEMM route, so `INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1`
-removed it too — one tunes GEMM shape tables, the other rewrites kernel source,
-and nothing in the log connected them. A run then held eight routable
-candidates, cleared the dispatch floor, and reached SWEEP having optimized
-nothing while waiting on an orchestration request that never came. Each stage in
-the shared tail now consults only its own switch, and each skip is a return
-inside its own helper rather than out of the entry hook.
+**The source-level dispatch is not downstream of GEMM tuning.** Tuning GEMM
+shape tables and rewriting kernel source are unrelated jobs, so each stage in
+the shared tail consults only its own switch and each skip is a return inside
+its own helper rather than out of the entry hook.
+`INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the source-level
+dispatch alone.
 
 `_run_kernel_opt_entry_batch()` names no `kernel_id`, leaving the set to
 `_batch_kernel_candidates`' own filter: every candidate that clears the dispatch
 floor and has retries left goes in one batch. Naming one here would put the
 phase back in the business of picking, which is the part that stalls when nobody
-picks. `_kernel_opt_work_remains()` gates it on `continue_kernel_after_gemm` and
-a non-empty `untried_hot_reusable_kernels()`.
+picks. `_kernel_opt_work_remains()` gates it on `auto_kernel_opt_enabled`
+(`--no-auto-kernel-opt`) and a non-empty `untried_hot_reusable_kernels()`. The
+switch covers this dispatch only: `kernel_opt` stays in the phase's allowed
+actions, so orchestration can still request it, and the fusion and collective
+lanes keep their own gates.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the

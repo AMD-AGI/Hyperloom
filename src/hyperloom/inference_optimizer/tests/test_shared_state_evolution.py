@@ -504,6 +504,48 @@ def test_v5_rename_table_targets_are_real_fields():
     assert not stale, f"legacy names that are somehow still fields: {stale}"
 
 
+def test_v6_rename_table_targets_are_real_fields():
+    """Same contract as the v5 table: targets exist, legacy names do not."""
+    from hyperloom.orchestrator.state.shared_state import _KERNEL_OPT_FIELD_RENAMES_V6
+
+    fields = set(SharedState.__dataclass_fields__)
+    missing = sorted(t for t in _KERNEL_OPT_FIELD_RENAMES_V6.values() if t not in fields)
+    assert not missing, f"rename targets that are no longer fields: {missing}"
+    stale = sorted(legacy for legacy in _KERNEL_OPT_FIELD_RENAMES_V6 if legacy in fields)
+    assert not stale, f"legacy names that are somehow still fields: {stale}"
+
+
+def test_v6_carries_the_pre_rename_kernel_opt_optout(tmp_path):
+    """A resumed opt-out keeps opting out instead of reverting to the default."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(
+        json.dumps({"schema_version": 5, "continue_kernel_after_gemm": False})
+    )
+
+    loaded = SharedState.load_or_init(sd)
+
+    assert loaded.auto_kernel_opt_enabled is False
+    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
+
+
+def test_v6_prefers_the_current_spelling_when_both_are_present(tmp_path):
+    """A mid-migration state holding both keys resolves to the current one."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 5,
+                "continue_kernel_after_gemm": False,
+                "auto_kernel_opt_enabled": True,
+            }
+        )
+    )
+
+    assert SharedState.load_or_init(sd).auto_kernel_opt_enabled is True
+
+
 def test_v4_nested_enablement_roundtrips(tmp_path):
     """A v4 state.json with nested enablement dict survives save/load_or_init."""
     sd = tmp_path / "session"

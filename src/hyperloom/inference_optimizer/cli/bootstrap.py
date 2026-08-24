@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,44 @@ def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
         if sep and key.strip():
             pins[key.strip()] = value
     return pins
+
+
+#: Default for the KERNEL-entry kernel_opt dispatch when neither spelling of the
+#: flag is passed. Both parser dests default to ``None`` so "not passed" stays
+#: distinguishable from an explicit value, which is what lets the deprecated
+#: alias be honoured without letting it override the current flag.
+AUTO_KERNEL_OPT_DEFAULT: bool = True
+
+
+def resolve_auto_kernel_opt(args: argparse.Namespace) -> bool:
+    """Resolve the KERNEL-entry auto-dispatch switch across both spellings.
+
+    ``--auto-kernel-opt`` is the current flag; ``--continue-kernel-after-gemm``
+    is its deprecated spelling, kept working because dropping it outright would
+    turn a launcher's opt-out into a silent opt-in. The current flag wins when
+    both are passed; the alias wins over nothing but the default.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Whether KERNEL entry should dispatch the source-level kernel_opt batch.
+    """
+    current = getattr(args, "auto_kernel_opt", None)
+    legacy = getattr(args, "continue_kernel_after_gemm", None)
+    if legacy is not None:
+        warnings.warn(
+            "--continue-kernel-after-gemm is deprecated; use --auto-kernel-opt "
+            "(the switch gates the KERNEL-entry kernel_opt dispatch on both "
+            "routes, not only after GEMM tuning)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if current is not None:
+        return bool(current)
+    if legacy is not None:
+        return bool(legacy)
+    return AUTO_KERNEL_OPT_DEFAULT
 
 
 def resolve_model_display_name(args: argparse.Namespace) -> str:
@@ -340,7 +379,7 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
+        auto_kernel_opt_enabled=resolve_auto_kernel_opt(args),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,

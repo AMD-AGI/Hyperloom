@@ -319,7 +319,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 5
+LATEST_STATE_SCHEMA_VERSION: int = 6
 
 #: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
 #: name. A state written before that rename spells them the old way, and the
@@ -337,6 +337,15 @@ _FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
     "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
     "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
     "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
+}
+
+#: KERNEL-entry dispatch switch renamed by the auto-dispatch rename, old name ->
+#: current name. The old spelling tied the switch to GEMM tuning, which stopped
+#: being true once the dispatch moved into the shared entry tail. Without this
+#: table the unknown-key filter in ``from_dict`` would drop the old spelling and
+#: a resumed opt-out session would silently start dispatching again.
+_KERNEL_OPT_FIELD_RENAMES_V6: dict[str, str] = {
+    "continue_kernel_after_gemm": "auto_kernel_opt_enabled",
 }
 
 #: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
@@ -542,8 +551,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     geak_result: dict[str, Any] = field(default_factory=dict)
     # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
     explore_enabled: bool = True
-    # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
-    continue_kernel_after_gemm: bool = True
+    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
+    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
+    # only governs the entry's own dispatch: orchestration can still request
+    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
+    auto_kernel_opt_enabled: bool = True
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace
@@ -1483,6 +1495,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     else entry
                     for entry in stack
                 ]
+
+        if incoming_version < 6:
+            # Carry the pre-rename KERNEL-entry dispatch switch over. Same
+            # reasoning as the v5 block: the old spelling is not a dataclass
+            # field, so the filter above has already dropped it, and a state
+            # holding both spellings is mid-migration with the current one
+            # winning.
+            for legacy, current in _KERNEL_OPT_FIELD_RENAMES_V6.items():
+                if legacy in raw and current not in raw:
+                    filtered[current] = bool(raw[legacy])
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])

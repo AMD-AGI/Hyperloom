@@ -3382,11 +3382,15 @@ class KernelPhase(PhaseHandler):
     def _kernel_opt_work_remains(self) -> bool:
         """Whether KERNEL entry should dispatch source-level kernel_opt itself.
 
+        The switch scopes to this dispatch alone. ``kernel_opt`` stays in the
+        phase's allowed actions either way, so orchestration can still request
+        it; opting out only means the phase stops asking on its own.
+
         Returns:
-            bool: ``True`` when the ``continue_kernel_after_gemm`` flag is set
-                and there are untried hot reusable kernels remaining.
+            bool: ``True`` when the ``auto_kernel_opt_enabled`` flag is set and
+                there are untried hot reusable kernels remaining.
         """
-        if not bool(getattr(self.shared_state, "continue_kernel_after_gemm", True)):
+        if not bool(getattr(self.shared_state, "auto_kernel_opt_enabled", True)):
             return False
         return bool(self.shared_state.untried_hot_reusable_kernels())
 

@@ -518,7 +518,7 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
 
 
 def test_kernel_opt_work_remains(coord: Coordinator) -> None:
-    coord.shared_state.continue_kernel_after_gemm = False
+    coord.shared_state.auto_kernel_opt_enabled = False
     assert coord._kernel_opt_work_remains() is False
 
 
