@@ -17,13 +17,11 @@ Contract:
   the caller treats the canonical per-file writes as the source of truth.
 * Selection is a glob spec (:data:`PACKAGE_GLOBS`) resolved against the
   session dir; only the curated result/report set is matched.
-* A session directory is shared-filesystem state, so a selected entry is
-  only bundled when it is a regular file that resolves inside the session.
-  Anything else is refused and reported rather than followed.
-* The manifest lists what was actually written, and every way the bundle
-  can fall short of the selection is a field on it: ``truncated`` /
-  ``dropped_files`` for the size caps, ``failed_files`` for write
-  failures, ``refused_files`` for entries outside the session boundary.
+* A selected entry is only bundled when it is a regular file resolving
+  inside the session, so a link planted in this shared-filesystem
+  directory cannot pull outside content into the dest root.
+* The manifest lists what was written, and ``complete`` is false whenever
+  anything selected is missing from it.
 """
 
 from __future__ import annotations
@@ -183,14 +181,10 @@ def _write_loose_manifest(loose_dir: Path, manifest: dict) -> None:
 
 
 def _is_packageable(path: Path, session_dir: Path) -> bool:
-    """Whether ``path`` may be bundled as an artifact of ``session_dir``.
+    """Whether ``path`` is a regular file resolving inside ``session_dir``.
 
-    A session directory is shared-filesystem state that agents write into,
-    so an entry is only bundled when it resolves inside the session and is
-    a regular file. That refuses a symlink pointing out of the session
-    (whose target content would otherwise be copied to the dest root) as
-    well as sockets and devices, which are not artifacts and cannot be
-    archived.
+    Refuses a symlink whose target escapes the session, and sockets and
+    devices, which are not artifacts and cannot be archived.
 
     Args:
         path: Candidate file discovered under ``session_dir``.
@@ -206,8 +200,8 @@ def _iter_session_files(session_dir: Path) -> list[Path]:
     """All files under session_dir (one walk), so glob matching is a
     single pass instead of N globs each re-walking the tree.
 
-    Directory symlinks are not descended into, so an entry's parent chain
-    is always real; only the entry itself can still be a link.
+    Symlinked directories are not descended into, so only an entry itself
+    can be a link.
 
     Args:
         session_dir: Root directory to walk.
@@ -422,7 +416,8 @@ def package_session_artifacts(
 
     Returns:
         Absolute path to the written zip, or ``None`` on any failure /
-        no files matched. Never raises.
+        no files matched. Never raises. A returned zip may still be
+        partial; its manifest's ``complete`` field says which.
     """
     try:
         sd = Path(session_dir).resolve()
@@ -512,8 +507,8 @@ def package_session_artifacts(
 
         # Also lay the same files down loose (uncompressed, original tree)
         # straight under the dest root so a consumer can grab one file without
-        # unzip. The loose tree can succeed or fail independently of the zip,
-        # so it gets a manifest describing its own contents.
+        # unzip. It succeeds or fails independently of the zip, so it carries
+        # its own manifest.
         if _loose_enabled():
             try:
                 copied, loose_failures = _copy_loose_tree(included, root)

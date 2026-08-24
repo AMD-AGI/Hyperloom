@@ -241,13 +241,12 @@ def _resolve_under_session(
 
     Tries the raw path as-is, then re-roots each ``anchors`` suffix at
     ``session_dir`` (container paths like ``/workspace/runs/...`` map to the
-    wekafs ``<session_dir>/runs/...`` view). Returns the first existing
+    wekafs ``<session_dir>/runs/...`` view).     Returns the first existing
     candidate that lies inside ``session_dir``, else ``None``.
 
-    The raw path is only trusted when it resolves inside ``session_dir``.
-    Otherwise it is treated as a foreign view of the session and re-rooted,
-    which is also what keeps a container path that happens to exist on this
-    host from resolving to another session's artifacts.
+    A raw path resolving outside the session is treated as a foreign view
+    and re-rooted, so a container path that also exists on this host cannot
+    resolve to another session's artifacts.
 
     Args:
         session_dir (Path): The on-disk session root to re-root under.

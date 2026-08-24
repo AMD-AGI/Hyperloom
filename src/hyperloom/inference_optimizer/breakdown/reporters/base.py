@@ -29,11 +29,7 @@ __all__ = [
 
 
 def as_dict(value: Any) -> dict[str, Any]:
-    """The value when it is a mapping, else an empty dict.
-
-    Section values are read back from JSON a producer wrote, so a section
-    that drifted to a list or a string must not turn attribute access into
-    an exception.
+    """Narrow a breakdown section to a mapping, since no producer is schema-checked.
 
     Args:
         value: A breakdown section value.
@@ -121,12 +117,10 @@ def render_section(
     fn: RendererFn,
     breakdown: dict[str, Any],
 ) -> RenderedSection:
-    """Run one renderer, degrading to a warning-only section when it raises.
+    """Run one renderer so a failing section costs itself, not the report.
 
-    Sections are rendered from whatever the producers wrote, and a section
-    whose shape drifted from what its renderer expects must cost that one
-    section rather than the whole report. The failure is surfaced as a data
-    quality warning so it is visible in the output instead of silent.
+    The failure is reported as a data-quality warning, which the compose
+    layer renders in the section body and the executive summary.
 
     Args:
         section_id: Registry id of the renderer, used for the fallback title.
