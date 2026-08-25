@@ -824,11 +824,40 @@ class TestWarmReplayPatchRootResolution:
             f"{dynamic_root}/",
         )
 
-    def test_mismatched_explicit_root_is_rejected(
+    def test_explicit_root_wins_when_it_holds_the_target(
         self,
         monkeypatch,
         tmp_path,
     ):
+        """The allowlist fallback must not demote a declared root that does match."""
+        env_root = tmp_path / "env-sglang"
+        other_root = tmp_path / "other" / "sglang"
+        rel = "python/sglang/srt/models/qwen3.py"
+        for root in (env_root, other_root):
+            (root / rel).parent.mkdir(parents=True)
+            (root / rel).write_text("original\n", encoding="utf-8")
+        patch = tmp_path / "framework.patch"
+        patch.write_text(
+            f"diff --git a/{rel} b/{rel}\n--- a/{rel}\n+++ b/{rel}\n@@ -1 +1 @@\n-original\n+patched\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("FRAMEWORK", "SGLANG")
+        monkeypatch.setenv("SGLANG_REPO_PATH", str(env_root))
+        monkeypatch.setattr(fp, "_warm_replay_framework_patch_roots", lambda: (f"{other_root}/",))
+
+        resolution = fp.resolve_warm_replay_framework_root(patch_paths=[patch])
+
+        # Both trees hold the target, so only the env preference keeps this out
+        # of an ambiguous_root refusal.
+        assert resolution.root == f"{env_root}/"
+        assert resolution.source == "env"
+
+    def test_mismatched_explicit_root_falls_back_to_allowlist(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """The env root is preferred, not mandatory: a replayable patch it does not hold still lands."""
         env_root = tmp_path / "env-sglang"
         fallback_root = tmp_path / "fallback" / "sglang"
         env_root.mkdir()
@@ -854,9 +883,10 @@ class TestWarmReplayPatchRootResolution:
 
         resolution = fp.resolve_warm_replay_framework_root(patch_paths=[patch])
 
-        assert resolution.root == ""
-        assert resolution.source == ""
-        assert resolution.reason == "framework_patch_root_not_in_allowlist"
+        assert resolution.root == f"{fallback_root}/"
+        assert resolution.source == "allowlist"
+        assert resolution.reason == ""
+        assert resolution.allowlist == (f"{fallback_root}/",)
 
     def test_inline_patch_content_matches_allowlist_root(self, monkeypatch, tmp_path):
         """A legacy entry carrying only an inline diff still resolves a root."""
