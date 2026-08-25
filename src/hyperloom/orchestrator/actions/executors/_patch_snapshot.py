@@ -10,11 +10,12 @@ Public surface
 * :func:`_git_commit_kept`        — stage and commit only patch-touched paths.
 * :func:`_commit_strip_level`     — the ``-p`` level a forward apply resolved at.
 * :func:`_patch_touched_paths`    — touched paths of an already-applied patch set.
-* :func:`_patch_touched_paths_from_text` — the same, before apply (header text only).
+* :func:`_patch_touched_paths_from_text` — pre-apply candidates, from header text.
 
-Snapshot and commit share one touched-path notion, so a revert and a KEEP can
-never disagree about which files the candidate owns. Neither ever widens to the
-whole tree, so unrelated working-tree state survives both.
+A KEEP commits the paths the apply resolved at; a snapshot, taken before the
+level is knowable, covers the candidates for every level it could resolve at, so
+the restore is a superset of what the commit would stage. Neither ever widens to
+the whole tree, so unrelated working-tree state survives both.
 """
 
 from __future__ import annotations
@@ -107,18 +108,12 @@ def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]
 def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
     """Repo-relative paths a diff's headers may resolve to, before it is applied.
 
-    Pre-apply the strip level is not knowable: what the patch creates does not
-    exist yet, and in a multi-patch set a later patch only resolves once an
-    earlier one has applied, so probing the tree the way
-    :func:`_commit_strip_level` does cannot stand in for it. Every level in
-    :data:`_P_LEVELS` is emitted instead — the same ladder the apply is driven
-    through — so whichever one it settles on, the path it really touches was
-    snapshotted.
-
-    Over-broad stays safe in both directions: a candidate that never
-    materialises is snapshotted as absent and restored as absent, and one that
-    exists but the patch never touches is restored to the content it already
-    has.
+    The strip level is not knowable here — what the patch creates does not exist
+    yet, and in a multi-patch set a later patch only resolves once an earlier one
+    has applied — so every level in :data:`_P_LEVELS` is emitted, the same ladder
+    the apply is driven through. Over-broad is safe: an unused candidate is
+    snapshotted absent and restored absent, or restored to the content it
+    already has.
 
     Args:
         patch_content: Raw text of a unified diff.
@@ -147,6 +142,10 @@ def _create_patch_snapshot(
 ) -> dict[str, Any]:
     """Snapshot the worktree content, mode and index entry of patch-touched paths.
 
+    Covers a candidate per strip level, so the apply cannot resolve to a path the
+    restore does not hold. A symlink among them fails the snapshot rather than
+    the restore, before anything has been mutated.
+
     Args:
         repo_path: The git worktree root the patches will be applied into.
         patch_contents: Raw text of each patch, to derive the paths to snapshot.
@@ -156,7 +155,7 @@ def _create_patch_snapshot(
         The manifest, also written to ``<output_dir>/warm_patch_snapshot/manifest.json``.
 
     Raises:
-        ValueError: When no touched paths are derivable, or a target is a symlink.
+        ValueError: When no candidate paths are derivable, or one is a symlink.
         subprocess.CalledProcessError: When ``git ls-files`` fails (not a git tree).
     """
     touched = list(
