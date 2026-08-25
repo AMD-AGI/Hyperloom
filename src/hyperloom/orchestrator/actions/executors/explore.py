@@ -1637,6 +1637,12 @@ class ExploreExecutor:
                             "fingerprint": fp,
                             "name": gv.name,
                             "candidate_extra_server_args": gv.extra_server_args,
+                            "candidate_extra_envs": dict(gv.extra_envs or {}),
+                            "recipe_delta": {
+                                "extra_server_args": gv.extra_server_args,
+                                "extra_envs": dict(gv.extra_envs or {}),
+                                **control_fields,
+                            },
                             "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
                             "effective_extra_server_args": next_effective_args,
                             "extra_envs": dict(next_envs),
