@@ -1502,6 +1502,14 @@ def test_profile_server_args_sanitizer_preserves_json_value_quotes():
     assert "--torch-compile-max-bs" not in sanitized
 
 
+def test_profile_server_args_sanitizer_degrades_on_unbalanced_quote():
+    """An unbalanced quote must not raise; the function falls back to whitespace split."""
+    result = _sanitize_profile_server_args("--foo 'unterminated --bar baz")
+    assert isinstance(result, str)
+    assert "--foo" in result
+    assert "--bar" in result
+
+
 # $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path.
 def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
     monkeypatch.delenv("FRAMEWORK", raising=False)

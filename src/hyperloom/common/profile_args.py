@@ -31,7 +31,10 @@ def sanitize_profile_server_args(args: str) -> str:
     raw = str(args or "").strip()
     if not raw:
         return ""
-    tokens = shlex.split(raw, posix=False)
+    try:
+        tokens = shlex.split(raw, posix=False)
+    except ValueError:
+        return " ".join(raw.split())
     out: list[str] = []
     skip_next = False
     i = 0
