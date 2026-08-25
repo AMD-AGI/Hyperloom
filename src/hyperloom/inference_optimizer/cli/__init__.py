@@ -1758,8 +1758,7 @@ def _export_partition_lever(
         rejected = unsupported_modes(modes, gpu_id)
         if rejected:
             print(
-                f"ERROR: GPU {gpu_id} does not support {','.join(rejected)}. "
-                f"It reports: {','.join(available)}.",
+                f"ERROR: GPU {gpu_id} does not support {','.join(rejected)}. It reports: {','.join(available)}.",
                 file=sys.stderr,
             )
             sys.exit(2)

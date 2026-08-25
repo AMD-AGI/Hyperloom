@@ -478,9 +478,7 @@ def test_layout_refuses_a_cu_count_that_does_not_divide(monkeypatch):
     # Flooring would be silent, and then fatal much later and for an apparently
     # unrelated reason: device selection matches the per-partition CU count
     # exactly, so a floored value matches no device at all.
-    monkeypatch.setitem(
-        gpu_partition.AMD_GPU_DISPATCH_IDENTITIES, "oddboard", ("gfx950", 300, "x")
-    )
+    monkeypatch.setitem(gpu_partition.AMD_GPU_DISPATCH_IDENTITIES, "oddboard", ("gfx950", 300, "x"))
     with pytest.raises(PartitionError, match="does not divide"):
         layout_for("oddboard", "CPX")
     # The same board is fine in a mode its CU count does divide by.

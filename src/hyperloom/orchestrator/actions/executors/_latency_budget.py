@@ -121,8 +121,7 @@ def latency_keep_block(
         )
     if observed > budget:
         return True, (
-            f"{REASON_OVER_BUDGET}: {observed:.0f} ms exceeds the "
-            f"{budget:.0f} ms budget ({observed / budget:.2f}x)"
+            f"{REASON_OVER_BUDGET}: {observed:.0f} ms exceeds the {budget:.0f} ms budget ({observed / budget:.2f}x)"
         )
     return False, ""
 
