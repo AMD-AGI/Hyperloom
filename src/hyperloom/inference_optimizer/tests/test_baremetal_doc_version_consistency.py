@@ -31,6 +31,7 @@ def test_baremetal_defaults_match_compat_doc():
     vllm_version = _default("VLLM_VERSION", sh)  # e.g. 0.27.1
     vllm_variant = _default("VLLM_ROCM_VARIANT", sh)  # e.g. rocm723
     sglang_ref = _default("SGLANG_REF", sh)  # e.g. v0.5.17
+    sglang_rocm_extra = _default("SGLANG_ROCM_EXTRA", sh)  # e.g. rocm724
 
     # compatibility.rst documents e.g. "v0.27.1 (rocm723)" and the pip spec
     # "vllm==0.27.1+rocm723"; keep both in lockstep with the script defaults.
@@ -43,4 +44,10 @@ def test_baremetal_defaults_match_compat_doc():
     )
 
     sglang_version = sglang_ref.lstrip("v")
-    assert "v%s (rocm" % sglang_version in doc, "docs/compatibility.rst must document SGLang v%s" % sglang_version
+    assert "v%s (%s)" % (sglang_version, sglang_rocm_extra) in doc, (
+        "docs/compatibility.rst must document SGLang 'v%s (%s)' to match "
+        "install_baremetal.sh defaults" % (sglang_version, sglang_rocm_extra)
+    )
+    assert "SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra in doc, (
+        "docs/compatibility.rst must document SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra
+    )
