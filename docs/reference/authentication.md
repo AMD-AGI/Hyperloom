@@ -20,8 +20,9 @@ Hyperloom needs at most two classes of configuration:
    [LLM gateway credentials](#llm-gateway-credentials)).
 - **Path / workspace layout**: Run bare-metal setup from the installed
    Hyperloom target directory. You normally only set `USER_DATA_PATH`
-   (writable artifact root; default `/workspace/hyperloom`); setup writes the
-   runtime env files and updates `.env`.
+   (writable artifact root; defaults to `/workspace/hyperloom` when `/workspace`
+   is writable, otherwise to `session/` under the current directory); setup
+   writes the runtime env files and updates `.env`.
 
 Hyperloom never borrows one provider's key or endpoint for the other. A side is
 configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, or by
@@ -260,7 +261,7 @@ loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 
 | Variable               | Set by operator? | Default                                          | Description                                                                                                      |
 |------------------------|------------------|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
-| `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom`                           | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Replaces retired `WORKSPACE_PATH` / `INFERENCE_OPTIMIZER_SESSION_DIR`. |
+| `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Bare-metal hosts without a writable `/workspace` take the second form, which is also what setup offers. Replaces retired `WORKSPACE_PATH` / `INFERENCE_OPTIMIZER_SESSION_DIR`. |
 | `REPO_ROOT`            | rarely           | auto-detected from script location               | This Hyperloom checkout. Locates `.env`, skills, scripts.                                                        |
 | `KERNEL_AGENT_ENV`     | rarely           | `$USER_DATA_PATH/runtime/kernel-agent.env.sh`    | Output of `install.sh`; exports resolved paths and LLM aliases.                                                  |
 | `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (env files, GEAK config, Recipe KB bookkeeping).                                             |
