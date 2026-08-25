@@ -1178,8 +1178,20 @@ async def test_promote_explore_multi_winner_watermark_stays_in_sync(session_dir)
     try:
         c.shared_state.baseline_tput = 1000.0
         task = _mk_task("explore", "t-multi-win")
-        winner_a = {"name": "w-a", "fingerprint": "fp_a", "tput": 1100.0, "extra_server_args": "--a 1", "extra_envs": {}}
-        winner_b = {"name": "w-b", "fingerprint": "fp_b", "tput": 1210.0, "extra_server_args": "--a 1 --b 2", "extra_envs": {}}
+        winner_a = {
+            "name": "w-a",
+            "fingerprint": "fp_a",
+            "tput": 1100.0,
+            "extra_server_args": "--a 1",
+            "extra_envs": {},
+        }
+        winner_b = {
+            "name": "w-b",
+            "fingerprint": "fp_b",
+            "tput": 1210.0,
+            "extra_server_args": "--a 1 --b 2",
+            "extra_envs": {},
+        }
         result = {
             "status": "succeeded",
             "winners": [winner_a, winner_b],
