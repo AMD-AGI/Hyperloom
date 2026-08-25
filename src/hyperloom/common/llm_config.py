@@ -238,8 +238,11 @@ def dual_protocol_endpoint_pair(base_url: str) -> tuple[str, str]:
     Matching is case-insensitive because AMD's gateway spells the segment
     ``/Anthropic`` (issue #929).
 
-    A bare known-dual-protocol host gets both segments appended.
-    An unknown host is returned as-is on the Anthropic side.
+    A bare known-dual-protocol host gets both segments appended. A bare unknown
+    host is returned as-is on *both* sides.
+
+    ``assets/install_baremetal.sh`` mirrors this for the pre-Python bootstrap
+    and has to keep agreeing with it, branch for branch.
     """
     base = base_url.strip().rstrip("/")
     if not base:
