@@ -422,6 +422,81 @@ def fits_in_partition(
     return required_gib * max(1, int(streams_per_partition)) <= layout.gib_per_partition
 
 
+#: GiB per unit amd-smi may label a VRAM size with. The binary divisor is the
+#: right one for its "MB": an MI355X with 288 GiB reports 294896 "MB", which is
+#: mebibytes. "GB" is treated the same way for consistency with that.
+_VRAM_UNIT_GIB: dict[str, float] = {
+    "B": 1.0 / (1024**3),
+    "KB": 1.0 / (1024**2),
+    "KIB": 1.0 / (1024**2),
+    "MB": 1.0 / 1024,
+    "MIB": 1.0 / 1024,
+    "GB": 1.0,
+    "GIB": 1.0,
+    "TB": 1024.0,
+    "TIB": 1024.0,
+}
+
+
+def read_hbm_gib(gpu_id: int = 0) -> float | None:
+    """Read a card's total HBM in GiB, or ``None`` when it cannot be determined.
+
+    This is the capacity :func:`layout_for` needs to fill in
+    ``gib_per_partition``, and it is read from the device rather than tabled
+    because boards sharing an ISA do not share a capacity.
+
+    Only answers for a card currently in a single partition. ``amd-smi`` reports
+    VRAM per device, and under a split mode a device is a partition, so the same
+    field means "the whole card" in SPX and "one eighth of it" in CPX with
+    nothing in the payload to say which. Dividing an already-divided figure by
+    the partition count would understate capacity eightfold and prune every mode
+    that actually fits. Rather than guess the field's scope, this reports
+    *unknown* outside SPX and lets the caller proceed without a memory opinion --
+    the lever restores the card to SPX between runs, so the normal case answers.
+
+    Args:
+        gpu_id: GPU to interrogate.
+
+    Returns:
+        Total HBM in GiB, or ``None`` when unreadable, unparseable, or when the
+        card is partitioned and the figure's scope would be ambiguous.
+    """
+    try:
+        mode = read_partition_mode(gpu_id)
+    except PartitionError as exc:
+        log.debug("cannot scope GPU %d HBM without its partition mode: %s", gpu_id, exc)
+        return None
+    if MODE_PARTITION_COUNTS.get(mode) != 1:
+        log.debug("not reading GPU %d HBM: card is in %s, so a per-device size is not the card's", gpu_id, mode)
+        return None
+
+    try:
+        payload = _amd_smi_json(["static", "-g", str(gpu_id), "--vram"], _READ_TIMEOUT_S)
+    except PartitionError as exc:
+        log.debug("could not read HBM capacity for GPU %d: %s", gpu_id, exc)
+        return None
+
+    rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        vram = row.get("vram")
+        size = vram.get("size") if isinstance(vram, dict) else None
+        if not isinstance(size, dict):
+            continue
+        try:
+            value = float(size.get("value"))
+        except (TypeError, ValueError):
+            continue
+        scale = _VRAM_UNIT_GIB.get(str(size.get("unit") or "").strip().upper())
+        if scale is None or value <= 0:
+            continue
+        return value * scale
+    return None
+
+
 def _amd_smi_json(args: Sequence[str], timeout_s: float, privileged: bool = False) -> object:
     """Run an ``amd-smi`` subcommand with ``--json`` and parse its output.
 
@@ -637,6 +712,7 @@ __all__ = [
     "parse_modes",
     "partition_device_predicate",
     "partitioned",
+    "read_hbm_gib",
     "read_partition_mode",
     "read_partition_modes",
     "read_partition_profiles",

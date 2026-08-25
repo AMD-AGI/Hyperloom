@@ -3065,6 +3065,11 @@ class WritebackCollaborator:
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
+                # Measured on the reference config, so it is the footprint the
+                # compute-partition lever sizes its partitions against. Carried
+                # here rather than re-derived because the baseline is the one run
+                # that measures the workload before any knob has changed it.
+                "peak_gib_per_stream": result.get("peak_gib_per_stream"),
                 "workspace": result.get("workspace"),
             }
             changed = True

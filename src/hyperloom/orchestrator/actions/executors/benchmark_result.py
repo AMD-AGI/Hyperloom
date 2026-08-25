@@ -722,6 +722,8 @@ def _merge_raw_result(
             raw.get("p99_e2el_ms"),
             raw.get("p99_latency_ms"),
         )
+    if measurement.get("peak_gib_per_stream") is None:
+        measurement["peak_gib_per_stream"] = to_float(raw.get("peak_gib_per_stream"))
     if measurement.get("raw_result_path") is None:
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict. The KEY'S PRESENCE marks the result as AgentX
@@ -765,6 +767,7 @@ def extract_benchmark_measurement(
     ttft = latency.get("ttft") or {}
     tpot = latency.get("tpot") or {}
     e2el = latency.get("e2el") or {}
+    memory = report.get("memory") or {}
 
     measurement: dict[str, Any] = {
         "reported_success": report.get("success") if report else None,
@@ -793,6 +796,17 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
+        # Peak HBM one stream held, when the harness reports it. "per_stream" is
+        # in the key because the scope is the whole value of the number: memory
+        # feasibility is asked per partition, and a total-across-workers figure
+        # substituted here would overstate the footprint by the worker count.
+        # Optional -- absent from every harness that does not measure it, and
+        # read as "unknown" rather than "zero" by anyone who wants it.
+        "peak_gib_per_stream": first_float(
+            memory.get("peak_gib_per_stream"),
+            report.get("peak_gib_per_stream"),
+            throughput.get("peak_gib_per_stream"),
+        ),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }

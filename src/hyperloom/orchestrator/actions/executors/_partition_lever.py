@@ -32,14 +32,16 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager, nullcontext
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from hyperloom.common.gpu_partition import (
     PartitionError,
     PartitionLayout,
+    fits_in_partition,
     layout_for,
     parse_modes,
     partitioned,
+    read_hbm_gib,
 )
 
 log = logging.getLogger(__name__)
@@ -143,11 +145,130 @@ def resolve_session_modes(
     return ()
 
 
+def per_stream_footprint_gib(
+    params: dict[str, Any] | None = None,
+    shared_state: Any = None,
+) -> tuple[float, str]:
+    """Resolve the per-stream HBM footprint to size partitions against.
+
+    Two sources, tightest first:
+
+    * **Measured.** ``peak_gib_per_stream`` from the baseline run, when the
+      harness reported it. This is the real footprint -- weights, activations
+      and workspace -- so it is the only source that can rule out a mode the
+      weights alone would fit.
+    * **Weights.** ``weight_bytes`` read byte-exact from the checkpoint's
+      safetensors index. A *lower bound*, and deliberately used as one: each
+      stream holds its own copy of the weights, so the true footprint is never
+      smaller. That makes a "does not fit" verdict from this source a proof and
+      a "fits" verdict no evidence at all -- which is exactly the asymmetry
+      pruning needs, since it only ever acts on the former.
+
+    Args:
+        params: Task params, consulted for an explicit override.
+        shared_state: Live SharedState, consulted for the baseline measurement
+            and the model identity.
+
+    Returns:
+        ``(gib, source)``, or ``(0.0, "")`` when neither source can answer.
+        ``source`` names the origin for the log line that reports a drop, since
+        "too big by the weights alone" and "too big as measured" call for
+        different responses from an operator.
+    """
+    measured = (params or {}).get("peak_gib_per_stream")
+    if measured is None:
+        best = getattr(shared_state, "current_best", None)
+        if isinstance(best, dict):
+            measured = best.get("peak_gib_per_stream")
+    try:
+        if measured is not None and float(measured) > 0:
+            return float(measured), "measured"
+    except (TypeError, ValueError):
+        pass
+
+    model_path = str((params or {}).get("model_path") or getattr(shared_state, "model_path", "") or "").strip()
+    if not model_path:
+        return 0.0, ""
+    # Lazy: the kernel package pulls in the analytical stack, and this module is
+    # imported by the executors on every run whether the lever is on or not.
+    from hyperloom.orchestrator.kernel.roofline_ceiling import load_model_meta
+
+    try:
+        meta = load_model_meta(
+            model_path,
+            precision_hint=str(getattr(shared_state, "precision", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 — an unreadable checkpoint is "unknown", not fatal
+        log.debug("cannot size partitions from %s: %s", model_path, exc)
+        return 0.0, ""
+    if meta is None or meta.weight_bytes <= 0:
+        return 0.0, ""
+    return meta.weight_bytes / float(1024**3), "weights"
+
+
+def prune_infeasible_modes(
+    modes: Sequence[str],
+    *,
+    gpu_type: str | None,
+    hbm_gib: float | None,
+    footprint_gib: float,
+    streams: int,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Drop modes whose partitions provably cannot hold the streams placed on them.
+
+    A partition gets its fraction of the card's HBM while every stream on it
+    keeps a full copy of the weights, so the narrow modes run out of memory
+    first. Measuring that is expensive and uninformative: the run OOMs, the
+    variant is scored as a failure, and the operator learns from a stack trace
+    what arithmetic could have said for free.
+
+    Silent when it cannot compute -- an unknown capacity or an unknown footprint
+    yields no drops rather than a guess, because the cost of wrongly dropping a
+    mode is an optimization that never considers the configuration that would
+    have won.
+
+    Args:
+        modes: Canonical modes the operator asked for, in their order.
+        gpu_type: Board name, needed to size partitions.
+        hbm_gib: Card capacity, or ``None`` when unknown.
+        footprint_gib: Per-stream footprint; ``0`` when unknown.
+        streams: Streams that will share each partition.
+
+    Returns:
+        ``(kept, reasons)``. ``kept`` preserves the input order; ``reasons``
+        holds one human-readable line per dropped mode.
+    """
+    if not hbm_gib or footprint_gib <= 0:
+        return tuple(modes), ()
+    kept: list[str] = []
+    reasons: list[str] = []
+    for mode in modes:
+        try:
+            layout = layout_for(gpu_type, mode, hbm_gib=hbm_gib)
+        except PartitionError as exc:
+            # Undescribable here means undescribable at apply time too, but this
+            # is not the place that gets to refuse it: keep the mode and let the
+            # apply path raise with its own context.
+            log.debug("not sizing %s: %s", mode, exc)
+            kept.append(mode)
+            continue
+        if fits_in_partition(footprint_gib, layout, streams):
+            kept.append(mode)
+            continue
+        reasons.append(
+            f"{mode}: {streams} x {footprint_gib:.1f} GiB = {footprint_gib * streams:.1f} GiB "
+            f"needed per partition, {layout.gib_per_partition:.1f} GiB available "
+            f"({layout.partitions} x {layout.cu_per_partition} CU)"
+        )
+    return tuple(kept), tuple(reasons)
+
+
 def partition_lever_grid(
     params: dict[str, Any] | None = None,
     shared_state: Any = None,
     *,
     framework: str | None,
+    hbm_gib: float | None = None,
 ) -> list[dict[str, Any]]:
     """Expand the session's mode list into one explore variant per mode.
 
@@ -157,10 +278,14 @@ def partition_lever_grid(
     code as every other variant, and a mode that loses is reverted like any
     other losing knob.
 
-    Every listed mode is emitted, including one that may already match the
-    card. This function stays pure -- no hardware read -- and a mode the
-    operator named explicitly is worth a measurement under the same harness as
-    its rivals rather than an inherited baseline number taken on trust.
+    A mode that may already match the card is still emitted: it is worth a
+    measurement under the same harness as its rivals rather than an inherited
+    baseline number taken on trust.
+
+    A mode whose partitions cannot hold the streams destined for them is not
+    emitted, because that variant has only one outcome and it is an OOM. See
+    :func:`prune_infeasible_modes`; the arithmetic needs a card capacity and a
+    per-stream footprint, and drops nothing when either is unknown.
 
     Only scriptable frameworks get variants. The mode is applied by
     :func:`plan_partition_run`, which the scriptable runner calls and the
@@ -173,10 +298,14 @@ def partition_lever_grid(
         params: Task params, consulted for the mode list.
         shared_state: Live SharedState, consulted for the persisted list.
         framework: Framework this round runs under.
+        hbm_gib: Card capacity for the feasibility check. Read from the managed
+            GPU when omitted; injectable so the decision is testable without a
+            card and overridable by a caller that already knows.
 
     Returns:
         Variant payload dicts ready for ``_grid_variants_from_payload``, or
-        ``[]`` when the lever is off or the framework cannot apply it.
+        ``[]`` when the lever is off, the framework cannot apply it, or no
+        requested mode has room for the workload.
     """
     from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
@@ -192,6 +321,41 @@ def partition_lever_grid(
             framework or "",
         )
         return []
+
+    streams = streams_per_partition()
+    footprint_gib, footprint_source = per_stream_footprint_gib(params, shared_state)
+    # Capacity is only read once a footprint exists to compare it against. With
+    # no footprint the check cannot reach a verdict either way, and this spares
+    # every mode-less-of-a-workload caller an amd-smi subprocess.
+    if hbm_gib is None and footprint_gib > 0:
+        hbm_gib = read_hbm_gib(partition_gpu_id())
+    feasible, dropped = prune_infeasible_modes(
+        modes,
+        gpu_type=str((params or {}).get("gpu_type") or getattr(shared_state, "gpu_type", "") or ""),
+        hbm_gib=hbm_gib,
+        footprint_gib=footprint_gib,
+        streams=streams,
+    )
+    for reason in dropped:
+        # Warned rather than debugged: the operator asked for this mode by name,
+        # and a list that quietly comes back shorter than it went in is the kind
+        # of thing that gets rediscovered as a bug.
+        log.warning(
+            "compute-partition %s dropped at %d stream(s)/partition, footprint from %s",
+            reason,
+            streams,
+            footprint_source,
+        )
+    if not feasible:
+        log.warning(
+            "no requested compute-partition mode has room for a %.1f GiB/stream "
+            "footprint (%s) at %d stream(s)/partition; the lever contributes no "
+            "variants this round",
+            footprint_gib,
+            footprint_source,
+            streams,
+        )
+        return []
     return [
         {
             "name": f"partition_{mode.lower()}",
@@ -200,7 +364,7 @@ def partition_lever_grid(
             "note": f"compute-partition {mode}",
             "provenance": "partition_lever",
         }
-        for mode in modes
+        for mode in feasible
     ]
 
 
@@ -307,7 +471,9 @@ __all__ = [
     "maybe_hold_partition_mode",
     "partition_gpu_id",
     "partition_lever_grid",
+    "per_stream_footprint_gib",
     "plan_partition_run",
+    "prune_infeasible_modes",
     "requested_mode",
     "resolve_session_modes",
     "runtime_env",

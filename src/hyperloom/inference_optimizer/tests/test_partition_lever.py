@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common import gpu_partition as gp
 from hyperloom.inference_optimizer import cli
 from hyperloom.orchestrator.actions.executors import _partition_lever as pl
 from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
@@ -47,10 +48,7 @@ class _FakeSmi:
             self.modes[gpu_id] = mode
             self.history.append(mode)
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        rows = [
-            {"gpu_id": gid, "memory": "NPS1", "accelerator_type": m}
-            for gid, m in sorted(self.modes.items())
-        ]
+        rows = [{"gpu_id": gid, "memory": "NPS1", "accelerator_type": m} for gid, m in sorted(self.modes.items())]
         return subprocess.CompletedProcess(cmd, 0, json.dumps({"current_partition": rows}), "")
 
 
@@ -209,9 +207,7 @@ class TestResumeContract:
 
     @staticmethod
     def _args(**over):
-        ns = argparse.Namespace(
-            compute_partition_modes=None, streams_per_partition=None, max_latency_ms=None
-        )
+        ns = argparse.Namespace(compute_partition_modes=None, streams_per_partition=None, max_latency_ms=None)
         for key, value in over.items():
             setattr(ns, key, value)
         return ns
@@ -302,9 +298,7 @@ def test_streams_per_partition_parses_to_none_when_not_passed():
     assert args.compute_partition_modes is None
     assert args.max_latency_ms is None
 
-    passed = _build_parser().parse_args(
-        ["optimize", "--model", "/tmp/m", "--streams-per-partition", "2"]
-    )
+    passed = _build_parser().parse_args(["optimize", "--model", "/tmp/m", "--streams-per-partition", "2"])
     assert passed.streams_per_partition == 2
 
 
@@ -332,9 +326,7 @@ class TestModeAxis:
         return SimpleNamespace(compute_partition_modes=list(modes))
 
     def test_the_session_list_becomes_one_variant_per_mode(self):
-        grid = pl.partition_lever_grid(
-            {"compute_partition_modes": "spx,dpx,cpx"}, None, framework="custom"
-        )
+        grid = pl.partition_lever_grid({"compute_partition_modes": "spx,dpx,cpx"}, None, framework="custom")
         assert [v["name"] for v in grid] == [
             "partition_spx",
             "partition_dpx",
@@ -369,12 +361,7 @@ class TestModeAxis:
         is wrong in a way nothing downstream can detect.
         """
         for framework in ("sglang", "vllm", ""):
-            assert (
-                pl.partition_lever_grid(
-                    {"compute_partition_modes": "dpx"}, None, framework=framework
-                )
-                == []
-            )
+            assert pl.partition_lever_grid({"compute_partition_modes": "dpx"}, None, framework=framework) == []
 
     def test_an_unusable_mode_list_seeds_nothing_rather_than_raising(self, monkeypatch):
         # Grid assembly is not the place to end a session; the CLI already
@@ -416,9 +403,7 @@ class TestModeAxisOrdering:
         # An operator or specialist who named the variant said something more
         # specific than the generated default; the generated one steps aside.
         pinned = {"name": "partition_dpx", "extra_envs": {"CUSTOM": "1"}}
-        grid, fresh = explore._prepend_fresh_variants(
-            [pinned], [{"name": "partition_dpx", "extra_envs": {}}]
-        )
+        grid, fresh = explore._prepend_fresh_variants([pinned], [{"name": "partition_dpx", "extra_envs": {}}])
         assert grid == [pinned]
         assert fresh == []
 
@@ -427,6 +412,200 @@ class TestModeAxisOrdering:
         grid, fresh = explore._prepend_fresh_variants(original, [])
         assert grid == original
         assert fresh == []
+
+
+class TestHbmCapacity:
+    """Reading how much memory a partition would actually get.
+
+    ``layout_for`` cannot size a partition's memory without the card's total,
+    and the total is not tabled because boards sharing an ISA do not share a
+    capacity. These cover the parse and the one state where the reading means
+    something other than what it says.
+    """
+
+    @staticmethod
+    def _smi(monkeypatch, *, mode: str = "SPX", vram: dict | None = None):
+        def fake_run(cmd, **kwargs):
+            if "--vram" in cmd:
+                payload = {"gpu_data": [{"gpu": 0, "vram": {"size": vram} if vram else {}}]}
+            else:
+                payload = {"current_partition": [{"gpu_id": 0, "accelerator_type": mode}]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+        monkeypatch.setattr(gp.subprocess, "run", fake_run)
+
+    def test_mebibytes_labelled_mb_are_read_as_mebibytes(self, monkeypatch):
+        # An MI355X with 288 GiB reports 294896 and calls it "MB". Taking that
+        # decimally would understate the card by 7% and prune modes that fit.
+        self._smi(monkeypatch, vram={"value": 294896, "unit": "MB"})
+        assert gp.read_hbm_gib(0) == pytest.approx(288.0, abs=0.1)
+
+    def test_a_partitioned_card_reports_unknown(self, monkeypatch):
+        """The reading is per device, and under a split mode a device is a partition.
+
+        Nothing in the payload says whether the figure is the card or a slice of
+        it, and dividing an already-divided number by the partition count again
+        would understate capacity eightfold -- pruning every mode that fits.
+        """
+        self._smi(monkeypatch, mode="CPX", vram={"value": 36864, "unit": "MB"})
+        assert gp.read_hbm_gib(0) is None
+
+    def test_an_unparseable_size_is_unknown_rather_than_zero(self, monkeypatch):
+        # Zero would read as "nothing fits" and silently empty the mode list.
+        self._smi(monkeypatch, vram={"value": "N/A", "unit": "MB"})
+        assert gp.read_hbm_gib(0) is None
+        self._smi(monkeypatch, vram={"value": 288, "unit": "furlongs"})
+        assert gp.read_hbm_gib(0) is None
+
+    def test_no_amd_smi_is_unknown(self, monkeypatch):
+        monkeypatch.setattr(gp.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
+        assert gp.read_hbm_gib(0) is None
+
+
+class TestFootprintPruning:
+    """Refusing a mode whose partitions cannot hold what would run on them.
+
+    A partition gets its share of HBM while every stream on it keeps a full copy
+    of the weights, so the narrow modes exhaust memory first. Measuring that
+    costs a run per mode and returns an OOM instead of a number.
+    """
+
+    def test_a_mode_too_small_for_its_streams_is_dropped(self):
+        # 288 GiB card: CPX gives 36 GiB/partition, and two 20.7 GiB streams
+        # need 41.4 GiB. QPX's 72 GiB holds them.
+        kept, reasons = pl.prune_infeasible_modes(
+            ("SPX", "DPX", "QPX", "CPX"),
+            gpu_type="mi355x",
+            hbm_gib=288.0,
+            footprint_gib=20.7,
+            streams=2,
+        )
+        assert kept == ("SPX", "DPX", "QPX")
+        assert len(reasons) == 1
+        # The arithmetic travels with the verdict; "CPX dropped" alone does not
+        # tell an operator whether to lower streams or pick a bigger mode.
+        assert "CPX" in reasons[0] and "41.4" in reasons[0] and "36.0" in reasons[0]
+
+    def test_streams_per_partition_decides_it(self):
+        """One stream fitting says nothing about two.
+
+        This is the case that makes gating on the single-stream figure worse than
+        not gating: the configuration is declared feasible and dies at the second
+        worker, after the first has already been measured.
+        """
+        args = dict(gpu_type="mi355x", hbm_gib=288.0, footprint_gib=20.7)
+        assert pl.prune_infeasible_modes(("CPX",), streams=1, **args)[0] == ("CPX",)
+        assert pl.prune_infeasible_modes(("CPX",), streams=2, **args)[0] == ()
+
+    def test_an_unknown_capacity_drops_nothing(self):
+        kept, reasons = pl.prune_infeasible_modes(
+            ("SPX", "CPX"), gpu_type="mi355x", hbm_gib=None, footprint_gib=20.7, streams=2
+        )
+        assert kept == ("SPX", "CPX")
+        assert reasons == ()
+
+    def test_an_unknown_footprint_drops_nothing(self):
+        # Wrongly dropping a mode costs the optimization the configuration that
+        # would have won, and leaves no trace that it was ever a candidate.
+        kept, _ = pl.prune_infeasible_modes(
+            ("SPX", "CPX"), gpu_type="mi355x", hbm_gib=288.0, footprint_gib=0.0, streams=2
+        )
+        assert kept == ("SPX", "CPX")
+
+    def test_an_unsizeable_board_keeps_the_mode(self):
+        # Refusing here would report an unknown board as a memory verdict; the
+        # apply path raises with the real reason attached.
+        kept, reasons = pl.prune_infeasible_modes(
+            ("CPX",), gpu_type="nvidia-h100", hbm_gib=288.0, footprint_gib=999.0, streams=2
+        )
+        assert kept == ("CPX",)
+        assert reasons == ()
+
+    def test_the_grid_drops_the_infeasible_mode(self, monkeypatch):
+        monkeypatch.setenv(pl.STREAMS_PER_PARTITION_ENV, "2")
+        grid = pl.partition_lever_grid(
+            {
+                "compute_partition_modes": "spx,cpx",
+                "gpu_type": "mi355x",
+                "peak_gib_per_stream": 20.7,
+            },
+            None,
+            framework="custom",
+            hbm_gib=288.0,
+        )
+        assert [v["name"] for v in grid] == ["partition_spx"]
+
+    def test_a_model_that_fits_nowhere_seeds_nothing(self, monkeypatch):
+        monkeypatch.setenv(pl.STREAMS_PER_PARTITION_ENV, "2")
+        grid = pl.partition_lever_grid(
+            {
+                "compute_partition_modes": "dpx,cpx",
+                "gpu_type": "mi355x",
+                "peak_gib_per_stream": 200.0,
+            },
+            None,
+            framework="custom",
+            hbm_gib=288.0,
+        )
+        assert grid == []
+
+
+class TestFootprintSource:
+    """Which number the partitions get sized against, and how sure it is."""
+
+    def test_a_measured_peak_wins(self):
+        state = SimpleNamespace(current_best={"peak_gib_per_stream": 20.7})
+        assert pl.per_stream_footprint_gib(None, state) == (20.7, "measured")
+
+    def test_params_override_the_baseline(self):
+        state = SimpleNamespace(current_best={"peak_gib_per_stream": 20.7})
+        assert pl.per_stream_footprint_gib({"peak_gib_per_stream": 30.0}, state) == (30.0, "measured")
+
+    def test_weights_are_the_fallback_and_a_lower_bound(self, tmp_path):
+        """Read from the checkpoint, so it needs no run to be known.
+
+        A lower bound is the right thing to prune on: the true footprint adds
+        activations and never subtracts weights, so "does not fit by the weights
+        alone" is a proof while "fits" is no evidence at all.
+        """
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"num_hidden_layers": 4, "hidden_size": 512, "torch_dtype": "float16"}),
+            encoding="utf-8",
+        )
+        (model / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 150 * 1024**3}}), encoding="utf-8"
+        )
+        gib, source = pl.per_stream_footprint_gib(None, SimpleNamespace(model_path=str(model)))
+        assert source == "weights"
+        assert gib == pytest.approx(150.0)
+
+    def test_no_measurement_and_no_readable_model_is_unknown(self, tmp_path):
+        assert pl.per_stream_footprint_gib(None, SimpleNamespace(model_path=str(tmp_path / "gone"))) == (0.0, "")
+        assert pl.per_stream_footprint_gib(None, None) == (0.0, "")
+
+    def test_a_large_checkpoint_rules_out_the_narrow_modes(self, tmp_path, monkeypatch):
+        """The case the weights bound is actually for.
+
+        Two streams of a 60 GiB checkpoint need 120 GiB per partition, which
+        QPX's 72 GiB cannot hold whatever the activations do -- and that is
+        knowable from the checkpoint before the first run.
+        """
+        monkeypatch.setenv(pl.STREAMS_PER_PARTITION_ENV, "2")
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(json.dumps({"torch_dtype": "float16"}), encoding="utf-8")
+        (model / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 60 * 1024**3}}), encoding="utf-8"
+        )
+        grid = pl.partition_lever_grid(
+            {"compute_partition_modes": "spx,dpx,qpx,cpx", "gpu_type": "mi355x"},
+            SimpleNamespace(model_path=str(model)),
+            framework="custom",
+            hbm_gib=288.0,
+        )
+        assert [v["name"] for v in grid] == ["partition_spx", "partition_dpx"]
 
 
 def test_launch_refuses_the_lever_on_a_serving_framework(capsys):
