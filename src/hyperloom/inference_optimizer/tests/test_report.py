@@ -52,6 +52,73 @@ def test_degraded_mode_section_empty():
     assert rp._format_degraded_mode_section({}) == []
 
 
+# ---- _format_compute_partition_section ----
+def _partition_summary(**over):
+    base = {"framework": "xdit", "compute_partition_modes": [], "streams_per_partition": 2}
+    base.update(over)
+    return base
+
+
+def test_partition_section_advertises_the_lever_when_it_was_not_used():
+    """The whole point of the section: an operator cannot ask for a lever nobody mentions."""
+    body = "\n".join(rp._format_compute_partition_section(_partition_summary()))
+    assert "not exercised" in body
+    # The flag has to be there literally -- naming the capability without the
+    # incantation leaves the reader exactly as stuck.
+    assert "--compute-partition-modes spx,dpx,qpx,cpx" in body
+    assert "--streams-per-partition 2" in body
+    # And the three things that bite: latency, privilege, other tenants.
+    assert "--max-latency-ms" in body and "1211 ms" in body
+    assert "HYPERLOOM_PARTITION_SUDO=1" in body
+    assert "evicts every process" in body
+
+
+def test_partition_section_is_silent_on_serving_frameworks():
+    # The lever is refused at launch there, so advertising it would send an
+    # operator to a flag that exits 2.
+    for framework in ("sglang", "vllm", "atom", ""):
+        assert rp._format_compute_partition_section(_partition_summary(framework=framework)) == []
+
+
+def test_partition_section_is_silent_on_a_multi_node_session():
+    # The lever manages one card; the advice would not apply to the run made.
+    summary = _partition_summary(platform={"multi_node_session": True})
+    assert rp._format_compute_partition_section(summary) == []
+
+
+def test_partition_section_reports_the_mode_that_won():
+    summary = _partition_summary(
+        compute_partition_modes=["SPX", "DPX"],
+        latency_budget_ms=400.0,
+        current_best={"action": "explore", "extra_envs": {"HYPERLOOM_PARTITION_MODE": "DPX"}},
+    )
+    body = "\n".join(rp._format_compute_partition_section(summary))
+    assert "not exercised" not in body
+    assert "`SPX`, `DPX`" in body
+    assert "`DPX` — the best configuration runs on a partitioned card" in body
+    assert "`400.0` ms" in body
+
+
+def test_partition_section_says_so_when_no_mode_was_kept():
+    # A measured loss is a result. Reporting it as a blank would read as a
+    # lever that never ran.
+    summary = _partition_summary(
+        compute_partition_modes=["CPX"],
+        latency_budget_ms=400.0,
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    body = "\n".join(rp._format_compute_partition_section(summary))
+    assert "none — no mode beat the unpartitioned card" in body
+
+
+def test_partition_section_flags_a_session_that_partitioned_without_a_budget():
+    """The unbounded case, which is how a run ends up on the slowest mode on offer."""
+    summary = _partition_summary(compute_partition_modes=["CPX"], latency_budget_ms=0.0)
+    body = "\n".join(rp._format_compute_partition_section(summary))
+    assert "⚠ none set" in body
+    assert "--max-latency-ms" in body
+
+
 def test_format_md_shows_validated_gain_when_timestamp_missing():
     md = rp._format_md(
         {

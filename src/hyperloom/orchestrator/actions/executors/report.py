@@ -562,6 +562,13 @@ def _build_summary_dict(
         # Degraded-mode advisory: benchmark numbers reflect the text path only.
         "degraded_mode": bool(getattr(state, "degraded_mode", False)),
         "model_warnings": list(getattr(state, "model_warnings", None) or []),
+        # The compute-partition lever's session contract. Recorded even when
+        # the lever was off, because "off" is what the advisory section keys on:
+        # an empty list is the difference between a lever that lost and a lever
+        # the operator never knew was there.
+        "compute_partition_modes": list(getattr(state, "compute_partition_modes", None) or []),
+        "streams_per_partition": int(getattr(state, "streams_per_partition", 0) or 0),
+        "latency_budget_ms": float(getattr(state, "latency_budget_ms", 0.0) or 0.0),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
@@ -717,6 +724,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
 
     lines.extend(_format_degraded_mode_section(summary))
+    lines.extend(_format_compute_partition_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
@@ -761,6 +769,98 @@ def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
         arch = w.get("architecture") or "?"
         signal = w.get("signal") or w.get("kind") or "multimodal signal"
         lines.append(f"- `{name}` (arch `{arch}`): {signal}")
+    lines.append("")
+    return lines
+
+
+def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
+    """Render the compute-partition lever's state, or advertise it when unused.
+
+    The unused case is the reason this section exists. Every other lever is
+    reachable by the optimizer on its own, so an operator learns about it from
+    the results; this one is off unless a flag names the modes, needs privilege
+    the session may not have, and reconfigures hardware other tenants share. A
+    lever nobody is told about is a lever nobody uses, and the report is the one
+    artefact an operator reads after every run.
+
+    Advertising it is not the same as recommending it. Partitioning a card only
+    ever gives a single stream fewer CUs, so the copy has to carry the cost as
+    plainly as the benefit -- an operator who enables this because a report
+    suggested it, and discovers per-request latency quadrupled, was misled by
+    that report.
+
+    Silent on serving frameworks, which the lever refuses at launch, and on
+    multi-node sessions, where it manages a single card and the advice would not
+    apply to the run that was made.
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines, or ``[]`` when the lever could not have applied.
+    """
+    from hyperloom.inference_optimizer import framework_registry
+
+    from ._partition_lever import PARTITION_MODE_ENV
+
+    if not framework_registry.is_scriptable(summary.get("framework")):
+        return []
+    platform = summary.get("platform") or {}
+    if platform.get("multi_node_session"):
+        return []
+
+    modes = [str(m) for m in (summary.get("compute_partition_modes") or [])]
+    streams = int(summary.get("streams_per_partition") or 0) or 2
+    budget = float(summary.get("latency_budget_ms") or 0.0)
+
+    if not modes:
+        return [
+            "## Compute partitioning (not exercised)",
+            "",
+            "This session left the GPU's compute partitioning alone. An AMD card can be split "
+            "into independent partitions -- `SPX` (whole card), `DPX` (2), `QPX` (4), `CPX` (8) -- "
+            "and the optimizer can search those modes as a lever, but only when asked.",
+            "",
+            "It is worth asking for when the workload runs many concurrent streams and is "
+            "throughput-bound. On one MI355X with a 1.26B-parameter vision model, `CPX` at two "
+            "streams per partition carried ~20% more aggregate throughput than the best `SPX` "
+            "configuration.",
+            "",
+            "- **Enable**: `--compute-partition-modes spx,dpx,qpx,cpx` "
+            f"(each mode becomes one explore variant) and `--streams-per-partition {streams}`.",
+            "- **Bound the cost first**: pair it with `--max-latency-ms <budget>`. Partitioning "
+            "only ever gives a single stream fewer CUs, so it cannot improve per-request latency "
+            "and always worsens it -- in that same measurement, from 183 ms to 1211 ms. Without a "
+            "budget the search is free to pick the narrowest partition on offer, which is the "
+            "slowest one per request.",
+            "- **Needs privilege**: the mode belongs to the card, not the process. Set "
+            "`HYPERLOOM_PARTITION_SUDO=1` with a NOPASSWD sudoers entry for `amd-smi`; an "
+            "unprivileged session cannot set a mode and will not pretend to.",
+            "- **Blast radius**: repartitioning evicts every process resident on the card and "
+            "renumbers its devices. The session restores the mode it found on the way out.",
+            "",
+        ]
+
+    lines = ["## Compute partitioning", ""]
+    lines.append(f"- modes offered     : {', '.join(f'`{m}`' for m in modes)}")
+    lines.append(f"- streams/partition : {streams}")
+    cb = summary.get("current_best") or {}
+    envs = cb.get("extra_envs") if isinstance(cb, dict) else None
+    won = str((envs or {}).get(PARTITION_MODE_ENV) or "").strip().upper()
+    if won:
+        lines.append(f"- kept              : `{won}` — the best configuration runs on a partitioned card")
+    else:
+        # Absence is a result, not a gap: the modes were measured and none beat
+        # the unpartitioned card, which is the expected outcome below the
+        # concurrency where partitioning pays.
+        lines.append("- kept              : none — no mode beat the unpartitioned card")
+    if budget > 0:
+        lines.append(f"- latency budget    : `{budget:.1f}` ms (candidates over it were refused)")
+    else:
+        lines.append(
+            "- latency budget    : ⚠ none set — the search was free to trade per-request latency "
+            "for throughput without limit. Pass `--max-latency-ms <budget>` to bound it."
+        )
     lines.append("")
     return lines
 
