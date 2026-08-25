@@ -1508,11 +1508,7 @@ def test_hotfix_asset_change_keeps_the_vendor_backup(tmp_path: Path):
     hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
-        body=(
-            f"{_SYNC_BODY}\n"
-            f'printf hotfix-hip-v2 > "{hotfix_hip}"\n'
-            f"{_SYNC_BODY}"
-        ),
+        body=(f'{_SYNC_BODY}\nprintf hotfix-hip-v2 > "{hotfix_hip}"\n{_SYNC_BODY}'),
         torch_hip=b"vendor-hip-bytes",
         torch_tracer=b"vendor-tracer-bytes",
     )
@@ -1529,11 +1525,7 @@ def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_
     hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
-        body=(
-            f"{_SYNC_BODY}\n"
-            f'printf hotfix-hip-v2 > "{hotfix_hip}"\n'
-            f"{_SYNC_BODY}"
-        ),
+        body=(f'{_SYNC_BODY}\nprintf hotfix-hip-v2 > "{hotfix_hip}"\n{_SYNC_BODY}'),
         torch_hip=b"VENDOR-hip",
         torch_tracer=None,
     )
@@ -1552,11 +1544,7 @@ def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path
     fp = f'"{tmp_path}/torch/lib/{_BACKUP_DIRNAME}/.fingerprint"'
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
-        body=(
-            f"{_SYNC_BODY}\n"
-            f"head -n 1 > {fp}.tmp {fp} && mv -f {fp}.tmp {fp}\n"
-            f"{_SYNC_BODY}"
-        ),
+        body=(f"{_SYNC_BODY}\nhead -n 1 > {fp}.tmp {fp} && mv -f {fp}.tmp {fp}\n{_SYNC_BODY}"),
         torch_hip=b"vendor-hip-bytes",
         torch_tracer=b"vendor-tracer-bytes",
     )
@@ -1585,7 +1573,7 @@ def test_sync_warns_when_framework_imports_but_torch_lib_is_missing(tmp_path: Pa
                 "CHECK_ONLY=0",
                 f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
                 f'resolve_python() {{ printf "%s" "{py}"; }}',
-                f'{_SYNC_BODY_SOFT}',
+                f"{_SYNC_BODY_SOFT}",
             ]
         )
         + "\n",
