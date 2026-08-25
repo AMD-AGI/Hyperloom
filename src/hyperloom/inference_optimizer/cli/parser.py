@@ -293,7 +293,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="MODES",
         help="Comma-separated compute-partition modes to evaluate, e.g. "
-        "'spx,dpx,cpx'. Off by default. Partitioning a card only ever gives "
+        "'spx,dpx,cpx'. Off by default. Each mode becomes one explore variant, "
+        "tried in the order given and ahead of the rest of the grid, so a mode "
+        "that is kept becomes the topology the remaining variants are then "
+        "explored inside. Scriptable frameworks only: the mode is established "
+        "by the scriptable runner, and on a serving framework the request "
+        "would be refused at launch rather than measured under the wrong "
+        "name. Partitioning a card only ever gives "
         "one stream fewer CUs, so it cannot improve single-stream latency "
         "and pays only in aggregate throughput at concurrency -- see "
         "--streams-per-partition. Requires a privileged amd-smi on the "

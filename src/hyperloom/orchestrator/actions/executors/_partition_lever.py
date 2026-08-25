@@ -38,6 +38,7 @@ from hyperloom.common.gpu_partition import (
     PartitionError,
     PartitionLayout,
     layout_for,
+    parse_modes,
     partitioned,
 )
 
@@ -106,6 +107,101 @@ def read_session_lever() -> tuple[tuple[str, ...], int, float]:
     except ValueError:
         budget = 0.0
     return modes, streams_per_partition(), budget
+
+
+def resolve_session_modes(
+    params: dict[str, Any] | None = None,
+    shared_state: Any = None,
+) -> tuple[str, ...]:
+    """Resolve the modes this session is allowed to explore.
+
+    Precedence is most-specific-first, matching
+    :func:`_latency_budget.resolve_latency_budget_ms`: an explicit task
+    parameter, then the session state the CLI seeded, then the environment.
+
+    Args:
+        params: Task params, which may carry ``compute_partition_modes``.
+        shared_state: Live SharedState, which may carry the persisted list.
+
+    Returns:
+        Canonical modes, empty when the lever is off.
+    """
+    for candidate in (
+        (params or {}).get("compute_partition_modes"),
+        getattr(shared_state, "compute_partition_modes", None),
+        os.environ.get(PARTITION_MODES_ENV),
+    ):
+        if not candidate:
+            continue
+        try:
+            modes = parse_modes(candidate)
+        except PartitionError as exc:
+            log.warning("ignoring unusable compute-partition modes %r: %s", candidate, exc)
+            continue
+        if modes:
+            return modes
+    return ()
+
+
+def partition_lever_grid(
+    params: dict[str, Any] | None = None,
+    shared_state: Any = None,
+    *,
+    framework: str | None,
+) -> list[dict[str, Any]]:
+    """Expand the session's mode list into one explore variant per mode.
+
+    Each variant is env-only, carrying nothing but
+    :data:`PARTITION_MODE_ENV`. That keeps the mode a plain point in the search
+    space: it is fingerprinted, deduplicated, gated and journalled by the same
+    code as every other variant, and a mode that loses is reverted like any
+    other losing knob.
+
+    Every listed mode is emitted, including one that may already match the
+    card. This function stays pure -- no hardware read -- and a mode the
+    operator named explicitly is worth a measurement under the same harness as
+    its rivals rather than an inherited baseline number taken on trust.
+
+    Only scriptable frameworks get variants. The mode is applied by
+    :func:`plan_partition_run`, which the scriptable runner calls and the
+    serving path does not, so emitting these for a server framework would
+    deliver the env, change nothing, and record the result under a mode the
+    card was never in -- the exact mislabelling this module refuses elsewhere.
+    The CLI rejects that combination at launch; this is the second line.
+
+    Args:
+        params: Task params, consulted for the mode list.
+        shared_state: Live SharedState, consulted for the persisted list.
+        framework: Framework this round runs under.
+
+    Returns:
+        Variant payload dicts ready for ``_grid_variants_from_payload``, or
+        ``[]`` when the lever is off or the framework cannot apply it.
+    """
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    modes = resolve_session_modes(params, shared_state)
+    if not modes:
+        return []
+    if not is_scriptable(framework):
+        log.warning(
+            "compute-partition modes %s ignored: framework %r does not apply "
+            "partition modes, so the variants would measure the card's current "
+            "topology under another mode's name",
+            ",".join(modes),
+            framework or "",
+        )
+        return []
+    return [
+        {
+            "name": f"partition_{mode.lower()}",
+            "extra_args": "",
+            "extra_envs": {PARTITION_MODE_ENV: mode},
+            "note": f"compute-partition {mode}",
+            "provenance": "partition_lever",
+        }
+        for mode in modes
+    ]
 
 
 def requested_mode(envs: dict[str, Any] | None) -> str:
@@ -210,8 +306,10 @@ __all__ = [
     "hold_partition_mode",
     "maybe_hold_partition_mode",
     "partition_gpu_id",
+    "partition_lever_grid",
     "plan_partition_run",
     "requested_mode",
+    "resolve_session_modes",
     "runtime_env",
     "streams_per_partition",
 ]

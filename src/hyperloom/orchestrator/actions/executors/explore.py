@@ -85,6 +85,7 @@ from ._latency_budget import (
     latency_keep_block,
     resolve_latency_budget_ms,
 )
+from ._partition_lever import partition_lever_grid
 from ._ray_serving import maybe_serving_lease
 
 # DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
@@ -245,6 +246,36 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.framework_lever_source = str(raw.get("framework_lever_source") or "")  # type: ignore[attr-defined]
         out.append(gv)
     return out
+
+
+def _prepend_fresh_variants(
+    grid_payload: list[Any],
+    addition: list[dict[str, Any]],
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Prepend the entries of ``addition`` that the grid does not already name.
+
+    Seeded axes go in front rather than on the end so a long LLM-supplied grid
+    cannot crowd them out of the round's budget, and -- for anything the later
+    variants are measured on top of -- so the stack resolves it first.
+
+    Name collisions defer to the grid. An operator or specialist who already
+    named a variant has said something specific about it, and overwriting that
+    with a generated default would discard the more informed entry.
+
+    Args:
+        grid_payload: The grid so far.
+        addition: Candidate payload dicts to prepend.
+
+    Returns:
+        ``(grid, fresh)`` where ``fresh`` is what was actually added.
+    """
+    if not addition:
+        return list(grid_payload), []
+    existing = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
+    fresh = [v for v in addition if str(v.get("name") or "") not in existing]
+    if not fresh:
+        return list(grid_payload), []
+    return fresh + list(grid_payload), fresh
 
 
 def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
@@ -898,16 +929,36 @@ class ExploreExecutor:
         # judge and better evidenced than a proposed config knob. Prepending also
         # means an LLM-supplied grid does not crowd the attribution out of the
         # round's budget.
+        # Kept in its own name: the round's attribution pass needs the payload it
+        # seeded from, not just what survived the merge.
         lever_payload = framework_lever_grid(extra.get("shared_state") or extra.get("state"))
-        if lever_payload:
-            existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
-            fresh = [v for v in lever_payload if str(v.get("name") or "") not in existing_names]
-            if fresh:
-                log.info(
-                    "explore: seeding %d framework-rewrite lever variant(s) for attribution",
-                    len(fresh),
-                )
-                grid_payload = fresh + list(grid_payload)
+        grid_payload, _lever_fresh = _prepend_fresh_variants(grid_payload, lever_payload)
+        if _lever_fresh:
+            log.info(
+                "explore: seeding %d framework-rewrite lever variant(s) for attribution",
+                len(_lever_fresh),
+            )
+        # Compute-partition modes ahead of even those, because the mode decides
+        # the topology every other knob is then tuned against. Ordering it first
+        # is what makes the stack do the useful thing: a KEEP'd mode joins
+        # ``stack_extra_envs``, so the variants after it are measured inside the
+        # winning partition rather than against a shape the session has already
+        # moved off. It also means each mode has to beat the best mode so far
+        # rather than the original baseline.
+        grid_payload, _partition_fresh = _prepend_fresh_variants(
+            grid_payload,
+            partition_lever_grid(
+                params,
+                extra.get("shared_state") or extra.get("state"),
+                framework=framework,
+            ),
+        )
+        if _partition_fresh:
+            log.info(
+                "explore: seeding %d compute-partition variant(s) ahead of the grid: %s",
+                len(_partition_fresh),
+                ",".join(str(v.get("name") or "?") for v in _partition_fresh),
+            )
         if not grid_payload:
             # No LLM variants: fall through to the framework's programmatic
             # seed grid instead of failing the task.

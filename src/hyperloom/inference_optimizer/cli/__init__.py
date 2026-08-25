@@ -1642,6 +1642,7 @@ def _export_partition_lever(
     modes_raw: str | None,
     streams_per_partition: int,
     max_latency_ms: float | None,
+    framework: str | None = None,
 ) -> tuple[str, ...]:
     """Validate and project the compute-partition lever into env.
 
@@ -1657,6 +1658,9 @@ def _export_partition_lever(
         modes_raw: The raw ``--compute-partition-modes`` value.
         streams_per_partition: The resolved ``--streams-per-partition``.
         max_latency_ms: The resolved ``--max-latency-ms``, if any.
+        framework: The session's framework. Checked because only the scriptable
+            runner applies a mode; unset skips the check for callers that run
+            before the framework is resolved.
 
     Returns:
         The canonical modes, empty when the lever is off.
@@ -1690,6 +1694,20 @@ def _export_partition_lever(
     if streams_per_partition < 1:
         print(
             f"ERROR: --streams-per-partition must be >= 1, got {streams_per_partition}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Only the scriptable runner establishes a mode. On a serving framework the
+    # env would be delivered, no partition would be set, and the number would be
+    # filed under a mode the card was never in -- a wrong answer that looks
+    # exactly like a right one. Refused here rather than dropped quietly at grid
+    # time, because the operator asked for something this session cannot do.
+    if framework and not framework_registry.is_scriptable(framework):
+        print(
+            f"ERROR: --compute-partition-modes needs a scriptable framework; {framework!r} "
+            "runs a server, and its benchmarks would report the card's current topology "
+            "under the requested mode's name.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -1884,6 +1902,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         modes_raw=getattr(args, "compute_partition_modes", None),
         streams_per_partition=int(getattr(args, "streams_per_partition", 2) or 2),
         max_latency_ms=getattr(args, "max_latency_ms", None),
+        framework=str(getattr(args, "framework", "") or "").strip().lower(),
     )
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
@@ -2111,6 +2130,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             modes_raw=getattr(args, "compute_partition_modes", None),
             streams_per_partition=int(getattr(args, "streams_per_partition", None) or 2),
             max_latency_ms=getattr(args, "max_latency_ms", None),
+            framework=str(getattr(args, "framework", "") or "").strip().lower(),
         )
         _persist_partition_lever(state)
         if state.compute_partition_modes:

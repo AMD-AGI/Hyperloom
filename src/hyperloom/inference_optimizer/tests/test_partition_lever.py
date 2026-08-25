@@ -21,6 +21,7 @@ import pytest
 from hyperloom.inference_optimizer import cli
 from hyperloom.orchestrator.actions.executors import _partition_lever as pl
 from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+from hyperloom.orchestrator.actions.executors import explore
 from hyperloom.orchestrator.actions.executors._latency_budget import (
     REASON_OVER_BUDGET,
     REASON_UNMEASURED,
@@ -316,3 +317,131 @@ def test_read_session_lever_tolerates_a_malformed_budget(monkeypatch):
     assert modes == ("DPX", "CPX")
     assert budget == 0.0
     assert streams >= 1
+
+
+class TestModeAxis:
+    """Turning the session's mode list into variants the search actually runs.
+
+    Declaring the modes is not the same as trying them. These cover the
+    expansion, the order it has to keep, and the one framework combination that
+    must not produce variants at all.
+    """
+
+    @staticmethod
+    def _state(modes):
+        return SimpleNamespace(compute_partition_modes=list(modes))
+
+    def test_the_session_list_becomes_one_variant_per_mode(self):
+        grid = pl.partition_lever_grid(
+            {"compute_partition_modes": "spx,dpx,cpx"}, None, framework="custom"
+        )
+        assert [v["name"] for v in grid] == [
+            "partition_spx",
+            "partition_dpx",
+            "partition_cpx",
+        ]
+        # Env-only, and carrying nothing but the selector: a mode variant that
+        # also moved a server flag would confound the two.
+        assert [v["extra_envs"] for v in grid] == [
+            {pl.PARTITION_MODE_ENV: "SPX"},
+            {pl.PARTITION_MODE_ENV: "DPX"},
+            {pl.PARTITION_MODE_ENV: "CPX"},
+        ]
+        assert {v["extra_args"] for v in grid} == {""}
+        assert {v["provenance"] for v in grid} == {"partition_lever"}
+
+    def test_the_operators_order_is_preserved(self):
+        # The list is a search order, not a set: the stack advances mode by mode,
+        # so reordering changes which mode each later one has to beat.
+        grid = pl.partition_lever_grid({"compute_partition_modes": "cpx,spx"}, None, framework="xdit")
+        assert [v["name"] for v in grid] == ["partition_cpx", "partition_spx"]
+
+    def test_no_modes_seeds_nothing(self):
+        assert pl.partition_lever_grid({}, None, framework="custom") == []
+        assert pl.partition_lever_grid(None, self._state([]), framework="custom") == []
+
+    def test_a_serving_framework_gets_no_variants(self):
+        """The mislabelling guard, at the grid rather than the card.
+
+        Only the scriptable runner calls ``plan_partition_run``. On a serving
+        framework the env would ride along, no partition would be established,
+        and the result would be filed under the requested mode -- a number that
+        is wrong in a way nothing downstream can detect.
+        """
+        for framework in ("sglang", "vllm", ""):
+            assert (
+                pl.partition_lever_grid(
+                    {"compute_partition_modes": "dpx"}, None, framework=framework
+                )
+                == []
+            )
+
+    def test_an_unusable_mode_list_seeds_nothing_rather_than_raising(self, monkeypatch):
+        # Grid assembly is not the place to end a session; the CLI already
+        # refused this at launch, so reaching here means the env was edited.
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "spx,nope")
+        assert pl.partition_lever_grid(None, None, framework="custom") == []
+
+    def test_mode_precedence_is_most_specific_first(self, monkeypatch):
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "cpx")
+        state = self._state(["QPX"])
+        assert pl.resolve_session_modes({"compute_partition_modes": "dpx"}, state) == ("DPX",)
+        assert pl.resolve_session_modes({}, state) == ("QPX",)
+        assert pl.resolve_session_modes({}, None) == ("CPX",)
+
+
+class TestModeAxisOrdering:
+    """The mode has to be decided before the knobs that are tuned against it.
+
+    Explore stacks a KEEP'd variant's envs onto every variant after it, so
+    putting the mode axis first is what makes the rest of the grid get
+    re-explored inside the winning partition. Landing it at the end instead
+    would measure every knob against the old topology and then change the
+    topology afterwards.
+    """
+
+    def test_seeded_variants_land_in_front(self):
+        grid, fresh = explore._prepend_fresh_variants(
+            [{"name": "llm_flag_a"}, {"name": "llm_flag_b"}],
+            [{"name": "partition_dpx"}],
+        )
+        assert [v["name"] for v in grid] == [
+            "partition_dpx",
+            "llm_flag_a",
+            "llm_flag_b",
+        ]
+        assert [v["name"] for v in fresh] == ["partition_dpx"]
+
+    def test_a_name_the_grid_already_uses_is_left_alone(self):
+        # An operator or specialist who named the variant said something more
+        # specific than the generated default; the generated one steps aside.
+        pinned = {"name": "partition_dpx", "extra_envs": {"CUSTOM": "1"}}
+        grid, fresh = explore._prepend_fresh_variants(
+            [pinned], [{"name": "partition_dpx", "extra_envs": {}}]
+        )
+        assert grid == [pinned]
+        assert fresh == []
+
+    def test_nothing_to_add_leaves_the_grid_untouched(self):
+        original = [{"name": "llm_flag_a"}]
+        grid, fresh = explore._prepend_fresh_variants(original, [])
+        assert grid == original
+        assert fresh == []
+
+
+def test_launch_refuses_the_lever_on_a_serving_framework(capsys):
+    """Fail at launch, not by quietly seeding an empty axis.
+
+    An operator who passed the flag expects modes to be tried. Dropping them at
+    grid time with only a log line would look like the lever ran and found
+    nothing worth keeping.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        cli._export_partition_lever(
+            modes_raw="dpx",
+            streams_per_partition=2,
+            max_latency_ms=400.0,
+            framework="sglang",
+        )
+    assert excinfo.value.code == 2
+    assert "scriptable framework" in capsys.readouterr().err
