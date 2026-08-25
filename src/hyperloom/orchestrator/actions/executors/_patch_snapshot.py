@@ -105,31 +105,38 @@ def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]
 
 
 def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
-    """Repo-relative paths a diff's headers name, before it has been applied.
+    """Repo-relative paths a diff's headers may resolve to, before it is applied.
 
-    Pre-apply there is nothing on disk to probe, so the strip level cannot be
-    resolved the way :func:`_commit_strip_level` does; common ``a/``/``b/``
-    prefixes are dropped instead. A path that misses is snapshotted as absent
-    and restored as absent, so an over-broad result stays safe.
+    Pre-apply the strip level is not knowable: what the patch creates does not
+    exist yet, and in a multi-patch set a later patch only resolves once an
+    earlier one has applied, so probing the tree the way
+    :func:`_commit_strip_level` does cannot stand in for it. Every level in
+    :data:`_P_LEVELS` is emitted instead — the same ladder the apply is driven
+    through — so whichever one it settles on, the path it really touches was
+    snapshotted.
+
+    Over-broad stays safe in both directions: a candidate that never
+    materialises is snapshotted as absent and restored as absent, and one that
+    exists but the patch never touches is restored to the content it already
+    has.
 
     Args:
         patch_content: Raw text of a unified diff.
 
     Returns:
-        Deduplicated repo-relative paths, in first-seen order.
+        Deduplicated repo-relative candidate paths, in first-seen order.
     """
     paths: list[str] = []
     for line in patch_content.splitlines():
         if not line.startswith(("--- ", "+++ ")):
             continue
         raw = line[4:].split("\t", 1)[0].strip()
-        if raw in ("/dev/null", ""):
+        if raw in (_PATCH_DEV_NULL, ""):
             continue
-        if raw.startswith(("a/", "b/")):
-            raw = raw[2:]
-        path = Path(raw)
-        if not path.is_absolute() and ".." not in path.parts:
-            paths.append(path.as_posix())
+        for level in _P_LEVELS:
+            path = Path(_strip_path_prefix(raw, level))
+            if not path.is_absolute() and ".." not in path.parts:
+                paths.append(path.as_posix())
     return list(dict.fromkeys(paths))
 
 
