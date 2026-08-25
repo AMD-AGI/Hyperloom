@@ -267,6 +267,37 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 # summary (matches the ``*_top15`` field names).
 _TRACE_HOT_KERNEL_TOP_N = 15
 
+
+def trace_analyze_hot_kernels(trace: dict[str, Any] | None) -> list[Any]:
+    """Return hot-kernel rows from a trace_analyze cache blob."""
+    if not isinstance(trace, dict):
+        return []
+    hot = trace.get("hot_kernels_top15") or trace.get("hot_kernels") or []
+    return hot if isinstance(hot, list) else []
+
+
+def trace_analyze_is_cuda_graph_degraded(trace: dict[str, Any] | None) -> bool:
+    """True when trace_analyze succeeded but per-kernel attribution was lost."""
+    if trace_analyze_hot_kernels(trace):
+        return False
+    warnings = (trace or {}).get("trace_health_warnings") or []
+    if not isinstance(warnings, list):
+        return False
+    return any(isinstance(w, dict) and w.get("code") == "cuda_graph_attribution_degraded" for w in warnings)
+
+
+def effective_trace_analyze(state: Any) -> dict[str, Any]:
+    """Prefer the latest healthy hot-kernel cache over a degraded reprofile."""
+    last = getattr(state, "last_trace_analyze", None) or {}
+    if not isinstance(last, dict):
+        last = {}
+    if trace_analyze_hot_kernels(last):
+        return last
+    baseline = getattr(state, "baseline_trace_analyze", None) or {}
+    if isinstance(baseline, dict) and trace_analyze_hot_kernels(baseline):
+        return baseline
+    return last
+
 # Session-level kernel-roofline report the analyzer writes for a non-close run;
 # read back when the trace_analyze envelope arrives without its payload keys.
 _DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
@@ -784,6 +815,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Roofline-v2 trace-analyze cache written by record_trace_analyze.
     # roofline_snapshot_id is a property derived from this dict.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # First healthy baseline-roofline trace_analyze kept for kernel/GEMM dispatch
+    # when a later reprofile on the optimized stack is cuda-graph degraded.
+    baseline_trace_analyze: dict[str, Any] = field(default_factory=dict)
     # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
@@ -3175,7 +3209,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             task_groups = []
 
         ts_iso = _now_iso()
-        self.last_trace_analyze = {
+        new_trace_analyze = {
             "trace_input": str(trace_input),
             "steady_state_trace": str(steady_state_trace),
             "candidates_path": str(candidates_path),
@@ -3194,6 +3228,32 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             ),
             "ts": ts_iso,
         }
+
+        forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+        if summary and (
+            not trace_analyze_hot_kernels(self.baseline_trace_analyze)
+            or forced_arm == "baseline"
+        ):
+            self.baseline_trace_analyze = dict(new_trace_analyze)
+
+        if (
+            trace_analyze_is_cuda_graph_degraded(new_trace_analyze)
+            and trace_analyze_hot_kernels(self.baseline_trace_analyze)
+        ):
+            fallback = dict(self.baseline_trace_analyze)
+            fallback["roofline_snapshot_id"] = snapshot_id
+            fallback["ts"] = ts_iso
+            fallback["trace_health_warnings"] = warnings_cleaned + list(
+                fallback.get("trace_health_warnings") or []
+            )
+            fallback["degraded_reprofile_fallback"] = True
+            log.info(
+                "record_trace_analyze: cuda_graph_attribution_degraded reprofile "
+                "had 0 hot kernels; retaining baseline trace for dispatch"
+            )
+            self.last_trace_analyze = fallback
+        else:
+            self.last_trace_analyze = new_trace_analyze
 
         self._append_roofline_snapshot_history(
             payload=payload,

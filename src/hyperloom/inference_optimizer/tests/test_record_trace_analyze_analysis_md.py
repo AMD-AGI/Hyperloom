@@ -374,3 +374,46 @@ def test_non_routable_kernel_opt_skip_rejects_canonical_id() -> None:
     assert entry["last_decision"] == "REVERT"
     assert entry["last_status"] == "skipped"
     assert entry["rejected_reason"] == "revert_decision"
+
+
+def test_degraded_reprofile_falls_back_to_baseline_trace(tmp_path: Path) -> None:
+    """A cuda-graph degraded reprofile must not wipe hot kernels used for dispatch."""
+    candidates = tmp_path / "kernel_candidates.json"
+    candidates.write_text("{}", encoding="utf-8")
+    hot = [{"kernel_id": "k001", "name": "pseudo_op::moe_flydsl_stage1", "gpu_pct": 3.0}]
+
+    state = SharedState()
+    state.record_trace_analyze(
+        {"trace_input": "/baseline.trace.json.gz", "roofline_arm": "baseline"},
+        {
+            "hot_kernels": hot,
+            "candidates_path": str(candidates),
+            "trace_health_warnings": [],
+        },
+    )
+    assert len(state.baseline_trace_analyze.get("hot_kernels_top15") or []) == 1
+    assert state.baseline_trace_analyze["hot_kernels_top15"][0]["kernel_id"] == "k001"
+
+    state.record_trace_analyze(
+        {"trace_input": "/optimized.trace.json.gz", "roofline_arm": "current_best"},
+        {
+            "hot_kernels": [],
+            "candidates_path": str(candidates),
+            "trace_health_warnings": [
+                {
+                    "code": "cuda_graph_attribution_degraded",
+                    "severity": "warning",
+                    "message": "0 hot kernels under cuda graph capture",
+                }
+            ],
+        },
+    )
+
+    assert len(state.last_trace_analyze.get("hot_kernels_top15") or []) == 1
+    assert state.last_trace_analyze["hot_kernels_top15"][0]["kernel_id"] == "k001"
+    assert state.last_trace_analyze.get("degraded_reprofile_fallback") is True
+    assert any(
+        w.get("code") == "cuda_graph_attribution_degraded"
+        for w in state.last_trace_analyze.get("trace_health_warnings") or []
+        if isinstance(w, dict)
+    )

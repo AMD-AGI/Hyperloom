@@ -1272,9 +1272,11 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
         str: The matching candidate's ``source_file``, or an empty string when
             no match is found.
     """
+    from ..state.shared_state import effective_trace_analyze
+
     kernels = (
-        (state.last_trace_analyze or {}).get("hot_kernels_top15")
-        or (state.last_trace_analyze or {}).get("hot_kernels")
+        effective_trace_analyze(state).get("hot_kernels_top15")
+        or effective_trace_analyze(state).get("hot_kernels")
         or []
     )
     for item in kernels:
@@ -2144,7 +2146,9 @@ def _resolve_forge_shapes(
             "active workload/config; ignoring its shape artifacts"
         )
         return ""
-    last_trace = getattr(state, "last_trace_analyze", None) or {}
+    from ..state.shared_state import effective_trace_analyze
+
+    last_trace = effective_trace_analyze(state)
     if not isinstance(last_trace, dict):
         return ""
 
