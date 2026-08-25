@@ -814,30 +814,52 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
     budget = float(summary.get("latency_budget_ms") or 0.0)
 
     if not modes:
-        return [
-            "## Compute partitioning (not exercised)",
-            "",
+        # Each paragraph is bound to a name before the list rather than wrapped
+        # inside it: adjacent string literals in a list display are ambiguous
+        # with a forgotten comma, which is both a real class of bug and a
+        # standing CodeQL finding on this file.
+        what_it_is = (
             "This session left the GPU's compute partitioning alone. An AMD card can be split "
             "into independent partitions -- `SPX` (whole card), `DPX` (2), `QPX` (4), `CPX` (8) -- "
-            "and the optimizer can search those modes as a lever, but only when asked.",
-            "",
+            "and the optimizer can search those modes as a lever, but only when asked."
+        )
+        when_to_ask = (
             "It is worth asking for when the workload runs many concurrent streams and is "
             "throughput-bound. On one MI355X with a 1.26B-parameter vision model, `CPX` at two "
             "streams per partition carried ~20% more aggregate throughput than the best `SPX` "
-            "configuration.",
-            "",
+            "configuration."
+        )
+        how_to_enable = (
             "- **Enable**: `--compute-partition-modes spx,dpx,qpx,cpx` "
-            f"(each mode becomes one explore variant) and `--streams-per-partition {streams}`.",
+            f"(each mode becomes one explore variant) and `--streams-per-partition {streams}`."
+        )
+        bound_the_cost = (
             "- **Bound the cost first**: pair it with `--max-latency-ms <budget>`. Partitioning "
             "only ever gives a single stream fewer CUs, so it cannot improve per-request latency "
             "and always worsens it -- in that same measurement, from 183 ms to 1211 ms. Without a "
             "budget the search is free to pick the narrowest partition on offer, which is the "
-            "slowest one per request.",
+            "slowest one per request."
+        )
+        needs_privilege = (
             "- **Needs privilege**: the mode belongs to the card, not the process. Set "
             "`HYPERLOOM_PARTITION_SUDO=1` with a NOPASSWD sudoers entry for `amd-smi`; an "
-            "unprivileged session cannot set a mode and will not pretend to.",
+            "unprivileged session cannot set a mode and will not pretend to."
+        )
+        blast_radius = (
             "- **Blast radius**: repartitioning evicts every process resident on the card and "
-            "renumbers its devices. The session restores the mode it found on the way out.",
+            "renumbers its devices. The session restores the mode it found on the way out."
+        )
+        return [
+            "## Compute partitioning (not exercised)",
+            "",
+            what_it_is,
+            "",
+            when_to_ask,
+            "",
+            how_to_enable,
+            bound_the_cost,
+            needs_privilege,
+            blast_radius,
             "",
         ]
 

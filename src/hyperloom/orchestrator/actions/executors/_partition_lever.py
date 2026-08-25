@@ -186,6 +186,10 @@ def per_stream_footprint_gib(
         if measured is not None and float(measured) > 0:
             return float(measured), "measured"
     except (TypeError, ValueError):
+        # A report that carries the field as something other than a number is
+        # treated as not carrying it: fall through to the weight-bytes bound
+        # rather than fail, since the caller's contract is "prunes nothing when
+        # the footprint is unknown" and a malformed reading is unknown.
         pass
 
     model_path = str((params or {}).get("model_path") or getattr(shared_state, "model_path", "") or "").strip()

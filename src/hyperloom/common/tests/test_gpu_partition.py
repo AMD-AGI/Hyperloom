@@ -31,6 +31,19 @@ from hyperloom.common.gpu_partition import (
 )
 
 
+def _raise(exc: BaseException) -> None:
+    """Raise ``exc`` from inside a ``with`` body.
+
+    Called rather than raised inline so the assertions *after* an enclosing
+    ``pytest.raises`` stay reachable to a static analyser. CodeQL does not model
+    ``pytest.raises`` as suppressing what the block raises, so an inline
+    ``raise`` as the body's last statement makes every following line read as
+    dead code -- and those lines are the actual subject of these cases: what the
+    context manager did on its way out.
+    """
+    raise exc
+
+
 class _FakeSmi:
     """An ``amd-smi`` whose partition state a test can drive.
 
@@ -261,7 +274,7 @@ def test_partitioned_restores_after_a_failure_inside_the_block(smi):
     with pytest.raises(ZeroDivisionError):
         with partitioned(0, "QPX"):
             assert smi.modes[0] == "QPX"
-            raise ZeroDivisionError
+            _raise(ZeroDivisionError())
     assert smi.modes[0] == "SPX"
 
 
@@ -279,7 +292,7 @@ def test_partitioned_restore_failure_does_not_mask_the_real_error(monkeypatch, c
     monkeypatch.setattr(subprocess, "run", flaky)
     with pytest.raises(ValueError, match="workload blew up"):
         with partitioned(0, "DPX"):
-            raise ValueError("workload blew up")
+            _raise(ValueError("workload blew up"))
     assert "left in DPX" in caplog.text
 
 
