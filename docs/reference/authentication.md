@@ -310,7 +310,8 @@ At preflight, the inference optimizer CLI:
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
 2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
-   `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
+   `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`
+   (`src/hyperloom/...` in a source checkout).
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    resolved Anthropic-side upstream gateway.
 
