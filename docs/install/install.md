@@ -113,6 +113,15 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 ```
 
+A `pip install --target .` workspace also exposes the same backend as a console
+script, which needs no `PYTHONPATH`:
+
+```bash
+./bin/hyperloom              # same as the module invocation above
+./bin/hyperloom --check-only # verify only; do not mutate
+./bin/hyperloom --dry-run    # print planned actions only
+```
+
 The backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,

@@ -44,11 +44,14 @@ Hyperloom combines:
 
 | Feature | Options |
 |------|-------|
-| Workload | Inference |
-| Platform | MI300X, MI325X, MI355X |
-| Framework | vLLM, SGLang |
+| Workload | Inference serving; diffusion pipelines via xDiT |
+| Platform | MI300X, MI308X, MI325X, MI355X |
+| Framework | SGLang, vLLM, Atom, xDiT, plus `custom` for your own benchmark script |
 | Kernel Language | HIP, Triton, FlyDSL |
-| Backend | Claude |
+| LLM Backend | Claude, Codex |
+
+See the [compatibility matrix](docs/compatibility.rst) for the versions each
+framework is validated against.
 
 ## Get Started
 
