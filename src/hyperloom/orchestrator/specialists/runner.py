@@ -1362,17 +1362,16 @@ class SpecialistRunner:
             base_checkout,
         )
         explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
-        kept, dropped, grounding = _patch_safety.vet_patches(
+        kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
             explicit_root=Path(explicit_value) if explicit_value else None,
         )
-        # Every patch dropped for a target no tree holds: a distinct outcome from
-        # "the specialist wrote none", and the next round has to be told which.
         all_dropped_by_grounding = bool(
             deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
         )
+        patches_span_multiple_roots = bool(kept and spans_roots)
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
         # proposal_set over these fields, which costs the round every idea the
@@ -1389,6 +1388,8 @@ class SpecialistRunner:
         done_payload["patch_grounding"] = grounding
         if all_dropped_by_grounding:
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
+        if patches_span_multiple_roots:
+            done_payload["patches_span_multiple_roots"] = True
         if not kept:
             done_payload["empty"] = not bool(done_payload.get("proposal_set"))
         notes.extend(safety.notes())
