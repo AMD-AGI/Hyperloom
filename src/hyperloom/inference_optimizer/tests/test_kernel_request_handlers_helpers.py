@@ -440,6 +440,30 @@ def test_an_unattempted_skip_leaves_the_attempt_ledger_alone() -> None:
         assert state.untried_hot_reusable_kernels() == ["k001"], reason
 
 
+def test_the_breakdown_records_which_gate_declined(tmp_path: Path) -> None:
+    """ "skipped" is the same word for every gate; the reason names which one.
+
+    The ledger exemption above keeps an unattempted skip from reading as a
+    failure, and the canonical breakdown is where that distinction has to
+    survive. Recording ``status`` there spent the whole fix: a reader could tell
+    a skip from an attempt and could not tell a sub-floor kernel from one merged
+    into an op-fanout representative or a group already in flight.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
+
+    for reason in ("below_min_gpu_pct=5.0", "opfanout_merged_into=k002", "group_in_flight"):
+        session = tmp_path / reason.replace("=", "_").replace(".", "_")
+        session.mkdir()
+        state = _state_owing_one_attempt()
+        state._session_dir = session
+        krh.record_kernel_opt(state, {"status": "skipped", "reason": reason, "kernel_id": "k001"})
+
+        kernels = assemble_parts(session)["kernel_journey"]["kernels"]
+        entry = next(k for k in kernels if k["kernel_id"] == "k001")
+        assert entry["dispatch"]["dispatched"] is False, reason
+        assert entry["dispatch"]["skip_reason"] == reason, reason
+
+
 def test_a_real_failure_still_spends_its_attempt() -> None:
     """The exemption is scoped to skips; a backend that ran and failed counts."""
     state = _state_owing_one_attempt()

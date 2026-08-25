@@ -801,7 +801,16 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 kernel_id=_kid,
                 dispatched=_dispatched,
                 backends=_backends,
-                skip_reason="" if _dispatched else str(result.get("error_class") or result.get("status") or ""),
+                # ``reason`` first: for an undispatched row it is the only field
+                # that names *which* gate declined -- below the GPU-share floor,
+                # merged into an op-fanout representative, a group already in
+                # flight. ``status`` is "skipped" for all of them, so reading it
+                # first collapses the distinction this lane exists to draw.
+                skip_reason=(
+                    ""
+                    if _dispatched
+                    else str(result.get("reason") or result.get("error_class") or result.get("status") or "")
+                ),
                 orchestration_commit=str(getattr(state, "code_revision", "") or ""),
             )
             instrument.record_kernel_backend_result(sdir, result)
