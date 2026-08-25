@@ -42,14 +42,17 @@ Three properties keep the added freedom bounded:
   ``previous_method``, and the pre-review table is kept beside the reviewed one,
   so a bad review is auditable and reversible.
 
-The session may run shell commands (demangling a mangled vendor symbol is
-exactly the job), so the code under optimization is fingerprinted before and
-after: the candidate source files themselves, and the directories holding them
-so a file the session *created* is caught too. A review that modified either is
-discarded rather than applied -- the benchmark that follows would otherwise
-measure an unrecorded edit and credit it to the kernel rewrite. Writes through
-the ``Write`` tool do not get that far; they are refused outside the run
-directory (see :data:`_GATED_TOOLS`).
+The session gets no tool that can write outside its own run directory: reading
+and searching are pre-approved, ``Write`` is refused outside ``run_dir``, and
+everything else -- a shell included -- is denied. The code under optimization is
+still fingerprinted before and after, as a tripwire rather than as the boundary:
+the candidate source files, and every file in the directories holding them, so a
+sibling helper edited in place is caught alongside one that was created. Drift
+means something wrote where nothing was granted permission to, so the analysis
+fails instead of handing on a table measured against an unrecorded edit. The
+check runs on every outcome, including a session that failed or returned
+nothing -- a session can write and then crash (see :data:`_GATED_TOOLS` and
+:data:`_DENIED_TOOLS`).
 """
 
 from __future__ import annotations
@@ -140,16 +143,9 @@ ALLOWED_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob")
 #: :func:`_write_boundary_guard` instead.
 #:
 #: ``Write`` is the answer channel -- the session reports by writing the
-#: revisions file -- and is confined to the run directory. ``Bash`` is how a
-#: mangled vendor symbol gets demangled, which is exactly the job, and it is
-#: **not** confined: a shell command can write anywhere the process can, and no
-#: inspection of the command string changes that. The two backends therefore
-#: reach different guarantees, which is worth stating rather than implying:
-#: Codex passes ``writable_roots=(run_dir,)`` and its sandbox refuses a path
-#: outside it, covering shell commands too. On the Claude backend a write
-#: through ``Write`` is *prevented* and a write through ``Bash`` is *detected*,
-#: by the fingerprint taken around the session.
-_GATED_TOOLS: tuple[str, ...] = ("Bash", "Write")
+#: revisions file -- and is confined to the run directory. It is the only entry
+#: here because it is the only tool this stage grants that can write at all.
+_GATED_TOOLS: tuple[str, ...] = ("Write",)
 
 #: Tool inputs that name the file a write targets, in the order the SDK fills
 #: them. Kept as a tuple rather than a single key because the write tools do not
@@ -157,6 +153,19 @@ _GATED_TOOLS: tuple[str, ...] = ("Bash", "Write")
 _WRITE_PATH_KEYS: tuple[str, ...] = ("file_path", "path", "filePath", "notebook_path")
 
 _DENIED_TOOLS: tuple[str, ...] = (
+    # A shell writes wherever the process can, and reading the command string to
+    # guess whether it will is the guard that fails quietly on the first
+    # construction nobody predicted -- ``python3 -c`` alone defeats any
+    # allowlist. So the boundary cannot be enforced per call, which left the
+    # framework tree guarded by a fingerprint over the candidate files and their
+    # directories: a sibling helper edited in place, or any file in a directory
+    # no candidate names, drifted nothing and was applied. The one job that
+    # wanted a shell was demangling a vendor symbol, and the host now does that
+    # before the session starts -- see ``device_kernel_name_demangled`` in the
+    # candidate table -- so the capability buys nothing it costs.
+    "Bash",
+    "BashOutput",
+    "KillShell",
     "Edit",
     "NotebookEdit",
     "Task",
@@ -178,12 +187,14 @@ _SYSTEM_PROMPT = (
     "You audit an automated mapping from GPU kernel symbols to the source that "
     "defines them, and decide which kernels are worth handing to a kernel "
     "optimizer. Investigate with the tools available: read the candidate table, "
-    "grep the framework tree, demangle symbols, consult the model config and "
-    "serving arguments. Verify before you revise -- a file that merely calls a "
-    "kernel is not the file that defines it. Never modify anything outside the "
-    "output directory you are given; the framework tree is the code under "
-    "optimization and is checked for tampering. Report findings only by writing "
-    "the revisions file you are asked for."
+    "grep the framework tree, consult the model config and serving arguments. "
+    "Mangled vendor symbols are already demangled for you in the table, under "
+    "'device_kernel_name_demangled'. Verify before you revise -- a file that "
+    "merely calls a kernel is not the file that defines it. You cannot modify "
+    "the framework tree and must not try: it is the code under optimization, "
+    "you have no tool that may write to it, and it is checked for tampering "
+    "either way. Report findings only by writing the revisions file you are "
+    "asked for."
 )
 
 
@@ -290,15 +301,45 @@ def source_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
     return out
 
 
+#: Left out of the print entirely. Python creates this directory for any module
+#: the tree imports, and its own mtime moves on every file written inside it, so
+#: counting it would report drift for a serving process doing its job -- and a
+#: false positive here now fails the analysis. Bytecode cannot shadow the source
+#: it was compiled from, so nothing is given up.
+_IGNORED_ENTRY_NAMES: frozenset[str] = frozenset({"__pycache__"})
+
+#: Tracked by name but not by content: a host rewrites these on its own, and a
+#: rebuild is not an edit. The name is still recorded, so one of them *appearing*
+#: where it was not before is still drift -- that is the case where a planted
+#: file shadows a real module, and it does not depend on reading the content.
+_REBUILT_ENTRY_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".lock", ".log", ".tmp", ".swp")
+
+
 def directory_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
-    """Record the entry set of every directory holding a candidate source.
+    """Record the contents of every directory holding a candidate source.
 
     A file-only print can only ever report a change to a file the table already
-    named, so a file the session *creates* leaves it untouched -- a patched copy
-    beside the kernel, a ``sitecustomize`` module, or any name that shadows a
-    real one on ``sys.path``. Those have to land in one of these directories to
-    be imported in the traced source's place, so the directory listing is the
-    cheap place to notice them: names only, one ``scandir`` per directory.
+    named. Two things escape it, and both are reachable:
+
+    * A file the session *creates* -- a patched copy beside the kernel, a
+      ``sitecustomize`` module, any name that shadows a real one on
+      ``sys.path``. Those have to land in one of these directories to be
+      imported in the traced source's place.
+    * A file that was already there and got edited: a helper the traced kernel
+      calls, in the same package, named by no candidate. Recording names alone
+      missed this entirely, which made "the tree is fingerprinted" a weaker
+      claim than it read as.
+
+    So every entry contributes its name, and a regular file also contributes its
+    size and mtime. Two exemptions keep a healthy host from tripping a check
+    that now fails the analysis: :data:`_IGNORED_ENTRY_NAMES` is left out
+    entirely, and :data:`_REBUILT_ENTRY_SUFFIXES` is tracked by name without its
+    content. A subdirectory is name-only for the same reason -- its mtime moves
+    whenever anything is written inside it. One ``scandir`` plus one ``lstat``
+    per entry, over the handful of directories a candidate table names.
+
+    Symlinks are not followed: a link repointed at another file changes the
+    link's own signature, and following it would print the target instead.
 
     Args:
         paths (Sequence[str]): Candidate source paths, as above.
@@ -316,11 +357,30 @@ def directory_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
         if not directory or directory in out:
             continue
         try:
-            names = sorted(entry.name for entry in os.scandir(directory))
+            entries = list(os.scandir(directory))
         except OSError:
             continue
-        digest = hashlib.sha256("\0".join(names).encode("utf-8", "surrogateescape")).hexdigest()
-        out[directory] = [len(names), digest]
+        signatures: list[str] = []
+        for entry in entries:
+            name = entry.name
+            if name in _IGNORED_ENTRY_NAMES:
+                continue
+            if name.endswith(_REBUILT_ENTRY_SUFFIXES):
+                signatures.append(name)
+                continue
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    stat = entry.stat(follow_symlinks=False)
+                    signatures.append(f"{name}\0{stat.st_size}\0{stat.st_mtime_ns}")
+                else:
+                    signatures.append(name)
+            except OSError:
+                # Vanished between the scan and the stat. Recorded by name so
+                # the two prints still disagree if it comes back changed.
+                signatures.append(name)
+        signatures.sort()
+        digest = hashlib.sha256("\0\0".join(signatures).encode("utf-8", "surrogateescape")).hexdigest()
+        out[directory] = [len(signatures), digest]
     return out
 
 
@@ -383,11 +443,11 @@ def build_review_prompt(
     bound the review by whatever was guessed to be relevant, whereas the agent
     can follow the evidence -- and only ships what it actually opened.
 
-    The closing "write nothing outside the run directory" line is enforced for
-    the tool that writes -- ``Write`` is refused outside ``run_dir`` on both
-    backends -- and is an instruction for the one that can write anyway: a
-    ``Bash`` command on the Claude backend is bounded by detection, not by
-    refusal. See :data:`_GATED_TOOLS` for the split.
+    The closing "write nothing outside the run directory" line is enforced, not
+    advisory: ``Write`` is the only tool granted that can write and it is
+    refused outside ``run_dir`` on both backends. It is still said, because a
+    session told what the boundary is stops trying to cross it and spends its
+    turns on the audit instead. See :data:`_GATED_TOOLS`.
     """
     task = (
         "Audit the kernel-candidate table produced by the deterministic "
@@ -535,20 +595,13 @@ def _write_boundary_guard(
     freedom this stage exists to withhold, and does so silently on an SDK
     upgrade nobody reviewed.
 
-    Three decisions, and only three:
+    Two decisions, and only two. Nothing else this stage grants can write, so
+    the boundary is a refusal rather than a fingerprint:
 
     * ``Write`` is the answer channel and is confined to ``run_dir``. A target
       outside it, or one that cannot be read off the tool input at all, is
       refused, and the refusal reaches the session as a tool error it can react
       to rather than as a silent success.
-    * ``Bash`` is admitted, and every call is recorded. A shell command can
-      write anywhere the process can, and reading the command string to guess
-      whether it will is the kind of guard that fails quietly on the first
-      construction nobody predicted -- ``python3 -c`` alone defeats any command
-      allowlist -- so confinement is not attempted here and
-      :func:`directory_fingerprint` carries the case instead. What the callback
-      does add is a record: an unexplained drift afterwards can be read against
-      the commands that ran.
     * The pre-approved read-only tools are allowed if they ever arrive here.
       They should not -- an ``allowed_tools`` entry auto-approves ahead of the
       callback -- but agreeing with :data:`ALLOWED_TOOLS` costs nothing and
@@ -586,10 +639,6 @@ def _write_boundary_guard(
                     f"refused: {tool_name} may only write under {run_dir}; "
                     f"{target or '(no path in tool input)'} is outside it"
                 )
-            return sdk.PermissionResultAllow()
-        if tool_name == "Bash":
-            command = str(tool_input.get("command") or "").strip()
-            _say(f"bash (unconfined, tree is fingerprinted): {command[:240]}")
             return sdk.PermissionResultAllow()
         if tool_name in ALLOWED_TOOLS:
             return sdk.PermissionResultAllow()

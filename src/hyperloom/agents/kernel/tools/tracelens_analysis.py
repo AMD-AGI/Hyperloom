@@ -60,6 +60,11 @@ except ImportError:
     _known_target_roots = None
 
 try:
+    from _task_group_contract import native_operation_key as _native_operation_key
+except ImportError:
+    _native_operation_key = None
+
+try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
 except Exception:
     _aiter_jit_core = None
@@ -6736,6 +6741,53 @@ def build_audit_summary(
     }
 
 
+def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Copy ``candidate`` with the demangled device symbol added when it differs.
+
+    ``native_operation_key`` already owns this normalization for the task-group
+    identity: it strips the CPU-side launch call, a return type and template
+    parameters, then demangles an Itanium symbol. Only added when it actually
+    changes the string, so a row whose symbol was never mangled does not grow a
+    field restating it.
+
+    Args:
+        candidate (dict[str, Any]): One finalized candidate row.
+
+    Returns:
+        dict[str, Any]: A shallow copy, possibly carrying
+            ``device_kernel_name_demangled``.
+    """
+    row = dict(candidate)
+    if _native_operation_key is None:
+        return row
+    raw = str(row.get("device_kernel_name") or row.get("name") or "").strip()
+    if not raw:
+        return row
+    try:
+        demangled = _native_operation_key(raw)
+    except Exception:  # noqa: BLE001 - a reading aid must not fail the stage
+        return row
+    if demangled and demangled != raw:
+        row["device_kernel_name_demangled"] = demangled
+    return row
+
+
+class CandidateSourceTampered(RuntimeError):
+    """The code under optimization changed while the review session ran.
+
+    Not a fault in the audit, so it is not contained like one. The session has
+    no tool that may write to the framework tree, so drift means something wrote
+    where nothing was granted permission to, and every measurement taken after
+    this point would be against a tree nothing recorded. Discarding the
+    revisions was never enough on its own: the edit stays on disk, and the
+    benchmark that follows would credit it to the kernel rewrite.
+
+    Raised out of the stage and out of ``main()``, which marks the analysis
+    failed. That is what stops the dispatch: no reviewed candidate table is
+    published, so nothing downstream has a kernel to hand to a backend.
+    """
+
+
 def run_candidate_review_stage(
     run_dir: Path,
     *,
@@ -6748,7 +6800,11 @@ def run_candidate_review_stage(
 
     The stage is advisory by construction, and it sits at the end of an
     analysis that a multi-hour benchmark paid for. An unforeseen fault in it
-    must cost the audit, not the run, so nothing escapes this boundary.
+    must cost the audit, not the run, so nothing escapes this boundary --
+    except :class:`CandidateSourceTampered`, which reports that the tree the
+    benchmark measures is no longer the tree the trace described. Containing
+    that one would turn the check into a log line and let the run continue on
+    exactly the evidence it exists to refuse.
     """
     try:
         return _run_candidate_review_stage(
@@ -6758,6 +6814,8 @@ def run_candidate_review_stage(
             log_path=log_path,
             trace_health_warnings=trace_health_warnings,
         )
+    except CandidateSourceTampered:
+        raise
     except Exception as exc:  # noqa: BLE001 - never let the audit fail the run
         log.warning("candidate review stage failed (%r); keeping the deterministic table", exc)
         if trace_health_warnings is not None:
@@ -6957,14 +7015,21 @@ def _run_candidate_review_stage(
 
     tracelens_dir = run_dir / "tracelens"
     raw_path = run_dir / RAW_CANDIDATES_FILENAME
-    routable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
+    # Demangled here rather than in the session. Demangling a vendor symbol was
+    # the one job that wanted a shell, and a shell cannot be confined to the run
+    # directory -- so the host does it and the session keeps a read-only tool
+    # surface. Written onto copies: the demangled name is an aid for the reader
+    # of this table, not a candidate field, and the reviewed table downstream
+    # must stay diffable against the deterministic one.
+    payload_rows = [_with_demangled_symbol(c) for c in candidates if isinstance(c, dict)]
+    routable = [c for c in payload_rows if c.get("reusable_native_kernel") is True]
     atomic_write_json(
         raw_path,
         {
             "model_name": args.model_name,
             "framework": args.framework,
             "source": "tracelens_analysis:deterministic",
-            "hot_kernels": candidates,
+            "hot_kernels": payload_rows,
             "routable_kernels": routable,
         },
     )
@@ -7021,6 +7086,41 @@ def _run_candidate_review_stage(
         log=_forward_to_log,
     )
 
+    # Before the outcome is even read. A session that crashed, timed out or
+    # returned unparseable JSON can have written first, and returning on
+    # ``not outcome.ok`` ahead of this check meant exactly the failures most
+    # likely to have left something behind were the ones never inspected.
+    drifted = fingerprint_drift(before, source_fingerprint(source_paths))
+    drifted_dirs = fingerprint_drift(before_dirs, directory_fingerprint(source_paths))
+    if drifted or drifted_dirs:
+        warnings.append(
+            {
+                "code": "candidate_review_touched_source",
+                "severity": "error",
+                "paths": (drifted + drifted_dirs)[:16],
+                "files_changed": len(drifted),
+                "directories_changed": len(drifted_dirs),
+                "review_status": outcome.status,
+                "message": (
+                    "The candidate review session modified the code under "
+                    f"optimization ({len(drifted)} file(s), {len(drifted_dirs)} "
+                    "directory listing(s)) despite holding no tool that may "
+                    "write there. The analysis is failed rather than reported: "
+                    "the edit is on disk, so every measurement after this point "
+                    "would be against a tree nothing recorded. Restore the "
+                    "framework tree before re-running."
+                ),
+            }
+        )
+        _note(
+            f"candidate review changed {len(drifted)} source file(s) and "
+            f"{len(drifted_dirs)} directory listing(s); failing the analysis"
+        )
+        raise CandidateSourceTampered(
+            f"the candidate review session modified {len(drifted)} source file(s) "
+            f"and {len(drifted_dirs)} directory listing(s) under optimization"
+        )
+
     if not outcome.ok:
         warnings.append(
             {
@@ -7037,31 +7137,6 @@ def _run_candidate_review_stage(
             }
         )
         _note(f"candidate review failed ({outcome.status}): {outcome.detail}")
-        return artifacts
-
-    drifted = fingerprint_drift(before, source_fingerprint(source_paths))
-    drifted_dirs = fingerprint_drift(before_dirs, directory_fingerprint(source_paths))
-    if drifted or drifted_dirs:
-        warnings.append(
-            {
-                "code": "candidate_review_touched_source",
-                "severity": "error",
-                "paths": (drifted + drifted_dirs)[:16],
-                "files_changed": len(drifted),
-                "directories_changed": len(drifted_dirs),
-                "message": (
-                    "The candidate review session modified the code under "
-                    f"optimization ({len(drifted)} file(s), {len(drifted_dirs)} "
-                    "directory listing(s)); its revisions were discarded. Any "
-                    "benchmark run after this point would measure an unrecorded "
-                    "edit."
-                ),
-            }
-        )
-        _note(
-            f"candidate review discarded: it changed {len(drifted)} source file(s) "
-            f"and {len(drifted_dirs)} directory listing(s)"
-        )
         return artifacts
 
     op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")

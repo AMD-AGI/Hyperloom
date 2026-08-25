@@ -819,16 +819,33 @@ class TestToolScope:
             assert tool not in cra.ALLOWED_TOOLS
             assert tool in cra._DENIED_TOOLS
 
-    def test_the_writing_tools_are_not_pre_approved(self):
+    def test_the_writing_tool_is_not_pre_approved(self):
         """A tool in ``allowed_tools`` skips the permission callback entirely.
 
-        Leaving them there is what made the run-directory boundary a sentence in
+        Leaving it there is what made the run-directory boundary a sentence in
         the prompt rather than something the session runs into.
         """
-        for tool in ("Bash", "Write"):
+        assert "Write" not in cra.ALLOWED_TOOLS
+        assert "Write" not in cra._DENIED_TOOLS
+        assert "Write" in cra._GATED_TOOLS
+
+    def test_no_shell_is_granted(self):
+        """A shell cannot be confined to the run directory, so it is not given.
+
+        The boundary was previously enforced for ``Write`` and only *detected*
+        for ``Bash``, and detection covered the candidate files and the names in
+        their directories -- so a sibling helper edited in place, or any file
+        under a directory no candidate named, drifted nothing. Demangling was
+        the one job that wanted a shell and the host does it now.
+        """
+        for tool in ("Bash", "BashOutput", "KillShell"):
             assert tool not in cra.ALLOWED_TOOLS
-            assert tool not in cra._DENIED_TOOLS
-            assert tool in cra._GATED_TOOLS
+            assert tool not in cra._GATED_TOOLS
+            assert tool in cra._DENIED_TOOLS
+
+    def test_only_the_answer_channel_can_write(self):
+        """Every granted tool is read-only except the one that reports."""
+        assert cra._GATED_TOOLS == ("Write",)
 
 
 class TestWriteBoundaryGuard:
@@ -877,25 +894,18 @@ class TestWriteBoundaryGuard:
         decision = self._decide(run_dir, "Write", {"contents": "x"})
         assert decision.behavior == "deny"
 
-    def test_shell_commands_are_admitted_and_bounded_by_detection(self, tmp_path):
-        """Reading a command string to guess whether it writes is not attempted.
+    def test_a_shell_command_is_refused(self, tmp_path):
+        """No command string is inspected, because no shell is granted at all.
 
-        A shell command can write anywhere the process can; the directory
-        fingerprint is what covers that case, not this callback.
+        Guessing from the command whether it writes is the guard that fails on
+        the first construction nobody predicted -- ``python3 -c`` defeats any
+        allowlist -- so the capability goes instead of the guess.
         """
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        decision = self._decide(run_dir, "Bash", {"command": "c++filt _ZN5aiter4moeE"})
-        assert decision.behavior == "allow"
-
-    def test_every_shell_command_is_recorded(self, tmp_path):
-        """Bash is not confined, so the record is what makes drift readable."""
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-        seen: list[str] = []
-        guard = cra._write_boundary_guard(run_dir, log=seen.append)
-        asyncio.run(guard("Bash", {"command": "cp a.py /tmp/b.py"}, None))
-        assert any("cp a.py /tmp/b.py" in line for line in seen)
+        for command in ("c++filt _ZN5aiter4moeE", "cp a.py /tmp/b.py"):
+            decision = self._decide(run_dir, "Bash", {"command": command})
+            assert decision.behavior == "deny", command
 
     def test_an_unknown_tool_is_refused_not_allowed(self, tmp_path):
         """The tool set is the SDK's to grow.
@@ -1029,12 +1039,24 @@ class TestReviewStageBoundary:
             assert internal not in offered
         assert "analysis.md" in offered
 
-    def test_a_file_created_beside_the_traced_source_discards_the_review(self, tmp_path, monkeypatch):
+    def _stage_must_fail(self, tmp_path, candidates, warnings) -> dict:
+        """Run the stage expecting a tamper failure; return the warning row."""
+        with pytest.raises(tla.CandidateSourceTampered):
+            tla._run_candidate_review_stage(
+                tmp_path,
+                candidates=candidates,
+                args=self._args(),
+                trace_health_warnings=warnings,
+            )
+        return next(w for w in warnings if w["code"] == "candidate_review_touched_source")
+
+    def test_a_file_created_beside_the_traced_source_fails_the_analysis(self, tmp_path, monkeypatch):
         """The file print cannot see a file the session added.
 
         A module that shadows the traced source only has to exist beside it to
         be imported in its place, and the benchmark that follows would then
-        measure it.
+        measure it. Discarding the revision is not enough -- the file stays on
+        disk -- so the analysis fails and nothing is dispatched.
         """
         pkg = tmp_path / "vllm" / "ops"
         pkg.mkdir(parents=True)
@@ -1051,20 +1073,130 @@ class TestReviewStageBoundary:
 
         monkeypatch.setattr(cra, "run_candidate_review", _plants_a_shadow)
         warnings: list[dict] = []
-        artifacts = tla._run_candidate_review_stage(
+        touched = self._stage_must_fail(tmp_path, [candidate], warnings)
+        assert touched["directories_changed"] == 1
+        # Not applied either: the revision must not have landed.
+        assert candidate["source_file"] == str(source)
+
+    def test_an_edited_sibling_helper_fails_the_analysis(self, tmp_path, monkeypatch):
+        """A helper in the same package, named by no candidate, was invisible.
+
+        Recording directory *names* only meant an in-place edit to a file that
+        already existed drifted nothing: the name set is unchanged and the
+        candidate source itself is untouched. The traced kernel calls that
+        helper, so editing it changes what the benchmark measures just as much
+        as editing the kernel.
+        """
+        pkg = tmp_path / "aiter" / "ops"
+        pkg.mkdir(parents=True)
+        source = pkg / "gemm_afp4wfp4.py"
+        source.write_text("from .util import tune\n", encoding="utf-8")
+        helper = pkg / "util.py"
+        helper.write_text("def tune(): return 1\n", encoding="utf-8")
+        candidate = {"kernel_id": "k001", "name": "k", "source_file": str(source)}
+
+        def _edits_the_helper(**_kw):
+            helper.write_text("def tune(): return 2  # faster\n", encoding="utf-8")
+            return cra.ReviewOutcome(status="completed", revisions=[])
+
+        monkeypatch.setattr(cra, "run_candidate_review", _edits_the_helper)
+        warnings: list[dict] = []
+        touched = self._stage_must_fail(tmp_path, [candidate], warnings)
+        assert touched["directories_changed"] == 1
+        assert touched["files_changed"] == 0
+
+    def test_a_write_by_a_session_that_then_failed_is_still_caught(self, tmp_path, monkeypatch):
+        """The check used to sit behind the ``outcome.ok`` return.
+
+        A session can write and then crash, time out, or return unparseable
+        JSON -- so the outcomes most likely to have left something behind were
+        exactly the ones never inspected.
+        """
+        source = tmp_path / "sparse_attn.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        candidate = {"kernel_id": "k001", "name": "k", "source_file": str(source)}
+
+        def _writes_then_fails(**_kw):
+            source.write_text("def k(): return 1\n", encoding="utf-8")
+            return cra.ReviewOutcome(status="failed", detail="stream_timeout")
+
+        monkeypatch.setattr(cra, "run_candidate_review", _writes_then_fails)
+        warnings: list[dict] = []
+        touched = self._stage_must_fail(tmp_path, [candidate], warnings)
+        assert touched["files_changed"] == 1
+        assert touched["review_status"] == "failed"
+        # The failure is reported as tampering, not as a lost audit: the two
+        # ask for different operator responses.
+        assert [w["code"] for w in warnings].count("candidate_review_failed") == 0
+
+    def test_tampering_is_not_contained_by_the_stage_boundary(self, tmp_path, monkeypatch):
+        """The wrapper converts every fault into a warning except this one.
+
+        Containing it would turn the check into a log line and let the run
+        continue on exactly the evidence it exists to refuse.
+        """
+
+        def _tampered(*_args, **_kwargs):
+            raise tla.CandidateSourceTampered("1 file(s)")
+
+        monkeypatch.setattr(tla, "_run_candidate_review_stage", _tampered)
+        with pytest.raises(tla.CandidateSourceTampered):
+            tla.run_candidate_review_stage(tmp_path, candidates=[], args=self._args())
+
+    def test_a_rebuilt_artifact_is_not_tampering(self, tmp_path, monkeypatch):
+        """A false positive now fails the analysis, so a healthy host must pass.
+
+        The serving process imports and JIT-compiles the traced tree while this
+        runs. Bytecode cannot shadow the source it came from, so ``__pycache__``
+        is left out and a recompiled ``.pyc`` is tracked by name without its
+        content -- while the name set still moves if one *appears*, which is the
+        case that shadows a real module.
+        """
+        pkg = tmp_path / "vllm" / "ops"
+        pkg.mkdir(parents=True)
+        source = pkg / "attn.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        stale = pkg / "attn.pyc"
+        stale.write_bytes(b"\x00")
+        candidate = {"kernel_id": "k001", "name": "k", "source_file": str(source)}
+
+        def _recompiles_the_tree(**_kw):
+            cache = pkg / "__pycache__"
+            cache.mkdir()
+            (cache / "attn.cpython-312.pyc").write_bytes(b"\x00\x01")
+            stale.write_bytes(b"\x00\x01\x02")
+            return cra.ReviewOutcome(status="completed", revisions=[])
+
+        monkeypatch.setattr(cra, "run_candidate_review", _recompiles_the_tree)
+        warnings: list[dict] = []
+        tla._run_candidate_review_stage(
             tmp_path,
             candidates=[candidate],
             args=self._args(),
             trace_health_warnings=warnings,
         )
+        assert [w["code"] for w in warnings] == []
 
-        codes = [w["code"] for w in warnings]
-        assert "candidate_review_touched_source" in codes
-        touched = next(w for w in warnings if w["code"] == "candidate_review_touched_source")
+    def test_a_planted_module_is_tampering_even_with_an_exempt_suffix(self, tmp_path, monkeypatch):
+        """Exempting content must not exempt existence.
+
+        A rebuild is not an edit, but a file that was not there before is a file
+        that can be imported in the traced source's place, whatever it is named.
+        """
+        pkg = tmp_path / "vllm" / "ops"
+        pkg.mkdir(parents=True)
+        source = pkg / "attn.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        candidate = {"kernel_id": "k001", "name": "k", "source_file": str(source)}
+
+        def _plants_one(**_kw):
+            (pkg / "attn.pyc").write_bytes(b"\x00")
+            return cra.ReviewOutcome(status="completed", revisions=[])
+
+        monkeypatch.setattr(cra, "run_candidate_review", _plants_one)
+        warnings: list[dict] = []
+        touched = self._stage_must_fail(tmp_path, [candidate], warnings)
         assert touched["directories_changed"] == 1
-        # Discarded, not applied: the revision must not have landed.
-        assert candidate["source_file"] == str(source)
-        assert "kernel_candidates_revisions" not in artifacts
 
     def test_a_line_annotated_source_is_still_covered_by_the_stage(self, tmp_path, monkeypatch):
         """The stage hands ``source_file`` through as recorded.
@@ -1083,15 +1215,123 @@ class TestReviewStageBoundary:
 
         monkeypatch.setattr(cra, "run_candidate_review", _edits_the_tree)
         warnings: list[dict] = []
-        tla._run_candidate_review_stage(
-            tmp_path,
-            candidates=[candidate],
-            args=self._args(),
-            trace_health_warnings=warnings,
-        )
+        with pytest.raises(tla.CandidateSourceTampered):
+            tla._run_candidate_review_stage(
+                tmp_path,
+                candidates=[candidate],
+                args=self._args(),
+                trace_health_warnings=warnings,
+            )
 
         touched = next(w for w in warnings if w["code"] == "candidate_review_touched_source")
         assert touched["files_changed"] == 1
+
+    def test_the_public_audit_is_rebuilt_from_the_reviewed_table(self, tmp_path, monkeypatch):
+        """The audit was written during finalize, before this stage ran.
+
+        So a review that moved a ``source_file`` left the artifact a human reads
+        naming the old path while kernel_candidates.json named the new one --
+        two answers to "where does this kernel live", and the public one was
+        the stale one.
+        """
+        pkg = tmp_path / "aiter" / "ops"
+        pkg.mkdir(parents=True)
+        wrong = pkg / "caller.py"
+        wrong.write_text("from .real import k\n", encoding="utf-8")
+        right = pkg / "real.py"
+        right.write_text("def k(): pass\n", encoding="utf-8")
+        candidate = {
+            "kernel_id": "k001",
+            "name": "k",
+            "gpu_pct": 9.0,
+            "source_file": str(wrong),
+            "source_resolution_method": "name_grep",
+        }
+
+        # Pre-review audit, exactly as finalize leaves it.
+        audit_path = tmp_path / tla._SOURCE_RESOLUTION_NAME
+        tla.write_source_resolution_artifact([candidate], audit_path, framework="vllm", model_name="m")
+        assert json.loads(audit_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(wrong)
+
+        # A revised path is only taken when it resolves under a known root.
+        monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
+        monkeypatch.setattr(
+            cra,
+            "run_candidate_review",
+            lambda **_kw: cra.ReviewOutcome(
+                status="completed",
+                revisions=[
+                    {
+                        "kernel_id": "k001",
+                        "action": "rewrite",
+                        "source_file": str(right),
+                        "reason": "caller.py imports it; real.py defines it",
+                    }
+                ],
+            ),
+        )
+        artifacts = tla._run_candidate_review_stage(
+            tmp_path,
+            candidates=[candidate],
+            args=self._args(),
+            trace_health_warnings=[],
+        )
+
+        assert candidate["source_file"] == str(right)
+        assert artifacts["kernel_source_resolution"] == str(audit_path)
+        entry = json.loads(audit_path.read_text(encoding="utf-8"))["entries"][0]
+        assert entry["source_file"] == str(right)
+        # And the displaced path is recorded rather than dropped. The audit read
+        # ``source_resolution_previous_file``, which nothing writes, so this
+        # column was empty for the one case it exists to record.
+        assert entry["previous_source_file"] == str(wrong)
+        assert entry["previous_method"] == "name_grep"
+
+    def test_the_session_is_handed_the_demangled_symbol(self, tmp_path, monkeypatch):
+        """Demangling was the one job that wanted a shell.
+
+        A shell cannot be confined to the run directory, so the host demangles
+        before the session starts and the session keeps a read-only tool
+        surface. Written onto a copy: the reviewed table has to stay diffable
+        against the deterministic one.
+        """
+        candidate = {
+            "kernel_id": "k001",
+            "name": "aiter_op",
+            "device_kernel_name": "hipModuleLaunchKernel->_ZN5aiter18add_rmsnorm_kernelE",
+        }
+        monkeypatch.setattr(
+            cra,
+            "run_candidate_review",
+            lambda **_kw: cra.ReviewOutcome(status="failed", detail="not run"),
+        )
+        artifacts = tla._run_candidate_review_stage(
+            tmp_path,
+            candidates=[candidate],
+            args=self._args(),
+            trace_health_warnings=[],
+        )
+
+        raw = json.loads(Path(artifacts["kernel_candidates_raw"]).read_text(encoding="utf-8"))
+        assert raw["hot_kernels"][0]["device_kernel_name_demangled"] == "aiter::add_rmsnorm_kernel"
+        assert "device_kernel_name_demangled" not in candidate
+
+    def test_a_symbol_that_was_never_mangled_grows_no_field(self, tmp_path, monkeypatch):
+        """A field restating its neighbour is noise in every row that has one."""
+        candidate = {"kernel_id": "k001", "name": "k", "device_kernel_name": "_gqa_sparse_fwd_kernel"}
+        monkeypatch.setattr(
+            cra,
+            "run_candidate_review",
+            lambda **_kw: cra.ReviewOutcome(status="failed", detail="not run"),
+        )
+        artifacts = tla._run_candidate_review_stage(
+            tmp_path,
+            candidates=[candidate],
+            args=self._args(),
+            trace_health_warnings=[],
+        )
+        raw = json.loads(Path(artifacts["kernel_candidates_raw"]).read_text(encoding="utf-8"))
+        assert "device_kernel_name_demangled" not in raw["hot_kernels"][0]
 
     def test_a_tamper_check_that_covers_nothing_says_so(self, tmp_path, monkeypatch):
         """An empty print produces the same empty drift list as a clean tree.
