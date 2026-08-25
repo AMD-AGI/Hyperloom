@@ -34,6 +34,7 @@ from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _capture_shapes import is_capture_dir_name  # noqa: E402
 from _io_utils import safe_float  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     build_operator_identity,
@@ -282,9 +283,13 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
     """Find a graph-capture folder near a Magpie torch_trace input.
 
-    Checks the conventional ``capture_traces`` / ``graph_capture`` siblings of
-    the trace input directory and of the first trace file, returning the first
-    one that exists.
+    Scans the trace input directory and the first trace file's neighbourhood for
+    a subdirectory whose name matches the shared capture-directory shape, so a
+    layout that ranking already demotes is also a layout discovery can find.
+    Matching by shape rather than by two hard-coded names is what lets an
+    unpatched SGLang's ``graph_capture_profile/`` through: it was previously
+    missed here, so the capture folder went unpassed even on runs that had
+    correctly picked the workload trace.
 
     Args:
         trace_input (Path): The trace input path (file or directory).
@@ -294,24 +299,23 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
         Path | None: The capture folder if one exists nearby, else ``None``.
     """
 
-    candidates: list[Path] = []
+    search_roots: list[Path] = []
     if trace_input.is_dir():
-        candidates.extend(
-            [
-                trace_input / "capture_traces",
-                trace_input / "graph_capture",
-            ]
-        )
+        search_roots.append(trace_input)
     for trace_file in trace_files[:1]:
-        candidates.extend(
-            [
-                trace_file.parent / "capture_traces",
-                trace_file.parent.parent / "capture_traces",
-            ]
-        )
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
+        search_roots.extend([trace_file.parent, trace_file.parent.parent])
+    seen: set[Path] = set()
+    for root in search_roots:
+        if root in seen or not root.is_dir():
+            continue
+        seen.add(root)
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_dir() and is_capture_dir_name(child.name):
+                return child
     return None
 
 
@@ -1006,9 +1010,7 @@ def _row_to_candidate(
     device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
     # Store only the path in source_file; line/function annotations have their
     # own fields and otherwise make extension-based routing see an unknown file.
-    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(
-        kernel_path
-    )
+    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(kernel_path)
     if kernel_path:
         resolved = _resolve_launcher_to_abs_source(kernel_path)
         if resolved is not None:
@@ -1080,6 +1082,40 @@ _IDLE_PCT_TABLE_RE = re.compile(
     r"^\|\s*Idle\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
     re.IGNORECASE | re.MULTILINE,
 )
+_COMPUTE_PCT_TABLE_RE = re.compile(
+    r"^\|\s*Compute\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
+    re.IGNORECASE | re.MULTILINE,
+)
+_EXPOSED_COMM_PCT_TABLE_RE = re.compile(
+    r"^\|\s*Exposed\s+Communication\s*%\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\|",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_exec_summary_pct(md_path: Path, pattern: re.Pattern[str]) -> float | None:
+    """Extract one percentage row from an ``analysis.md`` Executive Summary table.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+        pattern: Row regex whose first group is the numeric percentage.
+
+    Returns:
+        The percentage, or ``None`` when the file or row is missing or
+        unparseable, so callers skip their gate gracefully.
+    """
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    match = pattern.search(text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
@@ -1094,20 +1130,38 @@ def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
         The idle percentage, or ``None`` when missing/unparseable so callers
         skip the gate gracefully.
     """
-    try:
-        text = md_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
+    return _extract_exec_summary_pct(md_path, _IDLE_PCT_TABLE_RE)
 
-    match = _IDLE_PCT_TABLE_RE.search(text)
-    if not match:
-        return None
 
-    raw = match.group(1)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+def extract_compute_pct_from_analysis_md(md_path: Path) -> float | None:
+    """Extract ``Compute %`` from an ``analysis.md`` Executive Summary table.
+
+    Used by the low-compute gate.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The compute percentage, or ``None`` when missing/unparseable so callers
+        skip the gate gracefully.
+    """
+    return _extract_exec_summary_pct(md_path, _COMPUTE_PCT_TABLE_RE)
+
+
+def extract_exposed_comm_pct_from_analysis_md(md_path: Path) -> float | None:
+    """Extract ``Exposed Communication %`` from an ``analysis.md`` summary table.
+
+    Context for the low-compute gate: it distinguishes a comm-dominated window
+    from a host-bound one.
+
+    Args:
+        md_path: Path to the ``analysis.md`` report.
+
+    Returns:
+        The exposed-communication percentage, or ``None`` when
+        missing/unparseable.
+    """
+    return _extract_exec_summary_pct(md_path, _EXPOSED_COMM_PCT_TABLE_RE)
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
@@ -1735,6 +1789,8 @@ __all__ = [
     "aggregate_by_source_function",
     "build_orchestrator_prompt",
     "discover_capture_folder",
+    "extract_compute_pct_from_analysis_md",
+    "extract_exposed_comm_pct_from_analysis_md",
     "extract_idle_pct_from_analysis_md",
     "infer_analysis_mode",
     "normalize_upstream_category",

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import py_compile
@@ -46,6 +47,25 @@ from patch_path_safety import (  # noqa: E402
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
 )
+
+
+def _pod_backup_stem(kernel_id: str, target: Path, host: str) -> str:
+    """Name a pod-side backup uniquely per target and per apply.
+
+    A constant ``kernel_id`` does not separate two targets, and a whole-second
+    stamp does not separate the files of one multi-file apply.
+
+    Args:
+        kernel_id (str): Kernel identifier; falls back to the target's stem.
+        target (Path): File being replaced.
+        host (str): Pod the backup is taken on.
+
+    Returns:
+        str: A collision-free stem for this apply.
+    """
+    path_hash = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
+    return f"{_safe_name(kernel_id or target.stem)}_{path_hash}_{host}_{time.time_ns()}"
+
 
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 _STREAM_TAIL_BYTES = 32 * 1024
@@ -107,7 +127,8 @@ def _do_apply(a: argparse.Namespace) -> int:
         return _emit({"status": "failed", "host": host, "error": f"target_path does not exist: {target}"})
     bdir = Path(a.backup_dir)
     bdir.mkdir(parents=True, exist_ok=True)
-    backup_path = bdir / (f"{_safe_name(a.kernel_id or target.stem)}_{host}_{int(time.time())}.bak")
+    backup_stem = _pod_backup_stem(a.kernel_id, target, host)
+    backup_path = bdir / f"{backup_stem}.bak"
     shutil.copy2(target, backup_path)
     try:
         data = base64.b64decode(a.patch_b64.encode("ascii"))
@@ -117,7 +138,7 @@ def _do_apply(a: argparse.Namespace) -> int:
     jit_backup = invalidate_aiter_jit_build(
         Path(jit_build_dir) if jit_build_dir else None,
         bdir,
-        f"{_safe_name(a.kernel_id or target.stem)}_{host}_{int(time.time())}",
+        backup_stem,
     )
     compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
     try:
@@ -132,10 +153,7 @@ def _do_apply(a: argparse.Namespace) -> int:
             {
                 "status": "failed",
                 "host": host,
-                "error": (
-                    "py_compile failed (auto-reverted): "
-                    f"{exc.msg}"
-                ),
+                "error": (f"py_compile failed (auto-reverted): {exc.msg}"),
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -181,11 +199,7 @@ def _do_revert(a: argparse.Namespace) -> int:
                 "restored_targets": [],
             }
         )
-    if (
-        not records_json
-        and getattr(a, "backup_path", "")
-        and not Path(a.backup_path).is_file()
-    ):
+    if not records_json and getattr(a, "backup_path", "") and not Path(a.backup_path).is_file():
         return _emit(
             {
                 "status": "noop_missing_backup",

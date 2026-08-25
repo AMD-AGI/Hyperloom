@@ -52,9 +52,7 @@ def validate_relative_path(value: str) -> str:
     if not raw or "\\" in raw or raw.startswith("/"):
         raise RemoteRecipeValidationError(f"invalid artifact path: {raw!r}")
     if len(raw.encode("utf-8")) > MAX_PATH_BYTES:
-        raise RemoteRecipeValidationError(
-            f"artifact path exceeds the {MAX_PATH_BYTES}-byte KB Store limit"
-        )
+        raise RemoteRecipeValidationError(f"artifact path exceeds the {MAX_PATH_BYTES}-byte KB Store limit")
     path = PurePosixPath(raw)
     if any(part in ("", ".", "..") for part in path.parts):
         raise RemoteRecipeValidationError(f"invalid artifact path: {raw!r}")
@@ -69,11 +67,7 @@ def extract_knowledge_artifact_refs(
     artifact_paths: Iterable[str] = (),
 ) -> set[str]:
     """Collect artifact refs actually present in the final knowledge document."""
-    known_paths = {
-        validate_relative_path(path)
-        for path in artifact_paths
-        if str(path or "").strip()
-    }
+    known_paths = {validate_relative_path(path) for path in artifact_paths if str(path or "").strip()}
     refs: set[str] = set()
 
     def declared_ref(raw: str, key: str) -> str | None:
@@ -150,9 +144,7 @@ class KnowledgeBundle:
                 allow_nan=False,
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
-            raise RemoteRecipeValidationError(
-                f"knowledge is not strict JSON: {exc}"
-            ) from exc
+            raise RemoteRecipeValidationError(f"knowledge is not strict JSON: {exc}") from exc
         if len(encoded) > MAX_KNOWLEDGE_BYTES:
             raise RemoteRecipeValidationError(
                 f"knowledge is {len(encoded)} bytes; KB Store limit is {MAX_KNOWLEDGE_BYTES}"

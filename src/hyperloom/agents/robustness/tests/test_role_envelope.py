@@ -12,7 +12,6 @@ import pytest
 from hyperloom.agents.robustness.role.envelope import (
     ALERT_SEVERITIES,
     IntentType,
-    KILL_TASK_ALLOWED_SCOPES,
     PAYLOAD_REQUIRED,
     ROBUSTNESS_ALLOWED_INTENTS,
     ROBUSTNESS_DELEGATE_ACTIONS,
@@ -23,7 +22,6 @@ from hyperloom.agents.robustness.role.envelope import (
     build_envelope_dict,
     build_escalate,
     build_heartbeat,
-    build_kill_task,
     build_prune_branch,
     build_send_message,
     build_update_state,
@@ -85,16 +83,6 @@ def test_escalate_builder_carries_hint_and_severity():
     assert payload["severity"] == "high"
 
 
-def test_kill_task_builder_pins_scope_to_task():
-    intent = build_kill_task("task-123", "stuck for 10min")
-    assert intent.type is IntentType.KILL_TASK
-    assert intent.payload == {
-        "task_id": "task-123",
-        "reason": "stuck for 10min",
-        "scope": "task",
-    }
-
-
 def test_prune_branch_builder():
     intent = build_prune_branch("backends.sglang", "3 consecutive failures")
     assert intent.type is IntentType.PRUNE_BRANCH
@@ -145,40 +133,16 @@ def test_escalate_requires_reason_and_hint():
         build_escalate("reason", "")
 
 
-@pytest.mark.parametrize(
-    "task_id,reason",
-    [("", "r"), ("t", ""), ("", "")],
-)
-def test_kill_task_requires_both_fields(task_id, reason):
-    with pytest.raises(ValueError):
-        build_kill_task(task_id, reason)
-
-
 def test_delegate_rejects_kernel_owned_action():
     for kernel_owned in ("kernel_opt", "integrate", "gemm_tuning"):
         with pytest.raises(ValueError):
             build_delegate(kernel_owned)
 
 
-def test_delegate_accepts_only_handle_actions():
+def test_delegate_accepts_every_allowlisted_action():
     for action in ROBUSTNESS_DELEGATE_ACTIONS:
         intent = build_delegate(action)
         assert intent.payload["action_name"] == action
-
-
-def test_delegate_allowlist_includes_report_wind_down():
-    """``report`` is the wind-down lever for ``deadline_imminent``/``recover_unsuccessful``; the ladder relies on ``build_delegate('report')`` not raising."""
-    assert "report" in ROBUSTNESS_DELEGATE_ACTIONS
-    intent = build_delegate(
-        "report",
-        params={"reason": "deadline_imminent"},
-        idempotency_key="report-deadline-imminent-tick-7",
-    )
-    assert intent.payload == {
-        "action_name": "report",
-        "params": {"reason": "deadline_imminent"},
-        "idempotency_key": "report-deadline-imminent-tick-7",
-    }
 
 
 def test_update_state_rejects_core_fields():
@@ -238,15 +202,10 @@ def test_robustness_only_subset_of_allowed():
 def test_robustness_only_set_matches_design_v06():
     assert ROBUSTNESS_ONLY_INTENTS == frozenset(
         {
-            IntentType.KILL_TASK,
             IntentType.PRUNE_BRANCH,
             IntentType.ESCALATE_STRATEGY_CHANGE,
         }
     )
-
-
-def test_kill_task_scope_locked_to_task():
-    assert KILL_TASK_ALLOWED_SCOPES == frozenset({"task"})
 
 
 def test_alert_severities_are_low_medium_high():

@@ -517,9 +517,7 @@ def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp
         benchmark_sec=550.0,
     )
 
-    assert result["_rounds_run"] == 2, (
-        "a cold pass was spent on a round the gate after it was always going to refuse"
-    )
+    assert result["_rounds_run"] == 2, "a cold pass was spent on a round the gate after it was always going to refuse"
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
 
 
@@ -1058,15 +1056,9 @@ def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2
-    assert all(
-        cfg["benchmark"]["envs"]["RUN_EVAL"] == "false"
-        for cfg in captured
-    )
+    assert all(cfg["benchmark"]["envs"]["RUN_EVAL"] == "false" for cfg in captured)
     assert result["accuracy_stage"]["status"] == "skipped"
-    assert (
-        result["accuracy_stage"]["reason"]
-        == "throughput_below_threshold"
-    )
+    assert result["accuracy_stage"]["reason"] == "throughput_below_threshold"
 
 
 def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
@@ -1120,14 +1112,8 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 3
-    assert [
-        cfg["benchmark"]["envs"]["RUN_EVAL"]
-        for cfg in captured
-    ] == ["false", "false", "true"]
-    assert [
-        cfg["benchmark"]["server_lifecycle"]["cleanup"]
-        for cfg in captured
-    ] == [False, False, True]
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == ["false", "false", "true"]
+    assert [cfg["benchmark"]["server_lifecycle"]["cleanup"] for cfg in captured] == [False, False, True]
     assert result["accuracy"] == pytest.approx(0.9)
     assert result["accuracy_stage"]["status"] == "succeeded"
 
@@ -1247,6 +1233,86 @@ def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
     assert captured[0]["benchmark"]["server_lifecycle"]["cleanup"] is False
     assert captured[1]["benchmark"]["server_lifecycle"]["cleanup"] is True
+
+
+def test_replay_warm_recipe_double_run_forces_warmup_eval(tmp_path):
+    """Warm replay evaluates in the warmup round and measures in the second."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=SimpleNamespace(baseline_double_run=True),
+    )
+    task = SimpleNamespace(
+        task_id="t-replay-warm",
+        kind="replay_warm_recipe",
+        params={
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+        },
+    )
+    ctx = SimpleNamespace(task=task, extra={})
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert captured[0]["benchmark"]["envs"]["RUN_EVAL"] == "true"
+    assert captured[1]["benchmark"]["envs"]["RUN_EVAL"] == "false"
+
+
+def test_replay_warm_recipe_honours_no_eval(tmp_path):
+    """``--no-eval`` outranks the replay's forced warmup eval.
+
+    The flag is the operator saying no eval runs this session. Forcing one on
+    the warmup round would spend the time the flag was passed to save, and do
+    it silently -- the baseline path on the same executor already honours the
+    flag, so a replay that did not would be the odd one out.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    shared = SimpleNamespace(baseline_double_run=True, eval_disabled=True)
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=shared,
+    )
+    task = SimpleNamespace(
+        task_id="t-replay-no-eval",
+        kind="replay_warm_recipe",
+        params={
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+        },
+    )
+    ctx = SimpleNamespace(task=task, extra={"shared_state": shared})
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == [
+        "false",
+        "false",
+    ]
 
 
 def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch):
@@ -1648,16 +1714,18 @@ def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
     stale = output_dir / "benchmark_vllm_20260101_000000"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {
-                "output_throughput": 9999.0,
-                "completed_requests": 64,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {
+                    "output_throughput": 9999.0,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1689,16 +1757,18 @@ def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
     stale = output_dir / "benchmark_vllm_20260101_000000"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {
-                "output_throughput": 9999.0,
-                "completed_requests": 64,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {
+                    "output_throughput": 9999.0,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1729,16 +1799,18 @@ def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, m
     stale = output_dir / "benchmark_vllm_29991231_235959"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {
-                "output_throughput": 9999.0,
-                "completed_requests": 64,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {
+                    "output_throughput": 9999.0,
+                    "completed_requests": 64,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1773,11 +1845,13 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
     stale = output_dir / "benchmark_vllm_29991231_235959"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {"output_throughput": 9999.0, "completed_requests": 64},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {"output_throughput": 9999.0, "completed_requests": 64},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0
@@ -1810,11 +1884,13 @@ def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypa
     stale = output_dir / "benchmark_vllm_20260101_000000"
     stale.mkdir(parents=True)
     (stale / "benchmark_report.json").write_text(
-        json.dumps({
-            "success": True,
-            "framework": "vllm",
-            "throughput": {"output_throughput": 1.0, "completed_requests": 1},
-        }),
+        json.dumps(
+            {
+                "success": True,
+                "framework": "vllm",
+                "throughput": {"output_throughput": 1.0, "completed_requests": 1},
+            }
+        ),
         encoding="utf-8",
     )
     old = 1735689600.0

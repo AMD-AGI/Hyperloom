@@ -276,10 +276,17 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
-    monkeypatch.setattr(mf, "build_provenance", lambda *a, **k: {
-        "gfx_arch": "gfx950", "ep": 8, "graph_mode": "graph_capture",
-        "server_args": ["--tp", "1"], "server_args_hash": "abc123",
-    })
+    monkeypatch.setattr(
+        mf,
+        "build_provenance",
+        lambda *a, **k: {
+            "gfx_arch": "gfx950",
+            "ep": 8,
+            "graph_mode": "graph_capture",
+            "server_args": ["--tp", "1"],
+            "server_args_hash": "abc123",
+        },
+    )
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["schema_version"] == 4
     assert m["gfx_arch"] == "gfx950"
@@ -302,9 +309,7 @@ def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tm
     venv_root = tmp_path / "vllm-venv"
     info = venv_root / "lib" / "python3.12" / "site-packages" / "vllm-0.27.1+rocm723.dist-info"
     info.mkdir(parents=True)
-    (info / "METADATA").write_text(
-        "Metadata-Version: 2.4\nName: vllm\nVersion: 0.27.1+rocm723\n", encoding="utf-8"
-    )
+    (info / "METADATA").write_text("Metadata-Version: 2.4\nName: vllm\nVersion: 0.27.1+rocm723\n", encoding="utf-8")
     monkeypatch.delenv("VLLM_VERSION", raising=False)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
     m = mf.build_manifest(Path("/tmp/sd"))

@@ -11,7 +11,6 @@ subprocess.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,25 +79,6 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
         knowledge_plane=_KP(),
     )
     assert callable(executor)
-
-
-def test_mcp_servers_from_explicit_config(tmp_path):
-    cfg = tmp_path / "mcp.json"
-    cfg.write_text(
-        json.dumps({"mcpServers": {"recipe_kb": {"type": "http"}, "pr_monitor": {"type": "http"}}}),
-        encoding="utf-8",
-    )
-    assert set(cli_executors._mcp_servers_from_config(str(cfg))) == {"recipe_kb", "pr_monitor"}
-
-
-def test_mcp_servers_from_absent_config_is_not_authoritative():
-    assert cli_executors._mcp_servers_from_config(None) is None
-
-
-def test_mcp_servers_from_empty_explicit_config_is_authoritative(tmp_path):
-    cfg = tmp_path / "mcp.json"
-    cfg.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-    assert cli_executors._mcp_servers_from_config(str(cfg)) == ()
 
 
 def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tmp_path):
@@ -228,13 +208,21 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
 
     A registration whose name is not in the action catalogue can never be
     enqueued, so it is dead weight that also makes the real gap harder to see.
+
+    An internal-only kind may deliberately have no entry -- ``targeted_build``
+    stays out to keep itself off ``_RUNS_ACTIONS`` -- so the exemption is
+    derived from ``INTERNAL_ONLY_ACTION_NAMES`` instead of spelled out here.
     """
-    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        ACTION_CATALOGUE,
+        INTERNAL_ONLY_ACTION_NAMES,
+    )
 
     registry = _fully_wired_registry()
     catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
+    uncatalogued_by_design = INTERNAL_ONLY_ACTION_NAMES - catalogue
 
-    phantom = sorted(set(registry) - catalogue)
+    phantom = sorted(set(registry) - catalogue - uncatalogued_by_design)
     assert not phantom, f"executor keys absent from ACTION_CATALOGUE: {phantom}"
 
 

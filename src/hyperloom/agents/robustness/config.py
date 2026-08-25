@@ -130,8 +130,7 @@ class Config:
     # -- deadline_imminent / budget_burn_no_gain signals --
     # warn/imminent_pct = budget consumed before medium/high rungs fire;
     # min_minutes avoids short smoke tests; productive_gain_pct is the
-    # validated-gain cliff above which the run finishes naturally (below it,
-    # wind down via delegate(report)).
+    # validated-gain cliff above which the run finishes naturally.
     budget_warn_pct: float = 0.70
     budget_imminent_pct: float = 0.85
     budget_min_minutes: float = 30.0
@@ -402,5 +401,3 @@ def _discover_llm_model(provider: str) -> str:
     if provider == "openai":
         return env.get("OPENAI_MODEL", "").strip() or env.get("CODEX_MODEL", "").strip() or "gpt-5.6-sol"
     return env.get("ANTHROPIC_MODEL", "").strip() or env.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
-
-

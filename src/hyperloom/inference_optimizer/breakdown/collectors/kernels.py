@@ -747,20 +747,12 @@ def _collect_optimized_kernels(
             )
     # Cross-reference the stable task ledger (covers ordinal reuse and rotated
     # on-disk verification), falling back to legacy per-ordinal state.
-    ko_attempts = (
-        state.get("kernel_opt_task_attempts")
-        or state.get("kernel_opt_attempts")
-        or {}
-    )
+    ko_attempts = state.get("kernel_opt_task_attempts") or state.get("kernel_opt_attempts") or {}
     if isinstance(ko_attempts, dict):
         for ledger_id, ent in ko_attempts.items():
             if not isinstance(ent, dict):
                 continue
-            kid = str(
-                ent.get("current_kernel_id")
-                or ent.get("kernel_id")
-                or ledger_id
-            )
+            kid = str(ent.get("current_kernel_id") or ent.get("kernel_id") or ledger_id)
             entry = by_kid.setdefault(
                 kid,
                 {
@@ -779,11 +771,33 @@ def _collect_optimized_kernels(
     return sorted(by_kid.values(), key=lambda e: e.get("kernel_id") or "")
 
 
+def _ledger_entry_is_adopted(ent: dict[str, Any]) -> bool:
+    """Report whether a ledger row represents an adopted kernel patch.
+
+    ``validated`` tracks single-kernel gain attribution, not adoption. GEAK
+    joint rebench rows and later failed revalidations can be ``validated=False``
+    while the kernel was still promoted with a proven overlay or an earlier
+    ``KEEP`` attempt.
+    """
+    if ent.get("last_decision") == "KEEP":
+        return True
+    source = str(ent.get("source") or "")
+    if source != "geak_e2e":
+        # Forge / integrate writers stamp REVERT on the entry itself; a prior
+        # KEEP attempt must not resurrect a kernel that was later rejected.
+        return False
+    attempts = ent.get("attempts") or []
+    has_keep = any(isinstance(a, dict) and a.get("decision") == "KEEP" for a in attempts)
+    if ent.get("overlay_loaded") is True:
+        return True
+    return has_keep
+
+
 def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Collect KEEP-promoted (adopted) kernel patch entries.
 
-    Reads ``state.kernel_integrate_attempts`` and keeps only entries whose
-    ``last_decision`` is ``"KEEP"``.
+    Reads ``state.kernel_integrate_attempts`` and keeps entries that were
+    promoted (``KEEP`` or proven GEAK overlay / historical ``KEEP``).
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -799,7 +813,7 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
         for key, ent in integ.items():
             if not isinstance(ent, dict):
                 continue
-            if ent.get("last_decision") != "KEEP":
+            if not _ledger_entry_is_adopted(ent):
                 continue
             out.append(
                 {
@@ -808,10 +822,15 @@ def _collect_adopted_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "target_file": str(ent.get("target_file") or ""),
                     "extra_server_args": str(ent.get("extra_server_args") or ""),
                     "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
-                    "validated": True,
+                    # Writers that cannot attribute the measured gain to this
+                    # one kernel say so; everything else stays validated, as
+                    # every pre-existing writer's row was.
+                    "validated": bool(ent.get("validated", True)),
                     "last_status": str(ent.get("last_status") or ""),
                     "adopted_at": str(ent.get("updated_at") or ""),
                     "attempt_count": int(ent.get("attempt_count") or 0),
+                    "basis": str(ent.get("basis") or ""),
+                    "alignment_status": str(ent.get("alignment_status") or ""),
                 }
             )
     return out
@@ -1297,10 +1316,15 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, dict):
             continue
         engine = _resolve_gemm_engine(raw)
+        e2e_gain_pct = _to_float(raw.get("e2e_gain_pct"))
         speedup = _to_float(raw.get("best_speedup"))
         gain_pct: float | None = None
         tuned_tput: float | None = None
-        if speedup is not None:
+        if e2e_gain_pct is not None:
+            gain_pct = e2e_gain_pct
+            if baseline_tput is not None:
+                tuned_tput = baseline_tput * (1.0 + e2e_gain_pct / 100.0)
+        elif speedup is not None:
             gain_pct = (speedup - 1.0) * 100.0
             if baseline_tput is not None:
                 tuned_tput = baseline_tput * speedup
@@ -1331,6 +1355,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
             "gpu_type": str(raw.get("gpu_type") or gpu_type),
             "baseline_tput": baseline_tput,
             "best_speedup": speedup,
+            "e2e_gain_pct": e2e_gain_pct,
             "gain_pct": gain_pct,
             "tuned_tput": tuned_tput,
             "tuned_file": tuned_file,
@@ -1389,7 +1414,7 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
 _COLLECTIVE_INTEGRATION_FIELDS = (
     "integration_id",
     "integration_decision",
-    "integration_status",
+    "patch_cleanup_status",
     "integration_result_status",
     "integration_revert_status",
     "integration_finalize_status",
@@ -1439,7 +1464,11 @@ def _normalize_collective_record(raw: dict[str, Any]) -> dict[str, Any]:
         "integration_new_tput": _to_float(raw.get("integration_new_tput")),
     }
     for field in _COLLECTIVE_INTEGRATION_FIELDS:
-        out[field] = str(raw.get(field) or "")
+        value = raw.get(field) or ""
+        if not value and field == "patch_cleanup_status":
+            # Resume compat: older state.json records use "integration_status".
+            value = raw.get("integration_status") or ""
+        out[field] = str(value)
     if isinstance(raw.get("bandwidth"), dict):
         out["bandwidth"] = raw["bandwidth"]
     if isinstance(raw.get("artifact_files"), list):
@@ -1470,11 +1499,7 @@ def collect_collective(state: dict[str, Any]) -> dict[str, Any]:
     if not raw_attempts and not last_raw:
         return {}
 
-    attempts = [
-        _normalize_collective_record(item)
-        for item in raw_attempts
-        if isinstance(item, dict)
-    ]
+    attempts = [_normalize_collective_record(item) for item in raw_attempts if isinstance(item, dict)]
     envelope: dict[str, Any] = {
         "only_mode": bool(state.get("collective_only_mode")),
         "attempts": attempts,

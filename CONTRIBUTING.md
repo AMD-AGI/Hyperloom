@@ -18,9 +18,9 @@ This repository treats **documentation-only** pushes and pull requests the same 
 |-----------------|------------------------|------------------------------|
 | **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
 | **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
-| **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; steps use `continue-on-error: true` until backlog is cleared) | Yes (same `paths-ignore` as tests / CodeQL) |
+| **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; hard gate) | Yes (same `paths-ignore` as tests / CodeQL) |
 | **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.robustness`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
-| **Mypy** | Local / optional tooling only here | N/A |
+| **Mypy** | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error`; config in `[tool.mypy]`) | Yes (same `paths-ignore`) |
 
 If you add standalone workflows for **pytest**, **ruff**, **pylint**, or similar, copy the **same** `paths-ignore` blocks as in `tests-coverage.yml` / `codeql.yml` so documentation-only PRs stay consistent and cheap.
 
@@ -39,6 +39,10 @@ If **any** changed file falls **outside** these patterns (for example `.py`, `py
 
 These GitHub jobs are optional from a default merge-policy perspective; skipping them on doc-only PRs saves runner time. You should still run **local** `pytest`, **ruff**, and **mypy** when your edits are not purely cosmetic (for example, Markdown that embeds commands, code blocks, or configuration snippets).
 
+## Coding style
+
+See **[docs/contributing/style-guide.md](docs/contributing/style-guide.md)** for Python, shell, YAML, testing, and REUSE conventions.
+
 ## Development setup
 - Python 3.10+.
 - Create and activate a virtual environment.
@@ -47,7 +51,33 @@ These GitHub jobs are optional from a default merge-policy perspective; skipping
 - To mirror the coverage CI job locally:  
   `pip install -e ".[test,ci]"` then run `pytest` with the same arguments as in the `[tool.hyperloom.tests_coverage]` table in `pyproject.toml` (see ``tests-coverage.yml`` for the exact list: marker filter + ``--cov`` flags).
 - If you plan to run lint/type checks, install tools:  
-  `pip install ruff mypy`
+  `pip install ruff mypy`  
+  Or install the bundled dev extra: `pip install -e ".[test,dev]"`
+
+## Pre-commit (recommended)
+
+Hyperloom ships a [`.pre-commit-config.yaml`](.pre-commit-config.yaml) that mirrors most static-analysis gates before code reaches CI.
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files   # optional baseline after clone
+```
+
+### Hooks
+
+| Hook | Purpose |
+|------|---------|
+| **pre-commit-hooks** | Trailing whitespace, EOF, merge conflicts, large files, private keys |
+| **ruff** | Python lint (`E`/`F`/`W`), same as `lint.yml` |
+| **bandit** | Security lint on production Python (tests excluded) |
+| **shellcheck** | Shell script analysis |
+| **yamllint** / **actionlint** | YAML and GitHub Actions workflow lint |
+| **reuse** | REUSE/SPDX compliance |
+| **gitleaks** | Secret scan (mirrors `secret-scan.yml`) |
+| **codespell** | Typos in docs and comments |
+
+**Intentionally not in pre-commit** (too slow or environment-specific): full **pytest**/coverage, **Pylint**, **CodeQL**, and E2E pytest markers.
 
 ## Testing
 - Run the full test suite from the repo root:  
@@ -70,8 +100,8 @@ Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow a
 - Ruff:  
   `ruff check .`
 - Type checks (mypy):  
-  `mypy src/hyperloom`
-  - Adjust paths if you change package locations.
+  `mypy src/hyperloom`  
+  Configuration lives in `[tool.mypy]` in `pyproject.toml`. CI runs mypy as an **advisory** job until the type-check backlog is reduced.
 - CI runs **Pylint** with **`--errors-only`** (fatal/error severity only, not style) on several first-party packages from [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error` today). Root **`[tool.pylint.main]`** in `pyproject.toml` holds minimal defaults (e.g. `jobs`); tighten or add message disables there as the backlog shrinks.
 
 ## Before opening a PR

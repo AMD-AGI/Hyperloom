@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _create_patch_snapshot,
     _resolve_recipe_patch_target,
     _revert_patches,
+    _revert_warm_patch_state,
 )
 
 
@@ -23,6 +26,12 @@ def fake_repo(tmp_path):
     repo = tmp_path / "inferencex"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=str(repo),
+        capture_output=True,
+        check=True,
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=str(repo),
@@ -65,6 +74,11 @@ index 0000000..1111111 100644
  original = True
 +patched = True
 """
+
+
+def _require_patch_cli() -> None:
+    if not shutil.which("patch"):
+        pytest.skip("patch CLI unavailable")
 
 
 def test_apply_single_patch(fake_repo, output_dir):
@@ -120,6 +134,10 @@ def test_required_recipe_patch_fails_when_active_framework_root_is_missing(
     output_dir,
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors.baseline.resolve_session_framework_root",
         lambda: "",
@@ -322,9 +340,7 @@ def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
     assert result == []
 
 
-def test_required_patch_present_only_in_dirty_index_is_republished(
-    fake_repo, output_dir
-):
+def test_required_patch_present_only_in_dirty_index_is_republished(fake_repo, output_dir):
     params = {
         "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
         "required_patch_timeline": True,
@@ -340,15 +356,10 @@ def test_required_patch_present_only_in_dirty_index_is_republished(
 
     assert first["status"] == "prepared"
     assert second["status"] == "prepared"
-    assert (
-        second["patches"][0]["status"]
-        == "present_in_dirty_worktree"
-    )
+    assert second["patches"][0]["status"] == "present_in_dirty_worktree"
 
 
-def test_required_patch_contained_in_committed_head_is_already_present(
-    fake_repo, output_dir
-):
+def test_required_patch_contained_in_committed_head_is_already_present(fake_repo, output_dir):
     target = fake_repo / "vllm" / "fp8.py"
     target.write_text("# fp8 module\noriginal = True\npatched = True\n")
     subprocess.run(
@@ -366,9 +377,7 @@ def test_required_patch_contained_in_committed_head_is_already_present(
 
     result = _apply_warm_patches(
         {
-            "patches": [
-                {"patch_file": "p.patch", "patch_content": VALID_PATCH}
-            ],
+            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
             "required_patch_timeline": True,
         },
         str(fake_repo),
@@ -379,14 +388,18 @@ def test_required_patch_contained_in_committed_head_is_already_present(
     assert result["patches"][0]["status"] == "already_present"
 
 
-def test_required_patch_uses_three_way_after_checks_fail(
-    fake_repo, output_dir, monkeypatch
-):
+def test_required_patch_uses_three_way_after_checks_fail(fake_repo, output_dir, monkeypatch):
     calls: list[list[str]] = []
 
     def _run(command, **_kwargs):
         calls.append(command)
         if "rev-parse" in command:
+            if "--is-inside-work-tree" in command:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="true\n",
+                    stderr="",
+                )
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"0123456789abcdef\n",
@@ -416,9 +429,7 @@ def test_required_patch_uses_three_way_after_checks_fail(
     assert any("--3way" in command for command in calls)
 
 
-def test_required_patch_failure_rolls_back_and_stops(
-    fake_repo, output_dir
-):
+def test_required_patch_failure_rolls_back_and_stops(fake_repo, output_dir):
     later = VALID_PATCH.replace("patched = True", "later = True")
     result = _apply_warm_patches(
         {
@@ -447,9 +458,7 @@ def test_pending_state_persist_failure_needs_no_file_rollback(
 ) -> None:
     result = _apply_warm_patches(
         {
-            "patches": [
-                {"patch_file": "p.patch", "patch_content": VALID_PATCH}
-            ],
+            "patches": [{"patch_file": "p.patch", "patch_content": VALID_PATCH}],
             "required_patch_timeline": True,
         },
         str(fake_repo),
@@ -462,9 +471,7 @@ def test_pending_state_persist_failure_needs_no_file_rollback(
     assert result["applied"] == []
     assert result["rollback"] == {"ok": True, "errors": []}
     assert result["rolled_back"] is True
-    assert "patched = True" not in (
-        fake_repo / "vllm" / "fp8.py"
-    ).read_text()
+    assert "patched = True" not in (fake_repo / "vllm" / "fp8.py").read_text()
 
 
 def test_snapshot_revert_validates_repo_and_head(
@@ -540,12 +547,18 @@ def test_snapshot_revert_rejects_head_mismatch(
     assert result["errors"][0].startswith("head_mismatch:")
 
 
-def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
+def test_required_timeline_refuses_a_repo_with_no_head(tmp_path, output_dir):
+    """prelude promotes this tree against a pre_sha it cannot get here.
+
+    Applying via nogit made the run look prepared and then fail downstream with
+    validated_recipe_checkout_incomplete, leaving a half-patched tree behind.
+    Refusing up front is the outcome the caller can act on.
+    """
     repo = tmp_path / "unborn"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     target = repo / "vllm" / "fp8.py"
-    target.parent.mkdir()
+    target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")
 
     result = _apply_warm_patches(
@@ -559,6 +572,90 @@ def test_required_patch_refuses_repo_without_head(tmp_path, output_dir):
 
     assert result["status"] == "failed"
     assert result["failure"] == "missing_git_head"
+    assert "original = True" in target.read_text(), "must not leave a patched tree"
+
+
+def test_required_timeline_refuses_a_non_git_install_tree(tmp_path, output_dir):
+    """Same contract for an install tree that was never a repo."""
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+
+    result = _apply_warm_patches(
+        {
+            "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+            "required_patch_timeline": True,
+        },
+        str(install_root),
+        output_dir,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure"] == "missing_git_head"
+    assert "original = True" in target.read_text()
+
+
+def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
+    """Nothing downstream of a legacy patch needs a sha, so nogit stays."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+
+    applied = _apply_warm_patches(
+        {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]},
+        str(install_root),
+        output_dir,
+    )
+
+    assert [p["status"] for p in applied] == ["applied_nogit"]
+    assert "patched = True" in target.read_text()
+    assert (output_dir / "warm_patches" / "patch_backups").is_dir()
+
+
+def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
+    """A nogit apply has no sha, so its backups are the only way back."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+    params = {"patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}]}
+
+    applied = _apply_warm_patches(params, str(install_root), output_dir)
+
+    assert [p["status"] for p in applied] == ["applied_nogit"]
+    assert not params.get("_warm_patch_snapshot_manifest"), "nogit has no git snapshot"
+    assert params["_warm_patch_nogit_backups"], "teardown would have nothing to undo"
+
+
+def test_teardown_undoes_a_nogit_apply(tmp_path):
+    """Keying the revert on pre_sha alone leaked nogit patches into later tasks
+    that reuse the same checkout."""
+    target = tmp_path / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\n")
+    backup = tmp_path / "backups" / "p__vllm__fp8.py__0000.bak"
+    backup.parent.mkdir(parents=True)
+    shutil.copy2(target, backup)
+    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
+
+    result = _revert_warm_patch_state(
+        str(tmp_path),
+        pre_sha="",
+        nogit_backups=[
+            {
+                "target": str(target),
+                "existed": True,
+                "backup_path": str(backup),
+                "revert_action": "restore",
+            }
+        ],
+    )
+
+    assert result == {"ok": True, "errors": [], "channel": "nogit"}
     assert "patched = True" not in target.read_text()
 
 
@@ -589,14 +686,10 @@ def test_legacy_patch_skips_when_rollback_snapshot_fails(
     )
 
     assert result == []
-    assert "patched = True" not in (
-        fake_repo / "vllm" / "fp8.py"
-    ).read_text()
+    assert "patched = True" not in (fake_repo / "vllm" / "fp8.py").read_text()
 
 
-def test_three_way_residue_fails_and_rolls_back(
-    fake_repo, output_dir, monkeypatch
-):
+def test_three_way_residue_fails_and_rolls_back(fake_repo, output_dir, monkeypatch):
     real_run = subprocess.run
     residue_checks = 0
 
@@ -608,19 +701,11 @@ def test_three_way_residue_fails_and_rolls_back(
             return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no")
         if command[:3] == ["git", "apply", "--3way"]:
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-        if (
-            "ls-files" in command
-            and command[command.index("ls-files") :][:2]
-            == ["ls-files", "-u"]
-        ):
+        if "ls-files" in command and command[command.index("ls-files") :][:2] == ["ls-files", "-u"]:
             residue_checks += 1
             return SimpleNamespace(
                 returncode=0,
-                stdout=(
-                    b""
-                    if residue_checks == 1
-                    else b"100644 deadbeef 1\tvllm/fp8.py\n"
-                ),
+                stdout=(b"" if residue_checks == 1 else b"100644 deadbeef 1\tvllm/fp8.py\n"),
                 stderr=b"",
             )
         return real_run(command, **kwargs)
@@ -640,9 +725,7 @@ def test_three_way_residue_fails_and_rolls_back(
     assert result["rolled_back"] is True
 
 
-def test_required_rollback_preserves_unrelated_dirty_checkout(
-    fake_repo, output_dir
-):
+def test_required_rollback_preserves_unrelated_dirty_checkout(fake_repo, output_dir):
     unrelated = fake_repo / "notes.txt"
     unrelated.write_text("committed\n")
     subprocess.run(
@@ -684,14 +767,10 @@ diff --git a/missing.py b/missing.py
     assert result["status"] == "failed"
     assert result["rolled_back"] is True
     assert unrelated.read_text() == "user dirty work\n"
-    assert "patched = True" not in (
-        fake_repo / "vllm" / "fp8.py"
-    ).read_text()
+    assert "patched = True" not in (fake_repo / "vllm" / "fp8.py").read_text()
 
 
-def test_rollback_does_not_erase_already_present_patch(
-    fake_repo, output_dir
-):
+def test_rollback_does_not_erase_already_present_patch(fake_repo, output_dir):
     target = fake_repo / "vllm" / "fp8.py"
     target.write_text("# fp8 module\noriginal = True\npatched = True\n")
     subprocess.run(
@@ -733,10 +812,20 @@ diff --git a/missing.py b/missing.py
     assert target.read_text() == "# fp8 module\noriginal = True\npatched = True\n"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="git apply --3way merge baseline is validated on Linux CI/pod",
+)
 def test_real_git_three_way_merge_succeeds(tmp_path, output_dir):
     repo = tmp_path / "threeway"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=repo,

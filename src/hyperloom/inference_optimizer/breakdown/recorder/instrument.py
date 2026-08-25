@@ -159,11 +159,7 @@ def _measurement_occurrence(*run_identity: Any, value: Any = None) -> str:
     The plain ordinal a reader wants is assigned at assembly instead, where the
     whole set is in hand at once.
     """
-    parts = [
-        str(part).strip()
-        for part in run_identity
-        if part is not None and str(part).strip()
-    ]
+    parts = [str(part).strip() for part in run_identity if part is not None and str(part).strip()]
     if not parts:
         numeric = to_float(value)
         rendered = f"{numeric:.10g}" if numeric is not None else str(value or "")
@@ -207,6 +203,7 @@ _AGENT_BY_ACTION = {
     "robustness": "robustness",
 }
 
+
 def _resolve_agent(
     action: str,
     *,
@@ -232,11 +229,7 @@ def _resolve_agent(
     if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
         return "kernel_agent"
 
-    return (
-        agent_from_phase(result.get("source_phase"))
-        or agent_from_phase(phase)
-        or UNATTRIBUTED
-    )
+    return agent_from_phase(result.get("source_phase")) or agent_from_phase(phase) or UNATTRIBUTED
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
@@ -549,12 +542,7 @@ def _mirror_action_v4(
         subject_id=subject_id,
         subject_type=subject_type,
         role="target",
-        name=str(
-            extras.get("candidate_id")
-            or extras.get("variant_name")
-            or extras.get("best_variant_name")
-            or action
-        ),
+        name=str(extras.get("candidate_id") or extras.get("variant_name") or extras.get("best_variant_name") or action),
         attributes=subject_attributes,
         producer=producer,
     )
@@ -586,8 +574,12 @@ def _mirror_action_v4(
                 "artifacts": artifact_ids,
             }
         )
-        eval_status = "skipped" if result.get("run_eval_disabled") else (
-            "succeeded" if result.get("accuracy") is not None else ("failed" if status == "failed" else "partial")
+        eval_status = (
+            "skipped"
+            if result.get("run_eval_disabled")
+            else (
+                "succeeded" if result.get("accuracy") is not None else ("failed" if status == "failed" else "partial")
+            )
         )
         substeps.append(
             {
@@ -677,9 +669,7 @@ def _mirror_action_v4(
                     if gain_pct is not None
                     else "partial"
                 ),
-                "decision": (
-                    "allow" if gain_pct is not None and gain_pct >= keep_threshold_pct else "deny"
-                ),
+                "decision": ("allow" if gain_pct is not None and gain_pct >= keep_threshold_pct else "deny"),
                 "reason": decision_reason,
                 "evaluated_at": ended_at,
                 "inputs": {"keep_threshold_pct": keep_threshold_pct},
@@ -731,9 +721,7 @@ def _mirror_action_v4(
         attribution_eligible = result.get("attribution_eligible")
         if attribution_eligible is None:
             attribution_eligible = not (
-                bool(result.get("enablement"))
-                or bool(result.get("baseline_enablement"))
-                or verdict == "KEPT_INERT"
+                bool(result.get("enablement")) or bool(result.get("baseline_enablement")) or verdict == "KEPT_INERT"
             )
         _record_adoption_transition(
             session_dir,
@@ -750,9 +738,7 @@ def _mirror_action_v4(
             attribution_eligible=bool(attribution_eligible),
             gain_pct=gain_pct,
             throughput_before=to_float(result.get("base_tput")),
-            throughput_after=to_float(
-                result.get("output_throughput") or result.get("tput")
-            ),
+            throughput_after=to_float(result.get("output_throughput") or result.get("tput")),
             configuration=dict(result.get("configuration") or {}),
             validation_basis=validation_basis,
             producer=producer,
@@ -774,18 +760,13 @@ def _mirror_action_v4(
         status=status,
         source="author_time_writeback",
         executor_class="deterministic",
-        purpose="discovery" if action in {"sweep", "conc_sweep"} else (
-            "validation" if action == "baseline" else "optimization"
-        ),
+        purpose="discovery"
+        if action in {"sweep", "conc_sweep"}
+        else ("validation" if action == "baseline" else "optimization"),
         scope=str(extras.get("scope") or ""),
         agent=agent,
         strategy_group=action,
-        strategy=str(
-            extras.get("provenance")
-            or result.get("provenance")
-            or result.get("strategy")
-            or action
-        ),
+        strategy=str(extras.get("provenance") or result.get("provenance") or result.get("strategy") or action),
         producer=producer,
         sequence=int(tick or 0),
         ended_at=ended_at,
@@ -1042,9 +1023,11 @@ def _snapshot_v4_run(rec, st: Any) -> None:
     stop_reason = str(getattr(st, "stop_reason", "") or "")
     outcome_status = "running"
     if stop_reason:
-        outcome_status = "failed" if any(
-            marker in stop_reason.lower() for marker in ("failed", "error", "crash", "abort")
-        ) else "completed"
+        outcome_status = (
+            "failed"
+            if any(marker in stop_reason.lower() for marker in ("failed", "error", "crash", "abort"))
+            else "completed"
+        )
     rec.record_upsert_singleton(
         "run_snapshot",
         {
@@ -1068,9 +1051,7 @@ def _snapshot_v4_run(rec, st: Any) -> None:
                 "baseline_throughput": to_float(getattr(st, "baseline_tput", None)),
                 "baseline_accuracy": to_float(getattr(st, "baseline_accuracy", None)),
                 "current_best": current_best,
-                "cumulative_gain_validated_pct": to_float(
-                    getattr(st, "cumulative_gain_validated", None)
-                ),
+                "cumulative_gain_validated_pct": to_float(getattr(st, "cumulative_gain_validated", None)),
                 "optimization_stack_size": len(stack),
             },
         },
@@ -1113,7 +1094,6 @@ def _snapshot_session(rec, st: Any) -> None:
             "phase": str(getattr(st, "phase", "") or ""),
         },
     )
-
 
 
 def _snapshot_explore_search(rec, st: Any) -> None:
@@ -1271,12 +1251,33 @@ def _kernel_selection_operation_id(
         if current:
             return current
         run_discriminator = f"runtime:{_now_iso_safe()}"
-    discriminator = (
-        f"macro_cycle:{int(macro_cycle)}"
-        if macro_cycle is not None
-        else f"run:{run_discriminator}"
-    )
+    discriminator = f"macro_cycle:{int(macro_cycle)}" if macro_cycle is not None else f"run:{run_discriminator}"
     return _stable_id("op", "kernel_optimizer_selection", context_key, discriminator)
+
+
+# Canonical kernel routes: the route operation every kernel record hangs under, and the strategy
+# stamped on the kernel operation itself. Two entries today, and the pair is derived rather than
+# written at each call site because the forge identity used to be a literal in nine places — a tenth
+# reader was one edit away from silently parenting somebody else's kernels under Forge.
+#
+# A GEAK kernel replayed from its kernel_journey must NOT hang under the Forge route: the tree would
+# then assert it ran beneath a route that never dispatched it, and a reader walking parents to answer
+# "which optimizer produced this?" gets the wrong answer. The `geak` route operation already exists
+# (see the GEAK dispatch writer below); this makes the replay reachable to it.
+CANONICAL_KERNEL_ROUTES: dict[str, tuple[str, str]] = {
+    # route_strategy -> (route operation name, strategy stamped on the kernel operation)
+    "kernel_agent_forge": ("kernel_agent_forge", "forge"),
+    "geak": ("geak", "geak"),
+}
+
+
+def _canonical_route(route_strategy: str | None) -> tuple[str, str]:
+    """(route operation name, kernel strategy) for a canonical route.
+
+    Unknown values fall back to the forge pair, which is what every caller got before routes were
+    named, so an unrecognised string cannot silently drop a kernel off the streams.
+    """
+    return CANONICAL_KERNEL_ROUTES.get(str(route_strategy or ""), CANONICAL_KERNEL_ROUTES["kernel_agent_forge"])
 
 
 def _kernel_route_operation_id(
@@ -1293,11 +1294,7 @@ def _kernel_route_operation_id(
         if current:
             return current
         run_discriminator = f"runtime:{_now_iso_safe()}"
-    discriminator = (
-        f"macro_cycle:{int(macro_cycle)}"
-        if macro_cycle is not None
-        else f"run:{run_discriminator}"
-    )
+    discriminator = f"macro_cycle:{int(macro_cycle)}" if macro_cycle is not None else f"run:{run_discriminator}"
     route_id = _stable_id(
         "op",
         "kernel_optimizer_run",
@@ -1436,11 +1433,7 @@ def record_kernel_strategy_selection(
     context["active_route_id"] = route_id
     context["active_strategy"] = selected
     context[version_key] = str(selection_version)
-    context["discriminator"] = (
-        f"macro_cycle:{int(macro_cycle)}"
-        if macro_cycle is not None
-        else f"run:{discriminator}"
-    )
+    context["discriminator"] = f"macro_cycle:{int(macro_cycle)}" if macro_cycle is not None else f"run:{discriminator}"
     record_operation(
         session_dir,
         operation_id=selection_id,
@@ -1526,19 +1519,21 @@ def record_native_kernel_run_start(
     payload: Mapping[str, Any] | None = None,
     macro_cycle: int | None = None,
     route_operation_id: str = "",
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Upsert the selected native Kernel Agent plus Forge route as running."""
+    route_name, _ = _canonical_route(route_strategy)
     if not session_dir:
         trace_skip(reason="no session_dir", section="kernel_journey")
         return
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
         _kernel_route_context_key(session_dir),
         {},
-    ).get("route:kernel_agent_forge", "")
+    ).get(f"route:{route_name}", "")
     route_id = route_operation_id or _kernel_route_operation_id(
         session_dir,
-        "kernel_agent_forge",
+        route_name,
         macro_cycle=macro_cycle,
         run_discriminator=""
         if current_route_id
@@ -1549,24 +1544,27 @@ def record_native_kernel_run_start(
         operation_id=route_id,
         producer=producer,
         kind="kernel_optimizer_run",
-        name="kernel_agent_forge",
+        name=route_name,
         phase="KERNEL_AGENT",
         scope="run",
         strategy_group="kernel_optimizer",
-        strategy="kernel_agent_forge",
-        executor_class="deterministic",
+        strategy=route_name,
+        executor_class="llm_tool" if route_name == "geak" else "deterministic",
         status="running",
         started_at=_now_iso_safe(),
         inputs=dict(payload or {}),
         subject={
             "subject_id": _kernel_route_subject_id(
                 session_dir,
-                "kernel_agent_forge",
+                route_name,
                 route_operation_id=route_id,
             ),
             "subject_type": "kernel_optimizer_route",
             "role": "selected",
-            "name": "kernel_agent_forge",
+            # From route_name, like the operation above it. Left literal, a GEAK replay produced
+            # operation.name=geak next to subject.name=kernel_agent_forge — one record naming two
+            # different optimizers, and the subject is what identity lookups resolve against.
+            "name": route_name,
         },
     )
 
@@ -1577,9 +1575,11 @@ def record_native_kernel_run_result(
     result: Mapping[str, Any],
     macro_cycle: int | None = None,
     route_operation_id: str = "",
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Finalize the native Kernel Agent plus Forge route from its result."""
+    route_name, _ = _canonical_route(route_strategy)
     if not session_dir:
         trace_skip(reason="no session_dir", section="kernel_journey")
         return
@@ -1587,35 +1587,29 @@ def record_native_kernel_run_result(
     current_route_id = _KERNEL_ROUTE_CONTEXT.get(
         _kernel_route_context_key(session_dir),
         {},
-    ).get("route:kernel_agent_forge", "")
+    ).get(f"route:{route_name}", "")
     route_id = route_operation_id or _kernel_route_operation_id(
         session_dir,
-        "kernel_agent_forge",
+        route_name,
         macro_cycle=macro_cycle,
-        run_discriminator=""
-        if current_route_id
-        else str(value.get("run_id") or value.get("task_id") or ""),
+        run_discriminator="" if current_route_id else str(value.get("run_id") or value.get("task_id") or ""),
     )
     result_status = _operation_status(value.get("status"))
     batch_results = value.get("batch_results") if isinstance(value.get("batch_results"), list) else []
     if batch_results:
-        terminal = [
-            _operation_status(item.get("status"))
-            for item in batch_results
-            if isinstance(item, Mapping)
-        ]
+        terminal = [_operation_status(item.get("status")) for item in batch_results if isinstance(item, Mapping)]
         result_status = "succeeded" if any(item == "succeeded" for item in terminal) else result_status
     record_operation(
         session_dir,
         operation_id=route_id,
         producer=producer,
         kind="kernel_optimizer_run",
-        name="kernel_agent_forge",
+        name=route_name,
         phase="KERNEL_AGENT",
         scope="run",
         strategy_group="kernel_optimizer",
-        strategy="kernel_agent_forge",
-        executor_class="deterministic",
+        strategy=route_name,
+        executor_class="llm_tool" if route_name == "geak" else "deterministic",
         status=result_status,
         ended_at=_now_iso_safe(),
         outputs={
@@ -1684,11 +1678,7 @@ def record_geak_operation(
     value = dict(result or {})
     context = _KERNEL_ROUTE_CONTEXT.get(_kernel_route_context_key(session_dir), {})
     current_route_id = context.get("route:geak", "")
-    run_discriminator = (
-        ""
-        if current_route_id
-        else str(value.get("run_id") or value.get("task_id") or "")
-    )
+    run_discriminator = "" if current_route_id else str(value.get("run_id") or value.get("task_id") or "")
     route_id = route_operation_id or _kernel_route_operation_id(
         session_dir,
         "geak",
@@ -1722,11 +1712,7 @@ def record_geak_operation(
     # writes a new report and so is kept as its own reading, while re-recording
     # a stage that already reported lands back on the reading it first wrote.
     occurrence_run = str(
-        value.get("report_path")
-        or value.get("eval_dir")
-        or value.get("run_id")
-        or value.get("task_id")
-        or ""
+        value.get("report_path") or value.get("eval_dir") or value.get("run_id") or value.get("task_id") or ""
     )
     workload = value.get("workload") if isinstance(value.get("workload"), Mapping) else {}
     harness = value.get("bench_client") or value.get("harness") or "geak_e2e"
@@ -1966,9 +1952,7 @@ def record_gemm_tuning_operation(
     value = dict(result or {})
     task_id = str(inputs.get("task_id") or value.get("task_id") or "kernel_entry_gemm_tuning")
     cycle = (
-        int(macro_cycle)
-        if macro_cycle is not None
-        else int(inputs.get("macro_cycle") or value.get("macro_cycle") or 0)
+        int(macro_cycle) if macro_cycle is not None else int(inputs.get("macro_cycle") or value.get("macro_cycle") or 0)
     )
     attempt_key = str(
         attempt_discriminator
@@ -2135,10 +2119,7 @@ def record_gemm_tuning_operation(
         producer=producer,
         operation_id=operation_id,
         adopted=e2e_keep,
-        reason=str(
-            value.get("decision_reason")
-            or ("gemm_e2e_keep" if e2e_keep else "gemm_e2e_revert")
-        ),
+        reason=str(value.get("decision_reason") or ("gemm_e2e_keep" if e2e_keep else "gemm_e2e_revert")),
         transitioned_at=now,
         measurement_ids=measurement_refs,
         artifact_ids=artifact_refs,
@@ -2791,9 +2772,11 @@ def record_kernel_discovery(
             record_native_kernel_run_start(
                 session_dir,
                 payload={"discovery_source": source, "tool": tool or source},
+                route_strategy=route,
                 producer=producer,
             )
-            route_id = _kernel_route_operation_id(session_dir, "kernel_agent_forge")
+            route_name, _ = _canonical_route(route)
+            route_id = _kernel_route_operation_id(session_dir, route_name)
             record_operation(
                 session_dir,
                 operation_id=route_id,
@@ -2941,7 +2924,7 @@ def record_kernel_dispatch(
                 producer=producer,
             )
             return
-        record_native_kernel_run_start(session_dir, producer=producer)
+        record_native_kernel_run_start(session_dir, route_strategy=route_strategy, producer=producer)
         subject_id = _kernel_subject_id(session_dir, str(kernel_id))
         operation_id = _kernel_operation_id(session_dir, str(kernel_id))
         subject = {
@@ -2961,12 +2944,12 @@ def record_kernel_dispatch(
             phase="KERNEL_AGENT",
             scope="kernel",
             strategy_group="kernel_backend",
-            strategy="forge",
+            strategy=_canonical_route(route_strategy)[1],
             executor_class="llm_tool",
             status="running" if dispatched else "skipped",
             started_at=_now_iso_safe(),
-            parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-            root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+            root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
             subject=subject,
             inputs={
                 "backends": [str(value) for value in (backends or [])],
@@ -3013,7 +2996,9 @@ def record_kernel_backend_result(
             kernel-agent).
     """
     if not session_dir or not isinstance(result, dict):
-        trace_skip(reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_backend_result")
+        trace_skip(
+            reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_backend_result"
+        )
         return
     try:
         rec = _recorder(session_dir, producer)
@@ -3044,7 +3029,7 @@ def record_kernel_backend_result(
                     producer=producer,
                 )
         elif kid and not legacy_only:
-            record_native_kernel_run_start(session_dir, producer=producer)
+            record_native_kernel_run_start(session_dir, route_strategy=route_strategy, producer=producer)
             subject_id = _kernel_subject_id(session_dir, kid)
             subject = {
                 "subject_id": subject_id,
@@ -3097,9 +3082,7 @@ def record_kernel_backend_result(
             if operation_id:
                 canonical_attempt_id = attempt_id or _stable_id("attempt", operation_id, run_id, backend)
                 correctness_source = (
-                    att.get("correctness_source")
-                    or verification.get("correctness_source")
-                    or "partial:not_provided"
+                    att.get("correctness_source") or verification.get("correctness_source") or "partial:not_provided"
                 )
                 canonical_attempts.append(
                     {
@@ -3127,7 +3110,11 @@ def record_kernel_backend_result(
                             "gate_id": _stable_id("gate", operation_id, canonical_attempt_id, gate_name),
                             "kind": gate_kind,
                             "name": gate_name,
-                            "status": "passed" if gate_value is True else "failed" if gate_value is False else "partial",
+                            "status": "passed"
+                            if gate_value is True
+                            else "failed"
+                            if gate_value is False
+                            else "partial",
                             "decision": "allow" if gate_value is True else "deny" if gate_value is False else "review",
                             "evidence": {"source": correctness_source, "value": gate_value},
                         }
@@ -3225,8 +3212,8 @@ def record_kernel_backend_result(
                 executor_class="llm_tool",
                 status=operation_status,
                 ended_at=_now_iso_safe() if operation_status != "running" else "",
-                parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-                root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+                root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
                 subject=subject,
                 attempts=canonical_attempts,
                 gates=canonical_gates,
@@ -3298,8 +3285,8 @@ def record_kernel_backend_result(
                 executor_class="llm_tool",
                 status="failed",
                 ended_at=_now_iso_safe(),
-                parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-                root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+                root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
                 attempts=[
                     {
                         "attempt_id": _stable_id("attempt", operation_id, "predispatch"),
@@ -3485,11 +3472,7 @@ def record_kernel_e2e(
                 unit="percent" if role == "delta" else "tok/s",
                 status="validated" if validated is True else "provisional",
                 metric_basis="output",
-                **(
-                    {"occurrence": recorded_occurrence}
-                    if recorded_occurrence is not None
-                    else {}
-                ),
+                **({"occurrence": recorded_occurrence} if recorded_occurrence is not None else {}),
                 dimensions={"role": role, "baseline_source": "integrate_input", "final_source": "integrate_rebaseline"},
                 **_measurement_metadata(
                     "integrate_handler",
@@ -3501,18 +3484,24 @@ def record_kernel_e2e(
             )
             measurement_refs.append(measurement_id)
         parity = evidence.get("parity") or evidence.get("output_parity") or evidence.get("accuracy_pass")
-        paired_ab = evidence.get("paired_ab") if isinstance(evidence.get("paired_ab"), Mapping) else {}
         decision_reason = str(evidence.get("decision_reason") or "")
         final_validated = bool(validated) and decision_value in {"KEEP", "ADOPTED"}
         gate = {
             "gate_id": _stable_id("gate", operation_id, "integrate_e2e"),
             "kind": "e2e",
             "name": "integrate_e2e",
-            "status": "passed" if final_validated else "failed" if decision_value in {"REVERT", "REJECTED"} else "partial",
-            "decision": "allow" if final_validated else "deny" if decision_value in {"REVERT", "REJECTED"} else "review",
+            "status": "passed"
+            if final_validated
+            else "failed"
+            if decision_value in {"REVERT", "REJECTED"}
+            else "partial",
+            "decision": "allow"
+            if final_validated
+            else "deny"
+            if decision_value in {"REVERT", "REJECTED"}
+            else "review",
             "reason": decision_reason,
             "evidence": {
-                "paired_ab": dict(paired_ab),
                 "parity": parity,
                 "validated": validated,
                 "validation_tier": validation_tier or evidence.get("validation_tier"),
@@ -3522,7 +3511,11 @@ def record_kernel_e2e(
             },
         }
         artifact_refs: list[str] = []
-        for kind, path in (("patch", patch_path), ("target_file", target_file), ("report", evidence.get("report_path"))):
+        for kind, path in (
+            ("patch", patch_path),
+            ("target_file", target_file),
+            ("report", evidence.get("report_path")),
+        ):
             if not path:
                 continue
             artifact_id = _stable_id("artifact", operation_id, kind, path)
@@ -3541,14 +3534,26 @@ def record_kernel_e2e(
         adoption_refs: list[str] = []
         if final_validated or decision_value in {"REVERT", "REJECTED"}:
             adoption_id = _stable_id("adoption", operation_id, "integrate")
+            # ATTRIBUTABLE ONLY WITH A THROUGHPUT PAIR. `e2e_gain_pct` is a percentage the executor
+            # measured against whatever baseline it happened to hold at the time. The collector
+            # turns an adoption into points of the ONE session baseline by walking the throughput
+            # chain; with no pair to anchor it, it can only sum the local percentages, and
+            # percentages taken against different denominators do not add. Replaying real GEAK
+            # journeys showed the cost of pretending otherwise: 36 keeps whose local deltas summed
+            # to +348.6 pp of a session that did not move that far.
+            # The adoption is still written, so the keep stays visible and countable; only its
+            # contribution to any total is withheld.
+            before_tput = to_float(evidence.get("base_tput"))
+            after_tput = to_float(evidence.get("new_tput"))
+            has_pair = bool(before_tput and after_tput and before_tput > 0 and after_tput > 0)
             _record_adoption_transition(
                 session_dir,
                 adoption_id=adoption_id,
                 producer=producer,
                 operation_id=operation_id,
                 adopted=final_validated,
-                reason=decision_reason
-                or ("integrate_e2e_passed" if final_validated else "integrate_e2e_failed"),
+                attribution_eligible=has_pair,
+                reason=decision_reason or ("integrate_e2e_passed" if final_validated else "integrate_e2e_failed"),
                 subject=subject,
                 artifact_ids=artifact_refs,
                 measurement_ids=measurement_refs,
@@ -3557,15 +3562,18 @@ def record_kernel_e2e(
                 # Frozen inline, not just referenced: measurement ids are stable
                 # per kernel, so a later attempt on the same kernel overwrites
                 # the very numbers this adoption was decided on.
-                throughput_before=to_float(evidence.get("base_tput")),
-                throughput_after=to_float(evidence.get("new_tput")),
+                throughput_before=before_tput,
+                throughput_after=after_tput,
                 configuration={
                     "patch_path": patch_path,
                     "target_file": target_file,
                     "extra_server_args": str(extra_server_args or ""),
                 },
                 validation_basis="e2e_validation",
-                metadata={"validation_tier": validation_tier or "integrate_e2e"},
+                metadata={
+                    "validation_tier": validation_tier or "integrate_e2e",
+                    **({} if has_pair else {"non_attributable_reason": "no_throughput_pair"}),
+                },
             )
             adoption_refs.append(adoption_id)
         record_operation(
@@ -3577,10 +3585,14 @@ def record_kernel_e2e(
             phase="KERNEL_AGENT",
             scope="kernel",
             executor_class="llm_tool",
-            status="succeeded" if final_validated else "reverted" if decision_value in {"REVERT", "REJECTED"} else "needs_review",
+            status="succeeded"
+            if final_validated
+            else "reverted"
+            if decision_value in {"REVERT", "REJECTED"}
+            else "needs_review",
             ended_at=_now_iso_safe(),
-            parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
-            root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            parent_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
+            root_operation_id=_kernel_route_operation_id(session_dir, _canonical_route(route_strategy)[0]),
             subject=subject,
             gates=[gate],
             outputs={
@@ -3594,7 +3606,6 @@ def record_kernel_e2e(
             adoption_refs=adoption_refs,
             extensions={
                 "integrate": {
-                    "paired_ab": dict(paired_ab),
                     "parity": parity,
                     "decision_reason": decision_reason,
                 }
@@ -3671,10 +3682,7 @@ def record_specialist_round(
                 if not isinstance(proposal, Mapping):
                     continue
                 proposal_key = (
-                    proposal.get("proposal_id")
-                    or proposal.get("fingerprint")
-                    or proposal.get("name")
-                    or index
+                    proposal.get("proposal_id") or proposal.get("fingerprint") or proposal.get("name") or index
                 )
                 proposal_id = _stable_id("subject", "specialist-proposal", round_id, proposal_key)
                 record_subject(
@@ -3686,9 +3694,7 @@ def record_specialist_round(
                     attributes=dict(proposal),
                     producer=producer,
                 )
-                proposal_subjects.append(
-                    {"subject_id": proposal_id, "subject_type": "variant", "role": "proposal"}
-                )
+                proposal_subjects.append({"subject_id": proposal_id, "subject_type": "variant", "role": "proposal"})
         record_operation(
             session_dir,
             operation_id=operation_id,
@@ -3841,11 +3847,7 @@ def record_critic_iteration(
             if not isinstance(write, Mapping):
                 continue
             write_key = (
-                write.get("write_id")
-                or write.get("point_id")
-                or write.get("edge_id")
-                or write.get("kind")
-                or index
+                write.get("write_id") or write.get("point_id") or write.get("edge_id") or write.get("kind") or index
             )
             write_operation_id = _stable_id("op", "kb-write", iter_n, write_key)
             result_payload = write.get("result") if isinstance(write.get("result"), Mapping) else {}

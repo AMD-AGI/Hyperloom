@@ -393,7 +393,14 @@ class _ExploreStateMixin:
         self.params_no_promote_streak = 0
 
     def reset_per_cycle_plateau_state(self) -> None:
-        """Reset transient plateau and dispatch state for a macro-cycle."""
+        """Reset transient plateau and dispatch state for a macro-cycle, plus any stale escalate hint.
+
+        ``pending_escalate_hint`` isn't plateau or dispatch state, but it is
+        reset here too: a hint set during the prior macro-cycle (e.g. by
+        kernel_agent completion) and never claimed by the transition it
+        caused must not survive into the next cycle's phases as if they'd
+        earned it.
+        """
         self.params_no_promote_streak = 0
         self.explore_specialist_dispatched_count = 0
         self.framework_agent_phase_done = False
@@ -407,6 +414,7 @@ class _ExploreStateMixin:
         self.rounds_since_last_keep = {}
         self.last_sweep = {}
         self.last_conc_sweep = {}
+        self.discard_pending_escalate_hint()
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
@@ -599,6 +607,9 @@ class _ExploreStateMixin:
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
             "gain_pct": variant.get("gain_pct"),
+            # Carried through so the ledger records what the KEEP was judged on;
+            # ``None`` means the variant was never gated, not that it scored 0.
+            "accuracy": variant.get("accuracy"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
             "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),

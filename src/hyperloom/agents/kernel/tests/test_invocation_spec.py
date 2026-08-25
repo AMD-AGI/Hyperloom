@@ -221,11 +221,7 @@ def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
         "kernel_kind": "triton",
         "device_kernel_names": ["unified_attention_kernel"],
         "runtime_backend": "ROCM_ATTN",
-        "task_group": {
-            "operator_identity": {
-                "operation": "vllm :: unified_attention_with_output"
-            }
-        },
+        "task_group": {"operator_identity": {"operation": "vllm :: unified_attention_with_output"}},
     }
 
     spec = invocation_spec.build_invocation_spec(candidate)
@@ -369,7 +365,6 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
         driver=str(driver),
         workspace=str(tmp_path),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="forge/session/scaled_gemm",
         gpu_target="gfx942",
@@ -460,7 +455,6 @@ def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):
         driver=str(driver),
         workspace=str(tmp_path),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="forge/session/scaled_gemm",
         gpu_target="gfx942",
@@ -721,9 +715,10 @@ def test_group_cases_expand_csv_invocation_boundaries():
 
 
 def test_native_operation_key_normalizes_graph_wrapped_mangled_symbols():
-    assert native_operation_key(
-        "hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd"
-    ) == "aiter::add_rmsnorm_quant_kernel"
+    assert (
+        native_operation_key("hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd")
+        == "aiter::add_rmsnorm_quant_kernel"
+    )
 
 
 def _rewrite_candidate(rows: list[dict], **extra) -> dict:

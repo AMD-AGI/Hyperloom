@@ -252,18 +252,33 @@ def test_freeform_wave_too_large_rejected(gate, orchestration_role):
     assert exc.value.rule == "specialist_freeform_wave_too_large"
 
 
-def test_freeform_wave_non_dict_task_skipped(gate, orchestration_role):
-    gate._validate_specialist_dispatch(
-        orchestration_role,
-        _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
-    )
+def test_freeform_wave_non_dict_task_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
+        )
+    assert exc.value.rule == "specialist_freeform_wave_invalid_task"
+    assert "tasks[0]" in str(exc.value)
 
 
-def test_freeform_wave_empty_task_description_skipped(gate, orchestration_role):
-    gate._validate_specialist_dispatch(
-        orchestration_role,
-        _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
-    )
+def test_freeform_wave_empty_task_description_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
+        )
+    assert exc.value.rule == "specialist_freeform_empty_description"
+    assert "tasks[0]" in str(exc.value)
+
+
+def test_freeform_wave_all_invalid_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "tasks": ["bad", {"task_description": ""}]}),
+        )
+    assert exc.value.rule == "specialist_freeform_wave_invalid_task"
 
 
 # --------------------------------------------------------------------------- #
@@ -470,8 +485,7 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
     therefore pinned empty -- otherwise the pool is resolved from the host's real
     GPUs and the test only passes on a GPU-less machine.
     """
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP",
-                 "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
     gate = _gate_with_gpu_capacity(0)
@@ -574,28 +588,94 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
     )
 
 
-# --------------------------------------------------------------------------- #
-# Tool surface: TodoWrite and Task are granted.
-# --------------------------------------------------------------------------- #
-def test_task_tool_granted_and_todowrite_granted():
-    from hyperloom.orchestrator.specialists.runner import (
-        DEFAULT_SPECIALIST_TOOLS,
-        SPECIALIST_TOOL_DENYLIST,
-        SpecialistRunner,
+def test_freeform_wave_mixed_valid_and_invalid_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "tasks": [
+                        {"task_description": "valid task"},
+                        {"task_description": ""},
+                    ],
+                }
+            ),
+        )
+    assert exc.value.rule == "specialist_freeform_empty_description"
+    assert "tasks[1]" in str(exc.value)
+
+
+def test_freeform_negative_max_turns_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "task_description": "probe", "max_turns": -1}),
+        )
+    assert "max_turns" in str(exc.value)
+
+
+def test_freeform_wave_task_negative_max_turns_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "tasks": [{"task_description": "probe", "max_turns": -1}],
+                }
+            ),
+        )
+    assert "tasks[0].max_turns" in str(exc.value)
+
+
+def test_freeform_max_turns_above_cap_rejected(gate, orchestration_role):
+    from hyperloom.orchestrator.specialists.domains import SPECIALIST_MAX_TURNS_HARD_CAP
+
+    with pytest.raises(PolicyDenied):
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "probe",
+                    "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
+                }
+            ),
+        )
+
+
+def test_prepare_scoring_proposals_preserves_output_name_whitespace():
+    from hyperloom.orchestrator.scoring.proposal_scorer import (
+        _normalise_model_scores,
+        _prepare_scoring_proposals,
     )
 
-    assert "TodoWrite" in DEFAULT_SPECIALIST_TOOLS
-    assert "Task" in DEFAULT_SPECIALIST_TOOLS
+    entries = _prepare_scoring_proposals([{"name": " x "}])
+    parsed = {"scores": {"proposal_0": {"score": 5, "reason": "ok"}}}
+    out = _normalise_model_scores(parsed, scoring_entries=entries)
+    assert " x " in out
+    assert "x" not in out
+
+
+def test_resolve_specialist_max_turns_zero_uses_default():
+    from hyperloom.orchestrator.specialists.runner import resolve_specialist_max_turns
+
+    assert resolve_specialist_max_turns(0, default=1000) == 1000
+    assert resolve_specialist_max_turns(None, default=42) == 42
+    assert resolve_specialist_max_turns(5, default=1000) == 5
+
+
+# --------------------------------------------------------------------------- #
+# Tool surface: TaskKill and SlashCommand are denied.
+# --------------------------------------------------------------------------- #
+def test_denylist_blocks_process_kill_tools():
+    from hyperloom.orchestrator.specialists.runner import SPECIALIST_TOOL_DENYLIST
+
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
     assert "Task" not in SPECIALIST_TOOL_DENYLIST
-
-    runner = SpecialistRunner(backend_factory=lambda *a, **k: None)
-
-    default_resolved = runner._resolve_tools(None)
-    assert "Task" in default_resolved
-    assert "TodoWrite" in default_resolved
-
-    resolved = runner._resolve_tools(["Read", "Task", "TodoWrite", "Bash"])
-    assert {"Read", "Task", "TodoWrite", "Bash"} <= set(resolved)
+    assert "TodoWrite" not in SPECIALIST_TOOL_DENYLIST
 
 
 # --------------------------------------------------------------------------- #
@@ -714,36 +794,36 @@ def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_
 
 
 # --------------------------------------------------------------------------- #
-# readonly param + domain.readonly → mode=research, lane=cpu
+# domain.default_mode → mode=research, lane=cpu
 # --------------------------------------------------------------------------- #
-def test_readonly_param_forces_research_mode():
-    """params['readonly']=True must override any mode/lane dial."""
-    profile = resolve_specialist_profile({"readonly": True, "domain": "serving_specialist"})
+def test_research_mode_param_forces_research_mode():
+    """params['mode']='research' must override the global default."""
+    profile = resolve_specialist_profile({"mode": "research", "domain": "serving_specialist"})
     assert profile.mode == MODE_RESEARCH
     assert profile.lane == LANE_CPU
     assert profile.bench is False
 
 
-def test_readonly_domain_flag_forces_research_mode():
-    """Domains marked readonly=True yield mode=research even without the param."""
+def test_research_default_mode_domain_resolves_to_research():
+    """Domains with default_mode='research' yield mode=research when no explicit mode is given."""
     from hyperloom.orchestrator.specialists.domains import get_domain
 
     for key in ("research_scout_specialist", "static_recon_specialist", "pr_intel_specialist"):
         domain = get_domain(key)
         assert domain is not None
-        assert domain.readonly is True
+        assert domain.default_mode == "research"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_RESEARCH, f"{key} should resolve to research mode"
         assert profile.lane == LANE_CPU, f"{key} should resolve to cpu lane"
 
 
-def test_patch_capable_domains_unaffected_by_readonly_flag():
-    """Patch-capable domains must NOT be marked readonly."""
+def test_patch_capable_domains_default_to_patch():
+    """Patch-capable domains have default_mode='patch'."""
     from hyperloom.orchestrator.specialists.domains import get_domain
 
     for key in ("serving_specialist", "kernel_switch_specialist", "comm_specialist"):
         domain = get_domain(key)
         assert domain is not None
-        assert domain.readonly is False
+        assert domain.default_mode == "patch"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_PATCH

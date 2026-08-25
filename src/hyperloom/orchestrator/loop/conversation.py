@@ -262,7 +262,11 @@ class ConversationCollaborator:
         rendered = "\n".join(body_lines).splitlines()
         if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
             rendered = rendered[-_RECENT_OUTCOMES_LINE_CAP:]
-            return "\n".join([header] + rendered + [f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)"])
+            return "\n".join(
+                [header]
+                + rendered
+                + [f"(truncated at {_RECENT_OUTCOMES_LINE_CAP} lines; re-query with a smaller top_k)"]
+            )
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
@@ -518,7 +522,7 @@ class ConversationCollaborator:
                         "will likely be cut by the deadline."
                     )
 
-        # Time budget for Robustness — fires deadline_imminent → delegate(report) wind-down.
+        # Time budget for Robustness — drives the deadline_imminent alert.
         if agent_name == "robustness" and self._run_deadline is not None and self._run_started_monotonic is not None:
             remaining_min = max(
                 0.0,
@@ -547,6 +551,12 @@ class ConversationCollaborator:
                 denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
                 if denial_summary:
                     sections.append(denial_summary)
+            # Outside the SEED gate: a queue seen once is the amnesia it fixes.
+            if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_EXPLORE:
+                untested_block = self.shared_state.to_untested_proposals_summary()
+                if untested_block:
+                    sections.append("=== Untested proposals (current cycle) ===")
+                    sections.append(untested_block)
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration" and push_full:
@@ -737,11 +747,10 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        # Full unread batch: events arriving in one tick must not be dropped.
         rendered = list(msgs)
-        # Durable at-least-once-until-decided delivery of proposals to the
-        # Critic: the inbox tail is lossy, so re-present every still-undecided
-        # proposal from the durable ``pending_proposals`` registry.
+        if msgs:
+            top = msgs[-1]
+            self._coord._rendered_cursor[agent_name] = (int(top.seq), str(top.msg_id))
         if agent_name == "critic":
             rendered = await self._augment_critic_inbox_with_pending(rendered)
         if rendered:
@@ -756,17 +765,30 @@ class ConversationCollaborator:
 
         return "\n".join(sections)
 
+    async def _advance_rendered_cursor(self, agent_name: str) -> None:
+        """Advance an agent's read cursor to the last message its prompt rendered.
+
+        Args:
+            agent_name: The agent whose cursor to advance; a no-op when its
+                last composed prompt carried no new messages.
+        """
+        entry = self._coord._rendered_cursor.get(agent_name)
+        if entry is None:
+            return
+        seq, msg_id = entry
+        await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
+
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present.
 
-        The rendered tail can drop proposals that scrolled past the capped
-        window. Source the review set from the durable ``pending_proposals``
-        registry and merge any missing proposal messages into the rendered
-        window (deduped by ``msg_id``, re-sorted by ``seq`` so "newest last"
-        holds).
+        A rendered proposal whose verdict has not yet arrived will not appear in
+        the next inbox because the cursor has legitimately moved past it. Source
+        the review set from the durable ``pending_proposals`` registry and merge
+        any missing proposal messages into the rendered window (deduped by
+        ``msg_id``, re-sorted by ``seq`` so "newest last" holds).
 
         Args:
-            rendered: The tail-capped messages already selected for the inbox.
+            rendered: The messages selected for the inbox.
 
         Returns:
             The rendered list augmented with any undecided proposal messages
@@ -1184,8 +1206,12 @@ class ConversationCollaborator:
         return out
 
     def _research_scout_seed_block(self) -> str:
-        """Render all persisted research-scout findings for an Orchestration SEED."""
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+        """Render the persisted research-scout findings for an Orchestration SEED.
+
+        The scout's executable proposals are not rendered here: they go through
+        ``=== Untested proposals (current cycle) ===`` alongside every other
+        domain's, which also drops the ones already benched.
+        """
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
@@ -1203,38 +1229,15 @@ class ConversationCollaborator:
             for hint in hints:
                 lines.append(json.dumps(hint, sort_keys=True))
 
-        proposals: list[dict[str, Any]] = []
-        proposal_names: set[str] = set()
-        proposal_fingerprints: set[str] = set()
         questions: list[str] = []
         seen_questions: set[str] = set()
         for row in rounds:
-            for proposal in row.get("proposal_set") or []:
-                if not isinstance(proposal, dict):
-                    continue
-                name = str(proposal.get("name") or "").strip()
-                fingerprint = canonical_fingerprint(
-                    str(proposal.get("extra_args") or proposal.get("extra_server_args") or ""),
-                    proposal.get("extra_envs") if isinstance(proposal.get("extra_envs"), dict) else {},
-                    remove_args=proposal.get("remove_args"),
-                    unset_envs=proposal.get("unset_envs"),
-                    args_mode=str(proposal.get("args_mode") or "append"),
-                )
-                if (name and name in proposal_names) or fingerprint in proposal_fingerprints:
-                    continue
-                if name:
-                    proposal_names.add(name)
-                proposal_fingerprints.add(fingerprint)
-                proposals.append(proposal)
             for question in row.get("residual_questions") or []:
                 text = str(question).strip()
                 if text and text not in seen_questions:
                     seen_questions.add(text)
                     questions.append(text)
 
-        if proposals:
-            lines.append("Untested executable proposals:")
-            lines.extend(json.dumps(proposal, sort_keys=True) for proposal in proposals)
         if questions:
             lines.append("Residual questions:")
             lines.extend(f"- {question}" for question in questions)

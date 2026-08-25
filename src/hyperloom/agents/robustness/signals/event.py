@@ -167,9 +167,7 @@ def _delegated_failure_symptoms(
     for family, count in family_counts.items():
         if count < cfg.delegated_failure_threshold:
             continue
-        severity = (
-            SymptomSeverity.HIGH if count >= cfg.delegated_failure_prune_threshold else SymptomSeverity.MEDIUM
-        )
+        severity = SymptomSeverity.HIGH if count >= cfg.delegated_failure_prune_threshold else SymptomSeverity.MEDIUM
         out.append(
             Symptom(
                 name="repeated_failure",
@@ -275,10 +273,10 @@ def _recover_unsuccessful_symptoms(
 ) -> list[Symptom]:
     """Emit ``recover_unsuccessful`` when the latest recover needs review.
 
-    Fires (HIGH → delegate(report)) when the latest recover hit
-    ``state == "needs_review"`` — cleanup failed to free VRAM, terminal for
-    this budget. Inspects only the latest recover ``delegated_result``;
-    earlier successes are not second-guessed.
+    Fires (HIGH) when the latest recover hit ``state == "needs_review"`` —
+    cleanup failed to free VRAM, terminal for this budget. Inspects only the
+    latest recover ``delegated_result``; earlier successes are not
+    second-guessed.
 
     Args:
         events: Coordinator event dicts in chronological order.
@@ -325,7 +323,7 @@ def _recover_unsuccessful_symptoms(
             },
             subject={},  # session-wide
             source="coordinator_events",
-            suggestion=("delegate(report) to finalize at the last validated gain"),
+            suggestion=("propose report to finalize at the last validated gain"),
         )
     ]
 

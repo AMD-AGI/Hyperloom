@@ -17,6 +17,7 @@ import one type.
 
 from __future__ import annotations
 
+import re as _re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
@@ -215,9 +216,7 @@ class BuildResult:
         """Rehydrate from a plain dict."""
         d = d or {}
         raw_versions = d.get("installed_versions")
-        versions = (
-            {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
-        )
+        versions = {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
         raw_artifacts = d.get("built_artifacts")
         artifacts = tuple(str(x) for x in raw_artifacts) if isinstance(raw_artifacts, (list, tuple)) else ()
         return cls(
@@ -251,8 +250,6 @@ def build_novelty_key(
         tuple(action.build_command),
     )
 
-
-import re as _re
 
 _GITHUB_PR_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", _re.IGNORECASE)
 _PR_REF_RE = _re.compile(r"^PR:(\d+)$")

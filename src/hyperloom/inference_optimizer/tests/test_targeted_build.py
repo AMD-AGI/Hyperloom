@@ -18,9 +18,9 @@ import pytest
 
 from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.framework.targeted_build import (
-    default_budget_sec,
+    classify_build_exit,
+    ensure_build_dead,
     kill_build_pgroup,
-    poll_build,
     spawn_build,
 )
 
@@ -31,14 +31,9 @@ def _action(cmd, **kw):
     return TargetedBuildAction(**base)
 
 
-def _wait_terminal(handle, *, now=None, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        res = poll_build(handle, now=now) if now else poll_build(handle)
-        if res is not None:
-            return res
-        time.sleep(0.05)
-    raise AssertionError("build did not reach a terminal result in time")
+def _wait_terminal(handle, *, timeout=10.0):
+    rc = handle.proc.wait(timeout=timeout)
+    return classify_build_exit(handle, rc)
 
 
 def test_build_success(tmp_path):
@@ -62,9 +57,7 @@ def test_build_nonzero_is_compile_error(tmp_path):
 
 
 def test_per_attempt_jit_dir_env_and_log(tmp_path):
-    action = _action(
-        [sys.executable, "-c", "import os; print(os.environ['INFERENCE_OPTIMIZER_AITER_JIT_DIR'])"]
-    )
+    action = _action([sys.executable, "-c", "import os; print(os.environ['INFERENCE_OPTIMIZER_AITER_JIT_DIR'])"])
     root = tmp_path / "a3"
     handle = spawn_build(action, attempt_root=str(root))
     _wait_terminal(handle)
@@ -80,31 +73,19 @@ def test_empty_build_command_raises(tmp_path):
         spawn_build(action, attempt_root=str(tmp_path / "a4"))
 
 
-def test_timeout_two_phase_kill(tmp_path):
-    """A long build past its deadline gets SIGTERM then SIGKILL; result=timeout."""
+def test_ensure_build_dead_reaps_a_running_group(tmp_path):
+    """A live build is SIGKILLed and confirmed, so the sentinel can be dropped."""
     action = _action([sys.executable, "-c", "import time; time.sleep(600)"])
     handle = spawn_build(action, attempt_root=str(tmp_path / "a5"))
-    base = handle.deadline - default_budget_sec("aiter")
+    assert handle.proc.poll() is None
 
-    # Before the deadline: still running.
-    assert poll_build(handle, now=lambda: base + 1.0) is None
-    assert handle.sigterm_at == 0.0
-
-    # At the deadline: SIGTERM fired, sigterm_at recorded, still not terminal.
-    at_deadline = handle.deadline
-    assert poll_build(handle, now=lambda: at_deadline) is None
-    assert handle.sigterm_at == at_deadline
-
-    # SIGTERM alone should stop a plain `sleep`; wait for the terminal result.
-    res = _wait_terminal(handle, now=lambda: at_deadline + 0.1)
-    assert res.ok is False
-    assert res.failure_class == "timeout"
+    assert ensure_build_dead(handle) is True
+    with pytest.raises(ProcessLookupError):
+        os.killpg(handle.pgid, 0)
 
 
-def test_timeout_sigkill_escalation_kills_stubborn_child(tmp_path):
-    """A process that ignores SIGTERM is SIGKILLed after the grace window."""
-    # Install SIG_IGN, flush a readiness marker, THEN sleep — so the test only
-    # triggers the deadline once the handler is provably in place (no race).
+def test_ensure_build_dead_kills_a_child_that_ignores_sigterm(tmp_path):
+    """No SIGTERM grace to sit out: the teardown goes straight to SIGKILL."""
     prog = (
         "import signal,sys,time;"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
@@ -113,9 +94,7 @@ def test_timeout_sigkill_escalation_kills_stubborn_child(tmp_path):
     action = _action([sys.executable, "-c", prog])
     root = tmp_path / "a6"
     handle = spawn_build(action, attempt_root=str(root))
-    at_deadline = handle.deadline
 
-    # Wait until the child has installed the SIGTERM-ignore handler.
     log_path = root / "build.log"
     for _ in range(100):
         if log_path.exists() and "ready" in log_path.read_text():
@@ -124,18 +103,17 @@ def test_timeout_sigkill_escalation_kills_stubborn_child(tmp_path):
     else:
         raise AssertionError("stubborn child never signalled readiness")
 
-    # Deadline -> SIGTERM (ignored by the child).
-    assert poll_build(handle, now=lambda: at_deadline) is None
-    time.sleep(0.3)
-    assert handle.proc.poll() is None  # survived SIGTERM
-
-    # Past the grace window -> SIGKILL escalation.
-    poll_build(handle, now=lambda: at_deadline + 6.0)
-    res = _wait_terminal(handle, now=lambda: at_deadline + 6.0)
-    assert res.failure_class == "timeout"
-    # Process group is gone.
+    assert ensure_build_dead(handle) is True
     with pytest.raises(ProcessLookupError):
         os.killpg(handle.pgid, 0)
+
+
+def test_ensure_build_dead_on_an_already_exited_build(tmp_path):
+    action = _action([sys.executable, "-c", "print('done')"])
+    handle = spawn_build(action, attempt_root=str(tmp_path / "a7"))
+    handle.proc.wait(timeout=10.0)
+
+    assert ensure_build_dead(handle) is True
 
 
 def test_kill_build_pgroup_noop_on_bad_pgid():

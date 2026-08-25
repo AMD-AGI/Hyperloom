@@ -292,11 +292,14 @@ def test_maybe_setup_worktree_in_process_mode(tmp_path):
     assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
 
 
-def test_maybe_setup_worktree_readonly(tmp_path):
+def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
+    from hyperloom.orchestrator.specialists.profile import resolve_specialist_profile
+
     cfg = sr.SpecialistSubprocessConfig()
     r = _runner(backend_factory=None, subprocess_config=cfg)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"readonly": True}))
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"mode": "research"}))
+    profile = resolve_specialist_profile(ctx.task.params)
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "")
 
 
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
@@ -342,9 +345,7 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     assert base == worldplay, f"specialist would patch {seen.get('base')}, not the framework"
 
 
-def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(
-    tmp_path, monkeypatch
-):
+def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(tmp_path, monkeypatch):
     """A pip-installed framework must not cost the specialist its isolation."""
     aiter = tmp_path / "aiter"
     aiter.mkdir()
@@ -354,9 +355,7 @@ def test_maybe_setup_worktree_falls_back_when_the_framework_is_not_a_checkout(
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
     r = _runner(backend_factory=None, subprocess_config=cfg)
     monkeypatch.setattr(sr, "_setup_worktree", lambda base, path, branch: (path, ""))
-    ctx = SimpleNamespace(
-        task=SimpleNamespace(task_id="t", params={"framework": "worldplay"})
-    )
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
 
     _wt, base, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 

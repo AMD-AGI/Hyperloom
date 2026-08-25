@@ -1084,21 +1084,24 @@ async def test_auto_retry_caps_attempts(coord: Coordinator, monkeypatch) -> None
     assert await coord._maybe_auto_retry_specialist(task, res) is False
 
 
-# -- _fan_out_specialist_wave (skip path) ----------------------------------
+# -- _fan_out_specialist_wave (invalid entries) ---------------------------
 @pytest.mark.asyncio
-async def test_fan_out_wave_skips_invalid_entries(coord: Coordinator, monkeypatch) -> None:
+async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypatch) -> None:
     called = []
     monkeypatch.setattr(
         coord,
         "_handle_delegate",
         lambda *a, **k: called.append(a),
     )
-    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w"})
-    await coord._fan_out_specialist_wave(
-        "orchestration",
-        intent,
-        {"tasks": ["not-a-dict", {}, {"task_description": "   "}]},
-    )
+    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w", "action_name": "specialist"})
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    with pytest.raises(PolicyDenied):
+        await coord._fan_out_specialist_wave(
+            "orchestration",
+            intent,
+            {"tasks": ["not-a-dict", {}, {"task_description": "   "}]},
+        )
     assert called == []
 
 

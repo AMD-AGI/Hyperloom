@@ -72,7 +72,7 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
 
 def _published_manifest(commit_hash: str, **overrides) -> dict:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "commit_hash": commit_hash,
         "correctness_passed": True,
         "baseline_wall_ms": 3.0,
@@ -231,9 +231,7 @@ def test_submit_fails_before_loop_when_declared_source_is_unmappable(
     )
 
     assert result["returncode"] == 1
-    assert "declared implementation source could not be mapped" in (
-        result["stderr_tail"]
-    )
+    assert "declared implementation source could not be mapped" in (result["stderr_tail"])
 
 
 def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch):
@@ -324,12 +322,8 @@ def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch)
     assert result["incremental_improved"] is False
     assert result["improved"] is True
     assert result["improved_during_search"] is False
-    assert "[micro_speedup] 1.2500x" in (
-        output_dir / "optimization_report.md"
-    ).read_text()
-    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == (
-        "WARM_START_BEST\n"
-    )
+    assert "[micro_speedup] 1.2500x" in (output_dir / "optimization_report.md").read_text()
+    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == ("WARM_START_BEST\n")
     report = (output_dir / "optimization_report.md").read_text()
     assert "[micro_speedup] 1.2500x" in report
     assert "improved_during_search=false" in report
@@ -509,9 +503,7 @@ def test_finalize_repoints_artifact_paths_at_the_relocated_campaign(tmp_path):
     assert result["canonical_patch_path"] == str(relocated / "forge.patch")
     assert result["canonical_files_root"] == str(relocated / "files")
     assert result["artifacts"] == [str(relocated / "forge.patch")]
-    assert result["flydsl_applyback"]["canonical_manifest"] == str(
-        relocated / "manifest.json"
-    )
+    assert result["flydsl_applyback"]["canonical_manifest"] == str(relocated / "manifest.json")
     # The repointed path is the one that actually holds the artifact now.
     assert Path(result["canonical_patch_path"]).read_text() == "PATCH\n"
     # Paths outside the moved tree are left exactly as they were.
@@ -660,7 +652,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         driver=str(driver),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
@@ -717,7 +708,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--driver": str(driver),
         "--workspace": str(workspace),
         "--snr-threshold": "30.0",
-        "--max-iters": "8",
         "--max-hours": "1.0",
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
@@ -740,7 +730,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # that tolerates it drops it silently, and one that does not aborts the child
     # before the campaign starts. Either way the value never reaches the loop, so
     # the argv must not imply otherwise. Shapes travel in the invocation spec.
-    for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct"):
+    for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct", "--max-iters"):
         assert unsupported not in command, unsupported
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
@@ -766,9 +756,7 @@ def test_failure_tail_prefers_the_usage_error_over_the_transcript():
     it instead of the progress output a plain tail would capture.
     """
     tail = forge_submit._forge_failure_tail(
-        "  [prepare] task already conforms\n"
-        "Usage: main forge-loop [OPTIONS]\n"
-        "Error: No such option '--shapes-json'.\n"
+        "  [prepare] task already conforms\nUsage: main forge-loop [OPTIONS]\nError: No such option '--shapes-json'.\n"
     )
 
     assert "No such option '--shapes-json'" in tail
@@ -777,9 +765,7 @@ def test_failure_tail_prefers_the_usage_error_over_the_transcript():
 
 def test_failure_tail_falls_back_to_the_last_lines_and_skips_result_blobs():
     payload = "__FORGE_RESULT__" + json.dumps({"x": "y" * 400}) + "__FORGE_RESULT__"
-    tail = forge_submit._forge_failure_tail(
-        f"first\n{payload}\nsegfault in driver\nlast line\n"
-    )
+    tail = forge_submit._forge_failure_tail(f"first\n{payload}\nsegfault in driver\nlast line\n")
 
     assert "__FORGE_RESULT__" not in tail
     assert "segfault in driver" in tail
@@ -825,7 +811,6 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         driver=str(workspace / "driver.py"),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="b",
         gpu_target="gfx950",
@@ -859,11 +844,9 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
     wrapper.write_text("def attention(x):\n    return x\n")
     aiter_impl = workspace / "aiter" / "attention.py"
     aiter_impl.parent.mkdir()
-    aiter_impl.write_text(
-        "@triton.jit\ndef attention_kernel(x):\n    return x\n"
-    )
+    aiter_impl.write_text("@triton.jit\ndef attention_kernel(x):\n    return x\n")
     ck_source = workspace / "aiter" / "gemm.cu"
-    ck_source.write_text('__global__ void gemm_kernel() {}\n')
+    ck_source.write_text("__global__ void gemm_kernel() {}\n")
     fly_source = workspace / "flydsl" / "moe.py"
     fly_source.parent.mkdir()
     fly_source.write_text("@flydsl.jit\ndef moe_kernel(x):\n    return x\n")
@@ -967,7 +950,6 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             driver=str(driver),
             workspace=str(workspace),
             snr_threshold=30.0,
-            max_iters=1,
             max_hours=1.0,
             branch=f"forge/test/{index}",
             gpu_target="gfx950",
@@ -986,12 +968,8 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         )
 
         command = commands[-1]
-        assert command[command.index("--operator-name") + 1] == (
-            forge_submit._logical_operator(candidate)
-        )
-        assert command[command.index("--source-files") + 1] == ",".join(
-            source_values
-        )
+        assert command[command.index("--operator-name") + 1] == (forge_submit._logical_operator(candidate))
+        assert command[command.index("--source-files") + 1] == ",".join(source_values)
         assert command[command.index("--fellow") + 1] == case["expected_fellow"]
         assert kind == case["expected_kind"]
         assert framework == case["expected_framework"]
@@ -1002,9 +980,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         else:
             assert "--framework" not in command
         if symbols:
-            assert command[command.index("--target-functions") + 1] == ",".join(
-                symbols
-            )
+            assert command[command.index("--target-functions") + 1] == ",".join(symbols)
         else:
             assert "--target-functions" not in command
 
@@ -1027,9 +1003,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
     checkpoint_json = experiments / "hyperloom.json"
     result_json = experiments.parent / "forge_cli_result.json"
     # Artifacts left behind by a PREVIOUS campaign in the same output dir.
-    checkpoint_json.write_text(
-        json.dumps({"checkpoint": {"best_commit": "stale-commit"}})
-    )
+    checkpoint_json.write_text(json.dumps({"checkpoint": {"best_commit": "stale-commit"}}))
     result_json.write_text(json.dumps({"baseline_ms": 9.0, "best_ms": 9.0}))
     fresh = {"schema_version": 1, "state": "best_committed", "best_commit": "fresh"}
 
@@ -1045,9 +1019,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
 
     def fake_terminate(_proc):
         # Mirrors the loop's KEEP callback landing before the SIGKILL.
-        checkpoint_json.write_text(
-            json.dumps({"experiment_id": "hyperloom", "checkpoint": fresh})
-        )
+        checkpoint_json.write_text(json.dumps({"experiment_id": "hyperloom", "checkpoint": fresh}))
         return "partial stdout", "partial stderr"
 
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
@@ -1060,7 +1032,6 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         driver=str(driver),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=8,
         max_hours=1.0,
         branch="forge/session/kernel",
         gpu_target="gfx950",
@@ -1120,9 +1091,7 @@ def test_forced_termination_escalates_to_sigkill_and_keeps_partial_output(monkey
     monkeypatch.setattr(
         forge_submit.os,
         "killpg",
-        lambda process_group, sent_signal: signals.append(
-            (process_group, sent_signal)
-        ),
+        lambda process_group, sent_signal: signals.append((process_group, sent_signal)),
     )
     monkeypatch.setattr(
         forge_submit,
@@ -1249,9 +1218,7 @@ def test_disagreeing_recovery_channels_keep_the_published_manifest(
         checkpointed_commit = _git(workspace, "rev-parse", "HEAD")
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
-        (experiments / "best_result.json").write_text(
-            json.dumps(_published_manifest(published_commit))
-        )
+        (experiments / "best_result.json").write_text(json.dumps(_published_manifest(published_commit)))
         kernel.write_text("UNVALIDATED_MID_ITERATION\n")
         captured.update(
             published_commit=published_commit,
@@ -1353,9 +1320,7 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
         best_commit = _git(workspace, "rev-parse", "HEAD")
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
-        (experiments / "best_result.json").write_text(
-            json.dumps(_published_manifest(best_commit))
-        )
+        (experiments / "best_result.json").write_text(json.dumps(_published_manifest(best_commit)))
         # The kill lands mid-iteration, so the working tree holds an unvalidated
         # candidate that must never reach the exported artifacts.
         kernel.write_text("UNVERIFIED_MID_ITERATION\n")
@@ -1396,9 +1361,7 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
     assert result["best_commit"] == captured["best_commit"]
     assert result["cli_workspace"] == str(output_dir)
     assert result["output_dir"] == str(output_dir)
-    assert result["checkpoint_path"] == str(
-        output_dir / "forge_experiments" / "hyperloom.json"
-    )
+    assert result["checkpoint_path"] == str(output_dir / "forge_experiments" / "hyperloom.json")
     assert optimized.read_text() == "VERIFIED_BEST\n"
 
     patch = (output_dir / "optimized_versions" / "forge.patch").read_text()
@@ -1439,9 +1402,7 @@ def test_submit_timeout_export_failure_writes_no_promotable_artifacts(
         best_commit = _git(workspace, "rev-parse", "HEAD")
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
-        (experiments / "best_result.json").write_text(
-            json.dumps(_published_manifest(best_commit))
-        )
+        (experiments / "best_result.json").write_text(json.dumps(_published_manifest(best_commit)))
         kernel.write_text("UNVERIFIED_MID_ITERATION\n")
         captured["kernel"] = kernel
         return forge_submit.ForgeLoopOutcome(
@@ -1614,9 +1575,7 @@ def test_finalization_failure_does_not_swallow_the_forge_result(
         best_commit = _git(workspace, "rev-parse", "HEAD")
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
-        (experiments / "best_result.json").write_text(
-            json.dumps(_published_manifest(best_commit))
-        )
+        (experiments / "best_result.json").write_text(json.dumps(_published_manifest(best_commit)))
         captured["best_commit"] = best_commit
         return forge_submit.ForgeLoopOutcome(
             baseline_ms=3.0,
@@ -1650,9 +1609,7 @@ def test_finalization_failure_does_not_swallow_the_forge_result(
     assert result["returncode"] == 0
     assert result["salvaged"] is True
     assert result["best_commit"] == captured["best_commit"]
-    assert (
-        output_dir / "optimized_versions" / "v1_forge.py"
-    ).read_text() == "VERIFIED_BEST\n"
+    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == "VERIFIED_BEST\n"
     assert "forge workspace finalization failed" in caplog.text
 
 
@@ -1764,9 +1721,7 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
         best_commit = _git(workspace, "rev-parse", "HEAD")
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
-        (experiments / "best_result.json").write_text(
-            json.dumps(_published_manifest(best_commit))
-        )
+        (experiments / "best_result.json").write_text(json.dumps(_published_manifest(best_commit)))
         kernel.write_text("UNVERIFIED_MID_ITERATION\n")
         captured.update(
             workspace=workspace,
@@ -1813,13 +1768,9 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
     # The driver is the CLI-mandated exception: inside the workspace, hidden.
     assert captured["driver"].parent == repo
     assert captured["driver"].name.startswith(".forge_driver_")
-    assert result["checkpoint_path"] == str(
-        output_dir / "forge_experiments" / "hyperloom.json"
-    )
+    assert result["checkpoint_path"] == str(output_dir / "forge_experiments" / "hyperloom.json")
     assert (output_dir / "forge_experiments").is_dir()
-    assert (
-        output_dir / "optimized_versions" / "v1_forge.py"
-    ).read_text() == "VERIFIED_BEST\n"
+    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == "VERIFIED_BEST\n"
 
     # ... and the live checkout is handed back untouched: original branch, no
     # forge temp branch, pre-forge bytes, nothing tracked left dirty.
@@ -1862,9 +1813,7 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
         best_commit = _git(workspace, "rev-parse", "HEAD")
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
-        (experiments / "best_result.json").write_text(
-            json.dumps(_published_manifest(best_commit))
-        )
+        (experiments / "best_result.json").write_text(json.dumps(_published_manifest(best_commit)))
         captured["best_commit"] = best_commit
         return forge_submit.ForgeLoopOutcome(
             baseline_ms=3.0,
@@ -1906,9 +1855,7 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
     assert result["returncode"] == 0
     assert result["salvaged"] is True
     assert result["best_commit"] == captured["best_commit"]
-    assert (
-        output_dir / "optimized_versions" / "v1_forge.py"
-    ).read_text() == "VERIFIED_BEST\n"
+    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == "VERIFIED_BEST\n"
 
 
 def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
@@ -1933,9 +1880,7 @@ def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
     monkeypatch.setattr(
         forge_submit,
         "_prepare_worktree_nogit",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("must not fall through to no-git scratch")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fall through to no-git scratch")),
     )
 
     result = forge_submit.submit(
@@ -1992,7 +1937,6 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             driver=str(driver),
             workspace=str(workspace),
             snr_threshold=30.0,
-            max_iters=8,
             max_hours=1.0,
             branch="forge/session/kernel",
             gpu_target="gfx950",
@@ -2099,9 +2043,7 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
     assert result["returncode"] == 0
     assert result["best_commit"] == captured["published_commit"]
     assert result["best_commit"] != captured["checkpointed_commit"]
-    assert (
-        output_dir / "optimized_versions" / "v1_forge.py"
-    ).read_text() == "PUBLISHED_BEST\n"
+    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == "PUBLISHED_BEST\n"
 
     # The manifest's own numbers are reported -- the checkpoint's faster
     # best_ms=1.5 (a 2.0x claim) is not merged in behind the manifest's commit.
@@ -2135,9 +2077,7 @@ def test_trace_reads_llm_usage_from_the_cli_sidecar(tmp_path):
     assert steps == {"steps": [{"name": "baseline"}]}
 
     # A usage block with no canonical token counter is not a usage block.
-    (output_dir / "forge_cli_result.json").write_text(
-        json.dumps({"llm_usage": {"calls": 3}, "steps": {}})
-    )
+    (output_dir / "forge_cli_result.json").write_text(json.dumps({"llm_usage": {"calls": 3}, "steps": {}}))
     assert forge_submit._forge_trace_from_sidecar(output_dir) == (None, None)
 
 
@@ -2434,9 +2374,7 @@ def test_installed_producer_capabilities_are_accepted():
         forge_root=producer_root,
     )
 
-    assert capabilities.supported is True, (
-        f"{capabilities.reason}: {capabilities.detail}"
-    )
+    assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert set(capabilities.frameworks) == {"aiter", "vllm", "sglang"}
 
 
@@ -2782,9 +2720,7 @@ def test_rewrite_route_rejects_multi_node_before_the_apply_stage(tmp_path, monke
 
 def test_rewrite_route_rejects_a_framework_the_producer_cannot_apply_back(tmp_path, monkeypatch):
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
-    probe = _RecordingProbe(
-        _flydsl_rewrite.RewriteCapabilities(True, "capability_ok", "", ("aiter",))
-    )
+    probe = _RecordingProbe(_flydsl_rewrite.RewriteCapabilities(True, "capability_ok", "", ("aiter",)))
 
     decision = _flydsl_rewrite.evaluate_rewrite_route(
         capability_probe=probe,
@@ -2798,9 +2734,7 @@ def test_rewrite_route_rejects_a_framework_the_producer_cannot_apply_back(tmp_pa
 
 def test_rewrite_route_forwards_the_incompatible_capability_reason(tmp_path, monkeypatch):
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
-    probe = _RecordingProbe(
-        _flydsl_rewrite.RewriteCapabilities(False, "capability_probe_failed", "rc=2")
-    )
+    probe = _RecordingProbe(_flydsl_rewrite.RewriteCapabilities(False, "capability_probe_failed", "rc=2"))
 
     decision = _flydsl_rewrite.evaluate_rewrite_route(
         capability_probe=probe,
@@ -2830,14 +2764,14 @@ def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, 
         "shape_cases": [{"M": 8, "N": 16}],
         "framework": "vllm",
         "gpu_target": "gfx942",
-            # The producer needs this stated: the candidate's file is a .py that
-            # names no language, and only the trace knew it was Triton.
-            "source_language": "triton",
-            # The driver is generated only after the route is granted.
-            "driver": "",
-            "branch": "forge/session/fused-gemm-abc123def456",
-            "attempt_id": "attempt-1",
-        }
+        # The producer needs this stated: the candidate's file is a .py that
+        # names no language, and only the trace knew it was Triton.
+        "source_language": "triton",
+        # The driver is generated only after the route is granted.
+        "driver": "",
+        "branch": "forge/session/fused-gemm-abc123def456",
+        "attempt_id": "attempt-1",
+    }
     assert decision.with_driver("/ws/.forge_driver_x.py").spec.driver == "/ws/.forge_driver_x.py"
 
 
@@ -2946,9 +2880,7 @@ def _publish_applyback_in(
     changed_files = ["flydsl_kernel.py", "kernel.py"]
     for relative in changed_files:
         (artifact_dir / "files" / relative).write_text((root / relative).read_text())
-    (artifact_dir / "forge.patch").write_text(
-        _git(root, "diff", f"{base_commit}..{best_commit}") + "\n"
-    )
+    (artifact_dir / "forge.patch").write_text(_git(root, "diff", f"{base_commit}..{best_commit}") + "\n")
     scratch = artifact_dir / "scratch_port.py"
     scratch.write_text("SCRATCH\n")
     manifest = {
@@ -3197,12 +3129,8 @@ def test_submit_rejects_an_applyback_that_fails_its_own_contract(tmp_path, monke
 
     def fake_runner(**kwargs):
         base_commit = _git(Path(kwargs["workspace"]), "rev-parse", "HEAD")
-        outer = _publish_applyback_in(
-            kwargs["workspace"], base_commit, temporary_paths=None
-        )
-        return forge_submit.RewriteRunOutcome(
-            result=outer, output="", error=None, timed_out=False
-        )
+        outer = _publish_applyback_in(kwargs["workspace"], base_commit, temporary_paths=None)
+        return forge_submit.RewriteRunOutcome(result=outer, output="", error=None, timed_out=False)
 
     monkeypatch.setattr(forge_submit, "_run_rewrite_via_cli", fake_runner)
 
@@ -3263,7 +3191,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         snr_threshold=30.0,
         gpu_target="gfx950",
         gpu_type="mi355x",
-        max_iters=8,
         max_hours=2.0,
         branch="forge/session/fused-gemm",
         framework="vllm",
@@ -3289,7 +3216,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--snr-threshold": "30.0",
         "--gpu-target": "gfx950",
         "--gpu-type": "mi355x",
-        "--max-iters": "8",
         "--framework": "vllm",
         "--git-branch": "forge/session/fused-gemm",
         "--result-json": str(result_json),
@@ -3299,19 +3225,18 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
+    # The campaign is time-driven; forge-rewrite-by-flydsl no longer declares an
+    # iteration cap and would only report ours as an ignored option.
+    assert "--max-iters" not in command
     # The rewrite producer files its port under the same identity scheme, so it
     # needs the card as much as the loop does.
     assert captured["popen_kwargs"]["env"]["GPU_TYPE"] == "mi355x"
     # The producer is aimed one reserve short of this process's hard kill, so it
     # publishes the apply-back inside its own budget instead of racing the kill.
     producer_deadline = float(command[command.index("--deadline-unix") + 1])
-    assert producer_deadline == pytest.approx(
-        deadline - _flydsl_rewrite.APPLYBACK_RESERVE_SEC
-    )
+    assert producer_deadline == pytest.approx(deadline - _flydsl_rewrite.APPLYBACK_RESERVE_SEC)
     producer_hours = float(command[command.index("--max-hours") + 1])
-    assert producer_hours == pytest.approx(
-        (7200 - _flydsl_rewrite.APPLYBACK_RESERVE_SEC) / 3600.0, abs=1e-3
-    )
+    assert producer_hours == pytest.approx((7200 - _flydsl_rewrite.APPLYBACK_RESERVE_SEC) / 3600.0, abs=1e-3)
     assert producer_hours < 2.0
     # Options that only exist on the generic loop must never be smuggled across.
     for forbidden in (
@@ -3379,7 +3304,6 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         snr_threshold=30.0,
         gpu_target="gfx942",
         gpu_type="mi300x",
-        max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
         framework="",
@@ -3433,7 +3357,6 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
         snr_threshold=30.0,
         gpu_target="gfx942",
         gpu_type="mi300x",
-        max_iters=4,
         max_hours=1.0,
         branch="forge/session/op",
         framework="",

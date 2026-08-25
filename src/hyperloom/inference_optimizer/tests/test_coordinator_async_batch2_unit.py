@@ -45,10 +45,7 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "critic", "robustness")
-    }
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
@@ -73,18 +70,12 @@ async def test_resume_rolls_back_recipe_checkout_and_kernel(
     monkeypatch.setattr(
         baseline_module,
         "_revert_patches",
-        lambda target, sha, manifest=None: (
-            restores.append((target, sha))
-            or {"ok": True, "errors": []}
-        ),
+        lambda target, sha, manifest=None: restores.append((target, sha)) or {"ok": True, "errors": []},
     )
     monkeypatch.setattr(
         kernel_handlers,
         "_maybe_revert_kernel_patch",
-        lambda result: (
-            kernel_restores.append(result)
-            or {"status": "ok"}
-        ),
+        lambda result: kernel_restores.append(result) or {"status": "ok"},
     )
     task = await coord.tasks.create(
         kind="replay_warm_recipe",
@@ -134,9 +125,7 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
-        "recipe:missing_snapshot_manifest"
-    ]
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:missing_snapshot_manifest"]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
     assert kernel_restores == [{"manifest_path": "/tmp/kernel"}]
@@ -167,21 +156,14 @@ async def test_resume_retains_pending_when_any_restore_fails(
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending["rollback_errors"] == [
-        "restore failed"
-    ]
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["restore failed"]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
 
 
 def test_collective_resume_gate_is_delegated_to_kernel_phase() -> None:
     """Writeback resume must resolve the Collective gate."""
-    assert (
-        Coordinator._DELEGATED.get(
-            "_collective_required_before_kernel_opt"
-        )
-        == "phase_kernel"
-    )
+    assert Coordinator._DELEGATED.get("_collective_required_before_kernel_opt") == "phase_kernel"
 
 
 @pytest.fixture
@@ -383,9 +365,7 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
                     "domain": "serving_specialist",
                     "provenance": "specialist:serving_specialist",
                     "framework_agent_authoring": True,
-                    "source_manifest": (
-                        "/session/optimization_stack/src/spec-orphan/manifest.json"
-                    ),
+                    "source_manifest": ("/session/optimization_stack/src/spec-orphan/manifest.json"),
                     "target_files": ["vllm/model.py"],
                 },
             },
@@ -400,15 +380,11 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
     assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
     assert coord.shared_state.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
-    assert coord.shared_state.optimization_stack[-1]["provenance"] == (
-        "specialist:serving_specialist"
-    )
+    assert coord.shared_state.optimization_stack[-1]["provenance"] == ("specialist:serving_specialist")
     assert coord.shared_state.optimization_stack[-1]["source_manifest"] == (
         "/session/optimization_stack/src/spec-orphan/manifest.json"
     )
-    assert coord.shared_state.optimization_stack[-1]["target_files"] == [
-        "vllm/model.py"
-    ]
+    assert coord.shared_state.optimization_stack[-1]["target_files"] == ["vllm/model.py"]
     assert coord.shared_state.resume_pending_revalidation is True
 
 
@@ -652,9 +628,7 @@ async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord:
     report = await coord._resume_consistency_pass()
 
     assert not [
-        w
-        for w in report["warnings"]
-        if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
+        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
     ]
 
 
@@ -683,9 +657,7 @@ async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(
     report = await coord._resume_consistency_pass()
 
     orphan = next(
-        w
-        for w in report["warnings"]
-        if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
+        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
     )
     assert orphan["variant"] == "https://example.com/pull/8"
 
@@ -1366,7 +1338,7 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
         assert token in out
 
 
-def test_research_scout_seed_block_keeps_all_rounds(coord: Coordinator) -> None:
+def test_research_scout_seed_block_keeps_findings_and_questions_only(coord: Coordinator) -> None:
     from hyperloom.orchestrator.knowledge import research_hints
 
     research_hints.append_hints(
@@ -1410,11 +1382,14 @@ def test_research_scout_seed_block_keeps_all_rounds(coord: Coordinator) -> None:
 
     assert "hint one" in block
     assert "hint two" in block
-    assert '"name": "first"' in block
-    assert '"name": "second"' in block
     assert "question one" in block
     assert "question two" in block
     assert "ignore-me" not in block
+    # Proposals moved to the shared untested-proposal queue, which also drops
+    # the ones already benched; rendering them here as well would double them.
+    assert "Untested executable proposals" not in block
+    assert '"name": "first"' not in block
+    assert '"name": "second"' not in block
 
 
 @pytest.mark.asyncio
@@ -1724,7 +1699,10 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
         seen.append(dict(intent.payload.get("params") or {}))
 
     monkeypatch.setattr(coord, "_handle_delegate", _fake_delegate)
-    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "wave"})
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"idempotency_key": "wave", "action_name": "specialist"},
+    )
     await coord._fan_out_specialist_wave(
         "orchestration",
         intent,
@@ -2046,7 +2024,6 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
     seen: list[str] = []
 
     routes = {
-        IntentType.KILL_TASK: "_handle_kill_task",
         IntentType.PRUNE_BRANCH: "_handle_prune_branch",
         IntentType.ALERT: "_handle_alert",
         IntentType.UPDATE_STATE: "_handle_update_state",
@@ -2110,6 +2087,130 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
     assert coord.shared_state.stop_reason == "target_reached"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_survives_transition_toward_explore(coord: Coordinator, monkeypatch) -> None:
+    """A skip_to_kernel hint set during FRAMEWORK_AGENT must survive an unrelated
+    FRAMEWORK_AGENT -> EXPLORE transition, since exit_normal_explore (the hint's
+    only consumer) only ever checks it once the phase is EXPLORE.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "framework_phase_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "EXPLORE"
+    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_survives_transition_toward_framework_agent(coord: Coordinator, monkeypatch) -> None:
+    """The same survival requirement, one hop earlier: a hint set during
+    PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT, since EXPLORE (the hint's
+    only consumer) is still ahead whenever explore is enabled. Discarding here
+    is the FRAMEWORK_AGENT -> EXPLORE bug moved one phase upstream.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    coord.shared_state.explore_enabled = True
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
+    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_discarded_toward_framework_agent_when_explore_disabled(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """When explore is disabled for the session, FRAMEWORK_AGENT is not a step
+    on the way to EXPLORE -- it never runs -- so a hint riding there is
+    genuinely stale and must still be discarded, not preserved forever.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    coord.shared_state.explore_enabled = False
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Coordinator, monkeypatch) -> None:
+    """A pending hint is genuinely stale once the transition target isn't
+    EXPLORE -- it can never reach exit_normal_explore's check again -- so this
+    is the one case the unrelated-transition cleanup should still clear it.
+
+    A discard is not a consumption: it must land in last_discarded_escalate_hint,
+    not last_consumed_escalate_hint, which specifically means "this hint drove
+    a transition" and this one never did.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "SWEEP"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
+    assert coord.shared_state.last_discarded_escalate_hint_ts
+    assert coord.shared_state.last_consumed_escalate_hint == ""
+
+
+@pytest.mark.asyncio
+async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: Coordinator, monkeypatch) -> None:
+    """The complementary case: a hint-driven transition must record consumption,
+    not a discard, so the two are distinguishable in the breakdown.
+    """
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
+    monkeypatch.setattr(
+        ps,
+        "compute_next_phase",
+        lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
+    )
+
+    async def _entered(*, from_phase, to_phase):
+        return None
+
+    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
+    await coord._advance_phase_if_needed()
+    assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
+    assert coord.shared_state.pending_escalate_hint == ""
+    assert coord.shared_state.last_consumed_escalate_hint == "skip_to_kernel"
+    assert coord.shared_state.last_consumed_escalate_hint_ts
+    assert coord.shared_state.last_discarded_escalate_hint == ""
 
 
 # -- _materialize_approved_proposal -----------------------------------------

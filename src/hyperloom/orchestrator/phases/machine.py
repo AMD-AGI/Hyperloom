@@ -238,12 +238,13 @@ class MachinePhase(PhaseHandler):
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()
+        explore_enabled = self._explore_enabled()
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
-            explore_enabled=self._explore_enabled(),
+            explore_enabled=explore_enabled,
         )
         if str(state.phase or "").upper() == "EXPLORE":
             await self._maybe_enqueue_explore_research_scout()
@@ -270,9 +271,33 @@ class MachinePhase(PhaseHandler):
             == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
         ):
             # SWEEP already had an honest closeout, so skip_to_close was
-            # suppressed. Drop it here or the next phase inherits it and
-            # becomes robustness_escalated.
+            # suppressed in _global_terminal. Consume it (not discard) here:
+            # the hint's intended outcome -- reaching CLOSE -- did happen, just
+            # via the more honest reason, so the next phase must not re-evaluate
+            # it as if it were still unclaimed.
             state.consume_pending_escalate_hint()
+        elif state.pending_escalate_hint and target != _phase_state.PHASE_EXPLORE:
+            # A phase change fired for a reason unrelated to the hint while one
+            # was still pending (e.g. set by a different phase's agent turn and
+            # never claimed). skip_to_kernel/skip_to_sweep are consumed only
+            # inside exit_normal_explore, so a hint is still legitimately in
+            # flight not just when riding straight to EXPLORE, but also one hop
+            # earlier: PRELUDE -> FRAMEWORK_AGENT still has EXPLORE ahead of it
+            # whenever explore is enabled, and discarding here is the same bug
+            # this branch exists to fix, just moved upstream. Only discard once
+            # the transition moves to a phase from which EXPLORE can no longer
+            # be reached (including EXPLORE itself force-exiting past the hint
+            # via IR-6, or explore being disabled for this session).
+            hint_still_reachable = target == _phase_state.PHASE_FRAMEWORK_AGENT and explore_enabled
+            if not hint_still_reachable:
+                discarded_hint = state.discard_pending_escalate_hint()
+                log.info(
+                    "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
+                    discarded_hint,
+                    prior,
+                    target,
+                    reason,
+                )
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
             target == _phase_state.PHASE_CLOSE

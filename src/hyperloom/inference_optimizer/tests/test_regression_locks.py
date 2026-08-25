@@ -15,10 +15,13 @@ from hyperloom.orchestrator.actions.executors.report import (
 )
 from hyperloom.orchestrator.roles import (
     MockBackend,
+    MockTurn,
     ScriptedPlan,
 )
+from hyperloom.orchestrator.roles.base import BackendError
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
+from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -96,55 +99,6 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     summary = json.loads(Path(out["json_path"]).read_text())
     assert summary["session_id"] == "ctx-session"
     assert summary["baseline_tput"] == 600.0
-
-
-@pytest.mark.asyncio
-async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypatch):
-    """After an inline 'trace_analyze' handler, the kernel cursor moves past the request."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        async def fake_handler(payload, *, session_dir):
-            return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake_handler,
-        )
-
-        cur_before = await c.cursors.load("kernel_agent")
-        assert cur_before.last_processed_seq == 0
-
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": "/tmp/trace.json"},
-            },
-        )
-        await c._handle_intent("orchestration", intent)
-
-        msgs = await c.bus.tail(n=10)
-        topics = [m.topic for m in msgs]
-        assert "request" in topics
-        assert "response" in topics
-
-        cur_after = await c.cursors.load("kernel_agent")
-        request_msg = next(m for m in msgs if m.topic == "request")
-        assert cur_after.last_processed_seq >= request_msg.seq, (
-            f"kernel cursor {cur_after.last_processed_seq} must be past "
-            f"request seq {request_msg.seq} to suppress duplicate response"
-        )
-        leftover = await c.bus.replay_for(
-            "kernel_agent",
-            after_seq=cur_after.last_processed_seq,
-        )
-        assert not any(m.topic == "request" and m.msg_id == request_msg.msg_id for m in leftover)
-    finally:
-        await c.stop()
 
 
 @pytest.mark.asyncio
@@ -305,5 +259,82 @@ async def test_profile_trace_dir_without_json_not_promoted(session_dir):
             },
         )
         assert c.shared_state.last_profile_trace == ""
+    finally:
+        await c.stop()
+
+
+def _orchestration_turn(turn: MockTurn) -> dict[str, object]:
+    backends = _silent_backends()
+    backends["orchestration"] = MockBackend(ScriptedPlan(turns=[turn]), name="o")
+    return backends
+
+
+@pytest.mark.asyncio
+async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch):
+    """The response to a kernel request reaches the requester's next prompt."""
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
+    async def fake_handler(payload, *, session_dir):
+        return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
+
+    monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "trace_analyze", fake_handler)
+    request = Intent(
+        type=IntentType.REQUEST,
+        payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/t.json"}},
+    )
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
+    try:
+        await c._reactor_pass("orchestration")
+        assert "trace_analyze_done" in await c._compose_prompt("orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_no_intent_turn_advances_cursor(session_dir):
+    """A reply carrying no parseable intent still consumes what its prompt rendered."""
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=NoIntentEmitted("no envelope"))))
+    try:
+        alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
+        await c.bus.append_and_seq(alert)
+        await c._reactor_pass("orchestration")
+
+        cur = await c.cursors.load("orchestration")
+        assert cur.last_processed_seq >= alert.seq
+        assert "stall_warning" not in await c._compose_prompt("orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_backend_error_turn_does_not_advance_cursor(session_dir):
+    """A failed backend call leaves the messages its prompt rendered unread."""
+    c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(raise_error=BackendError("gateway down"))))
+    try:
+        alert = Message.new("robustness", "*", "alert", {"kind": "stall_warning"})
+        await c.bus.append_and_seq(alert)
+        await c._reactor_pass("orchestration")
+
+        cur = await c.cursors.load("orchestration")
+        assert cur.last_processed_seq == 0
+        assert "stall_warning" in await c._compose_prompt("orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_kernel_request_recorded_in_last_action_failures(session_dir):
+    """A failed kernel request lands in the log the FAILURE RECOVERY block reads."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "no_such_kind"},
+            ),
+        )
+        assert c.shared_state.last_action_failures[-1]["error_class"] == "unknown_kernel_kind"
+        assert "unknown_kernel_kind" in c.shared_state.to_prompt_summary()
     finally:
         await c.stop()

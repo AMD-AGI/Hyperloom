@@ -201,11 +201,11 @@ async def test_repeated_failure_high_emits_alert_plus_prune_branch():
     assert prune.payload["family"] == "kernel_opt"
 
 
-# Wind-down path: recover_unsuccessful / deadline_imminent -> delegate(report)
+# Wind-down path: recover_unsuccessful / deadline_imminent -> alert only
 
 
-async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
-    """``recover_unsuccessful`` keeps the ``delegate(report)`` finalization path (escalate auto-emit dropped)."""
+async def test_recover_unsuccessful_emits_alert_only():
+    """``recover_unsuccessful`` emits a HIGH alert; Orchestration decides the next step."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -221,7 +221,7 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
                     "mid_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
                 },
                 subject={},
-                suggestion="delegate(report) to finalize at the last validated gain",
+                suggestion="propose report to finalize at the last validated gain",
             )
         ],
         tick_index=7,
@@ -229,14 +229,8 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.DELEGATE in types
+    assert IntentType.DELEGATE not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-
-    delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
-    assert delegate.payload["action_name"] == "report"
-    assert delegate.payload["params"]["reason"] == "recover_unsuccessful"
-    assert delegate.payload["params"]["evidence"]["error_class"] == "gpu_unhealthy_after_soft_cleanup"
-    assert delegate.payload["idempotency_key"] == ("report-recover-unsuccessful-tick-7")
 
 
 async def test_state_json_corrupt_alert_only():
@@ -252,7 +246,6 @@ async def test_state_json_corrupt_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
     assert IntentType.PRUNE_BRANCH not in types
     assert IntentType.DELEGATE not in types
-    assert IntentType.KILL_TASK not in types
 
 
 async def test_coordinator_wal_bloat_high_alert_only():
@@ -293,11 +286,10 @@ async def test_coordinator_wal_bloat_medium_alert_only():
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-    assert IntentType.KILL_TASK not in types
 
 
-async def test_stale_lease_emits_kill_task_for_owner_lane():
-    """I3: HIGH emits kill_task(task_id) to release a lane held by a dead PID (paired escalate auto-emit dropped)."""
+async def test_stale_lease_emits_alert_only():
+    """I3: stale_lease HIGH is strategic; the dispatcher's per-tick reap frees the lease."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -311,28 +303,7 @@ async def test_stale_lease_emits_kill_task_for_owner_lane():
         tick_index=0,
         now_unix=1.0,
     )
-    types = [i.type for i in out.intents]
-    assert IntentType.ALERT in types
-    assert IntentType.KILL_TASK in types
-    kill = next(i for i in out.intents if i.type is IntentType.KILL_TASK)
-    assert kill.payload["task_id"] == "tsk-7"
-    assert kill.payload["reason"] == "stale_lease"
-    assert kill.payload["scope"] == "task"
-    assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-
-
-async def test_stale_lease_without_task_id_does_not_kill():
-    """Missing task_id → skip kill_task to avoid bad payloads; alert still fires for visibility."""
-    ladder = ActionLadder()
-    out = await ladder.decide(
-        [_sym("stale_lease", SymptomSeverity.HIGH, evidence={}, subject={})],
-        tick_index=0,
-        now_unix=1.0,
-    )
-    types = [i.type for i in out.intents]
-    assert IntentType.KILL_TASK not in types
-    assert IntentType.ALERT in types
-    assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
+    assert [i.type for i in out.intents] == [IntentType.ALERT]
 
 
 async def test_inbox_bloat_low_emits_observation_only():
@@ -353,7 +324,6 @@ async def test_inbox_bloat_low_emits_observation_only():
     types = [i.type for i in out.intents]
     msg_types = {i.payload.get("topic") for i in out.intents if i.type is IntentType.SEND_MESSAGE}
     assert "observation" in msg_types
-    assert IntentType.KILL_TASK not in types
 
 
 async def test_coordinator_zombie_alert_only():
@@ -721,8 +691,8 @@ async def test_g_medium_signals_fall_to_diagnose_alert():
         assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
-async def test_deadline_warning_high_emits_delegate_report():
-    """``deadline_warning`` HIGH (no validated gain) = alert(high) + finalization ``delegate(report)`` (escalate dropped)."""
+async def test_deadline_warning_high_emits_alert_only():
+    """``deadline_warning`` HIGH (no validated gain) = alert(high) only; Orchestration decides the next step."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -745,12 +715,8 @@ async def test_deadline_warning_high_emits_delegate_report():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.DELEGATE in types
+    assert IntentType.DELEGATE not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-    delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
-    assert delegate.payload["action_name"] == "report"
-    assert delegate.payload["params"]["reason"] == "deadline_warning"
-    assert delegate.payload["idempotency_key"] == ("report-deadline-warning-tick-200")
 
 
 async def test_deadline_warning_medium_only_emits_alert():
@@ -775,7 +741,8 @@ async def test_deadline_warning_medium_only_emits_alert():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
-async def test_deadline_hard_cutoff_emits_emergency_delegate():
+async def test_deadline_hard_cutoff_emits_alert_only():
+    """``deadline_hard_cutoff`` emits HIGH alert only; Orchestration decides the next step."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -795,12 +762,8 @@ async def test_deadline_hard_cutoff_emits_emergency_delegate():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.DELEGATE in types
+    assert IntentType.DELEGATE not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-    delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
-    assert delegate.payload["action_name"] == "report"
-    assert delegate.payload["params"]["reason"] == "deadline_hard_cutoff"
-    assert delegate.payload["idempotency_key"] == ("report-deadline-hard-cutoff-tick-355")
 
 
 async def test_budget_strategy_drift_falls_to_medium_diagnose():
@@ -825,7 +788,8 @@ async def test_budget_strategy_drift_falls_to_medium_diagnose():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
-async def test_deadline_imminent_emits_alert_plus_delegate_report():
+async def test_deadline_imminent_emits_alert_only():
+    """``deadline_imminent`` emits HIGH alert only; Orchestration decides the next step."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -843,7 +807,7 @@ async def test_deadline_imminent_emits_alert_plus_delegate_report():
                     "productive_gain_pct": 0.5,
                 },
                 subject={},
-                suggestion="delegate(report) to finalize",
+                suggestion="propose report to finalize",
             )
         ],
         tick_index=12,
@@ -851,12 +815,8 @@ async def test_deadline_imminent_emits_alert_plus_delegate_report():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.DELEGATE in types
+    assert IntentType.DELEGATE not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-    delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
-    assert delegate.payload["action_name"] == "report"
-    assert delegate.payload["params"]["reason"] == "deadline_imminent"
-    assert delegate.payload["idempotency_key"] == ("report-deadline-imminent-tick-12")
 
 
 async def test_same_payload_loop_emits_alert_plus_prune_branch():
@@ -948,7 +908,7 @@ async def test_shm_pressure_high_alert_only():
 
 
 async def test_no_levers_found_falls_to_medium_alert():
-    """``no_levers_found`` is demoted to MEDIUM (advisory) and the auto ``delegate(report)`` is dropped."""
+    """``no_levers_found`` is demoted to MEDIUM (advisory) and emits only an alert."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -1010,8 +970,8 @@ async def test_idempotency_replay_falls_to_medium_diagnose_tier():
     assert IntentType.DELEGATE not in types
 
 
-async def test_wind_down_idempotency_key_varies_per_tick():
-    """Post-cooldown re-fires MUST carry distinct idempotency_keys so PolicyGate accepts the second ``delegate(report)``."""
+async def test_recover_unsuccessful_cooldown_fires_twice():
+    """Post-cooldown re-fires of recover_unsuccessful each produce a fresh alert."""
     ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=1))
     sym = _sym(
         "recover_unsuccessful",
@@ -1021,10 +981,10 @@ async def test_wind_down_idempotency_key_varies_per_tick():
     )
     first = await ladder.decide([sym], tick_index=3, now_unix=1.0)
     second = await ladder.decide([sym], tick_index=20, now_unix=2.0)
-    first_keys = [i.payload.get("idempotency_key") for i in first.intents if i.type is IntentType.DELEGATE]
-    second_keys = [i.payload.get("idempotency_key") for i in second.intents if i.type is IntentType.DELEGATE]
-    assert first_keys == ["report-recover-unsuccessful-tick-3"]
-    assert second_keys == ["report-recover-unsuccessful-tick-20"]
+    assert any(i.type is IntentType.ALERT for i in first.intents)
+    assert any(i.type is IntentType.ALERT for i in second.intents)
+    assert not any(i.type is IntentType.DELEGATE for i in first.intents)
+    assert not any(i.type is IntentType.DELEGATE for i in second.intents)
 
 
 # Cooldown / heartbeat
@@ -1167,7 +1127,7 @@ async def test_gpu_memory_leaked_emits_alert_and_delegate():
 
 
 async def test_gpu_memory_leaked_does_not_emit_prune_branch():
-    """Resource recovery does not prune families — ``recover`` is the fix; on failure ``recover_unsuccessful`` triggers report."""
+    """Resource recovery does not prune families — ``recover`` is the fix; ``recover_unsuccessful`` emits a HIGH alert."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_gpu_leak_symptom()],
@@ -1216,3 +1176,82 @@ async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
     second_delegate = next(i for i in second.intents if i.type is IntentType.DELEGATE)
     assert first_delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-0"
     assert second_delegate.payload["idempotency_key"] == "recover-gpu-leak-tick-5"
+
+
+# local_server_unreachable -> delegate(recover)
+
+
+def _server_unreachable_symptom(url: str, evidence: dict | None = None) -> Symptom:
+    return Symptom(
+        name="local_server_unreachable",
+        severity=SymptomSeverity.HIGH,
+        summary=f"local server probe {url} status=down",
+        evidence=evidence or {"url": url},
+        subject={"url": url},
+        source="local",
+        suggestion="delegate(recover, force_gpu_cleanup=True) to restart the inference server",
+    )
+
+
+async def test_local_server_unreachable_emits_alert_and_delegate_recover():
+    """``local_server_unreachable`` must route to the real ``recover`` action,
+    not the non-dispatchable ``server_lifecycle`` its own suggestion text names.
+    """
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
+        tick_index=4,
+        now_unix=1.0,
+    )
+    types = [i.type for i in out.intents]
+    assert types == [IntentType.ALERT, IntentType.DELEGATE]
+
+    delegate = out.intents[1]
+    assert delegate.payload["action_name"] == "recover"
+    assert delegate.payload["params"]["force_gpu_cleanup"] is True
+    assert delegate.payload["params"]["reason"] == "local_server_unreachable"
+    assert delegate.payload["idempotency_key"].startswith("recover-server-unreachable-tick-4-")
+
+
+async def test_local_server_unreachable_idempotency_key_disambiguates_targets():
+    """Two unreachable targets in the same tick must not collide on idempotency_key,
+    or the second delegate comes back as a duplicate-idempotency PolicyDenied
+    that pollutes repeated_policy_denied tracking instead of just recovering.
+    """
+    ladder = ActionLadder()
+    out = await ladder.decide(
+        [
+            _server_unreachable_symptom("http://127.0.0.1:8000/health"),
+            _server_unreachable_symptom("http://127.0.0.1:8001/health"),
+        ],
+        tick_index=4,
+        now_unix=1.0,
+    )
+    delegate_keys = [i.payload["idempotency_key"] for i in out.intents if i.type is IntentType.DELEGATE]
+    assert len(delegate_keys) == 2
+    assert len(set(delegate_keys)) == 2
+    assert all(key.startswith("recover-server-unreachable-tick-4-") for key in delegate_keys)
+
+
+async def test_local_server_unreachable_idempotency_key_stable_for_same_target():
+    """The same target re-firing (e.g. a later tick after cooldown) must derive
+    the same per-target suffix, since that's what makes the disambiguator
+    deterministic rather than a source of new spurious duplicates.
+    """
+    ladder = ActionLadder()
+    first = await ladder.decide(
+        [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
+        tick_index=4,
+        now_unix=1.0,
+    )
+    second = await ladder.decide(
+        [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
+        tick_index=9,
+        now_unix=2.0,
+    )
+    first_key = next(i.payload["idempotency_key"] for i in first.intents if i.type is IntentType.DELEGATE)
+    second_key = next(i.payload["idempotency_key"] for i in second.intents if i.type is IntentType.DELEGATE)
+    first_suffix = first_key.rsplit("-", 1)[-1]
+    second_suffix = second_key.rsplit("-", 1)[-1]
+    assert first_suffix == second_suffix
+    assert first_key != second_key

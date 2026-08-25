@@ -320,9 +320,12 @@ class RooflineExecutor:
         # torch-profiler stream capture cannot collide. Operators can arm it
         # upfront too: the profiler cannot decompose cuda-graph replay, so a
         # graph-mode trace reports near-zero GPU time and trips the idle gate.
-        disable_cuda_graph = os.environ.get(
-            "HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        disable_cuda_graph = os.environ.get("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         # Resolve framework so the eager fallback picks the correct flag (vLLM
         # --enforce-eager, sglang --disable-cuda-graph).
         framework = self._resolve_framework(ctx)
@@ -864,7 +867,6 @@ class RooflineExecutor:
             params=params,
             idempotency_key=f"{parent_task.idempotency_key}-profile",
             requires_lanes=list(parent_task.requires_lanes or []),
-            allowed_tools=list(parent_task.allowed_tools or []),
             side_effects=list(parent_task.side_effects or []),
             lease_ttl_sec=parent_task.lease_ttl_sec,
         )

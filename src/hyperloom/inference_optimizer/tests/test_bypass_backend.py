@@ -1039,7 +1039,12 @@ def test_scriptable_run_missing_script_returns_config_error(tmp_path, monkeypatc
     )
 
     assert rc == 2
-    assert error == "scriptable benchmark script not found for xdit_mi300x.sh"
+    assert error is not None
+    assert "xdit_mi300x.sh" in error
+    log = (tmp_path / "ws" / "scriptable_stderr.log").read_text(encoding="utf-8")
+    assert "scriptable benchmark script not found" in log
+    assert "tried:" in log
+    assert "xdit_mi300x.sh" in log
 
 
 def test_scriptable_run_timeout_writes_stderr_log(tmp_path, monkeypatch):

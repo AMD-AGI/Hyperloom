@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import py_compile
 import shutil
@@ -101,7 +102,8 @@ def _apply_remote(
 
     bdir = Path(backup_dir)
     bdir.mkdir(parents=True, exist_ok=True)
-    backup_name = f"{_safe_name(kernel_id or target.stem)}_{host}_{int(time.time())}.bak"
+    path_hash = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
+    backup_name = f"{_safe_name(kernel_id or target.stem)}_{path_hash}_{host}_{time.time_ns()}.bak"
     backup_path = bdir / backup_name
     shutil.copy2(target, backup_path)
 
@@ -276,9 +278,7 @@ def _do_apply(args: argparse.Namespace) -> int:
         ]
         for node_id, ref in rollback_refs:
             try:
-                rollback.append(
-                    {"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)}
-                )
+                rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)})
             except Exception as exc:  # noqa: BLE001
                 rollback.append(
                     {
@@ -315,12 +315,8 @@ def _do_revert(args: argparse.Namespace) -> int:
     """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     try:
-        records_by_host: dict[str, list[dict]] = json.loads(
-            args.records_json or "{}"
-        )
-        backup_map: dict[str, str] = json.loads(
-            args.backup_map_json or "{}"
-        )
+        records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
+        backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         sys.stdout.write(
             json.dumps(
@@ -413,9 +409,7 @@ def _do_revert(args: argparse.Namespace) -> int:
 def _do_finalize(args: argparse.Namespace) -> int:
     """Finalize accepted patch transactions on every recorded host."""
     try:
-        records_by_host: dict[str, list[dict]] = json.loads(
-            args.records_json or "{}"
-        )
+        records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
     except json.JSONDecodeError as exc:
         sys.stdout.write(
             json.dumps(
@@ -452,9 +446,7 @@ def _do_finalize(args: argparse.Namespace) -> int:
     per_node = []
     for host, ref in refs:
         try:
-            per_node.append(
-                {"host": host, **ray.get(ref, timeout=args.timeout_sec)}
-            )
+            per_node.append({"host": host, **ray.get(ref, timeout=args.timeout_sec)})
         except Exception as exc:  # noqa: BLE001
             failures.append({"host": host, "error": str(exc)})
     payload = {

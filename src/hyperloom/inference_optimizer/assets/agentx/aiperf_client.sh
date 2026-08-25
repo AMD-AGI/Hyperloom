@@ -19,9 +19,20 @@
 # Inputs (from Magpie env): MODEL, TP, PORT, MAX_MODEL_LEN, CONC, RESULT_DIR,
 #   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE.
 # AgentX knobs (AGENTX_ prefix; NOT AIPERF_, which aiperf's own settings read):
-#   AGENTX_DATASET, AGENTX_MAX_CTX, AGENTX_NUM_ENTRIES,
-#   AGENTX_WARMUP_DURATION, AGENTX_NUM_WARMUP_SESSIONS, AGENTX_KEEP_SERVER,
-#   AGENTX_PROFILE_WARMUP_S, AGENTX_PROFILE_WINDOW_S,
+#   AGENTX_DATASET / WEKA_LOADER_OVERRIDE (pin the corpus loader),
+#   AGENTX_NUM_ENTRIES (corpus cap; default 393 = all),
+#   AGENTX_DURATION (measurement window; default 3600),
+#   AGENTX_WARMUP_REQUESTS_PER_LANE (default 10),
+#   AGENTX_WARMUP_GRACE_PERIOD (max drain wait; default 1800),
+#   AGENTX_FAILED_REQUEST_THRESHOLD (error-rate abort ratio; default 0.10),
+#   AGENTX_UNSAFE_OVERRIDE (opt into a sub-900s smoke; forces the run
+#     non-submittable -- see the smoke note below),
+#   AGENTX_REALTIME_METRICS (rolling stats block; default true),
+#   AGENTX_DATASET_CONFIG_TIMEOUT (default 1800), AGENTX_LIVE_ASSISTANT,
+#   AGENTX_MMAP_CACHE_DIR (dataset mmap cache; defaults under $HF_HUB_CACHE),
+#   AGENTX_MAX_CTX (explicit opt-in client-side context cap; NEVER inferred
+#     from $MAX_MODEL_LEN -- see the replay-context note below),
+#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WARMUP_S, AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -30,7 +41,12 @@ log() { echo "[aiperf_client] $*"; }
 
 : "${MODEL:?MODEL required}"
 PORT="${PORT:-8000}"
-CONC="${CONC:-16}"
+# Concurrency is measurement-defining and upstream makes it a hard requirement
+# (benchmark_lib.sh check_env_vars exits 1 on an empty CONC). A default here
+# would produce a full 3600s scenario-locked run at a concurrency nobody chose,
+# and the mapped result records no concurrency at all, so the mismatch would be
+# invisible afterwards. The switch always projects CONC; if it ever stops, say so.
+: "${CONC:?CONC required (the AgentX switch projects it from the benchmark config)}"
 RESULT_DIR="${RESULT_DIR:-$(pwd)}"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
 ART="${RESULT_DIR}/aiperf_artifacts"
@@ -108,29 +124,82 @@ _served="$(curl -sf "http://localhost:${PORT}/v1/models" 2>/dev/null \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["data"][0]["id"])' 2>/dev/null || true)"
 [ -n "$_served" ] && SERVE_MODEL="$_served"
 
-# ── Clamp requested context to what the model can actually serve ──────────────
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAXCTX="${AGENTX_MAX_CTX:-$MAX_MODEL_LEN}"
-if [ "$MAXCTX" -gt "$MAX_MODEL_LEN" ] 2>/dev/null; then MAXCTX="$MAX_MODEL_LEN"; fi
-
-DS="${AGENTX_DATASET:-semianalysis-cc-traces-weka-with-subagents}"
-NENT="${AGENTX_NUM_ENTRIES:-16}"
-WARMDUR="${AGENTX_WARMUP_DURATION:-45}"
-WARMSESS="${AGENTX_NUM_WARMUP_SESSIONS:-$CONC}"
-
-# aiperf has no "0 warmup" value: it treats UNSET flags as "no warmup phase" and
-# rejects an explicit 0 (loadgen.warmup_duration/num_sessions error). So build
-# the warmup flags conditionally and OMIT them to disable warmup.
-WARMUP_ARGS=()
-if [ -n "${WARMDUR}" ] && [ "${WARMDUR}" != "0" ]; then
-  WARMUP_ARGS+=(--warmup-duration "$WARMDUR")
+# ── Replay context: never capped from $MAX_MODEL_LEN ─────────────────────────
+# ``--max-context-length`` makes aiperf DROP (not truncate) every trace whose
+# peak exceeds it, and $MAX_MODEL_LEN is derived from the synthetic ISL+OSL
+# shape the agentic corpus never uses -- so deriving the cap from it silently
+# shrinks the corpus to its short-trace tail while every status marker still
+# reports a clean run. Upstream's agentic path unsets MAX_MODEL_LEN and never
+# emits the flag; the server's own context window is the only limit that
+# applies, and a trace that does not fit surfaces honestly as request errors
+# (see --failed-request-threshold below) instead of vanishing.
+#
+# AGENTX_MAX_CTX stays as an explicit operator escape hatch: set it to opt IN
+# to a client-side cap. It is never inferred.
+CTX_ARGS=()
+if [ -n "${AGENTX_MAX_CTX:-}" ]; then
+  CTX_ARGS+=(--max-context-length "$AGENTX_MAX_CTX")
 fi
-if [ -n "${WARMSESS}" ] && [ "${WARMSESS}" != "0" ]; then
-  WARMUP_ARGS+=(--num-warmup-sessions "$WARMSESS")
+
+# ── Corpus variant: mirror upstream's model-family whitelist ─────────────────
+# Upstream picks the trace corpus from a curated MODEL_PREFIX label
+# (benchmark_lib.sh resolve_trace_source): the 1M-context families replay the
+# unfiltered 062126 corpus, everything else the 256k-capped variant. Hyperloom
+# has no such label, so derive the family from the model identity. An unmatched
+# model falls back to the 256k variant -- the SAME fallback upstream uses -- and
+# says so, rather than failing: being conservative here costs a shorter corpus,
+# guessing "full" costs a boot failure or a 4xx storm.
+_model_family() {
+  printf '%s' "${1##*/}" | tr '[:upper:]' '[:lower:]' | tr -d '._-'
+}
+_default_loader() {
+  case "$(_model_family "$1")" in
+    dsv4*|deepseekv4*|glm52*|minimaxm3*|kimik3*)
+      printf 'semianalysis_cc_traces_weka_062126' ;;
+    *)
+      printf 'semianalysis_cc_traces_weka_062126_256k' ;;
+  esac
+}
+# WEKA_LOADER_OVERRIDE is upstream's own per-recipe override; AGENTX_DATASET is
+# the Hyperloom-side name kept for compatibility. Either pins the loader.
+# Derived once and reused by the deviation check below: two call sites 90 lines
+# apart would silently disagree the moment the derivation grows a second input.
+# AGENTX_CANONICAL_DATASET lets an operator declare the canonical corpus for a
+# model the family whitelist does not cover -- see the deviation check.
+CANON_DS="${AGENTX_CANONICAL_DATASET:-$(_default_loader "$MODEL")}"
+DS="${AGENTX_DATASET:-${WEKA_LOADER_OVERRIDE:-$CANON_DS}}"
+if [ -z "${AGENTX_DATASET:-}${WEKA_LOADER_OVERRIDE:-}" ]; then
+  case "$DS" in
+    *_256k) log "corpus: ${DS} (model family not in the 1M-context whitelist; set WEKA_LOADER_OVERRIDE to pin another)" ;;
+    *)      log "corpus: ${DS}" ;;
+  esac
 fi
+
+# The with-subagents corpus holds 393 traces; the loader treats this as a
+# min(cap, available) ceiling, so 393 means "all of them".
+NENT="${AGENTX_NUM_ENTRIES:-393}"
+DURATION="${AGENTX_DURATION:-3600}"
+
+# Deterministic agentic cache-pressure warmup: N extra requests per concurrency
+# lane on top of the mandatory snapshot primers, then wait (at most) the grace
+# period for them to drain before profiling starts. This replaces the old
+# --warmup-duration / --num-warmup-sessions pair, which the scenario does not
+# use and which measured a different thing entirely.
+WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-10}"
+WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-1800}"
+
+# Per-trajectory-tree idle cap. NOT the same thing as the scenario's 10s
+# whole-system cap, and NOT scenario-locked -- upstream passes it explicitly
+# alongside the scenario. Without it a trace carrying a 20-minute recorded idle
+# gap replays that gap in full, and because --benchmark-duration is a fixed
+# window the lost time comes straight out of measured requests: throughput lands
+# systematically below the published row for the same server config.
+IDLEGAP="${AGENTX_TRACE_IDLE_GAP_CAP_SECONDS:-300}"
 
 # aiperf reads AIPERF_-prefixed env into its own pydantic settings; scrub any
 # stray exported ones (keep AIPERF_BIN, which is ours) so they can't corrupt it.
+# Ours are exported AFTER the scrub so they are authoritative; operators tune
+# them through the AGENTX_ names instead.
 while IFS='=' read -r _k _; do
   case "$_k" in
     AIPERF_BIN) : ;;
@@ -138,19 +207,128 @@ while IFS='=' read -r _k _; do
   esac
 done < <(env)
 
-AIPERF="${AIPERF_BIN:-aiperf}"
-log "aiperf model=${SERVE_MODEL} dataset=${DS} conc=${CONC} maxctx=${MAXCTX} warmup=${WARMDUR}s/${WARMSESS}sess"
+# Dataset load + reconstruct + mmap runs 4-14 min on the Weka corpus; aiperf's
+# stock 900s Configure-Profiling timeout trips under parallel /tmp contention.
+# aiperf validates SERVICE_PROFILE_CONFIGURE_TIMEOUT >= DATASET_CONFIGURATION_TIMEOUT.
+export AIPERF_DATASET_CONFIGURATION_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+# Pre-canned assistant replay (recorded responses drive later turns).
+export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES="${AGENTX_LIVE_ASSISTANT:-0}"
+# Headless realtime metrics are opt-in on current aiperf, and the scrub above
+# would drop an inherited copy anyway. Without it the rolling TTFT/ITL/throughput
+# block is skipped entirely, which makes --stats-interval inert: a 60-minute
+# measurement window then emits nothing until it ends, so a run that is merely
+# slow is indistinguishable from one that has wedged. Upstream exports it too.
+export AIPERF_UI_REALTIME_METRICS_ENABLED="${AGENTX_REALTIME_METRICS:-true}"
+# Content-addressed mmap cache: on a hit this skips loader + tokenizer +
+# composer entirely, turning that 4-14 min into ~0 for every run after the
+# first. Soft default -- never required, so a bare environment still works.
+_mmap_default="${HF_HUB_CACHE:-${HOME:-/tmp}/.cache/huggingface/hub}/aiperf_dataset_mmap"
+export AIPERF_DATASET_MMAP_CACHE_DIR="${AGENTX_MMAP_CACHE_DIR:-$_mmap_default}"
 
+AIPERF="${AIPERF_BIN:-aiperf}"
+
+# Abort the run once the error rate exceeds this ratio. aiperf's own default is
+# None, i.e. the check is DISABLED -- without the flag a run whose requests
+# mostly 4xx still exits 0 and is mapped as a normal measurement, because
+# map_aiperf.py carries no error counters. This is the safety net that turns a
+# server/client context mismatch into an honest failure instead of a fabricated
+# win on the surviving short sessions. Matches upstream's 0.10.
+FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
+
+# ── Non-canonical workloads may run, but may never be submittable ────────────
+# The scenario enforces a 900s duration floor, so a shortened AGENTX_DURATION is
+# a hard startup abort rather than a quick run -- there would be no way to smoke
+# test this path at all. Upstream opts into --unsafe-override below the floor.
+#
+# --unsafe-override alone is NOT sufficient to make a run non-submittable: aiperf
+# stamps submission_valid=false only when the override actually suppressed a
+# violation, so forcing the flag at the canonical 3600s (where there is nothing
+# to suppress) leaves a fully KEEP-able result. And the scenario has no concept
+# of corpus size at all, so shrinking AGENTX_NUM_ENTRIES to 50 traces produces
+# submission_valid=true on a workload nothing on the leaderboard ran.
+#
+# So Hyperloom stamps the verdict itself. Every deviation from the canonical
+# workload is collected here and handed to map_aiperf.py, which forces
+# submission_valid=false with these reasons attached; benchmark_result.py then
+# refuses the measurement. A smoke can be run, and can never be mistaken for a
+# leaderboard measurement -- by construction rather than by promise.
+CANON_ENTRIES=393
+CANON_DURATION=3600
+# The corpus this model family canonically replays, before any operator pin.
+# CANON_DS is resolved with the corpus above. The family whitelist behind it is
+# a derivation, not a registry -- a model upstream runs on the full corpus but
+# whose slug does not match falls back to the 256k set, and the corpus log line
+# tells the operator to pin the right one. Flagging that pin as a deviation
+# would make the correct run permanently non-submittable, which is why
+# AGENTX_CANONICAL_DATASET exists as a second, explicit knob: pinning alone
+# still counts as a deviation.
+NONCANON=()
+# A pinned corpus is a different workload, and the scenario cannot object: its
+# allowlist admits every dated weka variant, so replaying the 061526 set (which
+# upstream's own H100/H200 recipes pin) comes back submission_valid=true against
+# a leaderboard row measured on 062126. Only the client knows which one this
+# model family was supposed to replay, so only the client can say it deviated.
+[ "$DS" != "$CANON_DS" ] && NONCANON+=("corpus=${DS}(canonical ${CANON_DS})")
+[ "$NENT" != "$CANON_ENTRIES" ] && NONCANON+=("entries=${NENT}(canonical ${CANON_ENTRIES})")
+[ "$DURATION" != "$CANON_DURATION" ] && NONCANON+=("duration=${DURATION}s(canonical ${CANON_DURATION}s)")
+[ -n "${AGENTX_MAX_CTX:-}" ] && NONCANON+=("client_context_cap=${AGENTX_MAX_CTX}")
+[ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ] && NONCANON+=("unsafe_override_forced")
+
+SMOKE_ARGS=()
+if [ "$DURATION" -lt "$CANON_DURATION" ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then
+  # Below the floor the scenario would abort outright; at or above it the flag
+  # is harmless (nothing to suppress) and keeps the two paths uniform.
+  SMOKE_ARGS+=(--unsafe-override)
+fi
+# Always exported, empty included: the switch forwards every AGENTX_* key from
+# the orchestrator's environment, so an inherited value from a previous run or a
+# wrapper would otherwise survive into a canonical run and invalidate it.
+export AGENTX_NONCANONICAL_REASONS=""
+if [ ${#NONCANON[@]} -gt 0 ]; then
+  _reasons="$(IFS=,; echo "${NONCANON[*]}")"
+  export AGENTX_NONCANONICAL_REASONS="$_reasons"
+  log "SMOKE: non-canonical workload [${_reasons}] -- this result will be stamped submission_valid=false and cannot KEEP"
+fi
+
+log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} duration=${DURATION}s warmup=${WARMLANE}/lane grace=${WARMGRACE}s fail-thresh=${FRT}${AGENTX_MAX_CTX:+ maxctx=${AGENTX_MAX_CTX}}"
+
+# Mirrors upstream benchmark_lib.sh build_replay_cmd(). --scenario locks the
+# leaderboard invariants (ignore_eos, streaming, no input truncation, corpus
+# allowlist, 900s duration floor, idle-gap cap, cache-bust) and stamps
+# metadata.submission_valid; anything conflicting aborts at startup.
+#
+# Deliberate deviations from upstream, all measurement-neutral:
+#   --artifact-dir       upstream says --output-artifact-dir; aiperf accepts
+#                        both (GenAI-Perf alias) and this name is what the
+#                        test harness parses.
+#   --model              upstream uses ${SERVED_MODEL_NAME:-$MODEL}; the probed
+#                        /v1/models id is more robust when a server is reused.
+#   --max-context-length omitted (see the replay-context note above).
 run_aiperf() {
   "$AIPERF" profile \
+    --scenario inferencex-agentx-mvp \
     --url "http://localhost:${PORT}" \
-    --model "$SERVE_MODEL" \
+    --endpoint /v1/chat/completions \
     --endpoint-type chat --streaming --use-server-token-count \
+    --model "$SERVE_MODEL" \
+    --tokenizer "$MODEL" --tokenizer-trust-remote-code \
     --public-dataset "$DS" \
     --num-dataset-entries "$NENT" \
-    --max-context-length "$MAXCTX" \
     --concurrency "$CONC" \
-    ${WARMUP_ARGS[@]+"${WARMUP_ARGS[@]}"} \
+    --benchmark-duration "$DURATION" \
+    --random-seed 42 \
+    --trajectory-start-min-ratio 0.25 \
+    --trajectory-start-max-ratio 0.75 \
+    --warmup-requests-per-lane "$WARMLANE" \
+    --warmup-grace-period "$WARMGRACE" \
+    --trace-idle-gap-cap-seconds "$IDLEGAP" \
+    --failed-request-threshold "$FRT" \
+    --stats-interval 30 \
+    --slice-duration 1.0 \
+    --no-gpu-telemetry \
+    ${CTX_ARGS[@]+"${CTX_ARGS[@]}"} \
+    ${SMOKE_ARGS[@]+"${SMOKE_ARGS[@]}"} \
     --artifact-dir "$ART" --ui simple
 }
 
@@ -163,13 +341,32 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # framework's --profiler-config/env when PROFILE=1); /start_profile begins
   # recording and /stop_profile flushes the trace to torch_profiler_dir for
   # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
-  PWARM="${AGENTX_PROFILE_WARMUP_S:-60}"
+  # Wall-clock delay measured from aiperf launch, so it has to clear everything
+  # that happens before steady state: corpus load/reconstruct (0 on an mmap cache
+  # hit, minutes on a miss), the per-lane cache warmup, and the warmup drain.
+  # 60s used to be enough when the client replayed a handful of short traces; at
+  # the upstream profile it lands squarely inside setup and captures nothing.
+  PWARM="${AGENTX_PROFILE_WARMUP_S:-2700}"
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   log "PROFILE=1: self-bracketing profile window (delay=${PWARM}s window=${PWIN}s)"
   run_aiperf & APID=$!
   sleep "$PWARM"
   if kill -0 "$APID" 2>/dev/null; then
-    if curl -sf -X POST "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
+    # SGLang takes its capture bounds in the /start_profile BODY, not on the
+    # serve line. Hyperloom computes them into $PROFILE_EXTRA_BODY, but only
+    # InferenceX's own client ever posted it -- a bare POST leaves the capture
+    # unbounded, and the worker then accumulates profiler events in host RAM
+    # until the cgroup OOM-killer takes it out mid-run. Forward the body when
+    # there is one; vLLM ignores it (its bounds ride on --profiler-config.*).
+    _pbody="${PROFILE_EXTRA_BODY:-}"
+    if [ -n "$_pbody" ] && [ "$_pbody" != "{}" ]; then
+      _pstart=(-H "Content-Type: application/json" -d "$_pbody")
+      log "start_profile: forwarding capture bounds ${_pbody}"
+    else
+      _pstart=()
+    fi
+    if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
+         "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
     else
       log "WARN start_profile failed (trace may be empty)"

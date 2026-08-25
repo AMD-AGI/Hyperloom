@@ -65,6 +65,10 @@ class _StubTaskRow:
     state: str
     params: dict
     idempotency_key: str
+    # Mirrors the real ``Task``: the dispatch path reads both before running a
+    # row. Closing steps take no lanes.
+    requires_lanes: list = field(default_factory=list)
+    lease_ttl_sec: int = 0
 
 
 class _StubTaskRegistry:
@@ -622,9 +626,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     fact = next(row for row in rows if row["step"] == "fact_finalize")
     assert fact["status"] == "failed"
-    assert fact["detail"] == (
-        "status=error reason=KBStoreError backend=kb-store"
-    )
+    assert fact["detail"] == ("status=error reason=KBStoreError backend=kb-store")
 
 
 @pytest.mark.asyncio
@@ -890,6 +892,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
 
     finalize_calls: list[str] = []
     save_calls: list[Path] = []
+
     def _finalize(*, source: str) -> dict:
         finalize_calls.append(source)
         return {"status": "written"}

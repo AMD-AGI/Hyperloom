@@ -89,7 +89,6 @@ def _capture_forge_loop_argv(
         driver=str(driver),
         workspace=str(workspace),
         snr_threshold=30.0,
-        max_iters=1,
         max_hours=1.0,
         branch="forge/test/provider",
         gpu_target="gfx950",
@@ -157,7 +156,6 @@ def _capture_rewrite_argv(
         snr_threshold=30.0,
         gpu_target="gfx950",
         gpu_type="mi355x",
-        max_iters=1,
         max_hours=1.0,
         branch="forge/test/rewrite",
         framework="vllm",
@@ -336,12 +334,7 @@ def test_install_sh_installs_the_codex_extra():
     ("Codex Python SDK is not installed; install kernel-agents[codex]"), which
     the provider fallback then converts into a silent Claude run.
     """
-    install_sh = (
-        Path(__file__).resolve().parents[3]
-        / "inference_optimizer"
-        / "assets"
-        / "install.sh"
-    )
+    install_sh = Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
 
     assert "[claude,codex]" in text, (

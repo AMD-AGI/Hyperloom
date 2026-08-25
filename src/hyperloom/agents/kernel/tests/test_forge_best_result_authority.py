@@ -55,7 +55,7 @@ def _publish(workspace: Path, payload: dict) -> None:
 
 def _manifest(commit_hash: str, **overrides) -> dict:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "commit_hash": commit_hash,
         "correctness_passed": True,
         "baseline_wall_ms": 2.0,
@@ -101,19 +101,13 @@ def test_missing_manifest_yields_no_evidence(repo):
     workspace, base_commit = repo
 
     assert forge_submit._read_forge_best_result(str(workspace)) is None
-    assert (
-        forge_submit._validated_forge_best_result(
-            None, workspace=str(workspace), base_commit=base_commit
-        )
-        is None
-    )
+    assert forge_submit._validated_forge_best_result(None, workspace=str(workspace), base_commit=base_commit) is None
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
         pytest.param({"correctness_passed": False}, id="correctness_failed"),
-        pytest.param({"schema_version": 2}, id="unknown_schema"),
         pytest.param({"mean_case_speedup": 1.0}, id="no_mean_case_gain"),
         pytest.param({"mean_case_speedup": None}, id="missing_mean_case_speedup"),
         pytest.param({"baseline_wall_ms": 0.0}, id="unusable_baseline"),
@@ -215,7 +209,7 @@ def test_corrupt_manifest_is_ignored_rather_than_raising(repo):
     workspace, _base_commit = repo
     root = workspace / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "best_result.json").write_text('{"schema_version": 1, "comm')
+    (root / "best_result.json").write_text('{"schema_version": 2, "comm')
 
     assert forge_submit._read_forge_best_result(str(workspace)) is None
 
@@ -245,9 +239,7 @@ def _publish_applyback(
     changed_files = ["flydsl_kernel.py", "kernel.py"]
     for relative in changed_files:
         (artifact_dir / "files" / relative).write_text((workspace / relative).read_text())
-    patch = patch_body if patch_body is not None else _git(
-        workspace, "diff", f"{base_commit}..{best_commit}"
-    )
+    patch = patch_body if patch_body is not None else _git(workspace, "diff", f"{base_commit}..{best_commit}")
     (artifact_dir / "forge.patch").write_text(patch + "\n")
 
     manifest = {
@@ -396,11 +388,7 @@ def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
         text=True,
         env={
             **os.environ,
-            "PYTHONPATH": (
-                producer_root
-                + os.pathsep
-                + os.environ.get("PYTHONPATH", "")
-            ),
+            "PYTHONPATH": (producer_root + os.pathsep + os.environ.get("PYTHONPATH", "")),
         },
         timeout=120,
     )
@@ -489,9 +477,7 @@ def test_outer_result_that_breaks_the_contract_is_rejected(repo, overrides):
     outer = _publish_applyback(workspace, base_commit, outer_overrides=overrides)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -512,9 +498,7 @@ def test_untrustworthy_temporary_path_declaration_fails_the_result(repo, overrid
     outer = _publish_applyback(workspace, base_commit, outer_overrides=overrides)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -554,9 +538,7 @@ def test_manifest_that_breaks_the_contract_is_rejected(repo, overrides):
     outer = _publish_applyback(workspace, base_commit, manifest_overrides=overrides)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -593,9 +575,7 @@ def test_manifest_commit_disagreeing_with_the_outer_result_is_rejected(repo):
     outer["best_commit"] = base_commit
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -607,9 +587,7 @@ def test_applyback_pinned_to_a_foreign_commit_is_rejected(repo):
     _git(workspace, "update-ref", _APPLYBACK_REF, base_commit)
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -623,9 +601,7 @@ def test_applyback_patch_disagreeing_with_changed_files_is_rejected(repo):
     )
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -637,9 +613,7 @@ def test_applyback_off_the_base_lineage_is_rejected(repo):
     advanced_base = _git(workspace, "rev-parse", "HEAD")
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=advanced_base
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=advanced_base)
         is None
     )
 
@@ -650,9 +624,7 @@ def test_corrupt_applyback_manifest_is_ignored_rather_than_raising(repo):
     (workspace / _ARTIFACT_DIR / "manifest.json").write_text('{"schema_version": 2, "comm')
 
     assert (
-        forge_submit._validated_rewrite_applyback_result(
-            outer, workspace=str(workspace), base_commit=base_commit
-        )
+        forge_submit._validated_rewrite_applyback_result(outer, workspace=str(workspace), base_commit=base_commit)
         is None
     )
 
@@ -671,3 +643,22 @@ def test_nested_schema_one_best_result_is_never_consulted_for_an_applyback(repo)
         )
         is None
     )
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, None])
+def test_a_schema_bump_alone_does_not_discard_a_proven_best(repo, version):
+    """What actually broke: the producer went to 2, this stayed on 1, and every
+    published best was dropped for six days. The evidence is judged on its own
+    fields, so the version it is stamped with cannot decide the question."""
+    workspace, base_commit = repo
+    best_commit = _commit_improvement(workspace)
+    _publish(workspace, _manifest(best_commit, schema_version=version))
+
+    validated = forge_submit._validated_forge_best_result(
+        forge_submit._read_forge_best_result(str(workspace)),
+        workspace=str(workspace),
+        base_commit=base_commit,
+    )
+
+    assert validated is not None
+    assert validated["best_commit"] == best_commit

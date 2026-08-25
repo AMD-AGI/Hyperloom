@@ -100,9 +100,7 @@ async def test_stream_api_error_is_marked_as_llm_call_failed():
     the case it was added for.
     """
     backend = ClaudeBackend(
-        sdk_query_factory=_make_raising_query_factory(
-            RuntimeError("litellm.BadRequestError: AnthropicException")
-        ),
+        sdk_query_factory=_make_raising_query_factory(RuntimeError("litellm.BadRequestError: AnthropicException")),
         sdk_options_cls=FakeOptions,
         enable_mcp_emit_intent=False,
         retry_policy=RetryPolicy(max_attempts=1),

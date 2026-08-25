@@ -117,15 +117,30 @@ def test_projection_classifies_each_resolution_tier():
     """Method is derived, since grep resolves without stamping anything."""
     got = tl.build_source_resolution_entries(
         [
-            {"kernel_id": "k1", "name": "a", "gpu_pct": 9.0, "source_file": "/x/a.py",
-             "source_resolution_method": "trace_python_stack"},
+            {
+                "kernel_id": "k1",
+                "name": "a",
+                "gpu_pct": 9.0,
+                "source_file": "/x/a.py",
+                "source_resolution_method": "trace_python_stack",
+            },
             {"kernel_id": "k2", "name": "b", "gpu_pct": 8.0, "source_file": "/x/b.py"},
             {"kernel_id": "k3", "name": "c", "gpu_pct": 7.0, "source_file": ""},
-            {"kernel_id": "k4", "name": "d", "gpu_pct": 6.0, "source_file": "",
-             "source_resolution_method": "rejected_non_path_sentinel",
-             "source_file_rejected": "AITER (vendor)"},
-            {"kernel_id": "k5", "name": "e", "gpu_pct": 5.0, "source_file": "/x/e.py",
-             "source_resolution_method": "llm_fallback"},
+            {
+                "kernel_id": "k4",
+                "name": "d",
+                "gpu_pct": 6.0,
+                "source_file": "",
+                "source_resolution_method": "rejected_non_path_sentinel",
+                "source_file_rejected": "AITER (vendor)",
+            },
+            {
+                "kernel_id": "k5",
+                "name": "e",
+                "gpu_pct": 5.0,
+                "source_file": "/x/e.py",
+                "source_resolution_method": "llm_fallback",
+            },
         ]
     )
     by_id = {e["kernel_id"]: e for e in got}
@@ -141,8 +156,15 @@ def test_projection_classifies_each_resolution_tier():
 def test_written_artifact_satisfies_its_own_contract(tmp_path):
     out = tmp_path / ksc.SOURCE_RESOLUTION_FILENAME
     tl.write_source_resolution_artifact(
-        [{"kernel_id": "k1", "name": "a", "gpu_pct": 5.0, "source_file": "/x/a.py",
-          "source_resolution_method": "trace_python_stack"}],
+        [
+            {
+                "kernel_id": "k1",
+                "name": "a",
+                "gpu_pct": 5.0,
+                "source_file": "/x/a.py",
+                "source_resolution_method": "trace_python_stack",
+            }
+        ],
         out,
         framework="sglang",
     )
@@ -173,8 +195,9 @@ def test_review_may_unresolve_a_confidently_wrong_entry():
     check. Only a reviewer looking at the whole entry can reject it.
     """
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="aten::fill_", gpu_pct=9.0,
-                       source_file="/repo/moe.py", method=ksc.METHOD_TRACE)
+        ksc.make_entry(
+            kernel_id="k1", name="aten::fill_", gpu_pct=9.0, source_file="/repo/moe.py", method=ksc.METHOD_TRACE
+        )
     )
     out, notes = review_resolution_document(
         doc,
@@ -192,14 +215,14 @@ def test_review_may_unresolve_a_confidently_wrong_entry():
 def test_review_cannot_invent_a_path():
     """A rewrite must land somewhere verifiable, or the original stands."""
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file="/repo/a.py", method=ksc.METHOD_TRACE)
+        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0, source_file="/repo/a.py", method=ksc.METHOD_TRACE)
     )
     out, notes = review_resolution_document(
         doc,
         framework_roots=("/repo",),
-        complete=_reply([{"kernel_id": "k1", "action": "rewrite",
-                          "source_file": "/tmp/invented.py", "reason": "guess"}]),
+        complete=_reply(
+            [{"kernel_id": "k1", "action": "rewrite", "source_file": "/tmp/invented.py", "reason": "guess"}]
+        ),
         model="m",
     )
     entry = out["entries"][0]
@@ -239,14 +262,14 @@ def test_review_stores_the_symlink_target_it_validated(tmp_path):
     link = tmp_path / "kernel.py"
     link.symlink_to(target)
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE)
+        ksc.make_entry(
+            kernel_id="k1", name="n", gpu_pct=9.0, source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE
+        )
     )
     out, _ = review_resolution_document(
         doc,
         framework_roots=(str(tmp_path),),
-        complete=_reply([{"kernel_id": "k1", "action": "rewrite",
-                          "source_file": str(link), "reason": "defines it"}]),
+        complete=_reply([{"kernel_id": "k1", "action": "rewrite", "source_file": str(link), "reason": "defines it"}]),
         model="m",
     )
     assert out["entries"][0]["source_file"] == str(target)
@@ -257,14 +280,14 @@ def test_review_accepts_a_rewrite_to_a_file_that_exists(tmp_path):
     real = tmp_path / "right.py"
     real.write_text("def kernel(): pass\n", encoding="utf-8")
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE)
+        ksc.make_entry(
+            kernel_id="k1", name="n", gpu_pct=9.0, source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE
+        )
     )
     out, _ = review_resolution_document(
         doc,
         framework_roots=(str(tmp_path),),
-        complete=_reply([{"kernel_id": "k1", "action": "rewrite",
-                          "source_file": str(real), "reason": "defines it"}]),
+        complete=_reply([{"kernel_id": "k1", "action": "rewrite", "source_file": str(real), "reason": "defines it"}]),
         model="m",
     )
     entry = out["entries"][0]
@@ -293,11 +316,13 @@ def test_line_annotated_rewrite_is_stored_as_an_openable_path(tmp_path):
         doc,
         framework_roots=(str(tmp_path),),
         complete=_reply(
-            [{
-                "kernel_id": "k1",
-                "action": "rewrite",
-                "source_file": f"{real}(247): kernel",
-            }]
+            [
+                {
+                    "kernel_id": "k1",
+                    "action": "rewrite",
+                    "source_file": f"{real}(247): kernel",
+                }
+            ]
         ),
         model="m",
     )
@@ -325,11 +350,13 @@ def test_a_line_suffix_only_difference_is_not_a_rewrite(tmp_path):
         doc,
         framework_roots=(str(tmp_path),),
         complete=_reply(
-            [{
-                "kernel_id": "k1",
-                "action": "rewrite",
-                "source_file": f"{real}(1): kernel",
-            }]
+            [
+                {
+                    "kernel_id": "k1",
+                    "action": "rewrite",
+                    "source_file": f"{real}(1): kernel",
+                }
+            ]
         ),
         model="m",
     )
@@ -410,15 +437,13 @@ def test_review_rejects_a_plausible_path_that_does_not_exist(tmp_path):
     file -- the wrong-source failure this pipeline exists to prevent.
     """
     invented = tmp_path / "python" / "sglang" / "srt" / "does_not_exist.py"
-    doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file="", method=ksc.METHOD_UNRESOLVED)
-    )
+    doc = _doc_with(ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0, source_file="", method=ksc.METHOD_UNRESOLVED))
     out, notes = review_resolution_document(
         doc,
         framework_roots=(str(tmp_path),),
-        complete=_reply([{"kernel_id": "k1", "action": "rewrite",
-                          "source_file": str(invented), "reason": "looks right"}]),
+        complete=_reply(
+            [{"kernel_id": "k1", "action": "rewrite", "source_file": str(invented), "reason": "looks right"}]
+        ),
         model="m",
     )
     assert out["entries"][0]["source_file"] == ""
@@ -427,50 +452,42 @@ def test_review_rejects_a_plausible_path_that_does_not_exist(tmp_path):
 
 def test_review_keeps_entries_below_the_gpu_floor_untouched():
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="tiny", gpu_pct=0.01,
-                       source_file="/repo/a.py", method=ksc.METHOD_TRACE)
+        ksc.make_entry(kernel_id="k1", name="tiny", gpu_pct=0.01, source_file="/repo/a.py", method=ksc.METHOD_TRACE)
     )
-    out, notes = review_resolution_document(
-        doc, framework_roots=("/repo",), complete=_reply([]), model="m"
-    )
+    out, notes = review_resolution_document(doc, framework_roots=("/repo",), complete=_reply([]), model="m")
     assert out["entries"][0]["source_file"] == "/repo/a.py"
     assert any("GPU share" in n for n in notes)
 
 
 def test_unusable_reply_leaves_the_table_alone():
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file="/repo/a.py", method=ksc.METHOD_TRACE)
+        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0, source_file="/repo/a.py", method=ksc.METHOD_TRACE)
     )
 
     def _garbage(_p, _m, _t):
         return "not json at all"
 
-    out, notes = review_resolution_document(
-        doc, framework_roots=("/repo",), complete=_garbage, model="m"
-    )
+    out, notes = review_resolution_document(doc, framework_roots=("/repo",), complete=_garbage, model="m")
     assert out["entries"][0]["source_file"] == "/repo/a.py"
     assert any("unusable reply" in n for n in notes)
 
 
 def test_call_failure_leaves_the_table_alone():
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file="/repo/a.py", method=ksc.METHOD_TRACE)
+        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0, source_file="/repo/a.py", method=ksc.METHOD_TRACE)
     )
 
     def _boom(_p, _m, _t):
         raise RuntimeError("gateway 401")
 
-    out, notes = review_resolution_document(
-        doc, framework_roots=("/repo",), complete=_boom, model="m"
-    )
+    out, notes = review_resolution_document(doc, framework_roots=("/repo",), complete=_boom, model="m")
     assert out["entries"][0]["source_file"] == "/repo/a.py"
     assert any("llm call failed" in n for n in notes)
 
 
 def test_review_call_error_is_redacted_from_notes_and_log():
     """Provider failures expose only stable exception metadata."""
+
     class ProviderError(RuntimeError):
         """Represent a provider response carrying sensitive details."""
 
@@ -487,10 +504,7 @@ def test_review_call_error_is_redacted_from_notes_and_log():
     )
 
     def _boom(_prompt, _model, _timeout):
-        raise ProviderError(
-            "https://gateway.example/v1?token=query-secret "
-            "Authorization: Bearer header-secret"
-        )
+        raise ProviderError("https://gateway.example/v1?token=query-secret Authorization: Bearer header-secret")
 
     logs: list[str] = []
     out, notes = review_resolution_document(
@@ -547,10 +561,12 @@ def test_review_discards_staged_changes_when_path_validation_raises(monkeypatch,
     out, notes = review_resolution_document(
         doc,
         framework_roots=(str(tmp_path),),
-        complete=_reply([
-            {"kernel_id": "k1", "action": "unresolve"},
-            {"kernel_id": "k2", "action": "rewrite", "source_file": str(replacement)},
-        ]),
+        complete=_reply(
+            [
+                {"kernel_id": "k1", "action": "unresolve"},
+                {"kernel_id": "k2", "action": "rewrite", "source_file": str(replacement)},
+            ]
+        ),
         model="m",
     )
 
@@ -598,8 +614,7 @@ def test_revision_for_unknown_kernel_is_reported_not_applied():
     instead of being silently left to a partial review.
     """
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file="/repo/a.py", method=ksc.METHOD_TRACE)
+        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0, source_file="/repo/a.py", method=ksc.METHOD_TRACE)
     )
     out, notes = review_resolution_document(
         doc,
@@ -621,17 +636,21 @@ def test_one_unreadable_gpu_pct_does_not_disable_the_whole_review(tmp_path):
     """
     real = tmp_path / "right.py"
     real.write_text("def kernel(): pass\n", encoding="utf-8")
-    hot = ksc.make_entry(kernel_id="k1", name="hot", gpu_pct=9.0,
-                         source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE)
-    broken = ksc.make_entry(kernel_id="k2", name="broken", gpu_pct=1.0,
-                            source_file="/repo/b.py", method=ksc.METHOD_TRACE)
+    hot = ksc.make_entry(
+        kernel_id="k1", name="hot", gpu_pct=9.0, source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE
+    )
+    broken = ksc.make_entry(
+        kernel_id="k2", name="broken", gpu_pct=1.0, source_file="/repo/b.py", method=ksc.METHOD_TRACE
+    )
     broken["gpu_pct"] = "12%"
     out, _ = review_resolution_document(
         _doc_with(hot, broken),
         framework_roots=(str(tmp_path), "/repo"),
-        complete=_reply([
-            {"kernel_id": "k1", "action": "rewrite", "source_file": str(real)},
-        ]),
+        complete=_reply(
+            [
+                {"kernel_id": "k1", "action": "rewrite", "source_file": str(real)},
+            ]
+        ),
         model="m",
     )
     assert out["entries"][0]["source_file"] == str(real)
@@ -642,12 +661,18 @@ def test_missing_review_id_rejects_the_entire_batch():
     """A truncated reply is not equivalent to an explicit keep decision."""
     doc = _doc_with(
         ksc.make_entry(
-            kernel_id="k1", name="a", gpu_pct=9.0,
-            source_file="/repo/a.py", method=ksc.METHOD_TRACE,
+            kernel_id="k1",
+            name="a",
+            gpu_pct=9.0,
+            source_file="/repo/a.py",
+            method=ksc.METHOD_TRACE,
         ),
         ksc.make_entry(
-            kernel_id="k2", name="b", gpu_pct=8.0,
-            source_file="/repo/b.py", method=ksc.METHOD_TRACE,
+            kernel_id="k2",
+            name="b",
+            gpu_pct=8.0,
+            source_file="/repo/b.py",
+            method=ksc.METHOD_TRACE,
         ),
     )
     out, notes = review_resolution_document(
@@ -667,8 +692,11 @@ def test_duplicate_review_id_rejects_the_entire_batch():
     """Repeated revisions cannot overwrite their own audit history."""
     doc = _doc_with(
         ksc.make_entry(
-            kernel_id="k1", name="a", gpu_pct=9.0,
-            source_file="/repo/a.py", method=ksc.METHOD_TRACE,
+            kernel_id="k1",
+            name="a",
+            gpu_pct=9.0,
+            source_file="/repo/a.py",
+            method=ksc.METHOD_TRACE,
         )
     )
     revisions = [
@@ -688,12 +716,18 @@ def test_revision_for_an_unsent_entry_rejects_the_entire_batch():
     """An entry below the review floor cannot be modified by an extra ID."""
     doc = _doc_with(
         ksc.make_entry(
-            kernel_id="hot", name="a", gpu_pct=9.0,
-            source_file="/repo/a.py", method=ksc.METHOD_TRACE,
+            kernel_id="hot",
+            name="a",
+            gpu_pct=9.0,
+            source_file="/repo/a.py",
+            method=ksc.METHOD_TRACE,
         ),
         ksc.make_entry(
-            kernel_id="cold", name="b", gpu_pct=0.1,
-            source_file="/repo/b.py", method=ksc.METHOD_TRACE,
+            kernel_id="cold",
+            name="b",
+            gpu_pct=0.1,
+            source_file="/repo/b.py",
+            method=ksc.METHOD_TRACE,
         ),
     )
     revisions = [
@@ -719,13 +753,21 @@ def test_revision_is_folded_back_onto_the_candidate():
     the revision is written back, the review tier changes nothing that runs.
     """
     candidates = [
-        {"kernel_id": "k1", "name": "foo_kernel", "gpu_pct": 9.0,
-         "source_file": "/sgl-workspace/aiter/csrc/wrong.cpp", "source_type": "hip_cpp"}
+        {
+            "kernel_id": "k1",
+            "name": "foo_kernel",
+            "gpu_pct": 9.0,
+            "source_file": "/sgl-workspace/aiter/csrc/wrong.cpp",
+            "source_type": "hip_cpp",
+        }
     ]
     entries = [
         ksc.make_entry(
-            kernel_id="k1", name="foo_kernel", gpu_pct=9.0,
-            source_file="/sgl-workspace/aiter/ops/right.py", method=ksc.METHOD_LLM,
+            kernel_id="k1",
+            name="foo_kernel",
+            gpu_pct=9.0,
+            source_file="/sgl-workspace/aiter/ops/right.py",
+            method=ksc.METHOD_LLM,
         )
     ]
     entries[0]["previous_source_file"] = "/sgl-workspace/aiter/csrc/wrong.cpp"
@@ -745,10 +787,10 @@ def test_revision_is_folded_back_onto_the_candidate():
 
 def test_unreviewed_entries_leave_candidates_untouched():
     """Only entries carrying previous_source_file were revised."""
-    candidates = [{"kernel_id": "k1", "name": "n", "gpu_pct": 9.0,
-                   "source_file": "/repo/a.py", "source_type": "python"}]
-    entries = [ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                              source_file="/repo/a.py", method=ksc.METHOD_TRACE)]
+    candidates = [
+        {"kernel_id": "k1", "name": "n", "gpu_pct": 9.0, "source_file": "/repo/a.py", "source_type": "python"}
+    ]
+    entries = [ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0, source_file="/repo/a.py", method=ksc.METHOD_TRACE)]
     assert tl.apply_resolution_entries_to_candidates(entries, candidates) == 0
     assert candidates[0]["source_file"] == "/repo/a.py"
     assert "source_resolution_previous_file" not in candidates[0]
@@ -756,10 +798,18 @@ def test_unreviewed_entries_leave_candidates_untouched():
 
 def test_unresolve_clears_the_candidate_source():
     """Dropping to unresolved must also clear it downstream, not only here."""
-    candidates = [{"kernel_id": "k1", "name": "aten::fill_", "gpu_pct": 9.0,
-                   "source_file": "/repo/moe.py", "source_type": "python"}]
-    entries = [ksc.make_entry(kernel_id="k1", name="aten::fill_", gpu_pct=9.0,
-                              source_file="", method=ksc.METHOD_UNRESOLVED)]
+    candidates = [
+        {
+            "kernel_id": "k1",
+            "name": "aten::fill_",
+            "gpu_pct": 9.0,
+            "source_file": "/repo/moe.py",
+            "source_type": "python",
+        }
+    ]
+    entries = [
+        ksc.make_entry(kernel_id="k1", name="aten::fill_", gpu_pct=9.0, source_file="", method=ksc.METHOD_UNRESOLVED)
+    ]
     entries[0]["previous_source_file"] = "/repo/moe.py"
     entries[0]["previous_method"] = ksc.METHOD_TRACE
 
@@ -798,8 +848,11 @@ def _aiter_candidate(**over):
 
 def _rewrite_to(path):
     entry = ksc.make_entry(
-        kernel_id="k1", name="fused_moe", gpu_pct=9.0,
-        source_file=path, method=ksc.METHOD_LLM,
+        kernel_id="k1",
+        name="fused_moe",
+        gpu_pct=9.0,
+        source_file=path,
+        method=ksc.METHOD_LLM,
     )
     entry["previous_source_file"] = "/repo/aiter/impl.cu"
     entry["previous_method"] = ksc.METHOD_TRACE
@@ -876,14 +929,16 @@ def test_audit_history_survives_artifact_rebuild(tmp_path, monkeypatch):
     new = tmp_path / "new.py"
     old.write_text("def old(): pass\n", encoding="utf-8")
     new.write_text("def new(): pass\n", encoding="utf-8")
-    candidates = [{
-        "kernel_id": "k1",
-        "name": "kernel",
-        "gpu_pct": 9.0,
-        "source_file": str(old),
-        "source_type": "python",
-        "source_resolution_method": ksc.METHOD_TRACE,
-    }]
+    candidates = [
+        {
+            "kernel_id": "k1",
+            "name": "kernel",
+            "gpu_pct": 9.0,
+            "source_file": str(old),
+            "source_type": "python",
+            "source_resolution_method": ksc.METHOD_TRACE,
+        }
+    ]
 
     def _review(doc, *, log_path):
         """Inject one reviewed rewrite without making a network call."""
@@ -910,14 +965,14 @@ def test_review_runs_without_any_opt_in(tmp_path):
     real = tmp_path / "right.py"
     real.write_text("def kernel(): pass\n", encoding="utf-8")
     doc = _doc_with(
-        ksc.make_entry(kernel_id="k1", name="n", gpu_pct=9.0,
-                       source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE)
+        ksc.make_entry(
+            kernel_id="k1", name="n", gpu_pct=9.0, source_file=str(tmp_path / "wrong.py"), method=ksc.METHOD_TRACE
+        )
     )
     out, _ = review_resolution_document(
         doc,
         framework_roots=(str(tmp_path),),
-        complete=_reply([{"kernel_id": "k1", "action": "rewrite",
-                          "source_file": str(real), "reason": "defines it"}]),
+        complete=_reply([{"kernel_id": "k1", "action": "rewrite", "source_file": str(real), "reason": "defines it"}]),
         model="m",
     )
     assert out["entries"][0]["source_file"] == str(real)

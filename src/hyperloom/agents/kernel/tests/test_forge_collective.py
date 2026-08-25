@@ -2238,7 +2238,7 @@ def test_timeout_salvages_authoritative_best_result(tmp_path, monkeypatch):
         (campaign / "best_result.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "correctness_passed": True,
                     "commit_hash": best_commit,
                     "baseline_wall_ms": 10.0,
@@ -2588,8 +2588,6 @@ def test_bandwidth_travels_on_the_forge_result(tmp_path):
 
 def test_a_loop_result_without_bandwidth_reports_none(tmp_path):
     """An older forge-loop still produces a verdict, just no bandwidth."""
-    result = fc._normalize_result(
-        str(tmp_path), 0, {}, result_payload={"improved": True}
-    )
+    result = fc._normalize_result(str(tmp_path), 0, {}, result_payload={"improved": True})
 
     assert "bandwidth" not in result

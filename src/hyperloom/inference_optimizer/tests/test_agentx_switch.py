@@ -32,6 +32,7 @@ _AGENTX_ENV_KEYS = (
     "AGENTX_NUM_WARMUP_SESSIONS",
     "AGENTX_KEEP_SERVER",
     "AIPERF_BIN",
+    "WEKA_LOADER_OVERRIDE",
     "RUN_EVAL",
     "MODEL_PATH",
 )
@@ -112,6 +113,31 @@ def test_switch_on_passes_agentx_env(tmp_path, monkeypatch):
     assert envs["AGENTX_DATASET"] == "semianalysis-cc-traces-weka-with-subagents"
     assert envs["AGENTX_NUM_ENTRIES"] == "8"
     assert envs["AIPERF_BIN"] == "/venv/bin/aiperf"
+
+
+def test_switch_forwards_weka_loader_override(tmp_path, monkeypatch):
+    """Upstream's own corpus pin has no ``AGENTX_`` prefix.
+
+    ``aiperf_client.sh`` documents ``WEKA_LOADER_OVERRIDE`` as a supported knob,
+    but the prefix loop would drop it -- leaving it to work only when the
+    benchmark process happens to inherit the full parent environment, which is
+    the class of silent difference this path exists to remove.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("WEKA_LOADER_OVERRIDE", "semianalysis_cc_traces_weka_062126")
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    assert bench["envs"]["WEKA_LOADER_OVERRIDE"] == "semianalysis_cc_traces_weka_062126"
+
+
+def test_switch_off_does_not_leak_weka_loader_override(tmp_path, monkeypatch):
+    """The synthetic path must not gain an env it never had."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("WEKA_LOADER_OVERRIDE", "semianalysis_cc_traces_weka_062126")
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    assert "WEKA_LOADER_OVERRIDE" not in (bench.get("envs") or {})
 
 
 # ── A3: defensive parsing ────────────────────────────────────────────────────

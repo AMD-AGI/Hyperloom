@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import sqlite3
 
-# ensure_schema creates the current schema under BEGIN IMMEDIATE. Databases
-# written by older versions are not supported and must be recreated.
-SCHEMA_VERSION = 3
+# Recorded by ensure_schema for provenance only: nothing compares it against the
+# version already in the DB, so a database written by an older version keeps its
+# own columns and is read as-is. Rows are addressed by column name, so a column
+# this version no longer writes is inert rather than a migration hazard.
+SCHEMA_VERSION = 4
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane
@@ -98,7 +100,6 @@ _DDL = [
         params           TEXT NOT NULL,
         idempotency_key  TEXT NOT NULL UNIQUE,
         requires_lanes   TEXT NOT NULL DEFAULT '[]',
-        allowed_tools    TEXT NOT NULL DEFAULT '[]',
         side_effects     TEXT NOT NULL DEFAULT '[]',
         lease_ttl_sec    INTEGER NOT NULL DEFAULT 0,
         history          TEXT NOT NULL DEFAULT '[]',

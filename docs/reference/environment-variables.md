@@ -1,7 +1,7 @@
 ---
 myst:
     html_meta:
-        "description": "Complete reference for all environment variables read by the Hyperloom runtime, grouped by purpose: credentials, paths, workload parameters, backend selection, and observability."
+        "description": "Reference for the environment variables read by the Hyperloom runtime, grouped by purpose: credentials, paths, workload parameters, backend selection, and observability. Opt-in benchmark modes carry additional variables documented alongside them."
         "keywords": "Hyperloom, environment variables, configuration, OPENAI_API_KEY, USER_DATA_PATH, ROCm, AMD GPU, LLM inference, kernel optimization, LLM gateway, Langfuse, session"
 ---
 # Environment variables
@@ -58,6 +58,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
+| `FORGE_PATH`                               | Conditional          | Unset                                                              | KernelForge checkout root, and the single canonical variable for it. Required whenever the forge kernel backend is enabled (`KERNEL_OPT_BACKEND_ORDER=forge`): `forge_submit.py` prepends it to `sys.path` to import `kernel_agents`, and resolves the vendor-playbook task bundles beneath it. Unset with `kernel_agents` already installed still imports, but the playbook bundles are then unresolvable. |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
 | `WORKSPACE_PATH` *(legacy)*               | No                   | Unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [Upgrade Hyperloom version](upgrade.md).                            |
@@ -124,7 +125,7 @@ that degraded path.
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
 `src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py` is a fixed
-`0.05`, i.e. a candidate must stay within 5 percentage points of the recorded
+`0.05`, that is, a candidate must stay within 5 percentage points of the recorded
 baseline accuracy.
 
 Note that the score is measured once per candidate, not averaged over repeats.
@@ -183,12 +184,30 @@ The following variables control the kernel optimization backend ladder.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `KERNEL_OPT_BACKEND_ORDER`     | Unset                         | Comma-separated override for the kernel-opt backend. Bare-metal defaults to `geak` (whole-pipeline GEAK). Use `forge` to opt into the forge backend.                    |
+| `KERNEL_OPT_BACKEND_ORDER`     | Unset (resolves to `geak`)    | Selects the kernel-opt backend. Unset resolves to `geak` (whole-pipeline GEAK owns the KERNEL phase); the bare-metal installer and the Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` on top of that. **Only an exact, case-insensitive `forge` opts into the per-kernel forge backend** (`forge_explicitly_enabled` in `common/env.py`). Despite the historical name, a comma list is not parsed: `forge,geak` silently stays on `geak`, as does any other value, legacy alias, or payload override. |
 | `KERNEL_OPT_MAX_PARALLEL`      | `8` (GPU-adaptive cap)        | Max parallel kernel-opt attempts per request (per-kernel race fan-out). The runtime caps this by visible GPUs and per-attempt GPU reservation when it can detect them.                                                                                                                            |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
 | `KERNEL_OPT_BACKEND_BUDGET_MIN` | `60`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `60` leaves roughly 30 minutes of real iteration. |
+| `AITER_LOG_TUNED_CONFIG`       | `1` (set for every serving run) | Makes aiter log each tuned-config lookup it *hits*, not only the ones it misses. Two checks have no input without it: the GEMM demand list, which learns the shapes the runtime actually asks for (config-derived shapes covered 0.4% of them), and the apply verdict, which cannot tell "the tuned table was never read" from "it was read and did not help". A scan of 60 production logs found it set in none of them, so it is now injected by default. An operator value wins — set `0` to turn hit logging off, at the cost of both checks going inconclusive. Every miss already prints a line regardless of this setting; hit logging adds roughly one line per lookup that succeeds. |
+| `HYPERLOOM_GEMM_PAIRED_PAIRS`  | `0` (off)                     | How many interleaved baseline/tuned pairs to re-measure before a GEMM tuning KEEP is reported as confirmed. One end-to-end measurement cannot separate a gain from drift on this fleet: three rounds of a single unchanged configuration spanned 58%, and one controlled repeat moved 16%. Each pair costs two extra benchmark rounds. When `0`, the gain is still promoted — it is the best number available — but recorded as an unpaired block comparison rather than presented as a paired one. |
+
+---
+
+## Fusion lane
+
+The fusion lane is Coordinator-owned and forge-only: it runs at KERNEL entry on
+the forge branch, never as an agent request, and the default `geak` backend
+returns before reaching it. Its gate needs a fusion-eligible framework
+(`sglang`, `vllm` or `vllm-aiter`), a decode trace to discover from, and no
+fusion that already succeeded this session.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_SKIP_FUSION`        | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the fusion lane outright, before any other gate is evaluated.                                                                                        |
+| `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. A payload `timeout` / `timeout_sec` takes precedence over the env; an unparseable value falls back to the default.                            |
+| `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run. A payload `max_turns` takes precedence.                                                                                                         |
 
 ---
 
@@ -204,7 +223,7 @@ symbols are opaque binaries and never qualify.
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_SKIP_COLLECTIVE`    | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the collective lane outright, before any gate is evaluated.                                                                                          |
-| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
+| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion, and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
 | `HYPERLOOM_COLLECTIVE_KEEP_PCT` | `1.0`                        | E2E `KEEP` threshold in percent for the collective integrate. Must parse as a finite, non-negative float, otherwise the integrate fails loudly rather than defaulting.                             |
 | `HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES` | Unset (disabled) | Truthy allows a source-resolved collective to borrow shapes from the trace's sole all-reduce workload family. The default rejects this inference because those shapes were not observed on that device symbol. |
 | `FORGE_COLLECTIVE_TIMEOUT`     | `14400` (4h)                  | Wrapper timeout in seconds for one forge-collective campaign; a collective iterates over N ranks per benchmark, hence the wide default. A payload `timeout` takes precedence over the env.          |
@@ -217,18 +236,18 @@ symbols are opaque binaries and never qualify.
 A kernel candidate must resolve to a real source file before any backend can
 rewrite it. Resolution runs as a ladder: curated dictionary, then the
 trace-derived launcher frame, then a name grep. All three are deterministic and
-require no configuration. Agent analysis may add the model-backed tiers below.
+require no configuration. Agent analysis might add the model-backed tiers below.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
 decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
 consumers and triage read a contract rather than candidate internals.
 
-Two model-backed tiers may sit on top of the deterministic ladder when
+Two model-backed tiers might sit on top of the deterministic ladder when
 `--analysis-route agent` is used. The `deterministic` route never invokes either
 tier. Agent-route network calls require an explicit
 `HYPERLOOM_LLM_SOURCE_PROVIDER`; a model name alone never implies a provider or
-endpoint. The tiers differ in scope, authority and data exposure; the
+endpoint. The tiers differ in scope, authority, and data exposure; the
 constraints of one do not apply to the other.
 
 Neither can fail a run: no model configured, a gateway error, a timeout or an
@@ -251,7 +270,7 @@ retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
 setting. Claude uses `CLAUDE_MODEL`, then the project-wide
 `DEFAULT_CLAUDE_MODEL`. Model settings are never borrowed across providers.
 
-**Authority: selection only.** The model may return one of the exact shortlist
+**Authority: selection only.** The model might return one of the exact shortlist
 strings and nothing else. An invented path is rejected, as is any answer below
 0.7 confidence. This is deliberate — an LLM-produced sentinel written into
 `source_file` is what broke this pipeline originally.
@@ -283,7 +302,7 @@ complete review.
 
 <div class="callout warn">
 
-**Authority: it may rewrite, and it has no confidence threshold.** Unlike the
+**Authority: it might rewrite, and it has no confidence threshold.** Unlike the
 fallback tier, this one is not restricted to a shortlist — it can replace any
 entry's path with any path, or drop a resolved entry back to unresolved. There
 is no 0.7 confidence gate. The mechanical limit is that a rewritten path must
@@ -314,7 +333,7 @@ deliberate boundary rather than a side effect of building a useful prompt.
 
 **Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
 `claude_agent_sdk`. Claude requests use the native Claude
-Agent SDK with all repository, shell and web tools denied.
+Agent SDK with all repository, shell, and web tools denied.
 `kernel_source_resolution.json` records the provider, model, source-preview
 decision, outcome and endpoint hostname. It never records keys, custom
 headers, URL userinfo, query parameters or the full prompt.
@@ -416,7 +435,7 @@ multi-node runs or when the Ray backend is disabled.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serialises execution on the physical GPU(s) via `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
+| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serializes execution on the physical GPU(s) using `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
 | `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
 
 ---
@@ -430,7 +449,7 @@ Use CLI flags for multi-node topology and prefill-decode configuration:
 `--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
 
 `optimize` never creates or releases a multi-node cluster. The provisioning
-platform (e.g. Primus-Claw) creates the RayJob or InferaDeployment and hands it
+platform (for example, Primus-Claw) creates the RayJob or InferaDeployment and hands it
 over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 
 ### Cluster hand-off variables
@@ -543,7 +562,8 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `LLM_GATEWAY_KEY`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | `bypassPermissions` | `--permission-mode` passed to the `claude` CLI for specialist subprocesses. Controls the Claude runtime approval-prompt behaviour only. Codex containment is resolved independently through `HYPERLOOM_CODEX_SANDBOX_MODE`. The default `bypassPermissions` is required for unattended operation; change only in setups where an external interactive approval flow is intended. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---

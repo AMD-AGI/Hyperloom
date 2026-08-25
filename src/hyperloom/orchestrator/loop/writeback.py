@@ -27,6 +27,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -37,8 +38,13 @@ from .coordinator_helpers import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
+    _geak_accepted_kernel_specs,
+    _geak_has_accepted_kernel,
+    _geak_overlay_digest,
+    _geak_overlay_is_loadable,
     _geak_result_has_material,
     _geak_revalidation_decision,
+    _geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
@@ -281,12 +287,7 @@ class WritebackCollaborator:
         seen: set[Path] = set()
         for raw in candidates:
             if isinstance(raw, Mapping):
-                raw = (
-                    raw.get("patch_path")
-                    or raw.get("patch_ref")
-                    or raw.get("patch_file")
-                    or ""
-                )
+                raw = raw.get("patch_path") or raw.get("patch_ref") or raw.get("patch_file") or ""
             raw_text = str(raw or "").strip()
             if not raw_text:
                 missing.append("<empty-patch-member>")
@@ -357,19 +358,14 @@ class WritebackCollaborator:
         from ..knowledge.remote_recipe import KnowledgeSections
 
         if (
-            str(os.environ.get("KNOWLEDGE_STORE_MODE") or "local").strip()
-            != "remote"
+            str(os.environ.get("KNOWLEDGE_STORE_MODE") or "local").strip() != "remote"
             or KnowledgeSections.from_env() is None
         ):
             return
         normalized = str(owner or "").strip().upper()
         if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
             return
-        sources, missing = (
-            self._keep_patch_sources(result, task)
-            if include_patches
-            else ([], [])
-        )
+        sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
         row = {
             "id": f"{normalized}:{int(stack_index)}",
             "owner": normalized,
@@ -379,10 +375,7 @@ class WritebackCollaborator:
             "missing_patch_sources": missing,
         }
         outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
-        if not any(
-            isinstance(existing, dict) and existing.get("id") == row["id"]
-            for existing in outbox
-        ):
+        if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):
             outbox.append(row)
         if include_patches and (sources or missing):
             stack = list(self.shared_state.optimization_stack or [])
@@ -401,27 +394,18 @@ class WritebackCollaborator:
             return
         retained: list[dict[str, Any]] = []
         dead_letter = [
-            dict(row)
-            for row in (
-                getattr(self.shared_state, "kb_stage_dead_letter", []) or []
-            )
-            if isinstance(row, dict)
+            dict(row) for row in (getattr(self.shared_state, "kb_stage_dead_letter", []) or []) if isinstance(row, dict)
         ]
         stack = list(self.shared_state.optimization_stack or [])
         for row in pending:
             if not isinstance(row, dict):
                 continue
-            missing = [
-                str(path)
-                for path in (row.get("missing_patch_sources") or [])
-                if str(path).strip()
-            ]
+            missing = [str(path) for path in (row.get("missing_patch_sources") or []) if str(path).strip()]
             if row.get("include_patches"):
                 missing.extend(
                     str(path)
                     for path in (row.get("patch_sources") or [])
-                    if str(path).strip()
-                    and not Path(str(path)).is_file()
+                    if str(path).strip() and not Path(str(path)).is_file()
                 )
             missing = list(dict.fromkeys(missing))
             if missing:
@@ -430,24 +414,18 @@ class WritebackCollaborator:
                     "missing_patch_sources": missing,
                     "reason": "patch_source_missing",
                 }
-                dead_letter = [
-                    item
-                    for item in dead_letter
-                    if item.get("id") != failed.get("id")
-                ]
+                dead_letter = [item for item in dead_letter if item.get("id") != failed.get("id")]
                 dead_letter.append(failed)
                 index = int(row.get("stack_index") or 0)
                 owner = str(row.get("owner") or "").upper()
                 if (
                     0 <= index < len(stack)
                     and isinstance(stack[index], dict)
-                    and str(stack[index].get("kb_required_owner") or "").upper()
-                    == owner
+                    and str(stack[index].get("kb_required_owner") or "").upper() == owner
                 ):
                     stack[index].pop("kb_required_owner", None)
                 log.warning(
-                    "%s kb: dropping owner section %s because patch sources "
-                    "are unavailable: %s",
+                    "%s kb: dropping owner section %s because patch sources are unavailable: %s",
                     owner,
                     row.get("id"),
                     missing,
@@ -995,9 +973,7 @@ class WritebackCollaborator:
             # baseline_failed budget yet. Multi-node keeps the strict backstop,
             # and so does a session that never admitted the eval lane — nothing
             # would re-run the eval, so holding the budget just stalls the run.
-            eval_pending_suppress = (
-                eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
-            )
+            eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
             if eval_failed:
                 self._persist_eval_failure(result_payload)
             if stopped_by_the_run:
@@ -1015,7 +991,11 @@ class WritebackCollaborator:
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
-                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged and not eval_pending_suppress:
+                if (
+                    self.shared_state.baseline_failure_streak >= 3
+                    and not enablement_engaged
+                    and not eval_pending_suppress
+                ):
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1680,17 +1660,9 @@ class WritebackCollaborator:
                 micro = float(e.get("last_micro_speedup") or 0.0)
             except (TypeError, ValueError):
                 micro = 0.0
-            kid = str(
-                e.get("current_kernel_id")
-                or e.get("kernel_id")
-                or ledger_id
-            )
+            kid = str(e.get("current_kernel_id") or e.get("kernel_id") or ledger_id)
             task_group_key = str(e.get("task_group_key") or "")
-            integ = (
-                integ_by_task.get(task_group_key)
-                if task_group_key
-                else integ_by_kid.get(kid)
-            )
+            integ = integ_by_task.get(task_group_key) if task_group_key else integ_by_kid.get(kid)
             e2e_gain = 0.0
             e2e_tput = 0.0
             e2e_decision = ""
@@ -1940,11 +1912,7 @@ class WritebackCollaborator:
         """Idempotently publish terminal Recipe state and persist its outcome."""
         state = self.shared_state
         prior = dict(getattr(state, "recipe_finalize_outcome", {}) or {})
-        prior_status = str(
-            getattr(state, "recipe_finalize_status", "")
-            or prior.get("status")
-            or ""
-        )
+        prior_status = str(getattr(state, "recipe_finalize_status", "") or prior.get("status") or "")
         if prior_status in {"written", "skipped", "disabled"}:
             return prior
 
@@ -1975,9 +1943,7 @@ class WritebackCollaborator:
             }
 
         raw_status = str(outcome.get("status") or "error")
-        state.recipe_finalize_status = (
-            "failed" if raw_status == "error" else raw_status
-        )
+        state.recipe_finalize_status = "failed" if raw_status == "error" else raw_status
         state.recipe_finalize_outcome = outcome
         try:
             state.save(self.session_dir)
@@ -2004,9 +1970,7 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
-        if bool(
-            getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)
-        ):
+        if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             log.info("Recipe KB finalize skipped (--degraded-kb)")
             return {
                 "status": "skipped",
@@ -2017,16 +1981,38 @@ class WritebackCollaborator:
         from ..knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 
         try:
-            config = (
-                getattr(getattr(self, "knowledge_plane", None), "config", None)
-                or KnowledgeConfig.from_env()
-            )
+            config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
         except Exception as exc:  # noqa: BLE001 - KB remains best-effort
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
             return {
                 "status": "error",
                 "reason": f"configuration:{type(exc).__name__}",
                 "backend": "unknown",
+            }
+        # Every Recipe sink funnels through agentx_kb_write_blocked; see it for
+        # why an agentic measurement must not enter a cross-session store. Placed
+        # ahead of the mode branch because in REMOTE mode _kb_amend_recipe returns
+        # early, which made the write below the only Recipe writer and the one
+        # door that gate could not see.
+        from hyperloom.orchestrator.actions.executors._workload_envs import (
+            agentx_kb_write_blocked,
+        )
+
+        if agentx_kb_write_blocked(self.shared_state):
+            log.info(
+                "Recipe KB finalize skipped (AgentX): the recipe identity has no mode "
+                "or workload dimension, so an agentic-replay result would overwrite a "
+                "synthetic best_throughput and be tagged isl/osl=%s/%s.",
+                getattr(self.shared_state, "isl", "?"),
+                getattr(self.shared_state, "osl", "?"),
+            )
+            # Backend stays as configured: "disabled" here would be
+            # indistinguishable in telemetry from a KB that was actually down,
+            # and reason= already carries why nothing was written.
+            return {
+                "status": "skipped",
+                "reason": "agentx",
+                "backend": str(getattr(config, "mode", "") or "unknown"),
             }
         if config.mode is KnowledgeStoreMode.REMOTE:
             # Remote mode has one Recipe sink: the KB Store final session
@@ -2065,12 +2051,8 @@ class WritebackCollaborator:
                     "status": remote_result.status,
                     "reason": remote_result.reason,
                     "backend": "kb-store",
-                    "canonical_id": str(
-                        getattr(remote_result, "canonical_id", "") or remote_cid
-                    ),
-                    "session_id": str(
-                        getattr(remote_result, "session_id", "") or remote_sid
-                    ),
+                    "canonical_id": str(getattr(remote_result, "canonical_id", "") or remote_cid),
+                    "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
                 }
             except Exception as exc:  # noqa: BLE001 - remote transport is best-effort
                 self._record_remote_recipe_audit(
@@ -2246,8 +2228,15 @@ class WritebackCollaborator:
                     tick=int(getattr(self.shared_state, "tick", 0) or 0),
                     phase=(getattr(self.shared_state, "phase", "") or "") or None,
                 )
-                if scores and scores.get("models"):
+                if scores and (scores.get("models") or scores.get("errors")):
                     round_entry["ensemble_scores"] = scores
+                    input_err = (scores.get("errors") or {}).get("input")
+                    if input_err and not scores.get("models"):
+                        log.warning(
+                            "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
+                            task.task_id,
+                            input_err,
+                        )
             except Exception:  # noqa: BLE001 — advisory; never block
                 log.exception(
                     "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
@@ -2392,9 +2381,7 @@ class WritebackCollaborator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
-        if bool((task.params or {}).get("enablement")) and isinstance(
-            done_payload.get("needs_targeted_build"), dict
-        ):
+        if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             try:
                 await self._maybe_enqueue_specialist_requested_build(
                     task_id=str(task.task_id or ""),
@@ -2546,6 +2533,10 @@ class WritebackCollaborator:
         applied, keyed by ``(action, variant_name)`` or by ``fingerprint``, so a
         rerun of an already-stacked config cannot double-apply it.
 
+        Every args string read here passes through
+        :func:`strip_benchmark_harness_flags`, the previous ``current_best``
+        included since it is re-merged onto the winner.
+
         Args:
             task_kind: The action kind that produced the winner (stamped on the
                 stack entry / current_best).
@@ -2572,17 +2563,19 @@ class WritebackCollaborator:
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
-            base_args = str(previous.get("extra_server_args") or "").strip()
+            base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
         # An authored-kernel overlay stays active until another KEEP replaces it.
         _overlay = str((bv.get("final_overlay") if isinstance(bv, dict) else "") or "").strip()
         if not _overlay and isinstance(previous, dict):
             _overlay = str(previous.get("final_overlay") or "").strip()
         candidate_args = ""
         if isinstance(bv, dict):
-            candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
+            candidate_args = strip_benchmark_harness_flags(
+                bv.get("candidate_extra_server_args") or bv.get("extra_server_args")
+            )
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or "").strip()
+            full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
         controls_effective = bool(
             isinstance(bv, dict)
             and (
@@ -2625,11 +2618,7 @@ class WritebackCollaborator:
             if not already_stacked:
                 source_phase = str(
                     (bv.get("source_phase") if isinstance(bv, dict) else "")
-                    or (
-                        getattr(self.shared_state, "phase", "")
-                        if task_kind != "integrate_patch"
-                        else ""
-                    )
+                    or (getattr(self.shared_state, "phase", "") if task_kind != "integrate_patch" else "")
                     or ""
                 ).strip()
                 stack_entry: dict[str, Any] = {
@@ -2638,6 +2627,10 @@ class WritebackCollaborator:
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+                    # Carry the promoting lane's accuracy verdict onto the stack
+                    # so CLOSE reads one place instead of reconstructing which
+                    # lane promoted the champion. ``None`` means "not gated".
+                    "accuracy": (bv.get("accuracy") if isinstance(bv, dict) else None),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -2669,6 +2662,13 @@ class WritebackCollaborator:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
+                # Carry the authored-kernel names onto the stack entry so
+                # attribution can separate a config gain from a gain measured
+                # with a kernel loaded. Absent on every flags-only variant.
+                if isinstance(bv, dict):
+                    _stack_kernels = [str(k).strip() for k in (bv.get("accepted_kernels") or []) if str(k).strip()]
+                    if _stack_kernels:
+                        stack_entry["accepted_kernels"] = _stack_kernels
                 if isinstance(bv, dict):
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
@@ -2677,7 +2677,7 @@ class WritebackCollaborator:
                         stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
                         stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
-                            str(bv.get("effective_extra_server_args") or "")
+                            strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                         )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
@@ -2702,20 +2702,14 @@ class WritebackCollaborator:
                         val = bv.get(_src_key)
                         if val:
                             stack_entry[_src_key] = str(val)
-                    target_files = [
-                        str(path)
-                        for path in (bv.get("target_files") or [])
-                        if str(path).strip()
-                    ]
+                    target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
                     if target_files:
                         stack_entry["target_files"] = target_files
                     for _attr_key in ("baseline_enablement", "attribution_eligible"):
                         if _attr_key in bv:
                             stack_entry[_attr_key] = bool(bv.get(_attr_key))
                     if "framework_agent_authoring" in bv:
-                        stack_entry["framework_agent_authoring"] = bool(
-                            bv.get("framework_agent_authoring")
-                        )
+                        stack_entry["framework_agent_authoring"] = bool(bv.get("framework_agent_authoring"))
                     for _origin_key in ("domain", "gap_layer"):
                         if bv.get(_origin_key):
                             stack_entry[_origin_key] = str(bv.get(_origin_key))
@@ -2760,7 +2754,7 @@ class WritebackCollaborator:
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
                 current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
-                    str(bv.get("effective_extra_server_args") or "")
+                    strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
                 )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
@@ -2928,12 +2922,7 @@ class WritebackCollaborator:
         anchor_accepted = bool(
             isinstance(tput, (int, float))
             and tput > 0
-            and (
-                prior_anchor <= 0.0
-                or float(tput) > prior_anchor
-                or is_revalidation
-                or corrects_a_cold_anchor
-            )
+            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation or corrects_a_cold_anchor)
         )
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
@@ -2942,8 +2931,7 @@ class WritebackCollaborator:
                 self.shared_state.baseline_tput = float(tput)
             else:
                 log.info(
-                    "baseline anchor: keeping %.1f; re-baseline measured %.1f "
-                    "(task=%s)",
+                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s)",
                     prior_anchor,
                     float(tput),
                     promoting_tid,
@@ -2980,7 +2968,10 @@ class WritebackCollaborator:
                                 from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
                             except ImportError:
                                 _max_stall = 5
-                        if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                        if (
+                            self.shared_state.enablement.stall_streak >= _max_stall
+                            and not self.shared_state.stop_reason
+                        ):
                             self.shared_state.set_stop_reason("enablement_stalled")
                         else:
                             self.shared_state.enablement.inflight_task_id = ""
@@ -3046,9 +3037,7 @@ class WritebackCollaborator:
             # figure, so a resumed session with a fresh clock is not held to the
             # earlier leg's shortfall.
             measure_round_dropped = bool(result.get("measure_round_dropped"))
-            if measure_round_dropped != bool(
-                getattr(self.shared_state, "baseline_measure_round_dropped", False)
-            ):
+            if measure_round_dropped != bool(getattr(self.shared_state, "baseline_measure_round_dropped", False)):
                 self.shared_state.baseline_measure_round_dropped = measure_round_dropped
                 changed = True
             # Promote the cold round's boot/benchmark split. Cleared the same way
@@ -3070,9 +3059,7 @@ class WritebackCollaborator:
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
             self.shared_state.current_best = {
                 "action": "baseline",
-                "tput": (
-                    anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)
-                ),
+                "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
                 "cold_tput": (
                     float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
@@ -3275,15 +3262,12 @@ class WritebackCollaborator:
                     arm=("baseline" if str(task_params.get("reason") or "") == "prelude_initial" else ""),
                 )
             else:
-                self.shared_state.last_profile_workload = (
-                    self.shared_state.current_profile_workload_context()
-                )
+                self.shared_state.last_profile_workload = self.shared_state.current_profile_workload_context()
                 self.shared_state.last_profile_workload_action = str(
                     (self.shared_state.current_best or {}).get("action") or ""
                 )
             self.shared_state.last_profile_args = str(
-                self.shared_state.last_profile_workload.get("server_args")
-                or profile_args
+                self.shared_state.last_profile_workload.get("server_args") or profile_args
             )
             # New trace invalidates the stale trace_analyze cache.
             self.shared_state.last_trace_analyze = {}
@@ -3479,9 +3463,7 @@ class WritebackCollaborator:
                     got_hash = str(best_winner.get("fingerprint") or "")
                 if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
                     got_hash = str(winners[0].get("fingerprint") or "")
-                cb_now = (
-                    self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                )
+                cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                 cb_tput = cb_now.get("tput")
                 decision = _geak_revalidation_decision(
                     measured=measured,
@@ -3491,6 +3473,28 @@ class WritebackCollaborator:
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=cb_tput,
                 )
+                # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
+                # cannot see the overlay drop out between dispatch and launch —
+                # ``run_grid`` skips an overlay whose dir has gone away and logs
+                # a warning, and the run then measures plain flags while the
+                # credit still reads as a kernel win. Re-check the overlay's own
+                # identity here; a miss is inconclusive, not validated.
+                expected_overlay = str((task.params or {}).get("expected_overlay") or "")
+                overlay_loaded = True
+                if expected_overlay:
+                    expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
+                    got_digest = _geak_overlay_digest(expected_overlay)
+                    overlay_loaded = _geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
+                    if not overlay_loaded and decision == "validated":
+                        log.warning(
+                            "geak 2b: overlay %r did not survive the run "
+                            "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
+                            expected_overlay,
+                            _geak_overlay_is_loadable(expected_overlay),
+                            expected_digest,
+                            got_digest,
+                        )
+                        decision = "fallback"
                 ps = (
                     self.shared_state.geak_result
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -3506,9 +3510,7 @@ class WritebackCollaborator:
                 # (let it through); otherwise there is no material to validate.
                 if decision == "validated":
                     stack_now = self.shared_state.optimization_stack or []
-                    has_prior_geak_e2e = any(
-                        isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now
-                    )
+                    has_prior_geak_e2e = any(isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now)
                     # Escape hatch first: a pre-existing geak_e2e stack entry is
                     # an already-proven win, so this is a resume revalidation.
                     # It must short-circuit the material check regardless of
@@ -3528,16 +3530,12 @@ class WritebackCollaborator:
                         ):
                             decision = "no_material"
                 pending = getattr(self.shared_state, "geak_pending", None) or {}
-                pending_tid = (
-                    str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
-                )
+                pending_tid = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
                 from ..phases.geak_rebench import geak_rebench_should_apply_result
 
                 macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
-                if not geak_rebench_should_apply_result(
-                    self.shared_state, task, macro_cycle=macro_cycle
-                ):
+                if not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
                     # The slot either names another task or already carries a
                     # verdict, so this result is orphaned or late. Record it:
                     # silently dropping a measured rebench is hard to diagnose.
@@ -3560,9 +3558,7 @@ class WritebackCollaborator:
                                 "idempotency_key": str(task.idempotency_key or ""),
                                 "pending_task_id": pending_tid,
                                 "pending_status": pending_status,
-                                "measured_tput": (
-                                    float(measured) if isinstance(measured, (int, float)) else None
-                                ),
+                                "measured_tput": (float(measured) if isinstance(measured, (int, float)) else None),
                             },
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
@@ -3574,6 +3570,10 @@ class WritebackCollaborator:
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
+                        provenance="geak_orch_harness_validated",
+                        # Only an overlay that was dispatched AND still matches
+                        # its manifest proves a kernel was in the measurement.
+                        overlay_loaded=bool(expected_overlay) and overlay_loaded,
                     )
                 elif decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
@@ -3593,9 +3593,7 @@ class WritebackCollaborator:
                             {
                                 "kind": "geak_no_material",
                                 "measured_tput": float(measured),
-                                "current_best_tput": (
-                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
-                                ),
+                                "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
                                 "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
                             },
                         )
@@ -3615,9 +3613,7 @@ class WritebackCollaborator:
                         self.phase_kernel._reject_geak_kernel_journey(
                             ps_stamped,
                             measured_tput=float(measured),
-                            current_best_tput=(
-                                float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0
-                            ),
+                            current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
                             provenance="geak_no_material",
                             rejection_reason="geak_no_material_product",
                         )
@@ -3631,8 +3627,7 @@ class WritebackCollaborator:
                     # do not replay via the GEAK harness (2a); clear the pending
                     # candidate without touching the headline / stack / gain.
                     log.info(
-                        "geak 2b rebench did not beat current_best "
-                        "(measured=%r current_best=%r) -> no_promote",
+                        "geak 2b rebench did not beat current_best (measured=%r current_best=%r) -> no_promote",
                         measured,
                         cb_tput,
                     )
@@ -3643,14 +3638,18 @@ class WritebackCollaborator:
                             {
                                 "kind": "geak_no_promote",
                                 "measured_tput": float(measured),
-                                "current_best_tput": (
-                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
-                                ),
+                                "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
                                 "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
                             },
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak no_promote: observation emit failed")
+                    # Persist the closed verdict so a later KERNEL entry does
+                    # not recover stale result.json and re-enqueue this already
+                    # adjudicated candidate (#1240).
+                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
+                    ps_stamped["revalidation_status"] = "no_promote"
+                    self.shared_state.geak_result = ps_stamped
                     self.shared_state.geak_pending = {}
                     self.shared_state.resume_pending_revalidation = False
                 else:
@@ -3668,9 +3667,7 @@ class WritebackCollaborator:
                         # Routed via ``_coord`` so a test / caller that overrides
                         # ``coordinator._validate_geak_via_geak_harness`` still wins
                         # (bare-name delegation resolves it back onto this class).
-                        fallback_result = await self._coord._validate_geak_via_geak_harness(
-                            reason="2b_inconclusive"
-                        )
+                        fallback_result = await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
                     except Exception as exc:  # noqa: BLE001 - defensive
                         log.exception("geak 2a GEAK-harness fallback failed")
                         fallback_result = {
@@ -3718,9 +3715,7 @@ class WritebackCollaborator:
             else:
                 if measured_ok and self.shared_state.baseline_tput > 0:
                     self._update_cumulative_gain_validated(measured)
-                    cb_rec = (
-                        self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                    )
+                    cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                     if (
@@ -3852,51 +3847,24 @@ class WritebackCollaborator:
         prebaseline_enablement = bool(
             kept_flag
             and float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0) <= 0.0
-            and (
-                result.get("enablement")
-                or task_params.get("enablement")
-                or task_params.get("enablement_landing")
-            )
+            and (result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing"))
         )
         lifted = False
         if kept_flag:
-            specialist_task_id = str(
-                result.get("specialist_task_id")
-                or task_params.get("specialist_task_id")
-                or ""
-            )
+            specialist_task_id = str(result.get("specialist_task_id") or task_params.get("specialist_task_id") or "")
             origin_domain = str(
-                task_params.get("domain")
-                or task_params.get("source_domain")
-                or result.get("domain")
-                or ""
+                task_params.get("domain") or task_params.get("source_domain") or result.get("domain") or ""
             ).strip()
-            origin_provenance = str(
-                task_params.get("provenance")
-                or result.get("provenance")
-                or ""
-            ).strip()
+            origin_provenance = str(task_params.get("provenance") or result.get("provenance") or "").strip()
             if origin_domain and not origin_provenance.startswith("specialist:"):
                 origin_provenance = f"specialist:{origin_domain}"
-            source_phase = str(
-                task_params.get("source_phase")
-                or result.get("source_phase")
-                or ""
-            ).strip()
-            gap_canonical_id = str(
-                task_params.get("gap_canonical_id")
-                or result.get("gap_canonical_id")
-                or ""
-            ).strip()
+            source_phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip()
+            gap_canonical_id = str(task_params.get("gap_canonical_id") or result.get("gap_canonical_id") or "").strip()
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                "extra_envs": dict(
-                    result.get("extra_envs_applied")
-                    or result.get("config_changes_applied")
-                    or {}
-                ),
+                "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
                 "tput": float(new_tput),
                 "workspace": result.get("workspace"),
                 "provenance": origin_provenance or "integrate_patch",
@@ -3905,11 +3873,7 @@ class WritebackCollaborator:
                 # and reproducible in the GEAK baseline.
                 "source_snapshot": result.get("source_snapshot") or "",
                 "source_manifest": result.get("source_manifest") or "",
-                "target_files": [
-                    str(path)
-                    for path in (result.get("target_files") or [])
-                    if str(path).strip()
-                ],
+                "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
@@ -3994,11 +3958,7 @@ class WritebackCollaborator:
             "provisional": result.get("provisional"),
         }
         if lifted and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = str(
-                task_params.get("source_phase")
-                or result.get("source_phase")
-                or ""
-            ).strip().upper()
+            owner = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
             if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
                 self._enqueue_agent_keep_outbox(
                     owner=owner,
@@ -4392,9 +4352,7 @@ class WritebackCollaborator:
             "fixes": [],
             "warnings": [],
         }
-        active_inferencex = str(
-            getattr(state, "active_inferencex_path", "") or ""
-        ).strip()
+        active_inferencex = str(getattr(state, "active_inferencex_path", "") or "").strip()
         if active_inferencex:
             if Path(active_inferencex).is_dir():
                 os.environ["INFERENCEX_PATH"] = active_inferencex
@@ -4441,14 +4399,10 @@ class WritebackCollaborator:
             resume_state_durable = False
             log.exception("Coordinator: pre-outbox resume save failed")
             report["warnings"].append({"kind": "resume_pre_outbox_save_failed"})
-        pending_kb_before = len(
-            getattr(state, "kb_stage_outbox", []) or []
-        )
+        pending_kb_before = len(getattr(state, "kb_stage_outbox", []) or [])
         if pending_kb_before and resume_state_durable:
             self._drain_agent_keep_outbox()
-            pending_kb_after = len(
-                getattr(state, "kb_stage_outbox", []) or []
-            )
+            pending_kb_after = len(getattr(state, "kb_stage_outbox", []) or [])
             if pending_kb_after:
                 report["warnings"].append(
                     {
@@ -4524,20 +4478,14 @@ class WritebackCollaborator:
             sid = str(result.get("specialist_task_id") or "")
             if not sid:
                 return False
-            domain = str(
-                result.get("domain") or result.get("source_domain") or ""
-            ).strip()
+            domain = str(result.get("domain") or result.get("source_domain") or "").strip()
             provenance = str(result.get("provenance") or "").strip()
             if domain and not provenance.startswith("specialist:"):
                 provenance = f"specialist:{domain}"
             bv = {
                 "name": sid,
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                "extra_envs": dict(
-                    result.get("extra_envs_applied")
-                    or result.get("config_changes_applied")
-                    or {}
-                ),
+                "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
                 "tput": float(tput),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
@@ -4547,11 +4495,7 @@ class WritebackCollaborator:
                 # the GEAK baseline (no path is left snapshot-less).
                 "source_snapshot": result.get("source_snapshot") or "",
                 "source_manifest": result.get("source_manifest") or "",
-                "target_files": [
-                    str(path)
-                    for path in (result.get("target_files") or [])
-                    if str(path).strip()
-                ],
+                "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
@@ -4829,9 +4773,7 @@ class WritebackCollaborator:
             try:
                 task = await self.tasks.get(task_id)
                 if getattr(task, "state", "") == "running":
-                    await self.tasks.transition(
-                        task_id, "failed", evidence={"failure_class": "resume_interrupted"}
-                    )
+                    await self.tasks.transition(task_id, "failed", evidence={"failure_class": "resume_interrupted"})
                     summary["failed_row"] = True
             except Exception:  # noqa: BLE001 — reclaim backstop still applies
                 log.debug("resume: targeted-build row fail raced for %s", task_id, exc_info=True)
@@ -4875,9 +4817,7 @@ class WritebackCollaborator:
                 return
             if row_state == "cancelled":
                 self._reopen_revalidation_window()
-                report["fixes"].append(
-                    {"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid}
-                )
+                report["fixes"].append({"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid})
                 log.info(
                     "resume: revalidation task %s was cancelled by the run; window left open "
                     "at generation %d without charging the stall streak",
@@ -4889,9 +4829,7 @@ class WritebackCollaborator:
             state.enablement.revalidation_task_id = ""
             state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
             state.enablement.inflight_task_id = ""
-            report["fixes"].append(
-                {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
-            )
+            report["fixes"].append({"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid})
             log.info(
                 "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
                 tracked_tid,
@@ -5030,13 +4968,39 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+        # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
+        # a result carrying an accepted, positive-delta kernel is revalidated
+        # too, so the kernel gets an orchestrator-measured number.
+        ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
+        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
             ps_flags = str(ps_cfg.get("flags") or "").strip()
             ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
             if _ps_extra_flags:
                 ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            # An overlay that cannot load installs nothing: the server launches
+            # as plain baseline and any delta measured against it belongs to the
+            # flags alone. Resolve that BEFORE dispatch so the task never carries
+            # a dead path, and so the row cannot be read as a kernel win.
+            ps_overlay_loadable = _geak_overlay_is_loadable(ps_overlay)
+            if ps_overlay and not ps_overlay_loadable:
+                log.warning(
+                    "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
+                    "revalidating the config WITHOUT the authored kernel",
+                    ps_overlay,
+                )
+                ps_overlay = ""
+            if not (ps_flags or ps_envs or ps_overlay):
+                # The overlay was the only material and it is dead. A rebench
+                # here would measure plain baseline and credit GEAK for the
+                # noise. Hand it to the GEAK harness (2a), which reproduces the
+                # optimized config from result.json and so engages by construction.
+                return {
+                    "skipped": True,
+                    "reason": "geak_overlay_unloadable",
+                    "fallback": "geak_harness",
+                }
             if ps_flags or ps_envs or ps_overlay:
                 # Identity hash uses the SAME (args, envs) contract the grid
                 # executor fingerprints with (overlay is NOT part of the hash,
@@ -5044,11 +5008,21 @@ class WritebackCollaborator:
                 # ran variant's fingerprint by construction, and any executor-side
                 # drop/alter of config is caught downstream.
                 expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
+                # ``expected_cfg_hash`` cannot see the overlay, so carry the
+                # overlay's own identity beside it. The consumer re-checks both
+                # after the run: a dropped or altered overlay then reads as
+                # inconclusive instead of as a validated kernel win.
+                expected_overlay_digest = _geak_overlay_digest(ps_overlay)
+                # Name what ran. Without this the decision row inherits the flag
+                # string as its whole identity and the kernel rides along unnamed.
+                ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
                 params_ps: dict[str, Any] = {
                     "source": "resume_stack_revalidate",
                     "reason": reason,
                     "geak_fallback": True,
                     "expected_cfg_hash": expected_cfg_hash,
+                    "expected_overlay": ps_overlay,
+                    "expected_overlay_digest": expected_overlay_digest,
                     "grid": [
                         {
                             "name": "geak_revalidate",
@@ -5056,13 +5030,15 @@ class WritebackCollaborator:
                             "extra_envs": dict(ps_envs),
                             "overlay_pythonpath": ps_overlay,
                             "provenance": "geak_revalidate",
+                            # Only claim kernels when an overlay is actually
+                            # being loaded; a flags-only rebench carries none.
+                            "accepted_kernels": ps_kernels if ps_overlay else [],
                             "note": "same-harness config-identity revalidation of the geak e2e win",
                         }
                     ],
                     # Revalidation reproduces the whole stack, so its gain is
                     # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-                    "enable_stack_rebench": False,
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
@@ -5076,6 +5052,8 @@ class WritebackCollaborator:
                     kind="explore",
                     params=params_ps,
                     idempotency_key=idempotency_key,
+                    # Without a TTL the row is invisible to ``reclaim_expired_running``.
+                    lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
                 )
                 try:
                     from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -5145,6 +5123,8 @@ class WritebackCollaborator:
             kind="explore",
             params=params,
             idempotency_key="resume-stack-revalidate",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 
@@ -5170,8 +5150,21 @@ class WritebackCollaborator:
             A summary dict describing whether validation succeeded.
         """
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
-        if str(ps.get("status") or "") != "ok":
+        if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        # Overlay identity, captured BEFORE the replay so it can be compared
+        # after. 2a replays GEAK's own launch script, which is why a
+        # ``succeeded`` status proves the *config* engaged -- but the overlay is
+        # a separate artifact on a path in ``result.json``, and it can be gone
+        # or inert by the time the replay runs. Measured over
+        # ``/shared_nfs/hyperloom-claw``: of 64 runs declaring a
+        # ``final_overlay``, 25 name a directory that does not exist and 30 name
+        # one holding no ``sitecustomize.py``. Only 9 can install a kernel. A
+        # non-empty string is therefore not evidence the kernel ran, and using
+        # it as evidence would stamp 55 flag-only measurements as kernel wins.
+        # Same check 2b runs; see ``_geak_overlay_is_loadable``.
+        ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
+        overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -5252,9 +5245,27 @@ class WritebackCollaborator:
                 except Exception:  # noqa: BLE001
                     log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
+            # The replay proves the config engaged. It does not prove the
+            # overlay did: the overlay has to still be loadable, and still be
+            # the same overlay, at the moment the replay ran.
+            overlay_loaded_2a = bool(ps_overlay_2a) and _geak_overlay_is_loadable(ps_overlay_2a)
+            if overlay_loaded_2a and overlay_digest_before:
+                overlay_loaded_2a = _geak_overlay_digest(ps_overlay_2a) == overlay_digest_before
+            if ps_overlay_2a and not overlay_loaded_2a:
+                log.warning(
+                    "geak 2a: overlay %r is not loadable evidence "
+                    "(loadable=%r digest before=%r after=%r) -> gain credited "
+                    "to config, not to a kernel",
+                    ps_overlay_2a,
+                    _geak_overlay_is_loadable(ps_overlay_2a),
+                    overlay_digest_before,
+                    _geak_overlay_digest(ps_overlay_2a),
+                )
             self._promote_geak_from_candidate(
                 ps,
                 measured_tput=measured,
+                provenance="geak_same_harness_geak",
+                overlay_loaded=overlay_loaded_2a,
             )
             base = float(self.shared_state.baseline_tput or 0.0)
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
@@ -5337,8 +5348,7 @@ class WritebackCollaborator:
         if kernel_enabled and not geak_enabled:
             try:
                 collective_required = bool(
-                    collective_integration_pending(state)
-                    or self._collective_required_before_kernel_opt()
+                    collective_integration_pending(state) or self._collective_required_before_kernel_opt()
                 )
             except Exception:  # noqa: BLE001
                 # A malformed collective record must not strand the GEAK

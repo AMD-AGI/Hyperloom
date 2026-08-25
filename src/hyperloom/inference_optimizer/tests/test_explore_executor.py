@@ -2406,21 +2406,14 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch,
 ):
     """When the atom help-text probe is unavailable, ``apply_compatibility_filter`` drops no seed variant."""
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    monkeypatch.delenv("FRAMEWORK", raising=False)
-    # Force the help-text probe to return empty (simulates atom not importable).
-    from hyperloom.orchestrator.actions.executors import (
-        _grid_runner,
-    )
+    # The filter resolves this name in its own module, so patching the
+    # re-export on _grid_runner would leave the real ten-second probe running.
+    from hyperloom.orchestrator.actions.executors import _grid_variant_filter
 
-    monkeypatch.setattr(
-        _grid_runner,
-        "_probe_server_help_text",
-        lambda fw: "",
-    )
+    monkeypatch.setattr(_grid_variant_filter, "_probe_server_help_text", lambda fw: "")
 
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
-    kept, dropped = apply_compatibility_filter(grid)
+    kept, dropped = apply_compatibility_filter(grid, framework="atom", model_path="")
     assert kept == grid, f"compatibility filter dropped seed variants when help-text probe is empty; dropped={dropped}"
 
 
@@ -2468,15 +2461,20 @@ def test_grid_variants_from_payload_carries_removal_controls():
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
     from hyperloom.orchestrator.actions.executors._grid_runner import (
         _on_disk_stderr_tail,
+        _report_errors_summary,
     )
 
-    (tmp_path / "benchmark_stderr.log").write_text(
-        "bench_fps.py: error: unrecognized arguments: --use_cache teacache"
-    )
+    (tmp_path / "benchmark_stderr.log").write_text("bench_fps.py: error: unrecognized arguments: --use_cache teacache")
     tail = _on_disk_stderr_tail(tmp_path)
     assert "unrecognized arguments" in tail
     # Empty dir → empty string (caller keeps its original blank error).
     assert _on_disk_stderr_tail(tmp_path / "nope") == ""
+    assert _report_errors_summary(None) == ""
+    assert _report_errors_summary({"errors": []}) == ""
+    assert (
+        _report_errors_summary({"errors": ["scriptable benchmark script not found for custom_mi355x.sh"]})
+        == "scriptable benchmark script not found for custom_mi355x.sh"
+    )
 
 
 @pytest.mark.asyncio

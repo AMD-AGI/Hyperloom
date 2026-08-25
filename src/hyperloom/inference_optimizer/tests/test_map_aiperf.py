@@ -95,6 +95,59 @@ def test_map_missing_metric_defaults_zero():
     assert r["completed"] == 0
 
 
+def test_noncanonical_reasons_force_the_verdict_false():
+    """The client sees deviations the scenario cannot.
+
+    aiperf has no concept of corpus size, and it stamps a False verdict only
+    when ``--unsafe-override`` actually suppressed a violation -- so a shrunken
+    corpus, or the override forced at the canonical duration, would come back
+    ``submission_valid=True`` on a workload nothing on the leaderboard ran.
+    """
+    export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
+    r = map_aiperf(export, noncanonical_reasons=["entries=50(canonical 393)"])
+    assert r["submission_valid"] is False
+    assert "entries=50(canonical 393)" in r["submission_invalid_reasons"]
+
+
+def test_noncanonical_reasons_append_to_scenario_reasons():
+    export = {
+        "output_token_throughput": {"avg": 10.0},
+        "metadata": {"submission_valid": False, "submission_invalid_reasons": ["unsafe_override"]},
+    }
+    r = map_aiperf(export, noncanonical_reasons=["duration=120s(canonical 3600s)"])
+    assert r["submission_valid"] is False
+    assert r["submission_invalid_reasons"] == ["unsafe_override", "duration=120s(canonical 3600s)"]
+
+
+def test_empty_noncanonical_reasons_leave_the_verdict_alone():
+    """A canonical run must not be demoted by an empty or blank list."""
+    export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
+    for reasons in (None, [], ["", "  "]):
+        r = map_aiperf(export, noncanonical_reasons=reasons)
+        assert r["submission_valid"] is True, reasons
+        assert r["submission_invalid_reasons"] == []
+
+
+def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
+    """The fallback runs on boxes where the package is not importable, i.e.
+    exactly where a silent divergence would go unnoticed."""
+    import importlib.util
+    import sys
+
+    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
+
+    monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
+    spec = importlib.util.spec_from_file_location("_asset_map_aiperf_nc", str(agentx_asset_dir() / "map_aiperf.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
+    assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"]) == map_aiperf(
+        export, noncanonical_reasons=["entries=50"]
+    )
+    assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"])["submission_valid"] is False
+
+
 def test_vendored_asset_fallback_matches_package(monkeypatch):
     """The deployed asset vendors a fallback map_aiperf for when the package is
     not importable; guard it against drifting from the package implementation."""

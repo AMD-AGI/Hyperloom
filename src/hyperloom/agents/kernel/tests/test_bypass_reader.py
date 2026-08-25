@@ -81,15 +81,33 @@ def test_correlation_attribution(tmp_path):
 
 _FALLBACK_TRACE_EVENTS = [
     # Capture-time launch of add_rmsnorm: cpu_op carries Input Dims (shape source).
-    {"cat": "cpu_op", "name": "aiter::add_rmsnorm", "args": {"External id": 100, "Input Dims": [[17, 7168]], "Input type": ["c10::BFloat16"]}},
+    {
+        "cat": "cpu_op",
+        "name": "aiter::add_rmsnorm",
+        "args": {"External id": 100, "Input Dims": [[17, 7168]], "Input type": ["c10::BFloat16"]},
+    },
     {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
-    {"cat": "kernel", "ph": "X", "name": "add_rmsnorm_kernel", "ts": 1000, "dur": 100, "args": {"correlation": 5, "grid": [17, 1, 1], "block": [256, 1, 1]}},
+    {
+        "cat": "kernel",
+        "ph": "X",
+        "name": "add_rmsnorm_kernel",
+        "ts": 1000,
+        "dur": 100,
+        "args": {"correlation": 5, "grid": [17, 1, 1], "block": [256, 1, 1]},
+    },
     # Graph-replay of the SAME kernel: no cpu_op link, grid-less Dispatch Task.
     {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": 6}},
     {"cat": "kernel", "ph": "X", "name": "add_rmsnorm_kernel", "ts": 2000, "dur": 100, "args": {"correlation": 6}},
     # Pure-Triton kernel: no cpu_op, but launch carries grid/block geometry.
     {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "args": {"correlation": 7}},
-    {"cat": "kernel", "ph": "X", "name": "_score_kernel", "ts": 3000, "dur": 100, "args": {"correlation": 7, "grid": [17, 2, 1], "block": [512, 1, 1]}},
+    {
+        "cat": "kernel",
+        "ph": "X",
+        "name": "_score_kernel",
+        "ts": 3000,
+        "dur": 100,
+        "args": {"correlation": 7, "grid": [17, 2, 1], "block": [512, 1, 1]},
+    },
 ]
 
 
@@ -110,10 +128,18 @@ def test_launch_geom_and_backfill_threaded_to_rows(tmp_path):
 
 
 _MULTI_SHAPE_BACKFILL_EVENTS = [
-    {"cat": "cpu_op", "name": "aten::small", "args": {"External id": 1, "Input Dims": [[8, 8]], "Input type": ["c10::BFloat16"]}},
+    {
+        "cat": "cpu_op",
+        "name": "aten::small",
+        "args": {"External id": 1, "Input Dims": [[8, 8]], "Input type": ["c10::BFloat16"]},
+    },
     {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 1, "External id": 1}},
     {"cat": "kernel", "ph": "X", "name": "dyn_kernel", "ts": 1000, "dur": 10, "args": {"correlation": 1}},
-    {"cat": "cpu_op", "name": "aten::large", "args": {"External id": 2, "Input Dims": [[64, 64]], "Input type": ["c10::BFloat16"]}},
+    {
+        "cat": "cpu_op",
+        "name": "aten::large",
+        "args": {"External id": 2, "Input Dims": [[64, 64]], "Input type": ["c10::BFloat16"]},
+    },
     {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 2, "External id": 2}},
     {"cat": "kernel", "ph": "X", "name": "dyn_kernel", "ts": 2000, "dur": 100, "args": {"correlation": 2}},
 ]
@@ -293,6 +319,23 @@ def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
     d = tmp_path / "torch_trace"
     main = _write_main_tp_trace(d)
     _write_capture_fragment(d, 256)  # writes bs_256_rank0.json.gz at top level
+    resolved = reader.resolve_trace_file(d)
+    assert resolved is not None and resolved.name == main.name
+
+
+def test_unpatched_sglang_capture_dir_is_deprioritized(tmp_path):
+    # Both routes now share one classifier, so the bypass reader also knows the
+    # SGLang-without-profiler-patch layout: a ``graph_capture_profile/`` holding
+    # ``cuda_graph_capture-*``. The reader's own copy of the rule only knew
+    # ``bs_<n>_rank<n>`` / ``capture_traces/`` and took the sidecar as a trace.
+    d = tmp_path / "torch_trace"
+    main = _write_main_tp_trace(d)
+    cap_dir = d / "graph_capture_profile"
+    cap_dir.mkdir(parents=True, exist_ok=True)
+    _write_capture_fragment(cap_dir, 512)
+    (cap_dir / "cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz").write_bytes(
+        (cap_dir / "bs_512_rank0.json.gz").read_bytes()
+    )
     resolved = reader.resolve_trace_file(d)
     assert resolved is not None and resolved.name == main.name
 
@@ -578,10 +621,7 @@ def test_bad_gzip_records_error_without_raising():
 
 def test_trace_events_null_does_not_capture_a_later_array():
     """A non-array traceEvents value must not redirect parsing elsewhere."""
-    payload = (
-        b'{"traceEvents": null, "other": '
-        b'[{"cat": "kernel", "name": "wrong-array"}]}'
-    )
+    payload = b'{"traceEvents": null, "other": [{"cat": "kernel", "name": "wrong-array"}]}'
     errors: list[str] = []
     assert list(reader.stream_events(io.BytesIO(payload), bufsize=16, errors=errors)) == []
     assert errors == ["traceEvents value is not an array"]
@@ -590,9 +630,7 @@ def test_trace_events_null_does_not_capture_a_later_array():
 def test_trace_events_text_value_before_key_is_ignored():
     """A string value named traceEvents must not shadow the real member."""
     good = {"cat": "kernel", "name": "real-array"}
-    payload = json.dumps(
-        {"label": "traceEvents", "traceEvents": [good]}
-    ).encode("utf-8")
+    payload = json.dumps({"label": "traceEvents", "traceEvents": [good]}).encode("utf-8")
     errors: list[str] = []
     assert list(reader.stream_events(io.BytesIO(payload), bufsize=9, errors=errors)) == [good]
     assert errors == []
@@ -622,11 +660,7 @@ def test_utf8_character_split_across_chunks_is_preserved():
 def test_complete_malformed_object_resyncs_to_later_event():
     """A balanced bad object must not hide a later valid event."""
     good = {"cat": "kernel", "name": "recovered"}
-    payload = (
-        b'{"traceEvents": [{"cat": "kernel", "name": invalid},'
-        + json.dumps(good).encode("utf-8")
-        + b"]}"
-    )
+    payload = b'{"traceEvents": [{"cat": "kernel", "name": invalid},' + json.dumps(good).encode("utf-8") + b"]}"
     errors: list[str] = []
     events = list(reader.stream_events(io.BytesIO(payload), bufsize=11, errors=errors))
     assert events == [good]

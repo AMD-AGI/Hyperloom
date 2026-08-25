@@ -41,8 +41,7 @@ def bmc():
 class FakeIpmi:
     """Records every ipmitool invocation and answers from a scripted table."""
 
-    def __init__(self, *, enabled_after_revoke=False, initially_enabled=False,
-                 fail=(), unreadable_status=False):
+    def __init__(self, *, enabled_after_revoke=False, initially_enabled=False, fail=(), unreadable_status=False):
         self.calls: list[list[str]] = []
         self.fail = set(fail)
         self.initially_enabled = initially_enabled
@@ -76,6 +75,7 @@ class FakeIpmi:
 
 
 # ------------------------------------------------------- account lifecycle
+
 
 def test_revocation_runs_even_when_the_password_step_fails(bmc, monkeypatch):
     """The slot must be claimed before any mutation.
@@ -146,7 +146,7 @@ def test_stale_enabled_sentinel_is_recorded_not_just_printed(bmc, monkeypatch):
 
 
 def test_unreadable_final_state_is_not_treated_as_revoked(bmc, monkeypatch):
-    """"Could not read" must never be recorded as "confirmed disabled".
+    """ "Could not read" must never be recorded as "confirmed disabled".
 
     Collapsing an unreadable state into "not enabled" would hand back a false
     confirmation for any BMC that errors or times out -- at the exact point the
@@ -223,6 +223,7 @@ def test_signal_handlers_allow_the_context_manager_to_unwind(bmc, monkeypatch):
 
 # ------------------------------------------------------- main(): exit contract
 
+
 @pytest.fixture
 def audit_main(bmc, monkeypatch):
     """Run ``main()`` with everything off-box stubbed out.
@@ -273,9 +274,7 @@ def test_no_bmc_access_is_unresolved_not_success(audit_main, bmc, monkeypatch, c
     "revoke_fails,expected",
     [(False, "EXIT_UNKNOWN"), (True, "EXIT_CREDENTIAL")],
 )
-def test_a_signal_mid_audit_produces_an_exit_code_not_a_traceback(
-    audit_main, bmc, monkeypatch, revoke_fails, expected
-):
+def test_a_signal_mid_audit_produces_an_exit_code_not_a_traceback(audit_main, bmc, monkeypatch, revoke_fails, expected):
     """SIGTERM is the case the signal handler exists for, so it must be reported.
 
     The handler raises KeyboardInterrupt to unwind the ``with``; letting that
@@ -308,9 +307,7 @@ def test_minting_an_account_requires_an_explicit_opt_in(audit_main, bmc, monkeyp
     assert "--allow-account-creation" in capsys.readouterr().err
 
 
-def test_ipmitool_is_required_to_mint_even_with_an_explicit_host(
-    audit_main, bmc, monkeypatch, capsys
-):
+def test_ipmitool_is_required_to_mint_even_with_an_explicit_host(audit_main, bmc, monkeypatch, capsys):
     """--bmc-host removes the need to discover the address, not to mint."""
     monkeypatch.setattr(bmc, "ipmitool_present", lambda: False)
 
@@ -325,6 +322,7 @@ def test_ipmitool_is_required_to_mint_even_with_an_explicit_host(
 
 # ------------------------------------------------------- verdicts / matching
 
+
 def test_verdict_is_exact_after_normalization(bmc):
     assert bmc.verdict("df_cstates", "Disabled") == "PASS"
     assert bmc.verdict("df_cstates", "Enabled") == "FAIL"
@@ -337,10 +335,10 @@ def test_verdict_is_exact_after_normalization(bmc):
 @pytest.mark.parametrize(
     "name,blocked",
     [
-        ("SevControl", True),        # CamelCase: no trailing word boundary
-        ("SEV_SNP_Support", True),   # SCREAMING_CASE
+        ("SevControl", True),  # CamelCase: no trailing word boundary
+        ("SEV_SNP_Support", True),  # SCREAMING_CASE
         ("Sev", True),
-        ("SeverityLevel", False),    # merely contains the letters
+        ("SeverityLevel", False),  # merely contains the letters
         ("DfCState", False),
     ],
 )

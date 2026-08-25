@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``run_grid``: pulse matrix, ``keep_going_on_failure``
-asymmetry, and auto-warmup teardown timing."""
+"""Behavior-lock tests for ``run_grid``: variant-boundary progress,
+``keep_going_on_failure`` asymmetry, and auto-warmup teardown timing."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 from hyperloom.orchestrator.actions.executors import (
@@ -27,9 +26,6 @@ from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
-)
-from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-    ORCHESTRATOR_CANCELLED_RETURNCODE,
 )
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
@@ -107,33 +103,25 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Robustness-pulse matrix
+# Variant-boundary progress matrix
 # ---------------------------------------------------------------------------
 
 
-def _run_with_pulse_capture(
+def _run_capturing_variant_notes(
     *,
     multi_node,
     run_side_effect,
     base,
     out,
     restart=None,
-    keep_going=True,
     grid_n=1,
-    scope=None,
     notes=None,
 ):
-    pulse_calls: list = []
-
-    async def fake_pulse(**kwargs):
-        pulse_calls.append(kwargs)
-
     async def collect(**note):
         notes.append(note)
 
     with ExitStack() as st:
         st.enter_context(patch.object(mne, "is_multi_node", lambda: multi_node))
-        st.enter_context(patch.object(gr, "_robustness_pulse", side_effect=fake_pulse))
         st.enter_context(
             patch(
                 "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
@@ -142,11 +130,6 @@ def _run_with_pulse_capture(
         )
         if restart is not None:
             st.enter_context(patch.object(mnsl, "restart_server_for_round", restart))
-        # Entered outside ``asyncio.run`` on purpose: a task copies the context
-        # at creation, which is how the dispatcher's scope reaches the action it
-        # publishes it for.
-        if scope is not None:
-            st.enter_context(use_cancel_scope(scope))
         if notes is not None:
             st.enter_context(progress_scope(collect))
         grid = [GridVariant(name=f"c{i}") for i in range(grid_n)]
@@ -159,16 +142,16 @@ def _run_with_pulse_capture(
                 magpie_python=sys.executable,
                 variant_timeout_sec=10,
                 gpu_type="mi300x",
-                keep_going_on_failure=keep_going,
+                keep_going_on_failure=True,
             )
         )
-    return results, pulse_calls
+    return results, notes
 
 
-class TestPulseMatrix:
-    """``_pulse_after_variant`` (progress note plus ``_robustness_pulse``) fires
-    on every variant outcome, including the multi-node
-    ``mn_server_restart_failed`` path that used to leave before reaching it."""
+class TestVariantBoundaryReportsEveryOutcome:
+    """``_report_finished_variant`` fires on every variant outcome, including
+    the multi-node ``mn_server_restart_failed`` path that used to leave before
+    reaching it."""
 
     def test_mn_server_restart_failed_reaches_the_variant_boundary(self, tmp_path, monkeypatch):
         """A variant whose remote server never came back still ends its own row.
@@ -187,7 +170,7 @@ class TestPulseMatrix:
         async def _restart_fail(**_kwargs):
             raise mnsl.ServerRestartFailed("server /health did not return 200")
 
-        results, pulse_calls = _run_with_pulse_capture(
+        results, _ = _run_capturing_variant_notes(
             multi_node=True,
             run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
             base=base,
@@ -199,7 +182,6 @@ class TestPulseMatrix:
         assert results[0].error_class == "mn_server_restart_failed"
         landed = [(n["label"], n["index"], n["status"]) for n in notes if n["unit"] == "variant"]
         assert landed == [("c0", 1, "failed")]
-        assert [call["tick_index"] for call in pulse_calls] == [0]
 
     def test_mn_server_restart_failed_reports_each_variant_it_ends(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
@@ -210,7 +192,7 @@ class TestPulseMatrix:
         async def _restart_fail(**_kwargs):
             raise mnsl.ServerRestartFailed("health probe timed out")
 
-        results, pulse_calls = _run_with_pulse_capture(
+        results, _ = _run_capturing_variant_notes(
             multi_node=True,
             run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
             base=base,
@@ -226,168 +208,6 @@ class TestPulseMatrix:
         # Each variant is named by its own row, not by the tail of the batch.
         landed = [(n["label"], n["index"]) for n in notes if n["unit"] == "variant"]
         assert landed == [("c0", 1), ("c1", 2)]
-        assert [call["tick_index"] for call in pulse_calls] == [0, 1]
-
-    def test_no_benchmark_workspace_failure_pulses(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        results, pulse_calls = _run_with_pulse_capture(
-            multi_node=False,
-            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
-            base=base,
-            out=tmp_path / "out",
-        )
-        assert results[0].error_class == "no_benchmark_workspace"
-        assert len(pulse_calls) == 1
-        assert pulse_calls[0]["tick_index"] == 0
-
-    def test_yaml_build_error_failure_pulses(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-        pulse_calls: list = []
-
-        async def fake_pulse(**kwargs):
-            pulse_calls.append(kwargs)
-
-        with (
-            patch.object(gr, "_robustness_pulse", side_effect=fake_pulse),
-            patch.object(gr, "_build_variant_yaml", side_effect=ValueError("bad yaml render")),
-        ):
-            results = asyncio.run(
-                run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
-                    grid=[GridVariant(name="c0")],
-                    output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    variant_timeout_sec=10,
-                    gpu_type="mi300x",
-                )
-            )
-        assert results[0].error_class == "yaml_build_error"
-        assert len(pulse_calls) == 1
-
-    def test_capability_unsupported_failure_pulses(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-        pulse_calls: list = []
-
-        async def fake_pulse(**kwargs):
-            pulse_calls.append(kwargs)
-
-        # Force the capability fast-fail branch without needing a real vLLM build.
-        with (
-            patch.object(gr, "_robustness_pulse", side_effect=fake_pulse),
-            patch.object(gr, "unsupported_capability_reason", lambda _v: "aiter fusion shared-experts unsupported"),
-        ):
-            results = asyncio.run(
-                run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
-                    grid=[GridVariant(name="c0")],
-                    output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    variant_timeout_sec=10,
-                    gpu_type="mi300x",
-                )
-            )
-        assert results[0].error_class == "capability_unsupported"
-        assert len(pulse_calls) == 1
-
-    def test_succeeded_variant_pulses(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        def _ok(cmd, *a, **k):
-            out_idx = cmd.index("--output-dir")
-            _valid_workspace(Path(cmd[out_idx + 1]))
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-        results, pulse_calls = _run_with_pulse_capture(
-            multi_node=False,
-            run_side_effect=_ok,
-            base=base,
-            out=tmp_path / "out",
-        )
-        assert results[0].status == "succeeded"
-        assert len(pulse_calls) == 1
-
-
-class TestThePulseStaysOutOfACancelledActionsUnwind:
-    """A cancel is answered by unwinding, not by observing what was cancelled.
-
-    A cooperative stop *returns* its sentinel, so ``run_grid`` walks its ordinary
-    stop path and would spend the pulse's whole budget between recording the row
-    and releasing the lease -- serially, inside the window the dispatcher gives
-    the action to finish. That window is derived from the terms of the unwind and
-    this is not one of them, so the pulse is skipped rather than budgeted for:
-    eight seconds of observing a tree the orchestrator just reaped is what the
-    rows already built are traded away for when the window expires.
-
-    The gate is the cancel scope and not the sentinel returncode, because a
-    variant can be failing for its own reasons when the cancel lands -- its row
-    is a genuine failure and its pulse would run in the same window.
-    """
-
-    def _cancelled_scope(self) -> CancelScope:
-        scope = CancelScope()
-        scope.cancel(reason="session_time_exhausted")
-        return scope
-
-    def test_the_round_the_run_stopped_is_not_pulsed(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        results, pulse_calls = _run_with_pulse_capture(
-            multi_node=False,
-            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(
-                cmd, ORCHESTRATOR_CANCELLED_RETURNCODE, "", ""
-            ),
-            base=base,
-            out=tmp_path / "out",
-            scope=self._cancelled_scope(),
-        )
-        assert results[0].status == "skipped"
-        assert results[0].error_class == "orchestrator_cancelled"
-        assert pulse_calls == [], "the pulse must not run inside the cancel window"
-
-    def test_a_variant_failing_on_its_own_when_the_cancel_lands_is_not_pulsed(self, tmp_path, monkeypatch):
-        """The row is a real failure; the eight seconds are still not affordable."""
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        results, pulse_calls = _run_with_pulse_capture(
-            multi_node=False,
-            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
-            base=base,
-            out=tmp_path / "out",
-            scope=self._cancelled_scope(),
-        )
-        assert results[0].error_class == "no_benchmark_workspace"
-        assert pulse_calls == []
-
-    def test_a_variant_that_failed_under_a_live_scope_is_still_pulsed(self, tmp_path, monkeypatch):
-        """Only a cancel silences the tick, so #1177's terminal-row tick survives."""
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        results, pulse_calls = _run_with_pulse_capture(
-            multi_node=False,
-            run_side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "stdout", "boom"),
-            base=base,
-            out=tmp_path / "out",
-            scope=CancelScope(),
-        )
-        assert results[0].error_class == "no_benchmark_workspace"
-        assert len(pulse_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +284,42 @@ class TestKeepGoingAsymmetry:
         assert len(results) == 1
         assert results[0].error_class == "magpie_nonzero_invalid_measurement"
         assert results[0].returncode == 1
+
+    def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
+        """Last-resort: empty pipe and no log files, diagnostic only in report.errors.
+
+        The live scriptable miss writes ``scriptable_stderr.log`` (then aliased
+        to ``benchmark_stderr.log``), so the on-disk log fallback fires first.
+        This fixture is the remaining contract: abort_reason.json still gets
+        ``error`` when nothing on disk exists except the report.
+        """
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _blank_rc2(cmd, *a, **k):
+            out_idx = cmd.index("--output-dir")
+            slot = Path(cmd[out_idx + 1])
+            ws = slot / "benchmark_sglang_20260101_000000"
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "benchmark_report.json").write_text(
+                json.dumps(
+                    {
+                        "success": False,
+                        "framework": "sglang",
+                        "errors": ["scriptable benchmark script not found for custom_mi355x.sh"],
+                    }
+                )
+            )
+            return subprocess.CompletedProcess(cmd, 2, "", "")
+
+        results = self._run(_blank_rc2, base, tmp_path / "out")
+        assert len(results) == 1
+        assert results[0].error_class == "magpie_nonzero_invalid_measurement"
+        assert "custom_mi355x.sh" in (results[0].error or "")
+        marker_path = next((tmp_path / "out").glob("variant_*/abort_reason.json"))
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert "custom_mi355x.sh" in marker["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -618,9 +474,7 @@ class TestResolveMnEffectiveServerArgs:
     def _base(self, tmp_path: Path, *, args: str = "--tp 8") -> Path:
         base = tmp_path / "base.yaml"
         base.write_text(
-            yaml.safe_dump(
-                {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": args}}}
-            ),
+            yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": args}}}),
             encoding="utf-8",
         )
         return base
@@ -653,9 +507,7 @@ class TestResolveMnEffectiveServerArgs:
         cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}), encoding="utf-8")
         variant = GridVariant(name="v1")
 
-        out = gr._resolve_mn_effective_server_args(
-            cfg, base, variant, base_extra_args="", base_args_mode="append"
-        )
+        out = gr._resolve_mn_effective_server_args(cfg, base, variant, base_extra_args="", base_args_mode="append")
         assert out == ""
 
     def test_falls_back_to_base_compose_when_variant_missing(self, tmp_path):
@@ -706,12 +558,8 @@ class TestVariantHeartbeat:
         async def _collect(**note):
             notes.append(note)
 
-        async def _no_pulse(**_kwargs):
-            return None
-
         with (
             progress_scope(sink or _collect),
-            patch.object(gr, "_robustness_pulse", side_effect=_no_pulse),
             patch(
                 "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
                 side_effect=run_side_effect,

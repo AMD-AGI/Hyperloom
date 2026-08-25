@@ -464,6 +464,9 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         stop_reason="",
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
+        # At least one specialist round this cycle, required for skip_to_kernel
+        # to fire at all (see test_exit_normal_explore_skip_to_kernel_*).
+        specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
     out = phase_state.compute_next_phase(state, kernel_enabled=False)
@@ -472,6 +475,55 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     assert next_phase == "SWEEP"
     assert reason == "no_kernel_skipped"
     assert evidence.get("passed_through_reason") == "plateau_explore"
+
+
+def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
+    """A skip_to_kernel hint must not end EXPLORE with zero validated work.
+
+    Reproduces the cumulative_gain_validated=0.00% session: the hint arrived
+    before EXPLORE ever dispatched a specialist round this cycle, and must not
+    be honored until one actually has.
+    """
+    state = SimpleNamespace(
+        phase="EXPLORE",
+        phase_started_unix=1_000_000.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        pending_escalate_hint="skip_to_kernel",
+        explore_search={},
+        specialist_rounds=[],
+        macro_cycle=0,
+        optimization_stack=[{"action": "explore"}],
+        _now_unix=lambda: 1_000_000.0,
+    )
+    out = phase_state.exit_normal_explore(
+        state,
+        force_exit_budget_pct=0.0,
+    )
+    assert out is None
+
+
+def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
+    state = SimpleNamespace(
+        phase="EXPLORE",
+        phase_started_unix=1_000_000.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        pending_escalate_hint="skip_to_kernel",
+        explore_search={},
+        specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
+        macro_cycle=0,
+        optimization_stack=[{"action": "explore"}],
+        _now_unix=lambda: 1_000_000.0,
+    )
+    out = phase_state.exit_normal_explore(
+        state,
+        force_exit_budget_pct=0.0,
+    )
+    assert out is not None
+    reason, evidence = out
+    assert reason == "plateau_explore"
+    assert evidence.get("hint") == "skip_to_kernel"
 
 
 def test_compute_next_phase_terminal_overrides_phase():
@@ -735,7 +787,7 @@ def test_policy_gate_denies_kernel_request_in_explore():
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "kernel_opt",
+            "kind": "run_optimization",
             "params": {},
         },
     )
@@ -775,32 +827,67 @@ def test_policy_gate_gates_apply_patch_alias_like_integrate():
     assert _rule_for("apply_patch") == "phase_incompatible"
 
 
-def test_policy_gate_does_not_widen_explore_for_kernel_request():
-    """EXPLORE no longer widens to kernel_agent-owned kinds."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="EXPLORE",
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
+def test_policy_gate_phase_matrix_over_every_kernel_request_kind():
+    """Every wire kind that maps to an owned action gates on that action.
+
+    The prompt mandates the wire kind (``run_optimization``), while
+    ``PHASE_ALLOWED_ACTIONS`` is keyed by the action name (``kernel_opt``), so
+    this walks the real handler table rather than a hand-written list.
+    """
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        REQUEST_KIND_TO_OWNED_ACTION,
     )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
+
+    for kind, action in REQUEST_KIND_TO_OWNED_ACTION.items():
+        for phase in phase_state.PHASE_NAMES:
+            state = SharedState()
+            state.record_phase_transition(
+                to_phase=phase,
+                reason="phase_entered",
+                evidence={},
+                ts="2026-05-19T00:00:00+00:00",
+                ts_unix=1.0,
+            )
+            gate = PolicyGate(
+                role_registry=_make_role_registry(),
+                shared_state=state,
+                strict_phase=True,
+            )
+            intent = Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": kind,
+                    "params": {},
+                },
+            )
+            allowed = action in phase_state.PHASE_ALLOWED_ACTIONS[phase]
+            if allowed:
+                gate.validate_intent("orchestration", intent)
+            else:
+                with pytest.raises(PolicyDenied) as excinfo:
+                    gate.validate_intent("orchestration", intent)
+                assert excinfo.value.rule == "phase_incompatible", (kind, phase)
+
+
+def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
+    """A new handler kind cannot arrive silently ungated."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
+        REQUEST_KIND_TO_OWNED_ACTION,
     )
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "kernel_opt",
-            "params": {},
-        },
+    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+
+    # trace_analyze has no owning action and no phase membership, so there is
+    # nothing to gate it against; it is refreshed on demand from any phase.
+    exempt = {"trace_analyze"}
+    ungated = (
+        set(KERNEL_REQUEST_HANDLERS)
+        - set(REQUEST_KIND_TO_OWNED_ACTION)
+        - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+        - exempt
     )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
+    assert ungated == set(), f"request kinds reach no phase gate: {sorted(ungated)}"
 
 
 def test_policy_gate_does_not_widen_kernel_for_explore_propose():

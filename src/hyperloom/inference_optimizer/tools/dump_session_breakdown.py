@@ -136,11 +136,7 @@ def _summary_line(breakdown: dict) -> str:
     sess = breakdown.get("session") or {}
     final = breakdown.get("final") or {}
     optimization_entries = (breakdown.get("optimizations") or {}).get("entries") or []
-    geak_n = sum(
-        1
-        for entry in optimization_entries
-        if isinstance(entry, dict) and entry.get("backend") == "geak"
-    )
+    geak_n = sum(1 for entry in optimization_entries if isinstance(entry, dict) and entry.get("backend") == "geak")
     lifecycle = breakdown.get("kernel_lifecycle") or {}
     sweep = breakdown.get("sweep") or {}
     warnings = breakdown.get("warnings") or []

@@ -19,13 +19,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .patch_lifecycle import (
+    finalize_settled as patch_finalize_settled,
+    lifecycle_complete as patch_lifecycle_complete,
+)
+
 
 #: Manifest states an interrupted apply can still be resumed from.
 _RESUMABLE_MANIFEST_STATES = frozenset({"applied"})
 #: Manifest states that are terminal but not resumable, so they get reverted.
-_REVERTIBLE_MANIFEST_STATES = frozenset(
-    {"applied", "failed", "prepared", "reverted_partial"}
-)
+_REVERTIBLE_MANIFEST_STATES = frozenset({"applied", "failed", "prepared", "reverted_partial"})
 _FINALIZED_MANIFEST_STATES = frozenset({"finalized", "finalized_partial"})
 _REVERTED_MANIFEST_STATES = frozenset({"reverted", "reverted_partial"})
 
@@ -52,11 +55,6 @@ class RecoveredApply(NamedTuple):
     preapplied: dict[str, Any] | None
     integ: dict[str, Any] | None
     uncertain: bool
-
-
-def patch_lifecycle_complete(result: Any) -> bool:
-    """Return whether patch cleanup reached a terminal state."""
-    return isinstance(result, dict) and result.get("status") in {"ok", "partial"}
 
 
 def load_apply_checkpoint(
@@ -116,10 +114,7 @@ def validate_integration_inputs(result: dict, state: Any) -> IntegrationInputs:
     if raw_envs is not None:
         if not isinstance(raw_envs, Mapping):
             raise ValueError("current_best.extra_envs must be a mapping")
-        if any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in raw_envs.items()
-        ):
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in raw_envs.items()):
             raise ValueError("current_best.extra_envs must contain strings")
         extra_envs = dict(raw_envs)
     return IntegrationInputs(
@@ -159,11 +154,15 @@ def _read_recovery_source(
         try:
             recovered, status = load_apply_checkpoint(checkpoint, backup_root)
         except Exception as exc:  # noqa: BLE001 - any read fault parks the lane
-            return None, "", _needs_review(
-                "collective_apply_checkpoint_invalid",
-                repr(exc),
-                patch,
-                target_file,
+            return (
+                None,
+                "",
+                _needs_review(
+                    "collective_apply_checkpoint_invalid",
+                    repr(exc),
+                    patch,
+                    target_file,
+                ),
             )
         return recovered, status, None
     if not backup_root.is_dir():
@@ -172,22 +171,30 @@ def _read_recovery_source(
     if not manifests:
         return None, "", None
     if len(manifests) > 1:
-        return None, "", _needs_review(
-            "collective_apply_manifest_ambiguous",
-            f"Collective recovery found multiple apply manifests under {backup_root}",
-            patch,
-            target_file,
+        return (
+            None,
+            "",
+            _needs_review(
+                "collective_apply_manifest_ambiguous",
+                f"Collective recovery found multiple apply manifests under {backup_root}",
+                patch,
+                target_file,
+            ),
         )
     try:
         manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ValueError("Collective apply manifest must be a mapping")
     except Exception as exc:  # noqa: BLE001 - any read fault parks the lane
-        return None, "", _needs_review(
-            "collective_apply_checkpoint_invalid",
-            repr(exc),
-            patch,
-            target_file,
+        return (
+            None,
+            "",
+            _needs_review(
+                "collective_apply_checkpoint_invalid",
+                repr(exc),
+                patch,
+                target_file,
+            ),
         )
     # The manifest's own status is the only evidence here; stamping an
     # apply_result "ok" over it would report an outcome nothing measured.
@@ -208,9 +215,9 @@ async def recover_apply_state(
 ) -> RecoveredApply:
     """Decide how an interrupted collective apply should continue.
 
-    ``result['integration_recovery_action']`` records what the previous session
-    still owed, so a resumed run replays that step rather than re-deriving it
-    from the manifest alone.
+    ``result['patch_cleanup_action']`` (or legacy ``integration_recovery_action``)
+    records what the previous session still owed, so a resumed run replays that
+    step rather than re-deriving it from the manifest.
     """
     from .request_handlers import (
         _maybe_finalize_kernel_patch,
@@ -228,7 +235,7 @@ async def recover_apply_state(
     if recovered is None:
         return RecoveredApply(None, None, False)
 
-    recovery_action = str(result.get("integration_recovery_action") or "").strip()
+    recovery_action = str(result.get("patch_cleanup_action") or result.get("integration_recovery_action") or "").strip()
 
     if recovery_action == "revert":
         if manifest_status in _REVERTED_MANIFEST_STATES:
@@ -263,16 +270,19 @@ async def recover_apply_state(
     )
     if resumable_finalize:
         if manifest_status in _FINALIZED_MANIFEST_STATES:
+            # Terminal manifest: finalize already ran and cannot run again, so
+            # the cleanup it owed is closed even on a partial sweep.
             finalize_result = {
                 "status": "ok" if manifest_status == "finalized" else "partial",
                 "reason": "manifest already finalized",
+                "settled": True,
             }
         else:
             finalize_result = await asyncio.to_thread(
                 _maybe_finalize_kernel_patch,
                 recovered,
             )
-        finalize_complete = patch_lifecycle_complete(finalize_result)
+        finalize_complete = patch_finalize_settled(finalize_result)
         return RecoveredApply(
             None,
             {
@@ -287,21 +297,15 @@ async def recover_apply_state(
                 "target_file": target_file,
                 "apply_result": recovered,
                 "finalize_result": finalize_result,
-                "integration_status": (
-                    "complete" if finalize_complete else "recovery_required"
-                ),
-                "integration_recovery_action": (
-                    "" if finalize_complete else "finalize"
-                ),
+                "patch_cleanup_status": ("complete" if finalize_complete else "recovery_required"),
+                "patch_cleanup_action": ("" if finalize_complete else "finalize"),
             },
             False,
         )
 
     # Two state machines meet here: a checkpoint carries the applier's own
     # apply_result ("ok"), a lone manifest carries only the manifest state.
-    if manifest_status in _RESUMABLE_MANIFEST_STATES and str(
-        recovered.get("status") or ""
-    ) in {"ok", manifest_status}:
+    if manifest_status in _RESUMABLE_MANIFEST_STATES and str(recovered.get("status") or "") in {"ok", manifest_status}:
         return RecoveredApply(recovered, None, False)
 
     if manifest_status == "reverted":
@@ -334,10 +338,7 @@ async def recover_apply_state(
                 "status": "failed",
                 "decision": "REVERT",
                 "error_class": "collective_apply_not_resumable",
-                "error": (
-                    "Collective apply manifest is not resumable: "
-                    f"{manifest_status or 'unknown'}"
-                ),
+                "error": (f"Collective apply manifest is not resumable: {manifest_status or 'unknown'}"),
                 "patch_path": patch,
                 "target_file": target_file,
                 "apply_result": recovered,
@@ -348,10 +349,7 @@ async def recover_apply_state(
 
     integ = _needs_review(
         "collective_apply_not_resumable",
-        (
-            "Collective apply manifest has unsupported state: "
-            f"{manifest_status or 'unknown'}"
-        ),
+        (f"Collective apply manifest has unsupported state: {manifest_status or 'unknown'}"),
         patch,
         target_file,
     )
@@ -363,6 +361,7 @@ __all__ = [
     "IntegrationInputs",
     "RecoveredApply",
     "load_apply_checkpoint",
+    "patch_finalize_settled",
     "patch_lifecycle_complete",
     "recover_apply_state",
     "validate_integration_inputs",

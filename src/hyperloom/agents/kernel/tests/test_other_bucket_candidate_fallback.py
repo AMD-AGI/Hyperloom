@@ -421,3 +421,146 @@ def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
     # Triton .py under a reusable root -> routable to GEAK.
     assert item["source_type"] == "triton"
     assert item["reusable_native_kernel"] is True, item.get("skip_reason")
+
+
+# ---------------------------------------------------------------------------
+# gpu_pct basis — the denominator must match what parse_analysis_md reports
+# ---------------------------------------------------------------------------
+
+
+def test_recover_normalizes_gpu_pct_against_trace_window(tmp_path):
+    """With the trace wall span known, gpu_pct is an end-to-end share.
+
+    ``ops_summary.csv`` percentages are a share of total *op* time, which
+    excludes collectives. On a comm-dominated trace that inflates them by an
+    order of magnitude relative to the analysis.md candidates they get ranked
+    against, so the window total wins when it is available.
+    """
+    _write(
+        tmp_path / "ops_summary.csv",
+        _ops_summary_csv("fused_moe_kernel,other,121.821899\naten::mm,GEMM,48.708459\n"),
+    )
+    recovered = tla.recover_other_bucket_candidates(
+        tmp_path,
+        [{"name": "aten::mm"}],
+        top_k=10,
+        # 18186.60 ms window against 121.82 ms of kernel -> 0.67% e2e.
+        total_window_us=18186603.0,
+        min_gpu_pct=0.5,
+    )
+    assert [c["name"] for c in recovered] == ["fused_moe_kernel"]
+    assert recovered[0]["gpu_pct"] == pytest.approx(0.67, abs=1e-2)
+    assert recovered[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_E2E
+
+
+def test_admission_is_unchanged_by_the_reporting_basis(tmp_path):
+    """GLM-5.2: 16.8% of compute is 0.67% of the window — recovered, but labelled.
+
+    ``min_gpu_pct`` keeps its original meaning (a large slice of the GPU work we
+    know about), so switching the *published* number to an e2e share must not
+    quietly raise the admission bar; the same op is recovered with or without a
+    window total, and only ``gpu_pct`` / ``gpu_pct_basis`` differ. Suppressing a
+    window like this one is the low-compute gate's job, not this path's.
+    """
+    _write(
+        tmp_path / "ops_summary.csv",
+        _ops_summary_csv("moe_flydsl_stage1,MoE_unfused,121.821899\n"),
+    )
+    with_window = tla.recover_other_bucket_candidates(
+        tmp_path,
+        [],
+        top_k=10,
+        total_window_us=18186603.0,
+    )
+    assert [c["name"] for c in with_window] == ["moe_flydsl_stage1"]
+    assert with_window[0]["gpu_pct"] == pytest.approx(0.67, abs=1e-2)
+    assert with_window[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_E2E
+
+    without_window = tla.recover_other_bucket_candidates(tmp_path, [], top_k=10)
+    assert [c["name"] for c in without_window] == ["moe_flydsl_stage1"]
+    assert without_window[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_LISTED_OPS
+
+
+def test_window_basis_does_not_starve_a_healthy_compute_bound_trace(tmp_path):
+    """A 60%-compute trace with work spread over eight kernels keeps its candidates.
+
+    Comparing the 10% floor against an e2e share instead of an op share raises
+    the bar by the reciprocal of the compute share; on this shape that is 12.5%
+    op time vs 7.5% e2e, and every candidate would silently disappear.
+    """
+    rows = "".join(f"k{i},other,75.0\n" for i in range(8))
+    _write(tmp_path / "ops_summary.csv", _ops_summary_csv(rows))
+    recovered = tla.recover_other_bucket_candidates(
+        tmp_path,
+        [],
+        top_k=10,
+        total_window_us=1_000_000.0,  # 1000 ms wall, 600 ms of kernel
+    )
+    assert len(recovered) == 8
+    assert recovered[0]["gpu_pct"] == pytest.approx(7.5, abs=1e-6)
+    assert recovered[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_E2E
+
+
+def test_recover_flags_a_batch_that_mixes_gpu_pct_bases(tmp_path):
+    """Two bases in one batch is the unrankable state the label exists to catch.
+
+    Reachable within a single sidecar when only some rows carry an absolute GPU
+    time: those are normalized against the e2e window, while a row that reports
+    only a percentage keeps whatever denominator the sidecar used.
+    """
+    _write(
+        tmp_path / "priority_data.json",
+        json.dumps(
+            {
+                "findings": [
+                    {"name": "has_time", "category": "other", "gpu_time_ms": 900.0},
+                    {"name": "pct_only", "category": "other", "gpu_pct": 40.0},
+                ]
+            }
+        ),
+    )
+    logged: list[str] = []
+    recovered = tla.recover_other_bucket_candidates(
+        tmp_path,
+        [],
+        top_k=10,
+        total_window_us=1_000_000.0,
+        log=logged.append,
+    )
+    by_name = {c["name"]: c["gpu_pct_basis"] for c in recovered}
+    assert by_name == {
+        "has_time": tla.GPU_PCT_BASIS_E2E,  # 900 ms of a 1 s window -> 90%
+        "pct_only": tla.GPU_PCT_BASIS_SIDECAR,  # no absolute time to rescale
+    }
+    assert [m for m in logged if "not mutually comparable" in m]
+
+
+def test_recover_stays_quiet_on_a_single_basis_batch(tmp_path):
+    """The mixed-basis note must not fire on the ordinary all-e2e batch."""
+    _write(
+        tmp_path / "ops_summary.csv",
+        _ops_summary_csv("a,other,900.0\nb,other,300.0\n"),
+    )
+    logged: list[str] = []
+    recovered = tla.recover_other_bucket_candidates(
+        tmp_path,
+        [],
+        top_k=10,
+        total_window_us=1_000_000.0,
+        log=logged.append,
+    )
+    # ops_summary.csv wins discovery, so this batch is single-basis and quiet.
+    assert {c["gpu_pct_basis"] for c in recovered} == {tla.GPU_PCT_BASIS_E2E}
+    assert not [m for m in logged if "not mutually comparable" in m]
+
+
+def test_recover_falls_back_to_sidecar_pct_without_window(tmp_path):
+    """A JSON sidecar carrying only a percentage keeps working, but is labelled."""
+    _write(
+        tmp_path / "priority_data.json",
+        json.dumps({"findings": [{"name": "fused_moe_kernel", "category": "other", "gpu_pct": 67.0}]}),
+    )
+    recovered = tla.recover_other_bucket_candidates(tmp_path, [], top_k=10)
+    assert [c["name"] for c in recovered] == ["fused_moe_kernel"]
+    assert recovered[0]["gpu_pct"] == 67.0
+    assert recovered[0]["gpu_pct_basis"] == tla.GPU_PCT_BASIS_SIDECAR

@@ -33,6 +33,8 @@ from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
     _MAX_ROOFLINE_FAILURE_RETRIES,
+    _geak_accepted_kernel_specs,
+    _geak_has_accepted_kernel,
     _resolve_roofline_watermark_ratio,
     _resolve_serving_fidelity,
     _split_env_and_flags,
@@ -46,6 +48,93 @@ log = _logging.getLogger(__name__)
 # non-existent path and exercise the "no complete aiter config anywhere" branch
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
+
+# Idempotency key of the same-harness GEAK rebench enqueued by
+# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
+# ``geak_pending`` before the task row exists, so the phase guard already sees a
+# pending revalidation while the enqueue is in flight.
+_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
+
+# Which table each aiter config env var is resolved under at serving time. Two
+# callers need it: the merge step, which has to find the runtime table to merge
+# our candidate into, and the apply check, which has to recognise our artifact
+# in the runtime's own lookup lines (the deployed file carries the candidate's
+# name, not the table's). They were separate copies until one of them was
+# almost edited alone -- and a name that drifts reads as "the artifact never
+# arrived", which reverts a candidate that was fine.
+#
+# A third copy lives in KernelForge's TUNER_ENV_VARS and cannot be shared
+# across repositories; ``test_aiter_env_table_matches_kernelforge`` asserts the
+# two agree wherever forge is importable.
+#
+# Note AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant: aiter reads
+# fp4/mxfp4 (gfx950-only) configs under that name (jit/core.py), and the
+# suffixed key was a dead one that silently dropped every tuned fp4 GEMM.
+_AITER_ENV_TO_TABLE: dict[str, str] = {
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm.csv",
+    "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
+    "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
+}
+
+
+def _safe_mtime(path: Path) -> float:
+    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+
+    Sorting server logs by mtime races the round that is still writing them, and
+    an ``exists()`` guard does not close the window. Ordering is a heuristic for
+    picking the newest log, so a vanished file is worth sorting last rather than
+    aborting the check that owns it.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _candidate_tuned_file(env: Any, env_var: str) -> str:
+    """Return the tuned artifact a candidate's env points at.
+
+    One KEEP is described by three different path strings -- the durable copy in
+    aiter's config tree, the tuner-workspace original, and the E2E merge product
+    -- so an attempt row cannot re-derive the one the stack ends up holding, and
+    reconstructing it matched none of them: every forge KEEP read as unadopted.
+
+    Reading the newest stack entry back is not the way out either. The stack
+    append is skipped when ``(action, variant_name)`` already matches, and a GEMM
+    variant is named ``<backend>_<tuner>`` -- so a second macro cycle re-tuning
+    the same tuner finds its entry present, appends nothing, and the newest entry
+    is the previous round's. The attempt would then claim that round's artifact
+    along with its gain: the same misreport as before, inverted.
+
+    Both the stack entry and the attempt row take the value from here, which
+    makes them the same string by construction rather than by lookup.
+    """
+    if not isinstance(env, dict):
+        return ""
+    value = env.get(env_var)
+    if value in (None, ""):
+        value = next((v for v in env.values() if v not in (None, "")), "")
+    return str(value or "")
+
+
+def _paired_measurement_basis(verdict: Any) -> str:
+    """How the promoted gain was measured, so the ledger cannot overstate it.
+
+    A gain from ``base_tput`` (measured earlier) against ``new_tput`` (measured
+    now) is a comparison of two *blocks*, and drift between them is folded into
+    the result. Recording that distinction is what lets a reader tell a
+    confirmed number from a plausible one; without it both arrive as
+    ``e2e_rebench`` and look equally solid.
+    """
+    if verdict is None:
+        return "e2e_rebench_unpaired"
+    if getattr(verdict, "candidate_wins", False):
+        return "e2e_paired"
+    return f"e2e_paired_{getattr(verdict, 'reason', 'unknown')}"
 
 
 def _collective_comm_share(state: Any) -> tuple[float | None, str]:
@@ -103,6 +192,35 @@ def _derive_collective_attempt_id(result: dict[str, Any]) -> str:
     return "collective-" + hashlib.sha256(encoded).hexdigest()[:24]
 
 
+def _geak_decline_status(decline_reason: Any) -> str:
+    """Map a 2b decline reason to the status left on ``geak_pending``.
+
+    ``rebench_unavailable`` is not reused here, because the two states are
+    different facts that lead to different actions. ``rebench_unavailable``
+    means the rebench never got to run -- a scheduling or dispatch problem, and
+    the candidate should be retried. A decline means the rebench was refused on
+    purpose and the GEAK-harness fallback did not rescue it. When the refusal
+    was the overlay, retrying changes nothing: the kernel cannot install.
+
+    Collapsing the two would overwrite a live diagnostic. The field is already
+    in use across the campaign and carries only two error strings, so a third
+    meaning folded into it is unreadable.
+
+    The status is derived from the reason rather than hardcoded, so a future
+    ``geak_harness`` fallback with a different cause does not silently inherit
+    the overlay label.
+
+    Args:
+        decline_reason (Any): ``reason`` from the 2b dispatcher's summary.
+
+    Returns:
+        str: ``"overlay_unloadable"`` when the overlay was the refusal,
+        ``"rebench_declined"`` for every other refusal.
+    """
+    reason = str(decline_reason or "").strip().lower()
+    return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
+
+
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -119,18 +237,12 @@ class KernelPhase(PhaseHandler):
             return ""
         raw_envs = serving_config.get("extra_envs") or {}
         envs = (
-            {
-                str(key): str(value)
-                for key, value in raw_envs.items()
-                if str(key).strip()
-            }
+            {str(key): str(value) for key, value in raw_envs.items() if str(key).strip()}
             if isinstance(raw_envs, Mapping)
             else {}
         )
         payload = {
-            "extra_server_args": str(
-                serving_config.get("extra_server_args") or ""
-            ).strip(),
+            "extra_server_args": str(serving_config.get("extra_server_args") or "").strip(),
             "extra_envs": envs,
         }
         if not any((payload["extra_server_args"], envs)):
@@ -143,9 +255,7 @@ class KernelPhase(PhaseHandler):
 
     def _current_profile_config_signature(self) -> str:
         """Return a stable identity for the optimized serving configuration."""
-        serving_config = self.shared_state.profile_workload_context().get(
-            "serving_config"
-        )
+        serving_config = self.shared_state.profile_workload_context().get("serving_config")
         return self._serving_config_signature(serving_config)
 
     def _profile_config_changed(self, signature: str) -> bool:
@@ -171,9 +281,7 @@ class KernelPhase(PhaseHandler):
 
     def _profile_workload_changed(self) -> bool:
         """Whether the latest trace predates the active serving workload."""
-        status = str(
-            getattr(self.shared_state, "last_profile_status", "") or ""
-        ).strip().lower()
+        status = str(getattr(self.shared_state, "last_profile_status", "") or "").strip().lower()
         if status and status != "succeeded":
             return True
         recorded = getattr(self.shared_state, "last_profile_workload", None)
@@ -215,12 +323,8 @@ class KernelPhase(PhaseHandler):
             return
         if config_changed or workload_changed:
             log.info("kernel-entry reprofile: active runtime context changed")
-        snapshots_before = len(
-            getattr(self.shared_state, "roofline_snapshots", None) or []
-        )
-        snapshot_id_before = int(
-            getattr(self.shared_state, "roofline_snapshot_id", 0) or 0
-        )
+        snapshots_before = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
+        snapshot_id_before = int(getattr(self.shared_state, "roofline_snapshot_id", 0) or 0)
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
         profile_identity = json.dumps(
             {
@@ -231,9 +335,7 @@ class KernelPhase(PhaseHandler):
             sort_keys=True,
             separators=(",", ":"),
         )
-        profile_fingerprint = hashlib.sha256(
-            profile_identity.encode("utf-8")
-        ).hexdigest()[:12]
+        profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
         try:
             reprofile_task = await self._enqueue_internal_analysis_task(
                 reason=f"kernel_entry_g{stack_len}_{profile_fingerprint}"
@@ -244,27 +346,20 @@ class KernelPhase(PhaseHandler):
             # so reuse the existing snapshot instead of re-running.
             if str(getattr(reprofile_task, "state", "")) in TERMINAL_STATES:
                 log.info(
-                    "kernel-entry reprofile reuses terminal analysis task (state=%s); "
-                    "GEAK targets existing snapshot",
+                    "kernel-entry reprofile reuses terminal analysis task (state=%s); GEAK targets existing snapshot",
                     reprofile_task.state,
                 )
                 return
-            await self.sub.run_task(reprofile_task)
+            await self.run_task_registered(reprofile_task)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
-        snapshots_after = len(
-            getattr(self.shared_state, "roofline_snapshots", None) or []
-        )
-        snapshot_id_after = int(
-            getattr(self.shared_state, "roofline_snapshot_id", 0) or 0
-        )
+        snapshots_after = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
+        snapshot_id_after = int(getattr(self.shared_state, "roofline_snapshot_id", 0) or 0)
         snapshot_landed = (
-            after != before
-            or snapshots_after != snapshots_before
-            or snapshot_id_after != snapshot_id_before
+            after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
         )
         if after > 0 and snapshot_landed:
             self.shared_state.last_roofline_tput = after
@@ -272,9 +367,7 @@ class KernelPhase(PhaseHandler):
             # Record the workload (incl. serving_config) that this trace reflects;
             # _profile_config_changed derives the config signature from it, so
             # last_profile_args stays the plain-args field it is everywhere else.
-            self.shared_state.last_profile_workload = (
-                self.shared_state.profile_workload_context()
-            )
+            self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()
             self.shared_state.save(self.session_dir)
         else:
             log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
@@ -802,6 +895,41 @@ class KernelPhase(PhaseHandler):
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
+        async def _replay_succeeded_rebench(task_id: str) -> bool:
+            """Replay a persisted delegated result lost before state writeback."""
+            try:
+                settled_task = await self.tasks.get(task_id)
+                for msg in await self.bus.tail(topic="delegated_result", n=10_000):
+                    payload = msg.payload if isinstance(msg.payload, dict) else {}
+                    if str(payload.get("task_id") or "") != task_id:
+                        continue
+                    if str(payload.get("kind") or "") != "explore":
+                        continue
+                    if str(payload.get("state") or "").lower() != "succeeded":
+                        continue
+                    result = payload.get("result")
+                    if not isinstance(result, dict) or not self._is_promotable_result("explore", result):
+                        return False
+
+                    replay_pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+                    replay_pending["status"] = "awaiting_rebench"
+                    replay_pending["revalidation_task_id"] = task_id
+                    replay_pending.pop("revalidation_error", None)
+                    state.geak_pending = replay_pending
+                    state.save(self.session_dir)
+                    await self._promote_to_shared_state(
+                        "explore",
+                        result,
+                        task=settled_task,
+                    )
+                    return True
+            except Exception:  # noqa: BLE001 - recovery is best-effort
+                log.exception(
+                    "geak: failed to replay delegated result for succeeded rebench %s",
+                    task_id,
+                )
+            return False
+
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
             # Reserve the pending slot BEFORE the task exists. The rebench runs
@@ -828,9 +956,7 @@ class KernelPhase(PhaseHandler):
             reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             reserved["status"] = "awaiting_rebench"
             if not str(reserved.get("revalidation_task_id") or "").strip():
-                reserved["revalidation_task_id"] = _geak_rebench.geak_revalidate_idempotency_key(
-                    cycle
-                )
+                reserved["revalidation_task_id"] = _geak_rebench.geak_revalidate_idempotency_key(cycle)
             reserved.pop("revalidation_error", None)
             state.geak_pending = reserved
             state.save(self.session_dir)
@@ -841,8 +967,35 @@ class KernelPhase(PhaseHandler):
                 log.exception("geak: enqueue same-harness revalidation failed")
                 summary = {"skipped": True, "reason": repr(exc)}
 
+            # The dispatcher refuses to launch a rebench whose only material is
+            # an overlay that cannot load — that run would measure plain
+            # baseline and credit GEAK for the noise. GEAK's own harness replays
+            # the optimized config from result.json, so the kernel engages by
+            # construction there; take that route instead of losing the win.
+            if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
+                log.warning(
+                    "geak: 2b declined (%s); validating through the GEAK harness instead",
+                    summary.get("reason"),
+                )
+                try:
+                    fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
+                except Exception as exc:  # noqa: BLE001 - defensive
+                    log.exception("geak: GEAK-harness validation failed")
+                    fb = {"validated": False, "reason": repr(exc)}
+                if bool(fb.get("validated")):
+                    # 2a promotes and clears geak_pending itself.
+                    return True
+                pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+                pending["status"] = _geak_decline_status((summary or {}).get("reason"))
+                pending.pop("revalidation_task_id", None)
+                pending["revalidation_error"] = str(fb.get("reason") or summary.get("reason") or "")[:500]
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                return False
+
             task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
             task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
+            existing = bool(isinstance(summary, dict) and summary.get("existing"))
             pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
             if task_id and task_state in {"queued", "running"}:
                 pending["status"] = "awaiting_rebench"
@@ -851,13 +1004,46 @@ class KernelPhase(PhaseHandler):
                 state.save(self.session_dir)
                 return True
 
+            if task_id and existing and task_state == "succeeded":
+                # create_or_return_existing returned a task that already ran
+                # under this cycle's idempotency key (#1240). Reconcile the
+                # reservation from the persisted verdict rather than replacing
+                # it with the misleading "settled before dispatch" status.
+                prior_geak_result = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+                settled_status = str(prior_geak_result.get("revalidation_status") or "")
+                if settled_status in {"no_material", "no_promote"} or self._geak_win_already_recorded():
+                    state.geak_pending = {}
+                    state.save(self.session_dir)
+                    return True
+                if await _replay_succeeded_rebench(task_id):
+                    log.info(
+                        "geak: replayed persisted result for already-succeeded rebench %s",
+                        task_id,
+                    )
+                    return True
+                pending["status"] = "rebench_unavailable"
+                if pending.get("revalidation_task_id") in placeholder_keys:
+                    pending.pop("revalidation_task_id", None)
+                pending["revalidation_error"] = (
+                    f"rebench task {task_id} already succeeded but its verdict could not be reconciled"
+                )[:500]
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                log.warning(
+                    "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
+                    pending["revalidation_error"],
+                )
+                return False
+
             pending["status"] = "rebench_unavailable"
             # Drop reservation placeholders (current + legacy) so no stale id outlives the slot.
             if pending.get("revalidation_task_id") in placeholder_keys:
                 pending.pop("revalidation_task_id", None)
-            pending["revalidation_error"] = str(
-                (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
-            )[:500]
+            if task_state == "cancelled":
+                default_reason = f"rebench cancelled before completion ({task_id or 'unknown'})"
+            else:
+                default_reason = f"rebench task settled without a usable result (state={task_state or 'unknown'})"
+            pending["revalidation_error"] = str((summary or {}).get("reason") or default_reason)[:500]
             state.geak_pending = pending
             state.save(self.session_dir)
             log.warning(
@@ -871,16 +1057,16 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        # Tombstone: a result already dropped by 2b as no-material must not be
-        # re-recovered from the stale (still status=ok) result.json, else each
-        # KERNEL entry re-enqueues a wasted rebench in a loop.
+        # Tombstone a result already adjudicated by 2b so stale result.json
+        # cannot re-enqueue a settled candidate on a later KERNEL entry.
         prev_geak = (
-            self.shared_state.geak_result
-            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-            else {}
+            self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         )
-        dropped_no_material = str(prev_geak.get("revalidation_status") or "") == "no_material"
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not dropped_no_material:
+        already_adjudicated = str(prev_geak.get("revalidation_status") or "") in {
+            "no_material",
+            "no_promote",
+        }
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not already_adjudicated:
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -1091,6 +1277,11 @@ class KernelPhase(PhaseHandler):
         # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
             await _enqueue_geak_revalidation(reason="geak_e2e_win")
+        elif _geak_has_accepted_kernel(result):
+            # A no_gain headline over an accepted, parity-checked kernel still
+            # deserves the measurement — the rebench is what decides, and
+            # without it the kernel is lost with no number attached to it.
+            await _enqueue_geak_revalidation(reason="geak_e2e_accepted_kernel")
         self._record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1159,7 +1350,15 @@ class KernelPhase(PhaseHandler):
         ``_promote_geak_from_candidate``; the config is captured verbatim as the
         source the rebench launches from.
         """
-        if not isinstance(result, dict) or result.get("status") not in ("ok",):
+        if not isinstance(result, dict):
+            return
+        # ``no_gain`` is GEAK's verdict on its own headline number, not on the
+        # kernels it accepted. A run can report no_gain on the promoted basis
+        # while carrying an accepted kernel with a positive, parity-checked
+        # same-config A/B — and dropping the whole result here means that kernel
+        # never reaches a rebench and never appears anywhere. Admit it as a
+        # candidate; the rebench downstream is still what decides.
+        if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
             return
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
@@ -1178,6 +1377,12 @@ class KernelPhase(PhaseHandler):
             # Reproducible config the rebench launches from.
             "accepted_flags": accepted_flags,
             "accepted_envs": dict(parsed_envs),
+            # Carry the kernels and the basis they were judged on into the
+            # pending record, so a later promotion can name what it adopted
+            # without re-reading result.json.
+            "accepted_kernels": result.get("accepted_kernels") or [],
+            "geak_status": str(result.get("status") or ""),
+            "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
             "final_overlay": result.get("final_overlay") or "",
             "final_launch_script": result.get("final_launch_script"),
             "bench_script": result.get("bench_script"),
@@ -1209,18 +1414,64 @@ class KernelPhase(PhaseHandler):
                 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
             )
 
+    @staticmethod
+    def _geak_stack_entry_extra(result: dict[str, Any], *, overlay_loaded: bool | None) -> dict[str, Any]:
+        """Build the ``geak_e2e`` stack entry, carrying only kernels proven to have run.
+
+        ``accepted_kernels`` / ``accepted_heads`` are GEAK's self-report. They are
+        evidence that a kernel *ran* only if the overlay carrying it was proven loaded
+        for this measurement, which is exactly the call
+        :meth:`_record_geak_adopted_kernels` already makes for the per-kernel ledger.
+
+        The stack entry is the other reader: ``_geak_contribution`` classifies the
+        dashboard row from these lanes alone. Copying the lanes unconditionally let the
+        two disagree — a rebench that stripped a dead overlay promoted on its config
+        gain, the ledger correctly said unattributable, and the dashboard still filed
+        the row under ``kernel`` because the entry named one. So the lanes travel only
+        with the proof, and the proof travels with them.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+            overlay_loaded: Whether the overlay was proven loaded. ``None`` means the
+                caller could not tell, which is not proof and so is not credited.
+
+        Returns:
+            dict[str, Any]: The ``entry_extra`` for :meth:`_lift_to_current_best`.
+        """
+        proven = overlay_loaded is True
+        return {
+            "accepted_kernels": (result.get("accepted_kernels") or []) if proven else [],
+            "accepted_heads": (result.get("accepted_heads") or []) if proven else [],
+            "report_path": result.get("report_path"),
+            "source": "geak_e2e",
+            "overlay_loaded": overlay_loaded,
+        }
+
     def _promote_geak_from_candidate(
         self,
         result: dict[str, Any],
         *,
         measured_tput: float,
+        provenance: str = "geak_e2e_promote",
+        overlay_loaded: bool | None = None,
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
-        Lifts the measured config/overlay onto ``current_best`` and stamps
-        ``cumulative_gain_validated`` as the same-harness total
-        ``(measured - baseline)/baseline``. Clears ``geak_pending`` and the
-        revalidation flag.
+        The single headline writer: lifts ``current_best`` (config/overlay/scripts
+        + the measured tput), appends the ``geak_e2e`` optimization_stack entry +
+        gain ledger, and stamps ``cumulative_gain`` / ``cumulative_gain_validated``
+        as the same-harness total ``(measured - baseline)/baseline``. Clears
+        ``geak_pending`` and the revalidation flag.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+            measured_tput: The rebench-measured throughput (tok/s).
+            provenance: Which validation path measured it.
+            overlay_loaded: Whether the authored-kernel overlay was proven
+                loaded for the measurement. ``None`` means the caller could not
+                tell. Only a ``True`` here lets an accepted kernel be written
+                into the adoption ledger: a flags-only rebench measured no
+                kernel, so crediting one would be an invention.
         """
         if not isinstance(result, dict):
             return
@@ -1261,9 +1512,7 @@ class KernelPhase(PhaseHandler):
                 instrument.record_geak_operation(
                     self.session_dir,
                     stage="final_validation_failed",
-                    macro_cycle=int(
-                        getattr(self.shared_state, "macro_cycle", 0) or 0
-                    ),
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                     result=rejected_result,
                     status="failed",
                     validated=False,
@@ -1293,15 +1542,18 @@ class KernelPhase(PhaseHandler):
                 "tpot_mean_ms": result.get("tpot_ms"),
                 "workspace": result.get("eval_dir"),
             },
-            entry_extra={
-                "accepted_kernels": result.get("accepted_kernels") or [],
-                "accepted_heads": result.get("accepted_heads") or [],
-                "report_path": result.get("report_path"),
-                "source": "geak_e2e",
-            },
+            entry_extra=self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded),
         )
 
-        if self.shared_state.baseline_tput > 0:
+        base = float(self.shared_state.baseline_tput or 0.0)
+        self._record_geak_adopted_kernels(
+            result,
+            measured_tput=measured,
+            baseline_tput=base,
+            provenance=provenance,
+            overlay_loaded=overlay_loaded,
+        )
+        if base > 0:
             self._update_cumulative_gain_validated(
                 measured,
                 source="geak_e2e_promote",
@@ -1323,6 +1575,120 @@ class KernelPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001
             log.debug("geak v4 final validation recording failed", exc_info=True)
+
+    def _record_geak_adopted_kernels(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        baseline_tput: float,
+        provenance: str,
+        overlay_loaded: bool | None,
+    ) -> None:
+        """Write one adoption row per accepted GEAK kernel.
+
+        GEAK's win is recorded in two disjoint places today. The per-ACTION
+        ledger (``optimization_stack`` + ``geak_pending``) carries the headline;
+        the per-KERNEL ledger (``state.kernel_integrate_attempts``) is what
+        ``by_kernel``, ``kernel_lifecycle.adopted``, the attribution split and
+        the timeline all read. GEAK writes only the first, so an adopted kernel
+        exists in the headline and nowhere a report can name it. This writes the
+        second, from the same promotion, so both agree by construction.
+
+        The gain recorded is the ORCHESTRATOR-measured rebench gain over
+        baseline, never GEAK's self-reported ``e2e_delta_pct``. When several
+        kernels rode in on one rebench, or the overlay was not proven loaded,
+        the gain cannot be attributed to any single kernel: the row is written
+        with a null gain and ``validated: False`` rather than an invented share.
+        """
+        if not isinstance(result, dict):
+            return
+        # Both acceptance lanes, ``env`` selections excluded and alias twins
+        # collapsed. See ``_geak_accepted_kernel_specs``.
+        specs = _geak_accepted_kernel_specs(result)
+        if not specs:
+            return
+        rows = [
+            {
+                "kernel_id": str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip(),
+                "spec": k,
+            }
+            for k in specs
+        ]
+
+        rebench_gain: float | None = None
+        if baseline_tput > 0 and measured_tput > 0:
+            rebench_gain = (measured_tput - baseline_tput) / baseline_tput * 100.0
+        # One kernel, overlay proven loaded, one measured number: the gain is
+        # attributable. Anything else is a joint measurement.
+        attributable = bool(overlay_loaded) and len(rows) == 1
+        am = result.get("alignment_metrics") or {}
+        basis = str(am.get("final_basis") or result.get("final_throughput_basis") or "")
+        alignment_status = str((result.get("baseline_alignment") or {}).get("status") or "")
+        ts = datetime.now(timezone.utc).isoformat()
+        ledger = self.shared_state.kernel_integrate_attempts
+        if not isinstance(ledger, dict):
+            return
+        for row in rows:
+            kid = row["kernel_id"]
+            spec = row["spec"]
+            entry = dict(ledger.get(kid) or {})
+            attempts = list(entry.get("attempts") or [])
+            attempt_decision = "KEEP" if attributable else "UNATTRIBUTED"
+            attempt_status = "ok" if attributable else "unvalidated"
+            attempts.append(
+                {
+                    "decision": attempt_decision,
+                    "status": attempt_status,
+                    "new_tput": measured_tput,
+                    "gain_pct": rebench_gain if attributable else None,
+                    "decision_reason": provenance,
+                    "artifact_kind": str(spec.get("kind") or "authored"),
+                    "ts": ts,
+                    "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                }
+            )
+            # Max over attempts, matching the canonical ledger writer in
+            # ``_kernel_decisions.py`` -- ``by_kernel`` and
+            # ``kernel_lifecycle`` read this one field from both writers, so a
+            # second, worse rebench must not lower the kernel's best. ``None``
+            # is kept rather than that writer's ``0.0`` default: here it means
+            # "not attributable", which is not the same claim as "no gain".
+            gains = [
+                float(a["gain_pct"])
+                for a in attempts
+                if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
+            ]
+            entry.update(
+                {
+                    "key": kid,
+                    "kernel_id": kid,
+                    "source": "geak_e2e",
+                    "attempts": attempts,
+                    "attempt_count": len(attempts),
+                    "best_gain_pct": max(gains) if gains else None,
+                    "last_decision": attempt_decision,
+                    "last_status": attempt_status,
+                    "validated": attributable,
+                    "overlay_loaded": bool(overlay_loaded),
+                    "basis": basis,
+                    "alignment_status": alignment_status,
+                    # GEAK's own same-config A/B, kept beside the orchestrator
+                    # number so the two are never confused for each other.
+                    "geak_same_config_delta_pct": spec.get("e2e_delta_pct"),
+                    "geak_isolated_speedup": spec.get("isolated"),
+                    "updated_at": ts,
+                }
+            )
+            ledger[kid] = entry
+        self.shared_state.kernel_integrate_attempts = ledger
+        log.info(
+            "geak: recorded %d adopted kernel(s) in the per-kernel ledger (overlay_loaded=%r attributable=%r gain=%r)",
+            len(rows),
+            overlay_loaded,
+            attributable,
+            rebench_gain if attributable else None,
+        )
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
         """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
@@ -1367,7 +1733,7 @@ class KernelPhase(PhaseHandler):
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
                     tool="geak",
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey discovery replay failed", exc_info=True)
@@ -1387,14 +1753,14 @@ class KernelPhase(PhaseHandler):
                     skip_reason=str(disp.get("skip_reason") or ""),
                     orchestration_commit=commit,
                     task_group=disp.get("task_group"),
-                    route_strategy="legacy_only",
+                    route_strategy="geak",
                 )
                 br = k.get("backend_result")
                 if isinstance(br, dict):
                     instrument.record_kernel_backend_result(
                         sdir,
                         br,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                     )
                 e2e = k.get("e2e")
                 if isinstance(e2e, dict):
@@ -1409,7 +1775,7 @@ class KernelPhase(PhaseHandler):
                         target_file=e2e.get("target_file"),
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                         result=e2e,
-                        route_strategy="legacy_only",
+                        route_strategy="geak",
                         # Replaying must land on the reading it originally
                         # recorded, not count itself as a fresh one.
                         occurrence=e2e.get("occurrence"),
@@ -1486,13 +1852,15 @@ class KernelPhase(PhaseHandler):
                     e2e_gain_pct=None,
                     validated=False,
                     decision="REVERT",
+                    # Same route as the KEEP that this withdraws. Leaving it on the default
+                    # re-parented the kernel under a synthetic Forge route at the moment it was
+                    # revoked, so a withdrawn GEAK kernel ended up filed under an optimizer that
+                    # never touched it.
+                    route_strategy="geak",
                     patch_path=e2e.get("patch_path"),
                     target_file=e2e.get("target_file"),
-                    extra_server_args=str(
-                        e2e.get("extra_server_args") or ""
-                    ),
+                    extra_server_args=str(e2e.get("extra_server_args") or ""),
                     result=evidence,
-                    route_strategy="legacy_only",
                     # This is a second look at a kernel that was already kept,
                     # and ``evidence`` still carries the original integrate's
                     # identity. Without a namespace of its own, the reading
@@ -1541,7 +1909,34 @@ class KernelPhase(PhaseHandler):
         still boots and benchmarks fine, so the gate sees an honest "no gain" and
         the real cause -- an artifact the runtime never applied -- stays invisible.
         Replaying the lookup against the round's ``server.log`` separates the two.
+
+        Its result can block a KEEP, so an unexpected failure must not: it would
+        turn a diagnostic into the very false REVERT this replaces. Any
+        exception degrades to "undetermined", matching ``_gemm_apply_verdict``.
         """
+        try:
+            return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "tuned-config coverage failed for %s; treating it as undetermined",
+                tuner_name,
+                exc_info=True,
+            )
+            return None
+
+    def _gemm_tuned_config_coverage_impl(
+        self,
+        tuner_name: str,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Replay aiter's lookup against the round's log (see the caller).
+
+        For ``fmoe_ck``, delegates to ``_fmoe_tuned_config_coverage``, which
+        matches fused-MoE dispatch lines against ``candidate_fmoe.csv`` rather
+        than dense ``(M, N, K)`` GEMM lookups.
+        """
+        if tuner_name == "fmoe_ck":
+            return self._fmoe_tuned_config_coverage(envs)
         from ..kernel.gemm_shape_coverage import (
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
@@ -1553,13 +1948,30 @@ class KernelPhase(PhaseHandler):
         if not csv_paths:
             return None
         run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0)
+        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
         if not logs:
             return None
         try:
             log_text = logs[-1].read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
+
+        def _unreadable(kind: str) -> None:
+            """Log that the artifact could not be read, so the caller stays out of it.
+
+            A CSV we cannot parse is an absence of evidence, not evidence the
+            runtime ignored the table. Returning a 0% report would let that
+            absence block a KEEP whose throughput genuinely improved -- the
+            same conflation this change set exists to remove.
+            """
+            log.warning(
+                "gemm E2E: tuner=%s %s tuned CSV yielded no keys from %s; "
+                "coverage is undetermined and will not block the KEEP",
+                tuner_name,
+                kind,
+                csv_paths,
+            )
+
         missed, hit = parse_aiter_shape_lookups(log_text)
         requested = missed | hit
         if not requested:
@@ -1567,6 +1979,9 @@ class KernelPhase(PhaseHandler):
         tuned: set[tuple[int, int, int]] = set()
         for path in csv_paths:
             tuned |= tuned_csv_shapes(path)
+        if not tuned:
+            _unreadable("dense")
+            return None
         report = tuned_config_coverage(tuned, requested)
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
@@ -1584,9 +1999,355 @@ class KernelPhase(PhaseHandler):
             report["not_applied_reason"] = "no_shape_key_matched"
         return report
 
-    def _merge_gemm_candidate_with_runtime(
-        self, env_var: str, candidate_csv_path: str
-    ) -> str | None:
+    def _fmoe_tuned_config_coverage(
+        self,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Report whether a ``tuned_fmoe.csv`` covers logged fused-MoE dispatches.
+
+        Dense BF16 GEMM lookups in the same log are ignored: they belong to
+        linears the ``fmoe_ck`` tuner never wrote, and treating
+        ``bf16_tuned_gemm.csv`` as evidence produced false
+        ``artifact_table_not_consulted`` blockers on MoE models.
+        """
+        from ..kernel.gemm_shape_coverage import (
+            aiter_log_tuned_config_enabled,
+            fmoe_tuned_config_coverage,
+            log_has_fused_moe_activity,
+            parse_aiter_fused_moe_dispatches,
+            read_latest_integrate_server_log,
+            resolve_fmoe_candidate_csv,
+            tuned_fmoe_csv_rows,
+        )
+
+        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+        if not csv_paths:
+            return None
+        loaded = read_latest_integrate_server_log(self.session_dir)
+        if loaded is None:
+            return None
+        log_path, log_text = loaded
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
+        dispatches = parse_aiter_fused_moe_dispatches(log_text)
+        hit_logging = aiter_log_tuned_config_enabled(envs)
+        report: dict[str, Any] = {
+            "server_log": str(log_path),
+            "requested": len(dispatches),
+        }
+        if not dispatches:
+            if log_has_fused_moe_activity(log_text):
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "fused_moe_parse_inconclusive"
+                report["conclusive"] = False
+            elif not hit_logging:
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "fused_moe_logging_disabled"
+                report["conclusive"] = False
+            else:
+                report["artifact_applied"] = False
+                report["not_applied_reason"] = "no_fused_moe_dispatch"
+                report["conclusive"] = True
+            report["runtime_lookup_miss"] = 0
+            report["runtime_lookup_hit"] = 0
+            return report
+        if candidate_path is None:
+            report["artifact_applied"] = False
+            report["not_applied_reason"] = "candidate_csv_missing"
+            report["runtime_lookup_miss"] = len(dispatches)
+            report["runtime_lookup_hit"] = 0
+            report["conclusive"] = False
+            return report
+        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
+        report["candidate_csv"] = str(candidate_path)
+        report.update(fmoe_tuned_config_coverage(candidate_rows, dispatches))
+        report["artifact_applied"] = bool(report.get("covered"))
+        report["conclusive"] = True
+        report["runtime_lookup_miss"] = report.get("requested", 0) - report.get("covered", 0)
+        report["runtime_lookup_hit"] = report.get("covered", 0)
+        if not report["artifact_applied"]:
+            if report.get("runtime_default"):
+                report["not_applied_reason"] = "runtime_default_config"
+            elif report.get("kernel_name_mismatch"):
+                report["not_applied_reason"] = "kernel_name_mismatch"
+            else:
+                report["not_applied_reason"] = "no_shape_key_matched"
+        return report
+
+    async def _confirm_gemm_gain_paired(
+        self,
+        stacked_envs: dict[str, str],
+        *,
+        baseline_tput: float,
+        budget_minutes: int,
+        extra_server_args: str = "",
+    ):
+        """Re-measure baseline and tuned stack interleaved, and judge the pairs.
+
+        ``running_tput`` is compared against a ``baseline_tput`` measured earlier
+        in the session, so any drift between the two -- clocks, temperature, a
+        neighbour's workload -- is indistinguishable from the tuning. One
+        controlled repeat on this fleet moved 16% with nothing changed, and three
+        rounds of one unchanged configuration spanned 58%.
+
+        Interleaving is the only thing that separates them, and it costs two
+        extra benchmark rounds per pair, so it is opt-in via
+        ``HYPERLOOM_GEMM_PAIRED_PAIRS``. When it does not run the gain is still
+        promoted -- it is the best number available -- but it is *labelled* as an
+        unpaired block comparison rather than passed off as a paired one.
+        """
+        from ..kernel.request_handlers import integrate_handler
+        from ..measurement.paired import assess_paired, interleaved_plan
+
+        try:
+            n_pairs = int(os.environ.get("HYPERLOOM_GEMM_PAIRED_PAIRS", "0") or 0)
+        except ValueError:
+            n_pairs = 0
+        if n_pairs <= 0 or not stacked_envs or baseline_tput <= 0:
+            return None
+
+        pairs: list[tuple[float, float]] = []
+        pending: float | None = None
+        for idx, side in enumerate(interleaved_plan(n_pairs)):
+            envs = {} if side == "A" else dict(stacked_envs)
+            # The B leg has to be served the same way the KEEP was: fmoe_ck only
+            # takes effect under --moe-runner-backend aiter, and without it the
+            # tuned table is never read, so B measures the same thing as A and
+            # the confirmation reports within_noise for a gain that is real.
+            side_args = extra_server_args if side == "B" else ""
+            try:
+                res = await integrate_handler(
+                    {
+                        "task_id": f"gemm_paired_{side}{idx}",
+                        "kernel_id": f"gemm_paired_{side}{idx}",
+                        "source": "forge_gemm_paired",
+                        "base_tput": baseline_tput,
+                        "extra_server_args": side_args,
+                        "extra_envs": envs,
+                        # Measure, do not decide: the verdict comes from the
+                        # pairs, so a per-round KEEP/REVERT here would be noise
+                        # promoted to a decision.
+                        "keep_threshold_pct": 100.0,
+                        "budget_minutes": budget_minutes,
+                    },
+                    session_dir=self.session_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("forge gemm paired confirmation aborted at %s%d: %s", side, idx, exc)
+                break
+            tput = float(res.get("new_tput") or 0.0)
+            if tput <= 0:
+                log.warning("forge gemm paired confirmation: %s%d produced no throughput", side, idx)
+                break
+            if side == "A":
+                pending = tput
+            elif pending is not None:
+                pairs.append((pending, tput))
+                pending = None
+
+        verdict = assess_paired(pairs)
+        log.info(
+            "forge gemm paired confirmation: %d pair(s) -> %s (median delta %s%%)",
+            len(pairs),
+            verdict.reason,
+            verdict.median_delta_pct,
+        )
+        return verdict
+
+    def _gemm_apply_verdict(
+        self,
+        tuner_name: str,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Did the tuned table reach the server's merge list and get read?
+
+        Complements ``_gemm_tuned_config_coverage``, which replays the shape
+        lookup against the CSV we wrote. That answers "could this table have
+        served the requests"; it cannot see the case where the table never
+        arrived and the server loaded its bundled default instead, because the
+        CSV on our disk still contains the right rows either way.
+
+        For ``fmoe_ck``, delegates to ``_fmoe_apply_verdict``, which attributes
+        fused-MoE kernel pairs from dispatch lines instead of dense merge/hit
+        logging.
+        """
+        if tuner_name == "fmoe_ck":
+            return self._fmoe_apply_verdict(envs)
+        from ..measurement.apply_verification import verify_applied
+
+        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+        if not csv_paths:
+            return None
+        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
+        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        if not logs:
+            # Say so. This whole change exists to stop checks from failing
+            # quietly, and a missing log is the one way this one can.
+            log.warning(
+                "forge gemm E2E: no server.log under %s; apply verification cannot run for %s",
+                run_dir,
+                tuner_name,
+            )
+            return None
+
+        # The deployed file is named after the candidate, so the runtime's own
+        # table name has to travel with it or the arrival check compares
+        # merged_tuned_dense_bf16.csv against bf16_tuned_gemm.csv and concludes
+        # the artifact never landed.
+        table_names = [name for key in envs if (name := _AITER_ENV_TO_TABLE.get(key))]
+        # aiter prints a hit line only under this flag; every serving run now
+        # sets it by default, but an operator value in the candidate env wins,
+        # and then a zero-hit result means nothing.
+        raw_flag = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
+        hit_logging = raw_flag not in ("", "0", "false", "no", "off")
+
+        try:
+            return verify_applied(
+                logs[-1],
+                csv_paths,
+                hit_logging=hit_logging,
+                runtime_table_names=table_names,
+            ).to_dict()
+        except Exception:  # noqa: BLE001 - verification must never fail the run
+            log.warning("apply verification failed for %s", tuner_name, exc_info=True)
+            return None
+
+    def _fmoe_apply_verdict(
+        self,
+        envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Apply verdict for ``fmoe_ck`` based on fused-MoE dispatch, not dense GEMM.
+
+        Dense ``bf16_tuned_gemm.csv`` consulted-table lines in the same log must
+        not drive ``not_merged`` for a tuner that only deploys ``tuned_fmoe.csv``.
+        """
+        from ..kernel.gemm_shape_coverage import (
+            aiter_log_tuned_config_enabled,
+            fmoe_tuned_config_coverage,
+            log_has_fused_moe_activity,
+            parse_aiter_fused_moe_dispatches,
+            read_latest_integrate_server_log,
+            resolve_fmoe_candidate_csv,
+            tuned_fmoe_csv_rows,
+        )
+
+        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+        if not csv_paths:
+            return None
+        loaded = read_latest_integrate_server_log(self.session_dir)
+        if loaded is None:
+            run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
+            log.warning(
+                "forge gemm E2E: no server.log under %s; apply verification cannot run for fmoe_ck",
+                run_dir,
+            )
+            return None
+        log_path, log_text = loaded
+        hit_logging = aiter_log_tuned_config_enabled(envs)
+        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
+        dispatches = parse_aiter_fused_moe_dispatches(log_text)
+        if not dispatches:
+            if log_has_fused_moe_activity(log_text):
+                return {
+                    "verdict": "fused_moe_parse_inconclusive",
+                    "hits": 0,
+                    "misses": 0,
+                    "blocks_keep": False,
+                    "conclusive": False,
+                    "merged_tables": [],
+                    "unmerged_artifacts": list(csv_paths),
+                    "detail": ("server.log contains fused-MoE activity but no dispatch lines could be parsed"),
+                }
+            if not hit_logging:
+                return {
+                    "verdict": "fused_moe_logging_disabled",
+                    "hits": 0,
+                    "misses": 0,
+                    "blocks_keep": False,
+                    "conclusive": False,
+                    "merged_tables": [],
+                    "unmerged_artifacts": list(csv_paths),
+                    "detail": ("AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run"),
+                }
+            return {
+                "verdict": "no_fused_moe_dispatch",
+                "hits": 0,
+                "misses": 0,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": list(csv_paths),
+                "detail": ("server.log exists but contains no [aiter] [fused_moe] dispatch lines"),
+            }
+
+        if candidate_path is None:
+            return {
+                "verdict": "candidate_csv_missing",
+                "hits": 0,
+                "misses": len(dispatches),
+                "blocks_keep": False,
+                "conclusive": False,
+                "merged_tables": [],
+                "unmerged_artifacts": list(csv_paths),
+                "detail": (
+                    "env points at a merged fmoe CSV but the sibling bare "
+                    "candidate file is absent; cannot attribute runtime "
+                    "kernel names to the tuner candidate"
+                ),
+            }
+
+        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
+        coverage = fmoe_tuned_config_coverage(candidate_rows, dispatches)
+        covered = int(coverage.get("covered") or 0)
+        requested = int(coverage.get("requested") or 0)
+        if covered > 0:
+            return {
+                "verdict": "served",
+                "hits": covered,
+                "misses": requested - covered,
+                "blocks_keep": False,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}"
+                ),
+            }
+        if coverage.get("runtime_default"):
+            return {
+                "verdict": "runtime_default_config",
+                "hits": 0,
+                "misses": requested,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": ("runtime served default heuristics; tuned candidate kernels were not selected"),
+            }
+        if coverage.get("kernel_name_mismatch"):
+            return {
+                "verdict": "kernel_name_mismatch",
+                "hits": 0,
+                "misses": requested,
+                "blocks_keep": True,
+                "conclusive": True,
+                "merged_tables": [],
+                "unmerged_artifacts": [],
+                "detail": (
+                    "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv"
+                ),
+            }
+        return {
+            "verdict": "no_shape_key_matched",
+            "hits": 0,
+            "misses": requested,
+            "blocks_keep": True,
+            "conclusive": True,
+            "merged_tables": [],
+            "unmerged_artifacts": [],
+            "detail": (f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row"),
+        }
+
+    def _merge_gemm_candidate_with_runtime(self, env_var: str, candidate_csv_path: str) -> str | None:
         """Merge a GEMM candidate CSV with the runtime config.
 
         aiter's complete config is the merged superset of its top-level table and
@@ -1629,19 +2390,7 @@ class KernelPhase(PhaseHandler):
         if not candidate_path.is_file():
             return None
 
-        env_var_to_tuned_name = {
-            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
-            # aiter reads fp4/mxfp4 (gfx950-only) configs via AITER_CONFIG_GEMM_A4W4,
-            # not the "_BLOCKSCALE" variant (aiter jit/core.py). Must match KernelForge's
-            # TUNER_ENV_VARS or tuned fp4 GEMM CSVs are silently ignored at serving.
-            "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
-            "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
-        }
-        runtime_filename = env_var_to_tuned_name.get(env_var)
+        runtime_filename = _AITER_ENV_TO_TABLE.get(env_var)
         if not runtime_filename:
             return None
         tuned_stem = Path(runtime_filename).stem
@@ -1663,9 +2412,7 @@ class KernelPhase(PhaseHandler):
         if spec is not None and spec.origin:
             config_dirs.append(Path(spec.origin).resolve().parent / "configs")
         config_dirs.append(_CONTAINER_AITER_CONFIG_DIR)
-        config_dirs.extend(
-            sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs"))
-        )
+        config_dirs.extend(sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs")))
 
         seen_dirs: set[str] = set()
         unique_config_dirs: list[Path] = []
@@ -1693,9 +2440,7 @@ class KernelPhase(PhaseHandler):
                     base_path = config_dir / runtime_filename
                     model_paths = sorted(
                         path
-                        for path in (config_dir / "model_configs").glob(
-                            f"*{tuned_stem}*.csv"
-                        )
+                        for path in (config_dir / "model_configs").glob(f"*{tuned_stem}*.csv")
                         if path.is_file() and "untuned" not in path.name
                     )
                     paths = ([base_path] if base_path.is_file() else []) + model_paths
@@ -1705,18 +2450,13 @@ class KernelPhase(PhaseHandler):
                         break
             if not source_paths:
                 log.warning(
-                    "gemm E2E: no complete aiter config found for %s; "
-                    "candidate-only validation would be unsafe",
+                    "gemm E2E: no complete aiter config found for %s; candidate-only validation would be unsafe",
                     env_var,
                 )
                 return None
             if source_config_dir is None:
                 source_config_dir = next(
-                    (
-                        config_dir
-                        for config_dir in unique_config_dirs
-                        if (config_dir / f"{untuned_stem}.csv").is_file()
-                    ),
+                    (config_dir for config_dir in unique_config_dirs if (config_dir / f"{untuned_stem}.csv").is_file()),
                     None,
                 )
 
@@ -1731,11 +2471,7 @@ class KernelPhase(PhaseHandler):
             for columns in [*source_columns[1:], candidate_columns]:
                 for column in columns:
                     if column not in all_columns:
-                        insert_at = (
-                            all_columns.index("tflops")
-                            if "tflops" in all_columns
-                            else len(all_columns)
-                        )
+                        insert_at = all_columns.index("tflops") if "tflops" in all_columns else len(all_columns)
                         all_columns.insert(insert_at, column)
             fill_defaults = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
 
@@ -1761,15 +2497,9 @@ class KernelPhase(PhaseHandler):
                 untuned_path = source_config_dir / f"{untuned_stem}.csv"
                 if untuned_path.is_file():
                     untuned_columns = _read_header(untuned_path)
-                    key_cols.extend(
-                        column
-                        for column in untuned_columns
-                        if column in all_columns
-                    )
+                    key_cols.extend(column for column in untuned_columns if column in all_columns)
             if not key_cols:
-                key_cols.extend(
-                    column for column in ("M", "N", "K") if column in all_columns
-                )
+                key_cols.extend(column for column in ("M", "N", "K") if column in all_columns)
             for column in ("gfx", "cu_num", "_tag"):
                 if column in all_columns and column not in key_cols:
                     key_cols.append(column)
@@ -1783,9 +2513,7 @@ class KernelPhase(PhaseHandler):
             def _dispatch_key(row: dict[str, str]) -> tuple[str, ...]:
                 return tuple(row.get(column, "") for column in key_cols)
 
-            def _deduplicate_dispatch_rows(
-                rows: list[dict[str, str]], label: str
-            ) -> list[dict[str, str]] | None:
+            def _deduplicate_dispatch_rows(rows: list[dict[str, str]], label: str) -> list[dict[str, str]] | None:
                 counts: dict[tuple[str, ...], int] = {}
                 for row in rows:
                     key = _dispatch_key(row)
@@ -1794,8 +2522,7 @@ class KernelPhase(PhaseHandler):
                     return rows
                 if "us" not in all_columns:
                     log.warning(
-                        "gemm E2E: %s has duplicate dispatch keys for %s "
-                        "but no 'us' column to select the fastest row",
+                        "gemm E2E: %s has duplicate dispatch keys for %s but no 'us' column to select the fastest row",
                         label,
                         env_var,
                     )
@@ -1834,9 +2561,7 @@ class KernelPhase(PhaseHandler):
 
             # Drop rows from runtime that the candidate improves, then concat.
             candidate_keys = {_dispatch_key(row) for row in candidate_rows}
-            kept_from_runtime = [
-                row for row in runtime_rows if _dispatch_key(row) not in candidate_keys
-            ]
+            kept_from_runtime = [row for row in runtime_rows if _dispatch_key(row) not in candidate_keys]
             merged_rows = kept_from_runtime + candidate_rows
 
             merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
@@ -1845,8 +2570,7 @@ class KernelPhase(PhaseHandler):
                 writer.writeheader()
                 writer.writerows(merged_rows)
             log.info(
-                "gemm E2E: merged %d candidate rows into %d rows from %d "
-                "aiter config file(s) -> %d total (%s)",
+                "gemm E2E: merged %d candidate rows into %d rows from %d aiter config file(s) -> %d total (%s)",
                 len(candidate_rows),
                 len(runtime_rows),
                 len(source_paths),
@@ -1949,13 +2673,10 @@ class KernelPhase(PhaseHandler):
         from ..state.shared_state import SharedState
 
         persisted = SharedState.load_or_init(self.session_dir)
-        persisted_trace = str(
-            (persisted.last_trace_analyze or {}).get("steady_state_trace") or ""
-        ).strip()
+        persisted_trace = str((persisted.last_trace_analyze or {}).get("steady_state_trace") or "").strip()
         if persisted_trace != source_trace:
             log.warning(
-                "GEMM Roofline state sync skipped: persisted steady trace %r "
-                "does not match result %r",
+                "GEMM Roofline state sync skipped: persisted steady trace %r does not match result %r",
                 persisted_trace,
                 source_trace,
             )
@@ -1988,7 +2709,38 @@ class KernelPhase(PhaseHandler):
         """
         self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
-        await self._validate_gemm_tuning_e2e(result)
+        try:
+            await self._validate_gemm_tuning_e2e(result)
+        except Exception as exc:  # noqa: BLE001
+            # Validation spans server restarts, log parsing and CSV merges, and
+            # is reached from two entrypoints that only guard the tuning call
+            # itself. An unexpected failure here has to read as "this candidate
+            # was never measured", not take the KERNEL phase down with it --
+            # tuning that produced nothing measurable is the outcome this whole
+            # change exists to record honestly.
+            log.exception("gemm E2E validation raised; recording it as a fault")
+            e2e = result.setdefault("e2e_results", {})
+            if isinstance(e2e, dict):
+                faults = e2e.setdefault("faults", [])
+                if isinstance(faults, list):
+                    faults.append(
+                        {
+                            "tuner": "*",
+                            "error_class": "e2e_validation_exception",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+            # The bridge stamped KEEP + the raw combined env on the micro result;
+            # the normal exit rewrites both so Orchestration never bundles an
+            # integrate against an unmeasured candidate. This arm was not
+            # measured, so it reads as REVERT.
+            result["decision"] = "REVERT"
+            result["requires_e2e_validation"] = False
+            result["e2e_validated"] = False
+            result["micro_decision"] = "e2e_validation_exception"
+            for stale in ("recommended_env", "extra_envs"):
+                if result.get(stale):
+                    result[stale] = {}
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2092,19 +2844,29 @@ class KernelPhase(PhaseHandler):
         for t in result.get("tuners_run") or []:
             if not isinstance(t, dict):
                 continue
-            if t.get("status") != "ok":
+            # partial_output is a real artifact: the tuner wrote fewer rows than
+            # shapes it was given (the grouped batch budget ran out), but the
+            # rows it did write are deployable.
+            if t.get("status") not in ("ok", "partial_output"):
                 continue
-            if not bool(t.get("candidate")) and int(t.get("improved_shapes") or 0) <= 0:
+            # improved_shapes can never exceed 0 for tuners with no comparable
+            # baseline -- TunableOp never times the untuned dispatch, the
+            # candidate-CSV fallback has no per-shape Pre/Post table, and a
+            # hipblaslt-only bf16 run has no torch candidate to measure against.
+            # They report unverified_shapes instead, so gating on improved_shapes
+            # alone would drop exactly the artifacts that need e2e to say
+            # anything at all about them.
+            if (
+                not bool(t.get("candidate"))
+                and int(t.get("improved_shapes") or 0) <= 0
+                and int(t.get("unverified_shapes") or 0) <= 0
+            ):
                 continue
             env_var = str(t.get("env_var") or "").strip()
             env_value = str(t.get("env_value") or "").strip()
             raw_envs = t.get("env_vars") or {}
             envs = (
-                {
-                    str(key): str(value)
-                    for key, value in raw_envs.items()
-                    if str(key).strip() and str(value).strip()
-                }
+                {str(key): str(value) for key, value in raw_envs.items() if str(key).strip() and str(value).strip()}
                 if isinstance(raw_envs, dict)
                 else {}
             )
@@ -2166,6 +2928,7 @@ class KernelPhase(PhaseHandler):
         A round the run stopped ends the sweep with its tuners unrecorded.
         """
         from ..kernel.request_handlers import integrate_handler
+        from hyperloom.common.model_paths import resolve_session_model_path
 
         backend = str(result.get("backend") or "geak").strip().lower()
         candidates = self._gemm_e2e_candidates(result)
@@ -2178,6 +2941,9 @@ class KernelPhase(PhaseHandler):
         stacked_envs: dict[str, str] = {}
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
+        faults: list[dict[str, Any]] = []
+        # Set by the last KEEP; the attempt row claims this exact string.
+        adopted_tuned_file = ""
         try:
             from ..actions.executors.explore import _compute_explore_variant_timeout
 
@@ -2198,8 +2964,7 @@ class KernelPhase(PhaseHandler):
         )
 
         triton_moe_inert = (
-            any(c.get("tuner") == "vllm_moe_triton" for c in candidates)
-            and self._runtime_uses_aiter_fused_moe()
+            any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and self._runtime_uses_aiter_fused_moe()
         )
 
         for cand in candidates:
@@ -2281,42 +3046,107 @@ class KernelPhase(PhaseHandler):
                 running_tput,
             )
 
-            try:
-                integrate_result = await integrate_handler(
-                    {
-                        "task_id": f"gemm_tune_e2e_{tuner_name}",
-                        "kernel_id": f"gemm_tune_{tuner_name}",
-                        "source": "forge_gemm_tuning",
-                        "base_tput": running_tput,
-                        "extra_server_args": extra_server_args,
-                        "extra_envs": test_envs,
-                        "keep_threshold_pct": 3.0,
-                        "budget_minutes": per_tuner_budget_minutes,
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "gemm E2E: integrate failed for %s: %s",
-                    tuner_name,
-                    exc,
-                )
-                reverted.append({**cand, "reason": repr(exc)})
-                continue
+            from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
-            stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
-            if stopped is not None:
-                # Recording the rest would report a clock as a verdict on them.
-                log.info(
-                    "gemm E2E: %s left unmeasured — %s",
-                    tuner_name,
-                    stopped.interrupted,
-                )
+            integrate_verdict: dict[str, Any] | None = None
+            run_stopped = False
+            integrate_payload = {
+                "task_id": f"gemm_tune_e2e_{tuner_name}",
+                "kernel_id": f"gemm_tune_{tuner_name}",
+                "source": "forge_gemm_tuning",
+                "base_tput": running_tput,
+                "model_path": resolve_session_model_path(
+                    state_model_path=str(getattr(self.shared_state, "model_path", "") or ""),
+                    for_serving=True,
+                ),
+                "extra_server_args": extra_server_args,
+                "extra_envs": test_envs,
+                "keep_threshold_pct": 3.0,
+                "budget_minutes": per_tuner_budget_minutes,
+            }
+            for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
+                try:
+                    integrate_result = await integrate_handler(
+                        integrate_payload,
+                        session_dir=self.session_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
+                        log.warning(
+                            "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
+                            tuner_name,
+                            fault_attempt,
+                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                            exc,
+                        )
+                        continue
+                    log.warning(
+                        "gemm E2E: integrate raised for %s: %s",
+                        tuner_name,
+                        exc,
+                    )
+                    faults.append(
+                        {
+                            **cand,
+                            "reason": "integrate_fault:handler_exception",
+                            "fault": True,
+                            "error_class": "handler_exception",
+                            "error": repr(exc),
+                            "fault_attempts": fault_attempt,
+                        }
+                    )
+                    break
+
+                stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
+                if stopped is not None:
+                    log.info(
+                        "gemm E2E: %s left unmeasured — %s",
+                        tuner_name,
+                        stopped.interrupted,
+                    )
+                    run_stopped = True
+                    break
+
+                if self.shared_state._is_integrate_fault(integrate_result):
+                    error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
+                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
+                        log.warning(
+                            "gemm E2E: retrying tuner=%s after integrate fault %s (attempt %d/%d)",
+                            tuner_name,
+                            error_class,
+                            fault_attempt,
+                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                        )
+                        continue
+                    log.warning(
+                        "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, not a REVERT verdict",
+                        tuner_name,
+                        error_class,
+                    )
+                    faults.append(
+                        {
+                            **cand,
+                            "reason": f"integrate_fault:{error_class}",
+                            "fault": True,
+                            "error_class": error_class,
+                            "integrate_status": integrate_result.get("status"),
+                            "error": integrate_result.get("error"),
+                            "fault_attempts": fault_attempt,
+                        }
+                    )
+                    break
+
+                integrate_verdict = integrate_result
                 break
 
-            decision = str(integrate_result.get("decision") or "").upper()
-            new_tput = float(integrate_result.get("new_tput") or 0.0)
-            gain_pct = float(integrate_result.get("gain_pct") or 0.0)
+            if run_stopped:
+                break
+            if integrate_verdict is None:
+                continue
+
+            decision = str(integrate_verdict.get("decision") or "").upper()
+            new_tput = float(integrate_verdict.get("new_tput") or 0.0)
+            gain_pct = float(integrate_verdict.get("gain_pct") or 0.0)
 
             log.info(
                 "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
@@ -2326,10 +3156,20 @@ class KernelPhase(PhaseHandler):
                 gain_pct,
             )
 
+            # Two independent ways the artifact can fail to take effect, neither
+            # of which the throughput delta can see: the keys are unreachable
+            # (coverage), and the table never reached the server (apply verdict).
+            # Both are positive findings, not absences of evidence -- so they
+            # block the KEEP rather than merely annotating it. Crediting a gain
+            # here would attribute run-to-run drift to tuning that provably did
+            # not run.
+            apply_blockers: list[str] = []
+
             coverage = self._gemm_tuned_config_coverage(tuner_name, env)
             if coverage is not None:
                 cand = {**cand, "tuned_config_coverage": coverage}
-                if not coverage.get("artifact_applied"):
+                if not coverage.get("artifact_applied") and coverage.get("conclusive", True):
+                    apply_blockers.append(str(coverage.get("not_applied_reason") or "no_shape_key_matched"))
                     log.error(
                         "gemm E2E: tuner=%s produced an artifact the runtime never "
                         "applied — 0 of %d requested shape(s) resolve to a tuned row; "
@@ -2337,6 +3177,12 @@ class KernelPhase(PhaseHandler):
                         tuner_name,
                         coverage.get("requested") or 0,
                         gain_pct,
+                    )
+                elif not coverage.get("artifact_applied"):
+                    log.info(
+                        "gemm E2E: tuner=%s tuned-config coverage inconclusive — %s",
+                        tuner_name,
+                        coverage.get("not_applied_reason"),
                     )
                 else:
                     log.info(
@@ -2347,7 +3193,29 @@ class KernelPhase(PhaseHandler):
                         coverage.get("requested") or 0,
                     )
 
-            if decision == "KEEP" and new_tput > running_tput:
+            applied = self._gemm_apply_verdict(tuner_name, env)
+            if applied is not None:
+                cand = {**cand, "apply_verdict": applied}
+                if applied.get("blocks_keep"):
+                    apply_blockers.append(str(applied.get("verdict") or "not_applied"))
+                    log.error(
+                        "forge gemm E2E: tuner=%s apply verdict=%s — %s",
+                        tuner_name,
+                        applied.get("verdict"),
+                        applied.get("detail"),
+                    )
+                elif not applied.get("conclusive"):
+                    # "Cannot tell" is not "did not apply": hit lines need
+                    # AITER_LOG_TUNED_CONFIG=1, and treating their absence as a
+                    # failure would revert every arm that ran without it.
+                    log.info(
+                        "forge gemm E2E: tuner=%s apply verdict=%s (not conclusive) — %s",
+                        tuner_name,
+                        applied.get("verdict"),
+                        applied.get("detail"),
+                    )
+
+            if decision == "KEEP" and new_tput > running_tput and not apply_blockers:
                 stacked_envs.update(env)
                 running_tput = new_tput
                 kept.append(
@@ -2358,6 +3226,11 @@ class KernelPhase(PhaseHandler):
                         "gain_pct": gain_pct,
                     }
                 )
+                # The one place this path names its artifact. The stack entry
+                # below and the attempt row further down both read it, so the
+                # breakdown's string match cannot be defeated by a stack append
+                # that was skipped as already-applied.
+                adopted_tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
 
                 lifted = self._lift_to_current_best(
                     "gemm_tuning",
@@ -2370,10 +3243,7 @@ class KernelPhase(PhaseHandler):
                         "workspace": result.get("workspace"),
                     },
                     entry_extra={
-                        "tuned_file": (
-                            env.get(cand["env_var"])
-                            or next(iter(env.values()), "")
-                        ),
+                        "tuned_file": adopted_tuned_file,
                         "gain_pct": gain_pct,
                         "backend": backend,
                         "source": "kernel_entry_auto",
@@ -2386,25 +3256,56 @@ class KernelPhase(PhaseHandler):
                     )
             else:
                 reason = f"decision={decision}, gain={gain_pct:.2f}%"
-                if coverage is not None and not coverage.get("artifact_applied"):
+                if apply_blockers:
                     # Distinguish "the tuning did not pay off" from "the tuned
                     # artifact was never reachable", which is a wiring defect.
-                    reason = f"tuned_config_never_applied ({reason})"
+                    # The second is worth reporting even when the run also
+                    # happened to measure a gain -- especially then.
+                    reason = f"tuned_config_never_applied[{'+'.join(apply_blockers)}] ({reason})"
                 reverted.append({**cand, "reason": reason})
 
         # The watermark covers the whole run, so it waits for the last KEEP.
         if kept:
             total_gain = (running_tput - baseline_tput) / baseline_tput * 100.0 if baseline_tput > 0 else 0.0
+            # One end-to-end measurement is not enough on this fleet: three
+            # rounds of a single unchanged configuration spanned 58%. Re-run
+            # the baseline interleaved with the tuned stack so drift shows up
+            # as drift. Opt-in, and when it does not run the gain is still
+            # promoted -- it is the best number available -- but labelled as an
+            # unpaired block comparison rather than passed off as a paired one.
+            paired = await self._confirm_gemm_gain_paired(
+                stacked_envs,
+                baseline_tput=baseline_tput,
+                budget_minutes=per_tuner_budget_minutes,
+                extra_server_args=("--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else ""),
+            )
+            if paired is not None:
+                result["paired_confirmation"] = paired.to_dict()
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(
                     running_tput,
                     source="forge_gemm_tuning_e2e",
+                    measurement_basis=_paired_measurement_basis(paired),
                 )
+            # Name the artifact this run adopted, so the breakdown can tell it
+            # was. Forge never set ``tuned_file`` (it reports per-tuner envs
+            # instead), which left the history row's path empty and the adoption
+            # lookup matching on "". The value is the one the stack entry above
+            # carries, taken from the same call rather than looked up.
+            if adopted_tuned_file:
+                result["tuned_file"] = adopted_tuned_file
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
                 len(kept),
                 total_gain,
                 len(reverted),
+            )
+        elif faults:
+            stacked_envs = {}
+            total_gain = 0.0
+            log.info(
+                "gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict",
+                len(faults),
             )
         else:
             stacked_envs = {}
@@ -2416,17 +3317,28 @@ class KernelPhase(PhaseHandler):
 
         # Rewrite the stored result to the E2E-validated outcome so Orchestration
         # never sees the raw combined recommended_env and issues a bundled integrate.
-        result["e2e_results"] = {"kept": kept, "reverted": reverted}
+        result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
         result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
         result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
         result["recommended_env"] = dict(stacked_envs)
         result["extra_envs"] = dict(stacked_envs)
-        result["e2e_gain_pct"] = round(float(total_gain), 4)
+        if faults and not kept and not reverted:
+            result["e2e_gain_pct"] = None
+        else:
+            result["e2e_gain_pct"] = round(float(total_gain), 4)
         result["e2e_validated"] = True
         result["requires_e2e_validation"] = False
         if kept:
             result["status"] = "complete"
             result["decision"] = "KEEP"
+        elif reverted:
+            result["status"] = "complete"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "candidate_no_e2e_gain"
+        elif faults:
+            result["status"] = "failed"
+            result["decision"] = "REVERT"
+            result["micro_decision"] = "integrate_fault"
         else:
             result["status"] = "complete"
             result["decision"] = "REVERT"
@@ -2537,9 +3449,7 @@ class KernelPhase(PhaseHandler):
         )
         if not isinstance(state_value, bool):
             raise ValueError("collective_only_mode must be boolean")
-        return state_value or str(
-            os.environ.get("HYPERLOOM_COLLECTIVE_ONLY", "")
-        ).strip().lower() in (
+        return state_value or str(os.environ.get("HYPERLOOM_COLLECTIVE_ONLY", "")).strip().lower() in (
             "1",
             "true",
             "yes",
@@ -2602,12 +3512,8 @@ class KernelPhase(PhaseHandler):
             await self._integrate_collective(last)
         elif self._collective_required_before_kernel_opt():
             await self._run_forge_collective()
-        if self._collective_only_mode() and not (
-            _phase_state.collective_integration_pending(self.shared_state)
-        ):
-            self.shared_state.set_pending_escalate_hint(
-                _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP
-            )
+        if self._collective_only_mode() and not (_phase_state.collective_integration_pending(self.shared_state)):
+            self.shared_state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             self.shared_state.save(self.session_dir)
 
     async def _run_forge_collective(self) -> None:
@@ -2646,20 +3552,13 @@ class KernelPhase(PhaseHandler):
         if kept != requires_e2e:
             raise ValueError("Collective handler E2E flags are inconsistent")
         if not str(recorded.get("collective_attempt_id") or "").strip():
-            recorded["collective_attempt_id"] = (
-                _derive_collective_attempt_id(recorded)
-            )
+            recorded["collective_attempt_id"] = _derive_collective_attempt_id(recorded)
         if kept:
-            recorded["integration_status"] = "pending"
+            recorded["patch_cleanup_status"] = "pending"
             if not str(recorded.get("integration_id") or "").strip():
-                seed = (
-                    recorded["collective_attempt_id"]
-                    + ":"
-                    + str(recorded.get("patch") or "")
-                )
+                seed = recorded["collective_attempt_id"] + ":" + str(recorded.get("patch") or "")
                 recorded["integration_id"] = (
-                    "collective-integration-"
-                    + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+                    "collective-integration-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
                 )
         self.shared_state.record_collective(recorded, self.session_dir)
         log.info(
@@ -2740,19 +3639,13 @@ class KernelPhase(PhaseHandler):
                     snapshot_dir=Path(patch).parent / "collective_snapshot",
                 )
             except Exception as exc:  # noqa: BLE001
-                log.exception(
-                    "KERNEL entry collective snapshot materialization failed"
-                )
+                log.exception("KERNEL entry collective snapshot materialization failed")
                 return _failed(exc.__class__.__name__, repr(exc))
 
         try:
-            keep_threshold = float(
-                os.environ.get("HYPERLOOM_COLLECTIVE_KEEP_PCT", "1.0")
-            )
+            keep_threshold = float(os.environ.get("HYPERLOOM_COLLECTIVE_KEEP_PCT", "1.0"))
             if not math.isfinite(keep_threshold) or keep_threshold < 0:
-                raise ValueError(
-                    "HYPERLOOM_COLLECTIVE_KEEP_PCT must be finite and non-negative"
-                )
+                raise ValueError("HYPERLOOM_COLLECTIVE_KEEP_PCT must be finite and non-negative")
             integ = await integrate_handler(
                 {
                     "task_id": "collective_e2e",
@@ -2797,11 +3690,7 @@ class KernelPhase(PhaseHandler):
         from ..kernel.request_handlers import _maybe_revert_kernel_patch
 
         apply_result = integ.get("apply_result")
-        manifest_path = (
-            str(apply_result.get("manifest_path") or "").strip()
-            if isinstance(apply_result, dict)
-            else ""
-        )
+        manifest_path = str(apply_result.get("manifest_path") or "").strip() if isinstance(apply_result, dict) else ""
         if not manifest_path and apply_checkpoint.is_file():
             try:
                 apply_result, _manifest_status = _collective_recovery.load_apply_checkpoint(
@@ -2848,16 +3737,10 @@ class KernelPhase(PhaseHandler):
                 _maybe_revert_kernel_patch,
                 apply_result,
             )
-        revert_complete = not manifest_path or _collective_recovery.patch_lifecycle_complete(
-            integ.get("revert_result")
-        )
+        revert_complete = not manifest_path or _collective_recovery.patch_lifecycle_complete(integ.get("revert_result"))
         integration_complete = revert_complete and not recovery_uncertain
-        integ["integration_status"] = (
-            "complete" if integration_complete else "recovery_required"
-        )
-        integ["integration_recovery_action"] = (
-            "" if integration_complete else "revert"
-        )
+        integ["patch_cleanup_status"] = "complete" if integration_complete else "recovery_required"
+        integ["patch_cleanup_action"] = "" if integration_complete else "revert"
         return decision
 
     async def _integrate_collective(self, result: dict) -> None:
@@ -2876,8 +3759,7 @@ class KernelPhase(PhaseHandler):
         current_envs = inputs.extra_envs
         patch_root = patches_dir(
             self.session_dir,
-            "forge_collective_"
-            + hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16],
+            "forge_collective_" + hashlib.sha256(integration_id.encode("utf-8")).hexdigest()[:16],
         )
         backup_root = patch_root / "backup"
         apply_checkpoint = patch_root / "apply_checkpoint.json"
@@ -2908,22 +3790,12 @@ class KernelPhase(PhaseHandler):
         apply_result = integ["apply_result"]
 
         state_snapshot = {
-            "optimization_stack": list(
-                self.shared_state.optimization_stack or []
-            ),
-            "gain_per_stack_entry": list(
-                self.shared_state.gain_per_stack_entry or []
-            ),
+            "optimization_stack": list(self.shared_state.optimization_stack or []),
+            "gain_per_stack_entry": list(self.shared_state.gain_per_stack_entry or []),
             "current_best": dict(self.shared_state.current_best or {}),
-            "cumulative_gain_validated": (
-                self.shared_state.cumulative_gain_validated
-            ),
-            "cumulative_gain_validated_ts": (
-                self.shared_state.cumulative_gain_validated_ts
-            ),
-            "cumulative_gain_validated_stack_len": (
-                self.shared_state.cumulative_gain_validated_stack_len
-            ),
+            "cumulative_gain_validated": (self.shared_state.cumulative_gain_validated),
+            "cumulative_gain_validated_ts": (self.shared_state.cumulative_gain_validated_ts),
+            "cumulative_gain_validated_stack_len": (self.shared_state.cumulative_gain_validated_stack_len),
         }
         if decision == "KEEP":
             try:
@@ -2939,9 +3811,8 @@ class KernelPhase(PhaseHandler):
                     _maybe_revert_kernel_patch,
                     apply_result,
                 )
-                revert_complete = _collective_recovery.patch_lifecycle_complete(
-                    revert_result
-                )
+                revert_complete = _collective_recovery.patch_lifecycle_complete(revert_result)
+                revert_action = "" if revert_complete else "revert"
                 integ.update(
                     {
                         "status": "failed",
@@ -2949,14 +3820,8 @@ class KernelPhase(PhaseHandler):
                         "error_class": "collective_promotion_invalid",
                         "error": repr(exc),
                         "revert_result": revert_result,
-                        "integration_status": (
-                            "complete"
-                            if revert_complete
-                            else "recovery_required"
-                        ),
-                        "integration_recovery_action": (
-                            "" if revert_complete else "revert"
-                        ),
+                        "patch_cleanup_status": ("complete" if revert_complete else "recovery_required"),
+                        "patch_cleanup_action": revert_action,
                     }
                 )
                 decision = "REVERT"
@@ -2968,8 +3833,8 @@ class KernelPhase(PhaseHandler):
             gain,
         )
         if decision == "KEEP":
-            integ["integration_status"] = "recovery_required"
-            integ["integration_recovery_action"] = "finalize"
+            integ["patch_cleanup_status"] = "recovery_required"
+            integ["patch_cleanup_action"] = "finalize"
         try:
             self.shared_state.record_collective_integration(
                 integ,
@@ -2984,28 +3849,25 @@ class KernelPhase(PhaseHandler):
 
         if decision == "KEEP":
             finalize_result = integ.get("finalize_result")
-            if not _collective_recovery.patch_lifecycle_complete(finalize_result):
+            # Settled, not complete: an already-finalized manifest must not be
+            # finalized again even when its sweep was partial.
+            if not _collective_recovery.patch_finalize_settled(finalize_result):
                 finalize_result = await asyncio.to_thread(
                     _maybe_finalize_kernel_patch,
                     apply_result,
                 )
                 integ["finalize_result"] = finalize_result
-            finalize_complete = _collective_recovery.patch_lifecycle_complete(
-                finalize_result
-            )
-            integ["integration_status"] = (
-                "complete" if finalize_complete else "recovery_required"
-            )
-            integ["integration_recovery_action"] = (
-                "" if finalize_complete else "finalize"
-            )
+            finalize_complete = _collective_recovery.patch_finalize_settled(finalize_result)
+            finalize_action = "" if finalize_complete else "finalize"
+            integ["patch_cleanup_status"] = "complete" if finalize_complete else "recovery_required"
+            integ["patch_cleanup_action"] = finalize_action
             self.shared_state.record_collective_integration(
                 integ,
                 self.session_dir,
                 integration_id=integration_id,
             )
 
-        if integ["integration_status"] == "complete":
+        if integ["patch_cleanup_status"] == "complete":
             apply_checkpoint.unlink(missing_ok=True)
         try:
             await self.bus.append_and_seq(
@@ -3040,9 +3902,7 @@ class KernelPhase(PhaseHandler):
         A no-op when the patch is already stacked, or when the lift refuses a
         winner that does not beat the live throughput anchor.
         """
-        if not isinstance(collective_result, dict) or not isinstance(
-            integrate_result, dict
-        ):
+        if not isinstance(collective_result, dict) or not isinstance(integrate_result, dict):
             raise TypeError("Collective promotion inputs must be mappings")
         if str(integrate_result.get("decision") or "").strip().upper() != "KEEP":
             return
@@ -3059,25 +3919,20 @@ class KernelPhase(PhaseHandler):
         incremental_gain_raw = integrate_result.get("gain_pct")
         baseline_tput_raw = self.shared_state.baseline_tput
         if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
+            isinstance(value, bool) or not isinstance(value, (int, float))
             for value in (
                 new_tput_raw,
                 incremental_gain_raw,
                 baseline_tput_raw,
             )
         ):
-            raise ValueError(
-                "Collective KEEP is missing numeric E2E measurements"
-            )
+            raise ValueError("Collective KEEP is missing numeric E2E measurements")
         try:
             new_tput = float(new_tput_raw)
             incremental_gain = float(incremental_gain_raw)
             baseline_tput = float(baseline_tput_raw)
         except (OverflowError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "Collective KEEP is missing numeric E2E measurements"
-            ) from exc
+            raise ValueError("Collective KEEP is missing numeric E2E measurements") from exc
         if not math.isfinite(new_tput) or new_tput <= 0:
             raise ValueError("Collective KEEP new_tput must be positive")
         if not math.isfinite(incremental_gain) or incremental_gain <= 0:
@@ -3085,17 +3940,11 @@ class KernelPhase(PhaseHandler):
         if not math.isfinite(baseline_tput) or baseline_tput <= 0:
             raise ValueError("Collective KEEP baseline_tput must be positive")
 
-        patch = str(
-            collective_result.get("patch")
-            or integrate_result.get("patch_path")
-            or ""
-        ).strip()
+        patch = str(collective_result.get("patch") or integrate_result.get("patch_path") or "").strip()
         if not patch:
             raise ValueError("Collective KEEP is missing patch_path")
         integration_id = str(
-            collective_result.get("integration_id")
-            or integrate_result.get("integration_id")
-            or ""
+            collective_result.get("integration_id") or integrate_result.get("integration_id") or ""
         ).strip()
         if not integration_id:
             raise ValueError("Collective KEEP is missing integration_id")
@@ -3130,8 +3979,7 @@ class KernelPhase(PhaseHandler):
                 "kernel_name": str(collective_result.get("kernel_name") or ""),
                 "gain_pct": incremental_gain,
                 "patch_path": patch,
-                "target_file": collective_result.get("source_file")
-                or integrate_result.get("target_file"),
+                "target_file": collective_result.get("source_file") or integrate_result.get("target_file"),
                 "kernel_speedup": collective_result.get("kernel_speedup"),
                 "gpu_pct": collective_result.get("gpu_pct"),
                 "collective_op": collective_result.get("collective_op"),
@@ -3158,11 +4006,7 @@ class KernelPhase(PhaseHandler):
                 new_tput=new_tput,
                 gain_pct=incremental_gain,
                 patch_path=patch,
-                target_file=str(
-                    collective_result.get("source_file")
-                    or integrate_result.get("target_file")
-                    or ""
-                ),
+                target_file=str(collective_result.get("source_file") or integrate_result.get("target_file") or ""),
                 collective_op=str(collective_result.get("collective_op") or ""),
                 world_size=collective_result.get("world_size"),
                 kernel_speedup=collective_result.get("kernel_speedup"),

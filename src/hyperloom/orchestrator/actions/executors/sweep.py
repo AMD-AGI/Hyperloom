@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_int
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._grid_base import pareto_front
 from ._grid_runner import (
@@ -48,6 +49,7 @@ from ._grid_runner import (
 from ._ray_serving import maybe_serving_lease
 from ._workload_envs import (
     FrameworkScriptMismatchError,
+    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -240,6 +242,7 @@ class SweepExecutor:
         if not config_path.exists():
             return {"status": "failed", "error_class": "missing_config", "error": f"config not found: {config_path}"}
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
         output_root = Path(
             params.get("output_dir") or extra.get("workspace") or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
         )
@@ -248,7 +251,11 @@ class SweepExecutor:
         # Workload-contract materialization: sweep overrides CONC/ISL/OSL/
         # NUM_PROMPTS per variant, but TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/
         # ROCR_VISIBLE_DEVICES still flow from env onto the variant base.
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=str(getattr(shared_state, "model_path", "") or "") if shared_state else "",
+            for_serving=True,
+        )
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
@@ -279,6 +286,21 @@ class SweepExecutor:
 
         conc_values = list(params.get("conc_values") or self.default_conc_values)
         isl_osl_configs = list(params.get("isl_osl_configs") or self.default_isl_osl_configs)
+        # The AgentX client reads CONC and nothing else -- request shapes come
+        # from the trace corpus, so ISL/OSL are inert placeholders there. Fanning
+        # out over them would run byte-identical measurements under three
+        # different labels and attribute the spread between them to ISL/OSL.
+        # Collapse to a single point; the concurrency axis is unaffected.
+        # (Also note the ISL+OSL > max_model_len skip below can no longer fire
+        # under AgentX: max_model_len is now the model's native window, orders of
+        # magnitude above these placeholders -- so nothing else prunes them.)
+        if agentx_enabled() and len(isl_osl_configs) > 1:
+            log.info(
+                "sweep: AgentX collapses %d ISL/OSL points to %s (the agentic client does not read ISL/OSL)",
+                len(isl_osl_configs),
+                isl_osl_configs[0],
+            )
+            isl_osl_configs = isl_osl_configs[:1]
         num_prompts_factor = int(params.get("num_prompts_factor", self.default_num_prompts_factor))
         base_extra_args = params.get("base_extra_args", "")
         base_remove_args = [str(v) for v in (params.get("base_remove_args") or []) if str(v).strip()]

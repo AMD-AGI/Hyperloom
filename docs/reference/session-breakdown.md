@@ -226,7 +226,7 @@ through `adopted_attempt_id`.
 | `optimization_kind` | The attempt's `kind`. |
 | `name` | Operation name, typically the kernel or variant. |
 | `backend` | Producing engine, e.g. `geak` or `forge`. |
-| `gain_pct` | Gain against the **session baseline**. The only figure that may be summed. |
+| `gain_pct` | Gain against the **session baseline**. The only figure that can be summed. |
 | `gain_method` | How `gain_pct` was arrived at; see below. |
 | `chain_continuous` | `false` when this step recorded no finishing throughput, so the drift across it could not be measured. |
 | `local_gain_pct` | The executor's own figure, kept beside `gain_pct` so the two are visibly different numbers. Not summable. |
@@ -326,6 +326,29 @@ preserves the available `donor_canonical_id`, `donor_model`,
 `donor_breakdown_link`. Fields absent from the source recipe remain absent
 rather than being inferred.
 
+`kb_provenance.warm_replay` additionally records what the replay was judged
+on, whether it passed or failed. A replayed recipe is evidence from another
+session on another machine, so reproducing its throughput says nothing about
+whether it still computes correctly here.
+
+| Field | Type | Description |
+|---|---|---|
+| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay_accuracy` `0.0`) from a replay nothing checked (`eval_ran` false, `replay_accuracy` `null`). |
+| `replay_accuracy` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
+| `baseline_accuracy` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
+| `eval_error` | string \| null | Why no score could be read. Distinguishes a contract with the eval switched off, an eval that produced an unreadable file, and a results file carrying no metric this parser knows. |
+
+A replay whose accuracy could not be measured is still promoted — a failed
+measurement is not evidence the config broke the model — so `eval_ran` is what
+tells an unjudged promotion apart from a judged one.
+
+The `optimization_stack` entry a warm replay pushes carries the same score as
+`accuracy`, so the promotion and the evidence behind it are readable from one
+place. `null` there means the lane recorded no verdict.
+
+Sessions started with `--no-eval` run no eval at all, warm replay included, so
+these fields record the absence rather than a score.
+
 ## `session` — `SessionMeta`
 
 The `session` section contains the following metadata fields.
@@ -422,10 +445,27 @@ T+90 min" charts.
 ## `capability_summary` — `CapabilitySummary`
 
 One card per live capability (`geak`, `forge`, `explore`, `sweep`,
-`specialist`) with: `status`, `attempts`, `keeps`, `tested`,
-`best_gain_pct`, `reason`. Legacy `backends`, `params`, and
-`validate_stack` rows can appear when archived sessions are rebuilt.
-Drives the per-session UI cards in Primus-Claw.
+`specialist`) with: `status`, `attempts`, `keeps`, `micro_only_keeps`,
+`pending_integrate`, `reverts`, `e2e_gain_pct`, `tested`, `best_gain_pct`,
+`reason`. Legacy `backends`, `params`, and `validate_stack` rows can appear
+when archived sessions are rebuilt. Drives the per-session UI cards in
+Primus-Claw.
+
+For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
+
+- `keeps` — **distinct kernels adopted at integrate**, i.e. end-to-end
+  verified. A kernel re-tried across runs counts once.
+- `micro_only_keeps` — kernels that cleared the micro benchmark but never
+  reached integrate. Not adoptions: a faster kernel in isolation does not
+  imply a faster service.
+- `pending_integrate` — kernels whose integrate verdict is `NEEDS_REVIEW` or
+  not yet recorded. Undecided, not successful.
+- `reverts` — kernels integrate rejected (end-to-end regression).
+- `attempts` — **invocation rows**, not distinct kernels: how many tries the
+  lane made. Deliberately a different unit from `keeps`.
+
+The `specialist` row uses `keeps` / `attempts` differently: see
+`CapabilitySummary` in `schema.py`.
 
 ---
 
@@ -601,7 +641,7 @@ Eval-origin trigger (present when `origin` is `eval`):
 | `probe_config_path`         | string | Materialized config re-run to reproduce the contract.                                        |
 | `trigger_evidence_excerpt`  | string | Tail (2000 chars) of the captured eval-failure evidence.                                     |
 
-Stack actions, runtimes and builds:
+Stack actions, runtimes, and builds:
 
 | Field                 | Type                          | Description                                                                                     |
 |-----------------------|-------------------------------|-------------------------------------------------------------------------------------------------|
