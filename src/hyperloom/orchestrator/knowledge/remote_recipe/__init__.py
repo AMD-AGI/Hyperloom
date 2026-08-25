@@ -84,7 +84,10 @@ def write_final_remote_recipe(
         )
     if throughput <= 0:
         return RemoteWriteResult("skipped", "missing_optimized_throughput", canonical_id, session_id)
-    scope = RecipeScope.from_state(state)
+    try:
+        scope = RecipeScope.from_state(state)
+    except RemoteRecipeValidationError:
+        return RemoteWriteResult("skipped", "invalid_recipe_scope", canonical_id, session_id)
     with tempfile.TemporaryDirectory(prefix="hyperloom-remote-recipe-") as temporary:
         files_dir = Path(temporary) / "files"
         bundle = build_remote_knowledge(

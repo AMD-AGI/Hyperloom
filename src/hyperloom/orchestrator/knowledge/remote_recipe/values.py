@@ -726,7 +726,9 @@ def has_new_keep(state: Any) -> bool:
     individual rows therefore do not carry a redundant KEEP decision.
     Pre-baseline enablement KEEPs (``baseline_enablement``) establish a runnable
     anchor but are not performance optimizations; they alone do not qualify for
-    KB writeback.
+    KB writeback. The ``recipe_publishable`` flag is a config-layer filter that
+    ``build_publishable_recipe_config`` already applies; excluding it here would
+    gate the entire KB write for sessions whose gains come from enablement.
     """
     for raw in getattr(state, "optimization_stack", []) or []:
         if not isinstance(raw, Mapping):
@@ -735,8 +737,6 @@ def has_new_keep(state: Any) -> bool:
         if action in _IGNORED_ACTIONS:
             continue
         if raw.get("baseline_enablement"):
-            continue
-        if raw.get("recipe_publishable") is False:
             continue
         return True
     return False
