@@ -23,6 +23,9 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import (
     _parse_iso_unix,
@@ -79,12 +82,65 @@ _KERNEL_HEARTBEAT_SEC: float = 150.0
 class IntentRouter:
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
-    def __init__(self, coordinator: "Coordinator") -> None:  # noqa: F821 - deferred ref, not imported to avoid an import cycle (see note above)
+    def __init__(self, coordinator: Any) -> None:
         self._coord = coordinator
 
     def __getattr__(self, name: str) -> Any:
         # Attributes not defined on the router resolve onto the coordinator.
         return getattr(object.__getattribute__(self, "_coord"), name)
+
+    def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
+        """Freeze patch ownership when a specialist task is created."""
+        owner = patch_owner_phase(params)
+        if not owner:
+            gap_layer = str(params.get("gap_layer") or "").strip().lower()
+            active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+            if gap_layer == "framework":
+                owner = "FRAMEWORK_AGENT"
+            elif active_phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+                owner = "FRAMEWORK_AGENT"
+            elif active_phase == "EXPLORE":
+                owner = "EXPLORE"
+            elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
+                owner = "EXPLORE"
+        if owner:
+            params["source_phase"] = owner
+        return owner
+
+    async def _stamp_integrate_patch_owner(
+        self,
+        params: dict[str, Any],
+    ) -> str:
+        """Copy immutable author ownership from the originating specialist."""
+        owner = patch_owner_phase(params)
+        if owner:
+            params["source_phase"] = owner
+            return owner
+        specialist_task_id = str(params.get("specialist_task_id") or "").strip()
+        if not specialist_task_id:
+            return ""
+        try:
+            specialist = await self.tasks.get(specialist_task_id)
+        except TaskNotFound:
+            return ""
+        specialist_params = dict(getattr(specialist, "params", None) or {})
+        owner = patch_owner_phase(specialist_params)
+        if not owner:
+            return ""
+        for key in (
+            "domain",
+            "source_domain",
+            "provenance",
+            "gap_canonical_id",
+            "gap_layer",
+            "framework_agent_authoring",
+            "framework_agent_candidate_id",
+        ):
+            value = specialist_params.get(key)
+            if value not in (None, "", [], {}):
+                params.setdefault(key, value)
+        params["source_phase"] = owner
+        return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
         """Validate an emitted intent through PolicyGate, then route it.
@@ -174,11 +230,28 @@ class IntentRouter:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
+        payload = dict(intent.payload)
+        if action_name == "integrate_patch":
+            params = dict(payload.get("params") or {})
+            if not await self._stamp_integrate_patch_owner(params):
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "proposal_rejected",
+                        "reason": "integrate_patch_owner_missing",
+                        "from_agent": source,
+                        "action_name": action_name,
+                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
+                    },
+                )
+                return
+            payload["params"] = params
         msg = Message.new(
             source,
             "*",
             "proposal",
-            {**intent.payload, "needs_review": True},
+            {**payload, "needs_review": True},
             priority=1,
         )
         await self.bus.append_and_seq(msg)
@@ -189,7 +262,7 @@ class IntentRouter:
             from_agent=source,
             action_name=action_name,
             predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
-            payload=dict(intent.payload),
+            payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
 
@@ -357,7 +430,7 @@ class IntentRouter:
         self,
         *,
         source: str,
-        pending: "PendingProposal",  # noqa: F821 - deferred ref; imported lazily in handlers to avoid import cycle.
+        pending: Any,
         verdict: str,
         reasoning: str,
         authored_verdict: str = "",
@@ -519,14 +592,25 @@ class IntentRouter:
             return
         # delegate explore runs variants directly (no Critic pre-review).
         params = dict(intent.payload.get("params") or {})
+        if action_name == "integrate_patch":
+            if not await self._stamp_integrate_patch_owner(params):
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "delegate_rejected",
+                        "reason": "integrate_patch_owner_missing",
+                        "from_agent": source,
+                        "action_name": action_name,
+                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
+                    },
+                )
+                return
         if action_name == "specialist":
             # Capture proposal ownership at dispatch. Specialist work can finish
             # after the state machine advances, so completion-time phase is not
             # a reliable source for a later integrate_patch KEEP.
-            params.setdefault(
-                "source_phase",
-                str(getattr(self.shared_state, "phase", "") or ""),
-            )
+            self._stamp_specialist_owner(params)
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
