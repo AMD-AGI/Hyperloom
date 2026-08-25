@@ -43,17 +43,23 @@ Three properties keep the added freedom bounded:
   so a bad review is auditable and reversible.
 
 The session may run shell commands (demangling a mangled vendor symbol is
-exactly the job), so the framework tree is fingerprinted before and after. A
-review that modified the code under optimization is discarded rather than
-applied: the benchmark that follows would otherwise measure an unrecorded edit.
+exactly the job), so the code under optimization is fingerprinted before and
+after: the candidate source files themselves, and the directories holding them
+so a file the session *created* is caught too. A review that modified either is
+discarded rather than applied -- the benchmark that follows would otherwise
+measure an unrecorded edit and credit it to the kernel rewrite. Writes through
+the ``Write`` tool do not get that far; they are refused outside the run
+directory (see :data:`_GATED_TOOLS`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -124,20 +130,33 @@ _ACTION_UNRESOLVE = "unresolve"
 _ACTION_DROP = "drop"
 _ACTIONS = frozenset({_ACTION_KEEP, _ACTION_REWRITE, _ACTION_UNRESOLVE, _ACTION_DROP})
 
-#: Read and search freely; run shell commands; write only the revision file.
-#: ``Edit`` is withheld deliberately -- the agent proposes, it does not patch,
-#: and the framework tree here is the code under optimization.
+#: Pre-approved outright: reading and searching cannot alter the tree, so no
+#: per-call decision is worth making. ``Edit`` is withheld deliberately -- the
+#: agent proposes, it does not patch, and the framework tree here is the code
+#: under optimization.
+ALLOWED_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob")
+
+#: Permitted but decided per call, not pre-approved. Listing a tool in
+#: ``allowed_tools`` tells the SDK to skip the permission callback for it, so a
+#: tool that needs a boundary must be left out of that list and admitted by
+#: :func:`_write_boundary_guard` instead.
 #:
-#: The two backends do not enforce that equally, and the difference is worth
-#: stating rather than implying. Codex confines writes with
-#: ``writable_roots=(run_dir,)``, so the sandbox refuses a path outside it. The
-#: Claude branch has no equivalent: ``Bash`` and ``Write`` are permitted and
-#: ``cwd`` is set to the run directory, which orders relative paths but forbids
-#: nothing -- "write nothing outside the run directory" is a prompt instruction
-#: there, not a boundary. What backs it instead is the fingerprint taken around
-#: the session, and that covers only the source files the candidate table names:
-#: a write elsewhere in the framework tree would not be detected.
-ALLOWED_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "Bash", "Write")
+#: ``Write`` is the answer channel -- the session reports by writing the
+#: revisions file -- and is confined to the run directory. ``Bash`` is how a
+#: mangled vendor symbol gets demangled, which is exactly the job, and it is
+#: **not** confined: a shell command can write anywhere the process can, and no
+#: inspection of the command string changes that. The two backends therefore
+#: reach different guarantees, which is worth stating rather than implying:
+#: Codex passes ``writable_roots=(run_dir,)`` and its sandbox refuses a path
+#: outside it, covering shell commands too. On the Claude backend a write
+#: through ``Write`` is *prevented* and a write through ``Bash`` is *detected*,
+#: by the fingerprint taken around the session.
+_GATED_TOOLS: tuple[str, ...] = ("Bash", "Write")
+
+#: Tool inputs that name the file a write targets, in the order the SDK fills
+#: them. Kept as a tuple rather than a single key because the write tools do not
+#: agree on the spelling, and a guard that reads the wrong key admits everything.
+_WRITE_PATH_KEYS: tuple[str, ...] = ("file_path", "path", "filePath", "notebook_path")
 
 _DENIED_TOOLS: tuple[str, ...] = (
     "Edit",
@@ -212,23 +231,57 @@ def _safe_exception_label(exc: BaseException) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: ``/repo/moe.py(247): _grouped_gemm`` -> ``/repo/moe.py``. Mirrors
+#: :func:`kernel_source_contract.strip_line_suffix` for standalone invocation,
+#: where that module is not importable.
+_LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?)\(\d+\)\s*:\s*\S.*$")
+
+
+def _bare_source_path(raw: str) -> str:
+    """Return a stat-able path from a possibly line-annotated candidate source.
+
+    A resolved source frequently arrives as ``path(line): function`` -- the
+    contract module measured 29 of 36 entries carrying that suffix on one real
+    session. ``os.stat`` cannot open such a string, and the caller below swallows
+    the resulting ``OSError``, so leaving the suffix on turns the tamper check
+    into a silent no-op for exactly the rows that carry the most evidence.
+
+    Args:
+        raw (str): A candidate ``source_file`` value.
+
+    Returns:
+        str: The bare path, or ``""`` when nothing path-shaped is left.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if _KSC is not None:
+        return str(_KSC.strip_line_suffix(text) or "").strip()
+    match = _LINE_SUFFIX_RE.match(text)
+    return match.group("path").strip() if match else text
+
+
 def source_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
-    """Record size and mtime for each readable path.
+    """Record size and mtime for each readable candidate source.
 
     Scoped to the files the candidates actually name rather than the whole
     framework tree: those are the ones a source-resolution session has reason
     to open, and hashing gigabytes of installed packages to guard a few dozen
     files would cost more than the session it protects.
+    :func:`directory_fingerprint` covers what a file-only print cannot see.
 
     Args:
-        paths (Sequence[str]): Candidate source paths, absolute.
+        paths (Sequence[str]): Candidate source paths, absolute, with or
+            without a ``(line): function`` suffix.
 
     Returns:
-        dict[str, list[Any]]: ``{path: [size, mtime_ns]}`` for readable paths.
+        dict[str, list[Any]]: ``{bare_path: [size, mtime_ns]}`` for readable
+            paths. A path that could not be stat'd is absent; use
+            :func:`unfingerprinted_sources` to tell that apart from coverage.
     """
     out: dict[str, list[Any]] = {}
     for raw in paths:
-        path = str(raw or "").strip()
+        path = _bare_source_path(raw)
         if not path or path in out:
             continue
         try:
@@ -239,12 +292,76 @@ def source_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
     return out
 
 
+def directory_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
+    """Record the entry set of every directory holding a candidate source.
+
+    A file-only print can only ever report a change to a file the table already
+    named, so a file the session *creates* leaves it untouched -- a patched copy
+    beside the kernel, a ``sitecustomize`` module, or any name that shadows a
+    real one on ``sys.path``. Those have to land in one of these directories to
+    be imported in the traced source's place, so the directory listing is the
+    cheap place to notice them: names only, one ``scandir`` per directory.
+
+    Args:
+        paths (Sequence[str]): Candidate source paths, as above.
+
+    Returns:
+        dict[str, list[Any]]: ``{directory: [entry_count, digest]}`` for
+            readable directories.
+    """
+    out: dict[str, list[Any]] = {}
+    for raw in paths:
+        path = _bare_source_path(raw)
+        if not path:
+            continue
+        directory = os.path.dirname(path)
+        if not directory or directory in out:
+            continue
+        try:
+            names = sorted(entry.name for entry in os.scandir(directory))
+        except OSError:
+            continue
+        digest = hashlib.sha256("\0".join(names).encode("utf-8", "surrogateescape")).hexdigest()
+        out[directory] = [len(names), digest]
+    return out
+
+
+def unfingerprinted_sources(
+    paths: Sequence[str],
+    fingerprint: dict[str, list[Any]],
+) -> list[str]:
+    """Return the named sources no signature could be taken for.
+
+    An empty fingerprint and an unmodified tree produce the same empty drift
+    list, which is what let a broken tamper check read as a passing one. Naming
+    the uncovered paths lets the caller report coverage instead of inferring it.
+
+    Args:
+        paths (Sequence[str]): The candidate source paths that were offered.
+        fingerprint (dict[str, list[Any]]): The result of
+            :func:`source_fingerprint` over the same paths.
+
+    Returns:
+        list[str]: Bare paths that were named but carry no signature.
+    """
+    missing: list[str] = []
+    for raw in paths:
+        path = _bare_source_path(raw)
+        if path and path not in fingerprint and path not in missing:
+            missing.append(path)
+    return sorted(missing)
+
+
 def fingerprint_drift(before: dict[str, list[Any]], after: dict[str, list[Any]]) -> list[str]:
-    """Return the paths whose size or mtime changed between two fingerprints."""
-    drifted: list[str] = []
-    for path, signature in before.items():
-        if after.get(path) != signature:
-            drifted.append(path)
+    """Return the paths whose recorded signature changed between two prints.
+
+    Both directions count. A key only in ``before`` was deleted; a key only in
+    ``after`` came into existence during the session -- which is how a directory
+    print reports an added file, and how a source that was absent when the first
+    print was taken reports being written. Iterating ``before`` alone reports
+    neither.
+    """
+    drifted = [path for path in set(before) | set(after) if before.get(path) != after.get(path)]
     return sorted(drifted)
 
 
@@ -268,13 +385,11 @@ def build_review_prompt(
     bound the review by whatever was guessed to be relevant, whereas the agent
     can follow the evidence -- and only ships what it actually opened.
 
-    The closing "write nothing outside the run directory" line is an
-    instruction, and on the Claude backend that is all it is: see
-    :data:`ALLOWED_TOOLS` for why. What stands behind it there is the
-    fingerprint taken around the session, which covers the source files the
-    candidate table names and nothing else. Read this line as the boundary and a
-    write elsewhere in the framework tree looks impossible; it is merely
-    undetected.
+    The closing "write nothing outside the run directory" line is enforced for
+    the tool that writes -- ``Write`` is refused outside ``run_dir`` on both
+    backends -- and is an instruction for the one that can write anyway: a
+    ``Bash`` command on the Claude backend is bounded by detection, not by
+    refusal. See :data:`_GATED_TOOLS` for the split.
     """
     task = (
         "Audit the kernel-candidate table produced by the deterministic "
@@ -391,6 +506,78 @@ def _resolve_backend() -> str:
     return "claude"
 
 
+def _within(path: str, root: Path) -> bool:
+    """Whether ``path`` resolves inside ``root``.
+
+    Resolves both sides before comparing, so ``..`` segments and a symlink
+    pointing out of the run directory are rejected rather than spelled around.
+    """
+    try:
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            target = root / target
+        resolved = target.resolve()
+        base = root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved == base or base in resolved.parents
+
+
+def _write_boundary_guard(
+    run_dir: Path,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> Callable[[str, dict[str, Any], Any], Any]:
+    """Build the ``can_use_tool`` callback that confines writes to ``run_dir``.
+
+    This is the enforcement the Claude backend previously only described. The
+    prompt's closing "write nothing outside the run directory" line is now
+    backed for the tool that writes: a ``Write`` naming a path outside the run
+    directory is refused, and the refusal reaches the session as a tool error it
+    can react to rather than as a silent success.
+
+    ``Bash`` is admitted. A shell command can write anywhere the process can,
+    and reading the command string to guess whether it will is the kind of guard
+    that fails quietly on the first construction nobody predicted -- so it is
+    not attempted here, and :func:`directory_fingerprint` carries that case
+    instead. Routing ``Bash`` through the same callback still buys one thing:
+    every gated call has a single place that decided it, and that place logs.
+
+    Args:
+        run_dir (Path): The only directory the session may write to.
+        log (Callable[[str], None] | None): Optional diagnostics callback.
+
+    Returns:
+        Callable: An async ``can_use_tool`` callback.
+    """
+    import claude_agent_sdk as sdk  # type: ignore[import-not-found]  # noqa: PLC0415
+
+    async def _can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+        if tool_name != "Write":
+            return sdk.PermissionResultAllow()
+        target = next(
+            (
+                str(tool_input.get(key) or "").strip()
+                for key in _WRITE_PATH_KEYS
+                if str(tool_input.get(key) or "").strip()
+            ),
+            "",
+        )
+        # A write whose target cannot be read off the input is refused rather
+        # than allowed: an unrecognised spelling must not become a bypass.
+        if not target or not _within(target, run_dir):
+            message = (
+                f"refused: {tool_name} may only write under {run_dir}; "
+                f"{target or '(no path in tool input)'} is outside it"
+            )
+            if log is not None:
+                log(f"[review-agent] WARNING: {message}")
+            return sdk.PermissionResultDeny(message=message)
+        return sdk.PermissionResultAllow()
+
+    return _can_use_tool
+
+
 async def _run_claude_session(
     prompt: str,
     *,
@@ -410,16 +597,39 @@ async def _run_claude_session(
             "model": model,
             "system_prompt": _SYSTEM_PROMPT,
             "max_turns": _MAX_TURNS,
+            # The gated tools stay out of ``allowed_tools`` on purpose: a tool
+            # listed there is pre-approved and the callback is never consulted.
             "allowed_tools": list(ALLOWED_TOOLS),
             "disallowed_tools": list(_DENIED_TOOLS),
             "cwd": str(run_dir),
+            "can_use_tool": _write_boundary_guard(run_dir, log=log),
         }
     )
-    try:
-        options = sdk.ClaudeAgentOptions(**kwargs)
-    except TypeError:
-        kwargs.pop("cwd", None)
-        options = sdk.ClaudeAgentOptions(**kwargs)
+    # Degrade one option at a time, and give up the write boundary last: an SDK
+    # that does not know ``cwd`` must not cost the guard as collateral. Dropping
+    # ``can_use_tool`` has to widen ``allowed_tools`` in the same step, because a
+    # gated tool with no decider left would stall on a prompt nobody answers --
+    # that is the pre-existing behaviour, where detection carries the whole
+    # guarantee.
+    without_guard = {
+        **{key: value for key, value in kwargs.items() if key != "can_use_tool"},
+        "allowed_tools": list(ALLOWED_TOOLS) + list(_GATED_TOOLS),
+    }
+    variants = (
+        kwargs,
+        {key: value for key, value in kwargs.items() if key != "cwd"},
+        without_guard,
+        {key: value for key, value in without_guard.items() if key != "cwd"},
+    )
+    options = None
+    for variant in variants:
+        try:
+            options = sdk.ClaudeAgentOptions(**variant)
+            break
+        except TypeError:
+            continue
+    if options is None:  # pragma: no cover - no known SDK rejects the last variant
+        raise TypeError("claude_agent_sdk.ClaudeAgentOptions rejected every option set")
 
     # The in-process SDK query has no client-side read timeout, so a stalled
     # gateway stream blocks until the overall bound -- fifteen minutes of a run
@@ -965,9 +1175,11 @@ __all__ = [
     "ReviewOutcome",
     "apply_revisions",
     "build_review_prompt",
+    "directory_fingerprint",
     "fingerprint_drift",
     "load_revisions",
     "run_candidate_review",
     "run_candidate_review_async",
     "source_fingerprint",
+    "unfingerprinted_sources",
 ]

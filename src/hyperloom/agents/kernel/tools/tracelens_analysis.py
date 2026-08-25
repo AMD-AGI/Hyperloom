@@ -6905,9 +6905,11 @@ def _run_candidate_review_stage(
             RAW_CANDIDATES_FILENAME,
             REVISIONS_FILENAME,
             apply_revisions,
+            directory_fingerprint,
             fingerprint_drift,
             run_candidate_review,
             source_fingerprint,
+            unfingerprinted_sources,
         )
     except ImportError as exc:  # pragma: no cover - packaging fault
         warnings.append(
@@ -6938,8 +6940,33 @@ def _run_candidate_review_stage(
     )
     artifacts["kernel_candidates_raw"] = str(raw_path)
 
+    # Two prints, because they catch different things: the files answer "was the
+    # traced source edited", their directories answer "was something new put
+    # beside it". An empty print is reported rather than inferred -- it reads
+    # downstream exactly like an untouched tree, which is how a tamper check that
+    # covered nothing could pass.
     source_paths = [str(c.get("source_file") or "") for c in candidates if isinstance(c, dict)]
     before = source_fingerprint(source_paths)
+    before_dirs = directory_fingerprint(source_paths)
+    uncovered = unfingerprinted_sources(source_paths, before)
+    if uncovered and not before:
+        warnings.append(
+            {
+                "code": "candidate_review_tamper_check_uncovered",
+                "severity": "warning",
+                "paths": uncovered[:16],
+                "message": (
+                    f"No candidate source could be fingerprinted ({len(uncovered)} "
+                    "path(s) named, none readable on this host), so a review that "
+                    "edited the framework tree would not be detected. The reviewed "
+                    "table is still produced; treat a later benchmark gain on these "
+                    "kernels as unverified against tampering."
+                ),
+            }
+        )
+        _note(f"candidate review tamper check covers no source ({len(uncovered)} path(s) unreadable)")
+    elif uncovered:
+        _note(f"candidate review tamper check skipped {len(uncovered)} unreadable source path(s)")
 
     # Only ``analysis.md`` is a supported TraceLens output; everything else in
     # that directory is internal and may be removed without notice. The rest of
@@ -6983,21 +7010,28 @@ def _run_candidate_review_stage(
         return artifacts
 
     drifted = fingerprint_drift(before, source_fingerprint(source_paths))
-    if drifted:
+    drifted_dirs = fingerprint_drift(before_dirs, directory_fingerprint(source_paths))
+    if drifted or drifted_dirs:
         warnings.append(
             {
                 "code": "candidate_review_touched_source",
                 "severity": "error",
-                "paths": drifted[:16],
+                "paths": (drifted + drifted_dirs)[:16],
+                "files_changed": len(drifted),
+                "directories_changed": len(drifted_dirs),
                 "message": (
-                    "The candidate review session modified framework source "
-                    f"({len(drifted)} file(s)); its revisions were discarded. "
-                    "Any benchmark run after this point would measure an "
-                    "unrecorded edit."
+                    "The candidate review session modified the code under "
+                    f"optimization ({len(drifted)} file(s), {len(drifted_dirs)} "
+                    "directory listing(s)); its revisions were discarded. Any "
+                    "benchmark run after this point would measure an unrecorded "
+                    "edit."
                 ),
             }
         )
-        _note(f"candidate review discarded: it modified {len(drifted)} source file(s)")
+        _note(
+            f"candidate review discarded: it changed {len(drifted)} source file(s) "
+            f"and {len(drifted_dirs)} directory listing(s)"
+        )
         return artifacts
 
     op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")

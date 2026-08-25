@@ -532,6 +532,49 @@ class TestSourceFingerprint:
         defines.unlink()
         assert cra.fingerprint_drift(before, cra.source_fingerprint([str(defines)])) == [str(defines)]
 
+    def test_a_line_annotated_source_is_still_fingerprinted(self, tree):
+        """``path(line): fn`` is the common shape of a resolved source.
+
+        ``os.stat`` cannot open that string and the caller swallows the error, so
+        leaving the suffix on silently prints nothing -- which reads downstream
+        exactly like an untouched tree.
+        """
+        _, defines = tree
+        annotated = f"{defines}(12): _gqa_sparse_decode_kernel"
+        prints = cra.source_fingerprint([annotated])
+        assert set(prints) == {str(defines)}
+
+        before = cra.source_fingerprint([annotated])
+        defines.write_text("def _gqa_sparse_decode_kernel(): return 1\n", encoding="utf-8")
+        assert cra.fingerprint_drift(before, cra.source_fingerprint([annotated])) == [str(defines)]
+
+    def test_uncovered_sources_are_named_not_inferred(self, tree):
+        """An empty print and an unmodified tree produce the same empty drift."""
+        _, defines = tree
+        prints = cra.source_fingerprint([str(defines), "/gone/x.py"])
+        assert cra.unfingerprinted_sources([str(defines), "/gone/x.py"], prints) == ["/gone/x.py"]
+        assert cra.unfingerprinted_sources([str(defines)], prints) == []
+
+    def test_a_file_created_beside_a_candidate_source_is_detected(self, tree):
+        """A file-only print cannot see a file the session added.
+
+        A shadowing module or a patched copy has to land in the directory the
+        traced source lives in to be imported in its place, so the directory
+        listing is where it shows up.
+        """
+        _, defines = tree
+        before = cra.directory_fingerprint([str(defines)])
+        assert set(before) == {str(defines.parent)}
+        (defines.parent / "sitecustomize.py").write_text("import os\n", encoding="utf-8")
+        drifted = cra.fingerprint_drift(before, cra.directory_fingerprint([str(defines)]))
+        assert drifted == [str(defines.parent)]
+
+    def test_an_added_key_counts_as_drift(self, tree):
+        """Iterating ``before`` alone reports a deletion but never a creation."""
+        _, defines = tree
+        after = cra.source_fingerprint([str(defines)])
+        assert cra.fingerprint_drift({}, after) == [str(defines)]
+
 
 # --- the answer is a file, so a half-written one is not mistaken for one ----
 
@@ -791,6 +834,77 @@ class TestToolScope:
             assert tool not in cra.ALLOWED_TOOLS
             assert tool in cra._DENIED_TOOLS
 
+    def test_the_writing_tools_are_not_pre_approved(self):
+        """A tool in ``allowed_tools`` skips the permission callback entirely.
+
+        Leaving them there is what made the run-directory boundary a sentence in
+        the prompt rather than something the session runs into.
+        """
+        for tool in ("Bash", "Write"):
+            assert tool not in cra.ALLOWED_TOOLS
+            assert tool not in cra._DENIED_TOOLS
+            assert tool in cra._GATED_TOOLS
+
+
+class TestWriteBoundaryGuard:
+    """The Claude backend's counterpart to Codex's ``writable_roots``."""
+
+    @staticmethod
+    def _decide(run_dir: Path, tool: str, tool_input: dict):
+        guard = cra._write_boundary_guard(run_dir)
+        return asyncio.run(guard(tool, tool_input, None))
+
+    def test_a_write_inside_the_run_directory_is_allowed(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        decision = self._decide(
+            run_dir, "Write", {"file_path": str(run_dir / cra.REVISIONS_FILENAME)}
+        )
+        assert decision.behavior == "allow"
+
+    def test_a_write_outside_the_run_directory_is_refused(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        outside = tmp_path / "vllm" / "ops" / "sparse_attn.py"
+        decision = self._decide(run_dir, "Write", {"file_path": str(outside)})
+        assert decision.behavior == "deny"
+        assert str(run_dir) in decision.message
+
+    def test_traversal_out_of_the_run_directory_is_refused(self, tmp_path):
+        """``..`` must not spell around the boundary."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        decision = self._decide(run_dir, "Write", {"file_path": "../vllm/ops/attn.py"})
+        assert decision.behavior == "deny"
+
+    def test_a_symlink_pointing_out_is_refused(self, tmp_path):
+        """Both sides are resolved, so the link target decides, not its name."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        target_dir = tmp_path / "vllm"
+        target_dir.mkdir()
+        (run_dir / "escape").symlink_to(target_dir, target_is_directory=True)
+        decision = self._decide(run_dir, "Write", {"file_path": str(run_dir / "escape" / "x.py")})
+        assert decision.behavior == "deny"
+
+    def test_a_write_with_no_recognisable_path_is_refused(self, tmp_path):
+        """An unrecognised input spelling must not become a bypass."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        decision = self._decide(run_dir, "Write", {"contents": "x"})
+        assert decision.behavior == "deny"
+
+    def test_shell_commands_are_admitted_and_bounded_by_detection(self, tmp_path):
+        """Reading a command string to guess whether it writes is not attempted.
+
+        A shell command can write anywhere the process can; the directory
+        fingerprint is what covers that case, not this callback.
+        """
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        decision = self._decide(run_dir, "Bash", {"command": "c++filt _ZN5aiter4moeE"})
+        assert decision.behavior == "allow"
+
 
 # --- the stage boundary in tracelens_analysis -------------------------------
 
@@ -853,6 +967,104 @@ class TestReviewStageBoundary:
         for internal in ("category_data", "priority_data", "perf_report_csvs"):
             assert internal not in offered
         assert "analysis.md" in offered
+
+    def test_a_file_created_beside_the_traced_source_discards_the_review(
+        self, tmp_path, monkeypatch
+    ):
+        """The file print cannot see a file the session added.
+
+        A module that shadows the traced source only has to exist beside it to
+        be imported in its place, and the benchmark that follows would then
+        measure it.
+        """
+        pkg = tmp_path / "vllm" / "ops"
+        pkg.mkdir(parents=True)
+        source = pkg / "sparse_attn.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        candidate = {"kernel_id": "k001", "name": "k", "source_file": str(source)}
+
+        def _plants_a_shadow(**_kw):
+            (pkg / "sitecustomize.py").write_text("import os\n", encoding="utf-8")
+            return cra.ReviewOutcome(
+                status="completed",
+                revisions=[{"kernel_id": "k001", "action": "unresolve", "reason": "x"}],
+            )
+
+        monkeypatch.setattr(cra, "run_candidate_review", _plants_a_shadow)
+        warnings: list[dict] = []
+        artifacts = tla._run_candidate_review_stage(
+            tmp_path,
+            candidates=[candidate],
+            args=self._args(),
+            trace_health_warnings=warnings,
+        )
+
+        codes = [w["code"] for w in warnings]
+        assert "candidate_review_touched_source" in codes
+        touched = next(w for w in warnings if w["code"] == "candidate_review_touched_source")
+        assert touched["directories_changed"] == 1
+        # Discarded, not applied: the revision must not have landed.
+        assert candidate["source_file"] == str(source)
+        assert "kernel_candidates_revisions" not in artifacts
+
+    def test_a_line_annotated_source_is_still_covered_by_the_stage(self, tmp_path, monkeypatch):
+        """The stage hands ``source_file`` through as recorded.
+
+        A resolved source usually carries a ``(line): fn`` suffix, which
+        ``os.stat`` cannot open, so an unstripped path silently prints nothing
+        and every edit reads as no drift.
+        """
+        source = tmp_path / "sparse_attn.py"
+        source.write_text("def k(): pass\n", encoding="utf-8")
+        candidate = {"kernel_id": "k001", "name": "k", "source_file": f"{source}(12): k"}
+
+        def _edits_the_tree(**_kw):
+            source.write_text("def k(): return 1\n", encoding="utf-8")
+            return cra.ReviewOutcome(status="completed", revisions=[])
+
+        monkeypatch.setattr(cra, "run_candidate_review", _edits_the_tree)
+        warnings: list[dict] = []
+        tla._run_candidate_review_stage(
+            tmp_path,
+            candidates=[candidate],
+            args=self._args(),
+            trace_health_warnings=warnings,
+        )
+
+        touched = next(w for w in warnings if w["code"] == "candidate_review_touched_source")
+        assert touched["files_changed"] == 1
+
+    def test_a_tamper_check_that_covers_nothing_says_so(self, tmp_path, monkeypatch):
+        """An empty print produces the same empty drift list as a clean tree.
+
+        Without this the guard reports success precisely when it is not
+        guarding anything.
+        """
+        candidate = {
+            "kernel_id": "k001",
+            "name": "k",
+            "source_file": "/nonexistent/serving/container/attn.py",
+        }
+        monkeypatch.setattr(
+            cra,
+            "run_candidate_review",
+            lambda **_kw: cra.ReviewOutcome(status="completed", revisions=[]),
+        )
+        warnings: list[dict] = []
+        artifacts = tla._run_candidate_review_stage(
+            tmp_path,
+            candidates=[candidate],
+            args=self._args(),
+            trace_health_warnings=warnings,
+        )
+
+        uncovered = next(
+            w for w in warnings if w["code"] == "candidate_review_tamper_check_uncovered"
+        )
+        assert uncovered["severity"] == "warning"
+        assert uncovered["paths"] == ["/nonexistent/serving/container/attn.py"]
+        # Advisory: the reviewed table is still produced.
+        assert "kernel_candidates_revisions" in artifacts
 
     def test_dims_land_even_though_the_path_did_not_move(self, tmp_path, monkeypatch):
         """The re-derivation is skipped for rows that did not change, and for a
