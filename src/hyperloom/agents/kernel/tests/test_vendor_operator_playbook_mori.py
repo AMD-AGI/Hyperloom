@@ -398,6 +398,27 @@ def test_a_playbook_row_holding_no_anchor_stays_open_to_review(monkeypatch):
     assert tla._is_curated_resolution(out[0]) is False
 
 
+def test_a_playbook_row_with_no_anchor_and_no_source_stays_open_to_review(monkeypatch):
+    """The unresolved row is the one that most needs the review.
+
+    Marking only rows that kept a path left this one looking anchor-backed to
+    ``_is_curated_resolution``, so it went into ``protected_ids`` and every
+    rewrite and unresolve the review proposed for it was refused. A row with no
+    source at all was therefore excluded from the one stage that could find one,
+    and reported ``missing_native_source`` every round without ever becoming
+    dispatchable -- a state nothing in the pipeline could leave.
+    """
+    monkeypatch.setattr(tla, "resolve_kernel_anchor_path", lambda _playbook: "")
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
+    candidates = [_mori_dispatch_candidate(source_file="")]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    assert out[0]["patch_strategy"] == "vendor_playbook"
+    assert not str(out[0].get("source_file") or "")
+    assert out[0]["vendor_playbook_without_kernel_anchor"] is True
+    assert tla._is_curated_resolution(out[0]) is False
+
+
 def test_a_playbook_candidate_is_not_open_to_review_rewriting():
     """Protection cannot key on the tier that resolved the replaced path.
 

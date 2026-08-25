@@ -4270,7 +4270,7 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
                 # is only auditable if the value it replaced is still recorded.
                 item["source_file_superseded_by_playbook"] = source_file
             item["source_file"] = anchor
-        elif source_file:
+        else:
             # ``resolve_kernel_anchor_path`` returns "" for a playbook entry
             # that declares no ``kernel_anchor``, so the override has nothing to
             # point the field at. Taking it anyway would blank a path the
@@ -4278,6 +4278,15 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
             # candidate as missing_native_source -- the outcome the override
             # exists to avoid. Whether the surviving path is trustworthy is
             # classify_patchability's question, not a second gate's.
+            #
+            # Marked whether or not a path survived. The flag says "this row's
+            # source_file is not a playbook anchor", and that is just as true of
+            # a row no tier resolved: gating it on ``source_file`` left the
+            # empty-path row looking anchor-backed to _is_curated_resolution(),
+            # which protected it from the review -- so a row with no source at
+            # all was refused the one stage that could have found one, and
+            # reported missing_native_source every round without ever being
+            # dispatchable.
             item["vendor_playbook_without_kernel_anchor"] = True
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
@@ -4870,6 +4879,11 @@ _SOURCE_DERIVED_METADATA = (
     "op_to_source_reason",
     "op_to_source_matched_route",
     "source_file_missing_on_disk",
+    # Names the path the playbook anchor displaced. Derived from the old
+    # source_file like the rest, so a review that moves the path leaves it
+    # asserting that some third file was superseded -- and it is restamped in
+    # the same pass, since _stamp_candidate_metadata re-runs the playbook match.
+    "source_file_superseded_by_playbook",
 )
 
 
