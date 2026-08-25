@@ -2675,6 +2675,24 @@ class WritebackCollaborator:
                             "unset_envs": to_str_list(recipe_delta.get("unset_envs")),
                             "args_mode": str(recipe_delta.get("args_mode") or "append").strip().lower(),
                         }
+                    else:
+                        # candidate_* fields are by definition the increment that
+                        # was measured; reconstruct the delta from them so KB
+                        # writeback is not blocked for rows written before
+                        # recipe_delta was introduced.
+                        _delta_args = str(bv.get("candidate_extra_server_args") or "").strip()
+                        _delta_envs = dict(bv.get("candidate_extra_envs") or {})
+                        _delta_mode = str(bv.get("args_mode") or "append").strip().lower()
+                        _delta_rm = to_str_list(bv.get("remove_args"))
+                        _delta_unset = to_str_list(bv.get("unset_envs"))
+                        if _delta_args or _delta_envs or _delta_rm or _delta_unset or _delta_mode == "replace":
+                            stack_entry["recipe_delta"] = {
+                                "extra_server_args": _delta_args,
+                                "extra_envs": _delta_envs,
+                                "remove_args": _delta_rm,
+                                "unset_envs": _delta_unset,
+                                "args_mode": _delta_mode,
+                            }
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
