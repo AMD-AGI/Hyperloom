@@ -167,3 +167,24 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
     assert es["rejected"] == []
     assert "winners_history" in es
     assert "synergy_attempted" in es
+
+
+def test_fingerprint_single_dash_flag_differs_from_missing_value() -> None:
+    """-x 1 -y 1 and -x 1 -y must hash differently: one flag has a value, the other does not."""
+    fp_with = canonical_fingerprint("-x 1 -y 1", {})
+    fp_without = canonical_fingerprint("-x 1 -y", {})
+    assert fp_with != fp_without
+
+
+def test_fingerprint_single_dash_flag_order_independent() -> None:
+    """-x 1 -y 2 and -y 2 -x 1 must collide: same bindings, different order."""
+    fp1 = canonical_fingerprint("-x 1 -y 2", {})
+    fp2 = canonical_fingerprint("-y 2 -x 1", {})
+    assert fp1 == fp2
+
+
+def test_fingerprint_negative_number_is_value_not_flag() -> None:
+    """A token like -1 is a numeric value, not a flag, and must not cause collisions."""
+    fp_flag = canonical_fingerprint("-k -1", {})
+    fp_val = canonical_fingerprint("-1 -k", {})
+    assert fp_flag != fp_val
