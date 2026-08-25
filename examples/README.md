@@ -25,7 +25,9 @@ Code before running the install command.
 
 ### Prerequisites
 
-- Python 3.10+ and `pip`.
+- Python 3.10+ and `pip` on the machine where you open the workspace and run
+  `pip install --target .`. This covers the Hyperloom wheel only; serving-framework
+  Python constraints depend on your setup scenario below.
 - Access to the Anthropic LLM provider.
 - A dedicated workspace directory opened in the user's agent.
 
@@ -97,6 +99,13 @@ Requirements:
 - ROCm runtime and ROCm torch are already installed.
 - `git` is available for dependency checkouts.
 - A serving framework is either already installed, or setup may install one.
+- **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
+  resolves, not a child venv:
+  - Python 3.10+ for SGLang and general operation.
+  - **Exactly Python 3.12** when setup installs vLLM. vLLM ROCm wheels are
+    built for 3.12 only. vLLM defaults to an isolated framework venv, but that
+    venv is created from the base interpreter and inherits its version; isolated
+    mode does not relax the requirement.
 
 In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host:
 
@@ -128,6 +137,9 @@ Requirements:
   host.
 - A ROCm container image that already ships the serving framework, such as
   SGLang or vLLM.
+- Host Python 3.10+ (from [Prerequisites](#prerequisites)) is enough for the
+  wheel and agent. Serving-framework Python versions come from the container
+  image, not the host.
 
 In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
 container. The selected demo skill owns the container lifecycle.

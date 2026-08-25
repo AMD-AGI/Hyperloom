@@ -20,6 +20,14 @@ For application-level configuration see
 credential setup see [Hyperloom authentication and credentials](authentication.md); for
 recurring symptoms see [Troubleshooting Hyperloom](troubleshooting.md).
 
+```{note}
+Shell paths on this page follow the recommended `pip install --target .` layout.
+In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
+```
+
 ---
 
 ## Sizing and resource requirements
@@ -174,7 +182,7 @@ Operational checks:
 ```bash
 test -n "${OPENAI_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
 test -n "${OPENAI_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
+bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
 Child processes inherit the gateway settings prepared by preflight; keep
@@ -245,7 +253,7 @@ the breakdown artifact.
 
 1. Confirm the pod has a current key and base URL (`OPENAI_API_KEY` /
    `OPENAI_BASE_URL`, or split Anthropic/OpenAI credentials).
-2. Re-run `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`
+2. Re-run `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`
    and then without `--check-only` if it reports missing aliases.
 3. Inspect `~/.claude/config.json`; `customApiUrl` must point at the upstream
    gateway.
