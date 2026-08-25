@@ -1465,10 +1465,90 @@ def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_pa
     )
 
     assert res.returncode == 0, res.stderr
-    assert "refreshing" in res.stdout
+    assert "vendor libs changed" in res.stdout
     backup = torch_lib / _BACKUP_DIRNAME
     assert (backup / "libamdhip64.so").read_bytes() == b"vendor-hip-v2"
     assert (backup / "libroctracer64.so").read_bytes() == b"vendor-tracer-v2"
+
+
+def test_sync_torch_profiler_libs_does_not_warn_when_verify_is_off(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+    torch_lib = tmp_path / "torch" / "lib"
+    torch_lib.mkdir(parents=True)
+    (torch_lib / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
+    (torch_lib / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
+    py = _fake_python_for_torch_lib(tmp_path / "fake-python-torch", torch_lib)
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                'sync_torch_profiler_libs "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert res.returncode == 0, res.stderr
+    assert "verification reported issues" not in res.stderr
+    assert "synced into" in res.stdout
+
+
+def test_hotfix_asset_change_keeps_the_vendor_backup(tmp_path: Path):
+    hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=(
+            f"{_SYNC_BODY}\n"
+            f'printf hotfix-hip-v2 > "{hotfix_hip}"\n'
+            f"{_SYNC_BODY}"
+        ),
+        torch_hip=b"vendor-hip-bytes",
+        torch_tracer=b"vendor-tracer-bytes",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "vendor libs changed" not in res.stdout
+    assert (torch_lib / _BACKUP_DIRNAME / "libamdhip64.so").read_bytes() == b"vendor-hip-bytes"
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-v2"
+
+
+def test_sync_warns_when_framework_imports_but_torch_lib_is_missing(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+    missing_torch_lib = tmp_path / "missing" / "torch" / "lib"
+    py = _fake_python_for_torch_lib(tmp_path / "fake-python-torch", missing_torch_lib)
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                f'{_SYNC_BODY_SOFT}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert "torch/lib not resolved" in res.stderr
 
 
 def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path: Path):

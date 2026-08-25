@@ -1071,6 +1071,71 @@ PY
 ROCM_PROFILER_HOTFIX_TORCH_LIBS="libamdhip64.so libroctracer64.so"
 ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS="sglang vllm"
 ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR=".profiler_hotfix_backup"
+ROCM_PROFILER_HOTFIX_FINGERPRINT=".fingerprint"
+
+_sha256_file() {
+  local f="$1"
+  [ -f "$f" ] || { printf 'absent'; return 0; }
+  sha256sum "$f" | awk '{print $1}'
+}
+
+_fingerprint_field() {
+  local fp="$1" kind="$2" name="$3"
+  grep "^${kind}:${name}:" "$fp" 2>/dev/null | cut -d: -f3-
+}
+
+_write_backup_fingerprint() {
+  local fp="$1" backup_dir="$2" rocm_lib_dir="$3" name src
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    if [ -e "${backup_dir}/${name}" ]; then
+      printf 'vendor:%s:%s\n' "$name" "$(_sha256_file "${backup_dir}/${name}")"
+    else
+      printf 'vendor:%s:absent\n' "$name"
+    fi
+    src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+    printf 'hotfix:%s:%s\n' "$name" "$(_sha256_file "$src")"
+  done > "$fp"
+}
+
+# Vendor snapshot is stale only when torch's on-disk libs are neither the
+# recorded vendor, the recorded hotfix, nor the current hotfix source.
+_torch_vendor_stale() {
+  local backup_dir="$1" torch_lib_dir="$2" rocm_lib_dir="$3"
+  local fp="${backup_dir}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}" name src torch_sha vendor_sha hotfix_sha
+
+  [ -f "$fp" ] || return 0
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    vendor_sha="$(_fingerprint_field "$fp" vendor "$name")"
+    hotfix_sha="$(_fingerprint_field "$fp" hotfix "$name")"
+    [ -n "$vendor_sha" ] || return 0
+    if [ ! -e "${torch_lib_dir}/${name}" ]; then
+      [ "$vendor_sha" = "absent" ] || return 0
+      continue
+    fi
+    torch_sha="$(_sha256_file "${torch_lib_dir}/${name}")"
+    src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+    if [ -f "$src" ] && [ "$torch_sha" = "$(_sha256_file "$src")" ]; then
+      [ -e "${backup_dir}/${name}" ] \
+        && [ "$(_sha256_file "${backup_dir}/${name}")" = "$vendor_sha" ] || return 0
+      continue
+    fi
+    [ "$torch_sha" = "$hotfix_sha" ] && continue
+    [ "$torch_sha" = "$vendor_sha" ] && continue
+    return 0
+  done
+  return 1
+}
+
+_framework_torch_lib_missing() {
+  local default_py="$1" fw probe_py dir
+  for fw in $ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS; do
+    probe_py="$(framework_probe_python "$fw" "$default_py")"
+    _py_has "$probe_py" "$fw" || continue
+    dir="$(resolve_torch_lib_dir "$probe_py")"
+    [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  done
+  return 1
+}
 
 collect_framework_torch_lib_dirs() {
   local default_py="$1" fw probe_py dir seen=""
@@ -1099,22 +1164,15 @@ PY
 
 ensure_torch_lib_backup() {
   local backup_dir="$1" torch_lib_dir="$2" rocm_lib_dir="$3"
-  local name src staging stale=0
+  local name staging fp="${backup_dir}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}"
 
   if [ -d "$backup_dir" ]; then
-    for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
-      src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
-      cmp -s "$src" "${torch_lib_dir}/${name}" && continue
-      if [ -e "${backup_dir}/${name}" ] || [ -e "${torch_lib_dir}/${name}" ]; then
-        cmp -s "${backup_dir}/${name}" "${torch_lib_dir}/${name}" || stale=1
-      fi
-    done
-    [ "$stale" -eq 0 ] && return 0
-    log "torch changed since the last hotfix; refreshing ${backup_dir}"
+    _torch_vendor_stale "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir" || return 0
+    log "torch vendor libs changed; refreshing ${backup_dir}"
     rm -rf "$backup_dir" || return 1
   fi
 
-  staging="${backup_dir}.staging.$$"
+  staging="${backup_dir}.staging"
   rm -rf "$staging"
   install -d "$staging" || return 1
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
@@ -1122,6 +1180,7 @@ ensure_torch_lib_backup() {
     cp -a "${torch_lib_dir}/${name}" "${staging}/${name}" || { rm -rf "$staging"; return 1; }
   done
   mv -T "$staging" "$backup_dir" || { rm -rf "$staging"; return 1; }
+  _write_backup_fingerprint "$fp" "$backup_dir" "$rocm_lib_dir"
 }
 
 restore_torch_libs() {
@@ -1194,7 +1253,14 @@ sync_rocm_profiler_libs_to_torch_lib() {
 
   default_py="$(resolve_python)" || { warn "cannot resolve Python"; return 1; }
   pairs="$(collect_framework_torch_lib_dirs "$default_py")"
-  [ -n "$pairs" ] || { log "no torch/lib to sync for ${ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS}"; return 0; }
+  if [ -z "$pairs" ]; then
+    if _framework_torch_lib_missing "$default_py"; then
+      warn "serving framework importable but torch/lib not resolved; skipping torch lib sync"
+      return 1
+    fi
+    log "no torch/lib to sync for ${ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS}"
+    return 0
+  fi
 
   while IFS="$(printf '\t')" read -r py dir; do
     sync_one_torch_lib "$rocm_lib_dir" "$py" "$dir" || rc=1
@@ -1223,7 +1289,9 @@ verify_rocm_profiler_torch_lib_sync() {
 sync_torch_profiler_libs() {
   local target_dir="$1" verify="${2:-0}"
   sync_rocm_profiler_libs_to_torch_lib "$target_dir" || warn "torch lib sync reported issues"
-  [ "$verify" -eq 1 ] && verify_rocm_profiler_torch_lib_sync "$target_dir" || warn "torch lib sync verification reported issues"
+  if [ "$verify" -eq 1 ]; then
+    verify_rocm_profiler_torch_lib_sync "$target_dir" || warn "torch lib sync verification reported issues"
+  fi
 }
 
 apply_rocm_profiler_hotfix() {
