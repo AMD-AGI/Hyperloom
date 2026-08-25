@@ -70,7 +70,7 @@ def test_shell_and_python_derive_the_same_pair(url: str) -> None:
     assert _shell_pair(url) == dual_protocol_endpoint_pair(url)
 
 
-def test_a_bare_unknown_host_gains_no_v1_on_either_side() -> None:
-    """The branch the two implementations disagreed on, pinned on both sides."""
-    assert dual_protocol_endpoint_pair("https://gw.example") == ("https://gw.example", "https://gw.example")
-    assert _shell_pair("https://gw.example") == ("https://gw.example", "https://gw.example")
+def test_a_bare_unknown_host_appends_v1_on_openai_side() -> None:
+    """The branch the two implementations must agree on, pinned on both sides."""
+    assert dual_protocol_endpoint_pair("https://gw.example") == ("https://gw.example", "https://gw.example/v1")
+    assert _shell_pair("https://gw.example") == ("https://gw.example", "https://gw.example/v1")
