@@ -701,7 +701,7 @@ async def test_rearm_kept_stores_accepted_config():
 async def test_rearm_kept_records_patches_in_stack():
     """KEEP patches are added to kept_patches so a revalidation-rearmed round inherits them."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval")
-    fake.shared_state.enablement.kept_patches = ["/prior/advance.patch"]
+    fake.shared_state.enablement.kept_rounds = [{"patches": ["/prior/advance.patch"], "artifacts": []}]
     fake._maybe_rearm_enablement(
         {
             "status": "kept",

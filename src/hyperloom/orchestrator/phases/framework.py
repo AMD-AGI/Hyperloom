@@ -1710,35 +1710,26 @@ class FrameworkPhase(PhaseHandler):
             state.enablement.setup_commands = cur
 
         def _push_kept_round(patches_this_round: list[str]) -> None:
-            """Append this round's patches + artifacts to kept_rounds and re-derive flat lists.
+            """Append this round to kept_rounds and re-derive the flat projections.
 
-            kept_rounds is the authoritative per-round record; kept_patches and
-            kept_artifacts are flat projections computed here. Artifact deduplication
-            is last-wins per target so later rounds can supersede earlier ones.
-
-            When kept_rounds is empty but kept_patches/kept_artifacts are non-empty
-            (state from before kept_rounds was introduced), the prior work is
-            treated as a single prior round so it is not discarded.
+            Artifacts dedupe last-wins per target so a later round supersedes an
+            earlier fix to the same file.
             """
-            round_artifacts = [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)]
             rounds = list(state.enablement.kept_rounds or [])
-            if not rounds:
-                prior_patches = [str(p) for p in (state.enablement.kept_patches or []) if str(p)]
-                prior_artifacts = [dict(a) for a in (state.enablement.kept_artifacts or []) if isinstance(a, dict)]
-                if prior_patches or prior_artifacts:
-                    rounds = [{"patches": prior_patches, "artifacts": prior_artifacts}]
-            rounds.append({"patches": list(patches_this_round), "artifacts": round_artifacts})
+            rounds.append(
+                {
+                    "patches": list(patches_this_round),
+                    "artifacts": [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)],
+                }
+            )
             state.enablement.kept_rounds = rounds
 
             flat_patches: list[str] = []
-            seen_patches: set[str] = set()
             artifact_by_target: dict[str, dict] = {}
             for rnd in rounds:
                 for p in rnd.get("patches") or []:
-                    sp = str(p)
-                    if sp and sp not in seen_patches:
-                        flat_patches.append(sp)
-                        seen_patches.add(sp)
+                    if p not in flat_patches:
+                        flat_patches.append(p)
                 for art in rnd.get("artifacts") or []:
                     target = str(art.get("target") or "")
                     if target:

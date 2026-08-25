@@ -726,9 +726,9 @@ def has_new_keep(state: Any) -> bool:
     individual rows therefore do not carry a redundant KEEP decision.
     Pre-baseline enablement KEEPs (``baseline_enablement``) establish a runnable
     anchor but are not performance optimizations; they alone do not qualify for
-    KB writeback. The ``recipe_publishable`` flag is a config-layer filter that
-    ``build_publishable_recipe_config`` already applies; excluding it here would
-    gate the entire KB write for sessions whose gains come from enablement.
+    KB writeback. ``recipe_publishable`` is deliberately not consulted: it filters
+    the config layer inside :func:`build_publishable_recipe_config`, and gating the
+    whole write on it would publish nothing for an enablement-only session.
     """
     for raw in getattr(state, "optimization_stack", []) or []:
         if not isinstance(raw, Mapping):

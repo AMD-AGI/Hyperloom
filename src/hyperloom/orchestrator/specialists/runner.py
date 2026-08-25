@@ -1196,8 +1196,6 @@ class SpecialistRunner:
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
-        if sub_result.worktree_clean_with_patches:
-            notes.append("worktree_clean_with_patches")
         capture_root: Path | None = None
         if sub_result.worktree_capture_path:
             patches_for_finalize = [sub_result.worktree_capture_path]
@@ -1214,6 +1212,7 @@ class SpecialistRunner:
             extra_notes=notes,
             patches_written=patches_for_finalize,
             capture_root=capture_root,
+            worktree_clean_with_patches=sub_result.worktree_clean_with_patches,
         )
 
     # Finalize phase (shared)
@@ -1229,6 +1228,7 @@ class SpecialistRunner:
         extra_notes: list[str],
         patches_written: list[str],
         capture_root: Path | None = None,
+        worktree_clean_with_patches: bool = False,
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
@@ -1248,6 +1248,9 @@ class SpecialistRunner:
             capture_root (Path | None): When the patch list came from a
                 worktree git-diff capture, this is the tree the diff was
                 taken from and is used as explicit_root for vet_patches.
+            worktree_clean_with_patches (bool): The worktree held no edits but
+                the specialist wrote patch files, so the diff text did not come
+                from the tree it claims to patch.
             patches_written (list[str]): Patch paths discovered by the run.
 
         Returns:
@@ -1382,10 +1385,11 @@ class SpecialistRunner:
             candidate_roots=candidate_roots,
             explicit_root=vet_explicit_root,
         )
+        # A set dropped for targets no tree holds is a distinct outcome from
+        # "the specialist wrote none", and the next round has to be told which.
         all_dropped_by_grounding = bool(
             deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
         )
-        patches_span_multiple_roots = bool(kept and spans_roots)
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
         # proposal_set over these fields, which costs the round every idea the
@@ -1402,15 +1406,13 @@ class SpecialistRunner:
         done_payload["patch_grounding"] = grounding
         if all_dropped_by_grounding:
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
-        if patches_span_multiple_roots:
+        if spans_roots:
             done_payload["patches_span_multiple_roots"] = True
-        if "worktree_clean_with_patches" in notes:
+        if worktree_clean_with_patches:
             done_payload["worktree_clean_with_patches"] = True
         if not kept:
             done_payload["empty"] = not bool(done_payload.get("proposal_set"))
         notes.extend(safety.notes())
-
-        self._write_specialist_done(workspace, done_payload)
         recovered = bool(done_payload.get("_recovered_from_partial"))
         # ``partial`` keeps an infra failure visible without making the attempt
         # retry-eligible, which would discard whatever was salvaged.
@@ -1424,6 +1426,8 @@ class SpecialistRunner:
             notes.append("recovered_from_partial")
         if notes:
             done_payload["_specialist_notes"] = list(notes)
+
+        self._write_specialist_done(workspace, done_payload)
 
         return SpecialistRunResult(
             task_id=ctx.task.task_id,

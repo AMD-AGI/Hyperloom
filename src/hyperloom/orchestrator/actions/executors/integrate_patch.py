@@ -355,6 +355,25 @@ def trusted_explicit_root(
     return None
 
 
+def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
+    """Return the diff text of every patch that could be read.
+
+    Args:
+        patch_paths: Patch files to read.
+
+    Returns:
+        The texts that were readable; a shorter list than ``patch_paths`` means
+        some patch is missing or unreadable.
+    """
+    texts: list[str] = []
+    for patch in patch_paths or []:
+        try:
+            texts.append(patch.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return texts
+
+
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
@@ -386,11 +405,7 @@ def _resolve_framework_root(
             return None
 
     texts = [str(text) for text in (patch_texts or []) if str(text).strip()]
-    for patch in patch_paths or []:
-        try:
-            texts.append(patch.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            continue
+    texts.extend(_read_patch_texts(patch_paths))
     has_patch_input = bool(patch_paths or patch_texts)
     if has_patch_input:
         session_root = resolve_session_framework_root()
@@ -1665,6 +1680,9 @@ class IntegratePatchExecutor:
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
+        # Set per round by _stage_apply; the revert needs it to know the tree was
+        # written even when no patch was applied.
+        self._ip_base_artifact_replayed = False
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
@@ -2087,6 +2105,7 @@ class IntegratePatchExecutor:
         Returns an early-exit result dict on failure/no-patches/apply_only,
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
+        self._ip_base_artifact_replayed = False
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -2315,10 +2334,9 @@ class IntegratePatchExecutor:
                 # trusted one that simply lacks the files is the patches' fault.
                 trusted_root = trusted_explicit_root(explicit_framework_root)
                 if trusted_root is not None:
-                    readable_count = sum(1 for p in patch_paths if p.is_file())
-                    if readable_count == 0:
+                    if not _read_patch_texts(patch_paths):
                         _error_class = "patch_unreadable"
-                        _error = "all patch files are missing or unreadable; verify paths and permissions"
+                        _error = "no patch file could be read; verify paths and permissions"
                     else:
                         missing_records = _preflight_missing_targets(trusted_root, patch_paths)
                         if missing_records:
@@ -3941,10 +3959,11 @@ class IntegratePatchExecutor:
             when the checkout fallback fires).
         """
         reverted: list[Path] = []
-        base_artifact_replayed = getattr(self, "_ip_base_artifact_replayed", False)
-        if framework_root is None or (not applied and not base_artifact_replayed):
+        if framework_root is None or (not applied and not self._ip_base_artifact_replayed):
             return reverted
         if not applied:
+            # The base-artifact replay wrote into the tree after the stash, so it
+            # has to be cleaned or the pop collides with it.
             _git_checkout_clean(framework_root)
             return reverted
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
@@ -4037,7 +4056,7 @@ class IntegratePatchExecutor:
             target, _ = resolved
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            self._ip_base_artifact_replayed = True  # type: ignore[attr-defined]
+            self._ip_base_artifact_replayed = True
             log.info("integrate_patch: re-installed base artifact %s", target)
 
     def _apply_artifacts(

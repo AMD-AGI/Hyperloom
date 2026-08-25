@@ -114,11 +114,15 @@ def write_setting_script(
 ) -> str:
     """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state.
 
-    Idempotently rewritten on every ``kept`` or ``advanced`` verdict.  Patches are
-    copied to ``reports/enablement/patches/`` under a stack-ordered name, since
-    specialists across rounds pick colliding file names, and are referenced only
-    once the copy lands.  Patches are dropped entirely without a framework root,
-    because ``git apply`` would have no target to run against.
+    Idempotently rewritten on every ``kept`` or ``advanced`` verdict. Deliverables
+    are emitted round by round from ``kept_rounds`` so the replay order matches the
+    order integrate_patch applied them in; a round's patches precede its artifacts,
+    which is what lets a round both patch and whole-file-replace the same file.
+
+    Patches are copied to ``reports/enablement/patches/`` under a stack-ordered
+    name, since specialists across rounds pick colliding file names, and are
+    referenced only once the copy lands. Patches are dropped entirely without a
+    framework root, because ``git apply`` would have no target to run against.
 
     Whole-file artifacts are copied to ``reports/enablement/artifacts/`` and
     become ``install -D`` lines. Each one's pre-image is copied alongside as
@@ -146,16 +150,7 @@ def write_setting_script(
     artifact_counter = 0
     script_rounds: list[dict] = []
 
-    kept_rounds_raw = list(enablement.kept_rounds or [])
-    if not kept_rounds_raw and (enablement.kept_patches or enablement.kept_artifacts):
-        kept_rounds_raw = [
-            {
-                "patches": list(enablement.kept_patches or []),
-                "artifacts": list(enablement.kept_artifacts or []),
-            }
-        ]
-
-    for rnd in kept_rounds_raw:
+    for rnd in enablement.kept_rounds or []:
         rnd_script_patches: list[str] = []
         rnd_script_artifacts: list[dict[str, str]] = []
 

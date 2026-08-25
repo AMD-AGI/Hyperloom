@@ -615,14 +615,12 @@ class SpecialistSubprocessResult:
     directly — do not join them onto a base."""
 
     worktree_capture_path: str = ""
-    """Absolute path of a patch file written by the orchestrator from
-    ``git diff`` of the specialist worktree, or ``""`` when capture did not
-    run or the worktree was clean."""
+    """Absolute path of the patch captured from the worktree with ``git diff``,
+    or ``""`` when the worktree held no edits."""
 
     worktree_clean_with_patches: bool = False
-    """True when the worktree had no uncommitted edits but the specialist
-    wrote patch files to ``patches/``. This is the primary signal that the
-    agent authored patch text without editing the tracked tree."""
+    """True when the worktree held no edits yet patch files were written, so the
+    diff text did not come from the tree it claims to patch."""
 
     usage: dict[str, Any] | None = None
     """Token usage recovered from the agent CLI's ``process.log``. Carries the
@@ -1103,11 +1101,7 @@ class SpecialistSubprocessDispatcher:
                 log_fh.close()
             clear_wall_budget_extension(task_id)
 
-        # Capture the worktree diff first so an authoritative root-known patch
-        # is available before the file-based patch scan.
-        worktree_capture_path, worktree_clean_with_patches = self._capture_worktree_diff(
-            worktree, worktree_base, workspace
-        )
+        worktree_capture_path, worktree_clean_with_patches = self._capture_worktree_diff(worktree, workspace)
 
         # Patches: scan worktree/patches/ (Arbor convention).
         patches = self._collect_patches(worktree, workspace)
@@ -1612,52 +1606,44 @@ class SpecialistSubprocessDispatcher:
                 pass
 
     @staticmethod
-    @staticmethod
     def _capture_worktree_diff(
         worktree: Path | None,
-        worktree_base: Path | None,
         workspace: Path,
     ) -> tuple[str, bool]:
-        """Run ``git diff`` on the worktree and write the result to a file.
+        """Capture the specialist's worktree edits as a patch file via ``git diff``.
 
-        Uses ``git add -N`` first so new untracked files appear in the diff
-        without being staged. The capture is skipped when there is no worktree
-        or the worktree is not a git checkout.
+        ``git add -N`` runs first so new files appear in the diff without being
+        staged. The diff's root is the worktree by construction, so a capture
+        needs no root inference.
 
         Args:
             worktree: Per-task git worktree directory, or ``None``.
-            worktree_base: The checkout the worktree was cut from, used as the
-                root-known-by-construction for the captured diff.
-            workspace: Task workspace directory for writing the output file.
+            workspace: Task workspace the capture file is written into.
 
         Returns:
-            A ``(capture_path, clean_with_patches)`` tuple:
-            - ``capture_path``: absolute path of the written patch file, or
-              ``""`` when the worktree was clean or capture failed.
-            - ``clean_with_patches``: ``True`` when the worktree had no
-              uncommitted edits but ``patches/`` already contains patch files.
+            A ``(capture_path, clean_with_patches)`` tuple. ``capture_path`` is
+            ``""`` when the worktree held no edits or git could not be run.
+            ``clean_with_patches`` is ``True`` when the worktree held no edits
+            yet the specialist wrote patch files, meaning the diff text did not
+            come from the tree it claims to patch.
         """
-        if worktree is None or worktree_base is None:
-            return "", False
-        if not worktree.is_dir() or not (worktree / ".git").exists() and not (worktree / ".git").is_file():
+        if worktree is None or not (worktree / ".git").exists():
             return "", False
         intent_cp = _run_git_cp(["-C", str(worktree), "add", "-N", "."], timeout=30.0)
         if intent_cp is None or intent_cp.returncode != 0:
+            log.warning("specialist: git add -N failed in %s; falling back to scanned patch files", worktree)
             return "", False
         diff_cp = _run_git_cp(["-C", str(worktree), "diff"], timeout=60.0)
         if diff_cp is None:
+            log.warning("specialist: git diff failed in %s; falling back to scanned patch files", worktree)
             return "", False
         diff_text = diff_cp.stdout or ""
-        patches_dir = worktree / "patches"
-        has_patch_files = (
-            patches_dir.is_dir()
-            and any(True for _ in patches_dir.glob("*.patch"))
-            or any(True for _ in patches_dir.glob("*.diff"))
-            if patches_dir.is_dir()
-            else False
-        )
         if not diff_text.strip():
-            return "", has_patch_files
+            wrote_patch_files = any(
+                base.is_dir() and (any(base.glob("*.patch")) or any(base.glob("*.diff")))
+                for base in (worktree / "patches", workspace / "patches")
+            )
+            return "", wrote_patch_files
         capture_dest = workspace / "worktree_capture.patch"
         try:
             capture_dest.write_text(diff_text, encoding="utf-8")

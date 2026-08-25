@@ -160,7 +160,9 @@ def test_vet_patches_rescues_a_cross_repo_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("sglang_file.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=aiter, candidate_roots=(sglang,))
+    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+        [str(patch)], base_checkout=aiter, candidate_roots=(sglang,)
+    )
     assert kept == [str(patch)]
     assert dropped == []
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
@@ -320,11 +322,16 @@ def test_kept_artifacts_reach_the_replay_script(tmp_path):
     backup.write_text("# original\n", encoding="utf-8")
 
     enablement = EnablementRound()
-    enablement.kept_artifacts = [
+    enablement.kept_rounds = [
         {
-            "target": "/sgl-workspace/sglang/python/sglang/srt/server_args.py",
-            "source": str(source),
-            "backup": str(backup),
+            "patches": [],
+            "artifacts": [
+                {
+                    "target": "/sgl-workspace/sglang/python/sglang/srt/server_args.py",
+                    "source": str(source),
+                    "backup": str(backup),
+                }
+            ],
         }
     ]
 
@@ -343,8 +350,13 @@ def test_artifact_only_repair_renders_a_replay_script(tmp_path):
         sources.append(src)
 
     enablement = EnablementRound()
-    enablement.kept_artifacts = [
-        {"target": f"/sgl-workspace/sglang/python/sglang/srt/{s.name}", "source": str(s)} for s in sources
+    enablement.kept_rounds = [
+        {
+            "patches": [],
+            "artifacts": [
+                {"target": f"/sgl-workspace/sglang/python/sglang/srt/{s.name}", "source": str(s)} for s in sources
+            ],
+        }
     ]
 
     write_setting_script(tmp_path, enablement, "sglang", model="/models/GLM-5.2-MXFP4", tp=8)
@@ -359,13 +371,35 @@ def test_script_without_artifacts_stays_a_launch_recipe():
     assert "install -D" not in text
 
 
+def test_each_round_emits_its_patches_before_its_artifacts():
+    """A round that patches and whole-file-replaces one file must replay in apply order."""
+    text = render_reference_script(
+        framework="sglang",
+        server_args="",
+        framework_root="/sgl-workspace/sglang",
+        rounds=[
+            {
+                "patches": ["patches/001_r1.patch"],
+                "artifacts": [{"archive_path": "artifacts/001_a.py", "target": "/t/a.py"}],
+            },
+            {"patches": ["patches/002_r2.patch"], "artifacts": []},
+        ],
+    )
+    order = [line for line in text.splitlines() if line.startswith("apply_patch ") or line.startswith("install -D ")]
+    assert order == [
+        "apply_patch patches/001_r1.patch",
+        'install -D "$SCRIPT_DIR"/artifacts/001_a.py /t/a.py',
+        "apply_patch patches/002_r2.patch",
+    ]
+
+
 def test_generated_artifact_script_installs_and_launches(tmp_path):
     source = tmp_path / "patched.py"
     source.write_text("# patched\n", encoding="utf-8")
     target = tmp_path / "tree" / "pkg" / "mod.py"
 
     enablement = EnablementRound()
-    enablement.kept_artifacts = [{"target": str(target), "source": str(source)}]
+    enablement.kept_rounds = [{"patches": [], "artifacts": [{"target": str(target), "source": str(source)}]}]
     rel = write_setting_script(tmp_path, enablement, "sglang", model="/models/M")
 
     proc = subprocess.run(
