@@ -2525,3 +2525,68 @@ async def test_target_reached_routes_through_close_phase(session_dir):
         assert c.shared_state.close_sequence_done is True
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_target_reached_at_session_bound_still_closes(session_dir):
+    """A target met at/after the session bound must still reach the sequencer.
+
+    Every ``_advance_phase_if_needed`` in the tick body is wrapped in
+    ``_await_within_session_bound``, which skips the step once the bound has
+    elapsed. Deferring the CLOSE transition to the next tick therefore never
+    gets one, and the run falls back to the cli safety-net report -- the exact
+    outcome this fix exists to prevent.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.save(session_dir)
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_minutes=0.0001,
+            max_ticks=6,
+        )
+        assert reason == "target_reached"
+        assert c.shared_state.close_sequence_done is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_target_reached_closes_despite_a_failed_state_save(session_dir):
+    """Persisting the terminal is best-effort; it must not gate the close.
+
+    The stop_reason is already set in memory, so a failed save leaves the run
+    with a met target and no close sequence -- the safety-net path again.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.save(session_dir)
+
+    real_save = c.shared_state.save
+    state = {"tripped": False}
+
+    def flaky_save(*args, **kwargs):
+        if c.shared_state.stop_reason == "target_reached" and not state["tripped"]:
+            state["tripped"] = True
+            raise OSError("simulated transient state-save failure")
+        return real_save(*args, **kwargs)
+
+    c.shared_state.save = flaky_save  # type: ignore[method-assign]
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_ticks=6,
+        )
+        assert state["tripped"] is True
+        assert reason == "target_reached"
+        assert c.shared_state.close_sequence_done is True
+    finally:
+        c.shared_state.save = real_save  # type: ignore[method-assign]
+        await c.stop()
