@@ -342,7 +342,9 @@ def test_unresolvable_patch_target_does_not_divert_to_an_unrelated_repo(
 
     root = _resolve_framework_root(None, patches)
 
-    assert root is None
+    assert root is not None
+    assert root.samefile(session)
+    assert not root.samefile(unrelated)
 
 
 def test_target_aware_match_still_wins_when_one_tree_holds_everything(

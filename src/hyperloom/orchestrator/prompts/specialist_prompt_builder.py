@@ -928,9 +928,6 @@ class SpecialistPromptInputs:
     # for every non-enablement domain, and the mandate degrades gracefully.
     enablement_source_context: str = ""
     enablement_candidate_refs: tuple[str, ...] = ()
-    # Env / server-arg layers prior advanced rounds accepted; the bench for this
-    # round launches with them, so the mandate has to name them.
-    enablement_accepted_config: dict[str, Any] = field(default_factory=dict)
 
     # Workspace path (for transcript / heartbeat instructions)
     workspace_path: str = ""
@@ -2276,19 +2273,6 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
     rows.extend(mandate.task_description.splitlines())
-    acc_cfg = inp.enablement_accepted_config or {}
-    acc_envs = {str(k): str(v) for k, v in (acc_cfg.get("extra_envs") or {}).items()}
-    acc_args = str(acc_cfg.get("extra_server_args") or "").strip()
-    if acc_envs or acc_args:
-        rows.append("")
-        rows.append("### Config already in effect")
-        rows.append(
-            "Prior rounds accepted these and your bench launches with them. Re-propose "
-            "one only to override or remove it."
-        )
-        rows.extend(f"- `export {k}={v}`" for k, v in acc_envs.items())
-        if acc_args:
-            rows.append(f"- server args: `{acc_args}`")
     return rows
 
 

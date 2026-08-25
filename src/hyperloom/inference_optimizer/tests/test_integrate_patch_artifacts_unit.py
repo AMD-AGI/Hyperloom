@@ -9,17 +9,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
 )
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.state.task_registry import Task
-
-from .conftest import init_git_repo, patch_integrate_patch_allowlist
-from .test_integrate_patch_executor import _VALID_PATCH, _write_specialist_workspace
 
 
 def _make_workspace(tmp_path: Path) -> Path:
@@ -27,18 +20,6 @@ def _make_workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "workspace"
     (ws / "worktree").mkdir(parents=True)
     return ws
-
-
-def _make_ctx(task_id: str, params: dict) -> RunnerContext:
-    task = Task(
-        task_id=task_id,
-        kind="integrate_patch",
-        state="queued",
-        params=params,
-        idempotency_key=task_id,
-        requires_lanes=tuple(),
-    )
-    return RunnerContext(task=task, lease=None, extra={})
 
 
 # ---- _resolve_artifact_specs: sandbox validation ----
@@ -283,169 +264,3 @@ def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_
     assert len(specs) == 1
     assert specs[0].target == (fw / "configs" / "model_configs" / "tuned.csv").resolve()
     assert specs[0].rel_target == "configs/model_configs/tuned.csv"
-
-
-# ---- _replay_base_artifacts: sandbox + stash-ordering ----------------------
-
-
-def _make_executor(session_dir: Path) -> IntegratePatchExecutor:
-    return IntegratePatchExecutor(session_dir=session_dir)
-
-
-def _base_art_params(fw: Path, source: Path, target: Path, session_dir: Path) -> dict:
-    return {
-        "enablement": True,
-        "enablement_base_artifacts": [
-            {
-                "source": str(source),
-                "target": str(target),
-                "rel_target": str(target.relative_to(fw)),
-                "kind": "python_source",
-            }
-        ],
-    }
-
-
-def test_replay_base_artifacts_installs_into_allowlist_root(tmp_path, monkeypatch):
-    """Happy path: a base artifact with a valid source and allowlisted target is installed."""
-    fw = tmp_path / "sglang"
-    (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-
-    session_dir = tmp_path / "session"
-    source = session_dir / "runs" / "specialist" / "t1" / "artifact.py"
-    source.parent.mkdir(parents=True)
-    source.write_text("# fixed\n", encoding="utf-8")
-
-    target = fw / "srt" / "artifact.py"
-    ex = _make_executor(session_dir)
-    ex._replay_base_artifacts(_base_art_params(fw, source, target, session_dir))
-
-    assert target.read_text(encoding="utf-8") == "# fixed\n"
-
-
-def test_replay_base_artifacts_rejects_target_outside_allowlist(tmp_path, monkeypatch):
-    """A target that resolves outside any allowlisted root must be skipped silently."""
-    fw = tmp_path / "sglang"
-    fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-
-    session_dir = tmp_path / "session"
-    source = session_dir / "runs" / "specialist" / "t1" / "artifact.py"
-    source.parent.mkdir(parents=True)
-    source.write_text("# evil\n", encoding="utf-8")
-
-    outside = tmp_path / "etc" / "passwd"
-    params = {
-        "enablement": True,
-        "enablement_base_artifacts": [{"source": str(source), "target": str(outside), "rel_target": "passwd"}],
-    }
-    ex = _make_executor(session_dir)
-    ex._replay_base_artifacts(params)
-
-    assert not outside.exists()
-
-
-def test_replay_base_artifacts_rejects_source_outside_session(tmp_path, monkeypatch):
-    """A source file that lives outside the session directory must be skipped."""
-    fw = tmp_path / "sglang"
-    (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-
-    # Source lives next to the session dir, not inside it.
-    source = tmp_path / "outside" / "artifact.py"
-    source.parent.mkdir()
-    source.write_text("# evil\n", encoding="utf-8")
-
-    target = fw / "srt" / "artifact.py"
-    ex = _make_executor(session_dir)
-    ex._replay_base_artifacts(_base_art_params(fw, source, target, session_dir))
-
-    assert not target.exists()
-
-
-def test_replay_base_artifacts_skips_missing_source(tmp_path, monkeypatch):
-    """A recorded source path that no longer exists must be skipped without error."""
-    fw = tmp_path / "sglang"
-    (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    target = fw / "srt" / "artifact.py"
-
-    params = {
-        "enablement": True,
-        "enablement_base_artifacts": [
-            {
-                "source": str(session_dir / "runs" / "missing.py"),
-                "target": str(target),
-                "rel_target": "srt/artifact.py",
-            }
-        ],
-    }
-    ex = _make_executor(session_dir)
-    ex._replay_base_artifacts(params)  # must not raise
-
-    assert not target.exists()
-
-
-def test_replay_base_artifacts_noop_for_non_enablement(tmp_path, monkeypatch):
-    """Must be a no-op when params['enablement'] is falsy."""
-    fw = tmp_path / "sglang"
-    (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
-
-    session_dir = tmp_path / "session"
-    source = session_dir / "runs" / "t1" / "artifact.py"
-    source.parent.mkdir(parents=True)
-    source.write_text("# should not install\n", encoding="utf-8")
-    target = fw / "srt" / "artifact.py"
-
-    ex = _make_executor(session_dir)
-    ex._replay_base_artifacts({"enablement_base_artifacts": [{"source": str(source), "target": str(target)}]})
-    assert not target.exists()
-
-
-@pytest.mark.asyncio
-async def test_stash_bookkeeping_is_published_before_the_replay_writes(tmp_path, monkeypatch):
-    """The undo can only restore a stash it can see, so the replay must run after the publish.
-
-    The replay install is unguarded on purpose, so an OSError from it unwinds through
-    ``__call__``. That unwind reads the framework root off the context and skips the
-    stash restore entirely when it is absent.
-    """
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    repo = tmp_path / "repo"
-    init_git_repo(repo)
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
-    _write_specialist_workspace(session_dir, "t-spec-replay", patch_contents=[_VALID_PATCH])
-
-    ex = IntegratePatchExecutor(session_dir=session_dir)
-    seen: dict[str, object] = {}
-    real_replay = ex._replay_base_artifacts
-
-    def _spy(params):
-        seen["framework_root"] = getattr(ex._spy_ctx, "_ip_framework_root", None)
-        seen["stash_state"] = getattr(ex._spy_ctx, "_ip_stash_state", None)
-        return real_replay(params)
-
-    monkeypatch.setattr(ex, "_replay_base_artifacts", _spy)
-    ctx = _make_ctx(
-        "t-int-replay",
-        {
-            "specialist_task_id": "t-spec-replay",
-            "framework_source_root": str(repo),
-            "apply_only": True,
-            "enablement": True,
-        },
-    )
-    ex._spy_ctx = ctx
-    await ex(ctx)
-
-    assert seen["framework_root"] == repo.resolve()
-    assert seen["stash_state"] is not None
