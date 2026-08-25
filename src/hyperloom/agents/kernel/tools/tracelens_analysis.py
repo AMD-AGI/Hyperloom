@@ -4241,11 +4241,21 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         # collision (``mori::EpDispatchCombineOp::dispatch`` reduces to the
         # keyword "dispatch" and lands on an unrelated vendor header).
         anchor = resolve_kernel_anchor_path(playbook)
-        if source_file and source_file != anchor:
-            # Keep the displaced path for triage: an unconditional override is
-            # only auditable if the value it replaced is still recorded.
-            item["source_file_superseded_by_playbook"] = source_file
-        item["source_file"] = anchor
+        if anchor:
+            if source_file and source_file != anchor:
+                # Keep the displaced path for triage: an unconditional override
+                # is only auditable if the value it replaced is still recorded.
+                item["source_file_superseded_by_playbook"] = source_file
+            item["source_file"] = anchor
+        elif source_file:
+            # ``resolve_kernel_anchor_path`` returns "" for a playbook entry
+            # that declares no ``kernel_anchor``, so the override has nothing to
+            # point the field at. Taking it anyway would blank a path the
+            # curated or trace-launcher tier resolved correctly and land the
+            # candidate as missing_native_source -- the outcome the override
+            # exists to avoid. Whether the surviving path is trustworthy is
+            # classify_patchability's question, not a second gate's.
+            item["vendor_playbook_without_kernel_anchor"] = True
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
@@ -4849,8 +4859,15 @@ def _is_curated_resolution(item: dict[str, Any]) -> bool:
     bundle's anchor. Leaving it unprotected would let a review proposal point
     the field back at framework source and route the candidate to a backend
     that has nothing to rewrite there.
+
+    That protection is scoped to the anchor it exists for. A playbook entry
+    declaring no ``kernel_anchor`` leaves ``source_file`` holding whatever tier
+    resolved it, and a grep guess is exactly what the review is here to correct,
+    so such a row stays open to revision.
     """
-    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook":
+    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook" and not item.get(
+        "vendor_playbook_without_kernel_anchor"
+    ):
         return True
     status = str(item.get("op_to_source_status") or "").strip()
     method = str(item.get("source_resolution_method") or "").strip()

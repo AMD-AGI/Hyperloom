@@ -368,6 +368,36 @@ def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
     assert "source_file_superseded_by_playbook" not in out[0]
 
 
+def test_a_playbook_without_an_anchor_does_not_blank_a_resolved_source(monkeypatch):
+    """``resolve_kernel_anchor_path`` returns "" for an entry with no anchor.
+
+    Taking the override anyway substitutes nothing for a path a deterministic
+    tier resolved correctly, and the candidate lands as ``missing_native_source``
+    -- the exact outcome the override exists to avoid.
+    """
+    monkeypatch.setattr(tla, "resolve_kernel_anchor_path", lambda _playbook: "")
+    candidates = [_mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE)]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    assert out[0]["source_file"] == _MORI_SITE_PACKAGES_FILE
+    assert out[0]["vendor_playbook_without_kernel_anchor"] is True
+    assert "source_file_superseded_by_playbook" not in out[0]
+
+
+def test_a_playbook_row_holding_no_anchor_stays_open_to_review(monkeypatch):
+    """Protection is scoped to the anchor it exists for.
+
+    With no anchor the field holds whatever tier resolved it, and a grep guess
+    is precisely what the review is here to correct.
+    """
+    monkeypatch.setattr(tla, "resolve_kernel_anchor_path", lambda _playbook: "")
+    candidates = [_mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE)]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    assert out[0]["patch_strategy"] == "vendor_playbook"
+    assert tla._is_curated_resolution(out[0]) is False
+
+
 def test_a_playbook_candidate_is_not_open_to_review_rewriting():
     """Protection cannot key on the tier that resolved the replaced path.
 
