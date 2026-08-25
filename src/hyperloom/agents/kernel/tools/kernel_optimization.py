@@ -1784,8 +1784,25 @@ def build_prompt(
         is_multinode_run = False
     # Held separately from ``safety``: the GPU-less sandbox applies to whichever
     # backend runs, while the rest of ``safety`` describes the GEAK harness only.
+    #
+    # Two shapes, for the same reason the prompt has two. The constraint -- no
+    # GPU on this node -- is a fact about the host and belongs to both backends.
+    # The procedure below it is not: it routes measurements through
+    # ``kernel-bench`` and names ``optimized_versions/`` and
+    # ``optimization_report.md``, which are the two paths forge's workspace guard
+    # refuses and the reason the deliverable contract was dropped in the first
+    # place. Handing forge the whole block put them straight back, so a
+    # multi-node forge run lost its first iteration exactly as before.
+    multinode_notice = ""
     multinode_block = ""
     if is_multinode_run:
+        multinode_notice = (
+            "\nMULTI-NODE SANDBOX: this node has no GPU. Nothing you run here can\n"
+            "compile against or measure a device -- `hipcc`, `torch.cuda.*` and\n"
+            "`torch.utils.cpp_extension.load` will hang or crash. Do not stand up a\n"
+            "measurement of your own; the harness that owns benchmarking dispatches\n"
+            "it to a GPU-bearing pod.\n"
+        )
         multinode_block = (
             "\nMULTI-NODE SANDBOX (no local GPU): every compile + benchmark\n"
             "step MUST be dispatched to a GPU-bearing RayJob pod. Do NOT\n"
@@ -1844,15 +1861,23 @@ def build_prompt(
         forge_sections = [
             f"# TASK: Optimize the `{kernel_name}` kernel",
             f"kernel_name: {kernel_name}\nkernel_url: {source_file}",
+            # The target architecture, which forge cannot derive: it is told
+            # which kernel to rewrite, not which card the measurement runs on,
+            # and a gfx942 intrinsic emitted for a gfx950 host does not compile.
+            platform_intro,
+            hardware_notes,
             promotion_block,
             device_symbol_block,
             hypothesis_block,
             extra_context_block,
             benchmark_cases_block,
+            # The harnesses the trace resolved, and the only channel by which a
+            # review-verified ``benchmark_files`` reaches this backend at all.
+            bench_block,
             priority_block,
             "Preserve function name, signature, decorators, and numerical behavior.",
             repo_block,
-            multinode_block,
+            multinode_notice,
         ]
         # Most of these blocks render empty for any given kernel; joining them
         # unfiltered leaves runs of blank lines where a section was skipped.

@@ -304,6 +304,62 @@ def test_build_prompt_omits_structured_shape_cases_without_program_output():
     assert "when `benchmark_shape_cases` is present" not in prompt
 
 
+def test_build_prompt_forge_keeps_the_target_arch_and_the_harness_paths(tmp_path):
+    """Three blocks left the forge shape by omission, not by design.
+
+    The comment above ``forge_sections`` lists what it removes and why, and none
+    of these were on it. ``hardware_notes`` carries the ROCm arch, so without it
+    an agent can emit a gfx942 intrinsic for a gfx950 host and the rewrite does
+    not compile; ``bench_block`` names the harnesses the trace resolved and is
+    the only channel by which a review-verified ``benchmark_files`` reaches this
+    backend at all.
+    """
+    bench = tmp_path / "test_gemm.py"
+    bench.write_text("def test_gemm(): pass\n", encoding="utf-8")
+    candidate = {
+        "name": "gemm_afp4wfp4",
+        "source_file": "/tmp/gemm_afp4wfp4.py",
+        "source_type": "python",
+        "benchmark_files": [str(bench)],
+        "target_platform": "mi355x",
+    }
+
+    prompt = ko.build_prompt(candidate, _args(), backend="forge")
+
+    assert "Hardware notes" in prompt
+    assert str(bench) in prompt
+    # Still without the sections that fight forge's own workspace guard.
+    assert "optimization_report.md" not in prompt
+    assert "optimized_versions/" not in prompt
+
+
+def test_build_prompt_forge_multinode_states_the_constraint_without_the_geak_recipe(monkeypatch):
+    """The GPU-less constraint is shared; the procedure under it is not.
+
+    The multi-node block routes measurements through ``kernel-bench`` and names
+    ``optimized_versions/`` and ``optimization_report.md`` -- the two paths
+    forge's workspace guard refuses, and the reason the deliverable contract was
+    dropped. Handing forge the whole block put them straight back, so a
+    multi-node forge run lost its first iteration exactly as before.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    prompt = ko.build_prompt(_candidate(), _args(), backend="forge")
+
+    assert "this node has no GPU" in prompt
+    assert "optimization_report.md" not in prompt
+    assert "optimized_versions/" not in prompt
+    assert "kernel-bench" not in prompt
+
+
+def test_build_prompt_geak_multinode_keeps_its_dispatch_recipe(monkeypatch):
+    """GEAK brings no benchmark of its own, so it still needs the procedure."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    prompt = ko.build_prompt(_candidate(), _args())
+
+    assert "kernel-bench" in prompt
+    assert "optimization_report.md" in prompt
+
+
 def test_build_prompt_forge_drops_the_geak_harness_and_keeps_trace_evidence():
     """Forge is handed trace evidence only, not the harness it does not run.
 
