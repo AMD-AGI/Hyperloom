@@ -39,22 +39,6 @@ In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
 
 Apply the following changes in order. Required steps must be completed before running; recommended and optional steps improve behavior or unlock new features.
 
-### Required: rename `INFERENCE_OPTIMIZER_SESSION_DIR` → `USER_DATA_PATH`
-
-The session directory env was renamed and the legacy variable is no
-longer read. Any launcher that exports the old name will silently
-fall back to the default `/workspace/hyperloom` instead of honouring
-your override.
-
-```diff
-# .env, run launchers, k8s ConfigMaps
-- INFERENCE_OPTIMIZER_SESSION_DIR=/shared/hyperloom-sessions/me
-+ USER_DATA_PATH=/shared/hyperloom-sessions/me
-```
-
-Same for `WORKSPACE_PATH` — it is legacy-only and still used in narrow
-fallbacks, but new launchers should rename it to `USER_DATA_PATH`.
-
 ### Required: rename multi-node image / GPU flags and envs
 
 The `optimize` CLI multi-node image and per-node GPU flags were renamed
