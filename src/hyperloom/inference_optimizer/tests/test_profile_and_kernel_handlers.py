@@ -1740,9 +1740,8 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
 async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
     """A parseable measurement must not launder a non-zero process exit into success.
 
-    The measurement is real, but the process that produced it exited non-zero, so
-    the round cannot be the number a later comparison is anchored to. Matches the
-    contract ``run_grid`` already enforces for a variant.
+    The round cannot be the number a later comparison anchors to. Same contract
+    ``run_grid`` enforces for a variant.
     """
     db = SqliteConnection(tmp_path / "baseline.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
@@ -1788,7 +1787,6 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
     assert res.result["error_class"] == "magpie_nonzero_after_valid_measurement"
     assert res.result["returncode"] == 1
     assert "cleanup failed" in res.result["error"]
-    # The measurement parsed, and that is exactly what must not carry the round.
     assert res.result["reported_success"] is False
     assert "output_throughput" not in res.result
     db.close()
@@ -2497,12 +2495,10 @@ async def test_trace_analyze_handler_does_not_forward_top_k(
     session_dir,
     monkeypatch,
 ):
-    """``top_k`` is not a tool flag: the tool reads the env var instead.
+    """``top_k`` is not a tool flag; the live dial is ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K``.
 
-    The CLI flag and this forwarding branch were removed together; no
-    orchestration code ever wrote the key, and the live entry point is
-    ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K``. A payload that still carries it must
-    be ignored rather than reach an argparse that no longer defines it.
+    A payload still carrying the key must be ignored rather than reach an
+    argparse that no longer defines it.
     """
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()

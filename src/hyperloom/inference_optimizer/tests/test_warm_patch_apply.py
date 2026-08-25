@@ -982,8 +982,8 @@ def _git_repo_with(tmp_path, rel, body):
 def test_snapshot_covers_the_path_a_non_default_strip_level_touches(tmp_path, output_dir):
     """The header needs -p2 to reach the real file; the snapshot must still cover it.
 
-    Guessing -p1 recorded ``y/pkg/mod.py``, so a revert restored nothing and the
-    candidate's edit survived into the next benchmark.
+    Assuming -p1 records ``x/pkg/mod.py``, which the apply never touches, so the
+    restore is a no-op and the candidate's edit survives into the next bench.
     """
     repo = _git_repo_with(tmp_path, "pkg/mod.py", "original = True\n")
     before = (repo / "pkg/mod.py").read_text(encoding="utf-8")

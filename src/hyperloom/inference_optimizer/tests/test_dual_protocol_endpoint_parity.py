@@ -4,10 +4,9 @@
 """The bootstrap shell and ``dual_protocol_endpoint_pair`` must derive the same pair.
 
 ``install_baremetal.sh`` runs before any Python is importable, so it carries its
-own copy of the endpoint derivation. The two drifted once already -- the shell
-kept appending ``/v1`` to an unknown host after the Python stopped -- which is
-invisible until a gateway is configured through the installer rather than the
-library. This pins them together on the same corpus.
+own copy of the derivation. A divergence between the two only shows up once a
+gateway is configured through the installer rather than the library, so the two
+are pinned here against one corpus.
 """
 
 from __future__ import annotations

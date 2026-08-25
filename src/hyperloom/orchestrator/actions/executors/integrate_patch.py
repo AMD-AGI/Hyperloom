@@ -1925,10 +1925,9 @@ class IntegratePatchExecutor:
     ) -> None:
         """Publish the values ``_stage_run`` reads back after ``_stage_apply``.
 
-        Every field is required and keyword-only: each of the stage's exits has
-        to name all of them, so an exit that forgets one fails here instead of
-        raising ``AttributeError`` inside the gate. Tree-mutation state is
-        published separately, as the tree takes it.
+        Every field is required and keyword-only, so an exit that omits one
+        fails here rather than in the gate. Tree-mutation state is published
+        separately, as the tree takes it.
         """
         ctx._ip_output_root = output_root  # type: ignore[attr-defined]
         ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
