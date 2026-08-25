@@ -2103,6 +2103,10 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
         "args_mode": "replace",
     }
     assert entry["candidate_extra_server_args"] == "--recipe --kernel"
+    assert entry["candidate_extra_envs"] == {
+        "VLLM_RECIPE": "1",
+        "KERNEL_ONLY": "1",
+    }
     assert coord.shared_state.current_best["extra_envs"]["KERNEL_ONLY"] == "1"
     assert coord.shared_state.warm_replay_pending == {}
 

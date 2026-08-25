@@ -302,6 +302,35 @@ def test_publishable_config_flattens_replayed_base_and_new_delta() -> None:
     }
 
 
+def test_publishable_config_replace_keeps_accumulated_recipe_stack() -> None:
+    state = SimpleNamespace(
+        warm_replay_outcome={"status": "reproduced"},
+        optimization_stack=[
+            {
+                "action": "replay_warm_recipe",
+                "recipe_delta": {
+                    "extra_server_args": "--page-size 32",
+                    "extra_envs": {"VLLM_PRIOR": "1"},
+                    "args_mode": "replace",
+                },
+            },
+            {
+                "action": "explore",
+                "recipe_delta": {
+                    "extra_server_args": "--enable-foo",
+                    "extra_envs": {"VLLM_NEW": "1"},
+                    "args_mode": "replace",
+                },
+            },
+        ],
+    )
+
+    assert build_publishable_recipe_config(state) == {
+        "extra_server_args": "--page-size 32 --enable-foo",
+        "extra_envs": {"VLLM_PRIOR": "1", "VLLM_NEW": "1"},
+    }
+
+
 def test_publishable_config_applies_remove_and_unset_without_dropping_base() -> None:
     state = SimpleNamespace(
         warm_replay_outcome={},

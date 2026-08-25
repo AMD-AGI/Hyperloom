@@ -2188,7 +2188,7 @@ class PreludePhase(PhaseHandler):
                 {
                     "name": "warm_replay",
                     "candidate_extra_server_args": warm_args,
-                    "candidate_extra_envs": recipe_envs,
+                    "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
                         "extra_server_args": recipe_args,
                         "extra_envs": recipe_envs,

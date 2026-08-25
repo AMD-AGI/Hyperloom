@@ -2495,6 +2495,7 @@ class FrameworkPhase(PhaseHandler):
             pass
         params: dict[str, Any] = {
             "domain": domain,
+            "source_phase": "FRAMEWORK_AGENT",
             "gap_canonical_id": gap_cid,
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
@@ -5493,6 +5494,7 @@ class FrameworkPhase(PhaseHandler):
         notes = "\n".join(context_lines).strip()
         params: dict[str, Any] = {
             "domain": domain,
+            "source_phase": "FRAMEWORK_AGENT",
             "gap_canonical_id": gap_cid,
             "gap_symptom": ("Propose runtime config variants (server args / env) for a throughput grid"),
             "gap_layer": "framework",
