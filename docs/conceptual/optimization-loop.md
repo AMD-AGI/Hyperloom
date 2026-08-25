@@ -259,7 +259,7 @@ look very different from Orchestration's side:
   per-kernel `kernel_opt` — and Orchestration drives the remaining kernel work
   through the request channel.
 
-See [Kernel optimization execution path](kernel-execution-path.md) for the
+See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
 
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)

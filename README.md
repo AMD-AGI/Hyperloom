@@ -31,7 +31,7 @@ Hyperloom combines:
 - Trace analysis, identifying bottleneck kernels and bridge planning through
   [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
    from [Magpie](https://github.com/AMD-AGI/Magpie) and
-   [Intellikit](https://github.com/AMDResearch/intellikit))
+   [IntelliKit](https://github.com/AMDResearch/intellikit))
 - Kernel optimization through the
   [GEAK](https://github.com/AMD-AGI/GEAK) backend.
 - Agentic search space exploration through
@@ -44,11 +44,11 @@ Hyperloom combines:
 
 | Feature | Options |
 |------|-------|
-| Workload | Inference |
+| Workload | Inference serving |
 | Platform | MI300X, MI325X, MI355X |
-| Framework | vLLM, SGLang |
+| Framework | SGLang, vLLM |
 | Kernel Language | HIP, Triton, FlyDSL |
-| Backend | Claude |
+| LLM Backend | Claude |
 
 ## Get Started
 
