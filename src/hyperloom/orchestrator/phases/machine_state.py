@@ -1009,6 +1009,30 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     return max(0.0, now - started)
 
 
+def is_phase_transition_row(row: Any) -> bool:
+    """True when ``row`` records an actual phase change, not an in-phase marker."""
+    if not isinstance(row, dict):
+        return False
+    to_phase = str(row.get("to_phase") or "").strip().upper()
+    from_phase = str(row.get("from_phase") or "").strip().upper()
+    return bool(to_phase) and to_phase != from_phase
+
+
+def phase_history_event_name(row: Any) -> str:
+    """Return a marker event name from either legacy or canonical history rows."""
+    if not isinstance(row, dict):
+        return ""
+    legacy = str(row.get("event") or "").strip()
+    if legacy:
+        return legacy
+    evidence = row.get("evidence")
+    if isinstance(evidence, dict):
+        nested = str(evidence.get("event") or "").strip()
+        if nested:
+            return nested
+    return str(row.get("reason") or "").strip()
+
+
 def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
     """Rebuild per-phase completed-segment totals from a ``phase_history`` log.
 
@@ -1038,11 +1062,12 @@ def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
         return {}
     rows = [row for row in history if isinstance(row, dict)]
     totals: dict[str, float] = {}
-    for idx in range(len(rows) - 1):
-        phase = str(rows[idx].get("to_phase") or "").strip().upper()
+    transition_rows = [row for row in rows if is_phase_transition_row(row)]
+    for idx in range(len(transition_rows) - 1):
+        phase = str(transition_rows[idx].get("to_phase") or "").strip().upper()
         try:
-            entered = float(rows[idx].get("ts_unix") or 0.0)
-            exited = float(rows[idx + 1].get("ts_unix") or 0.0)
+            entered = float(transition_rows[idx].get("ts_unix") or 0.0)
+            exited = float(transition_rows[idx + 1].get("ts_unix") or 0.0)
         except (TypeError, ValueError):
             continue
         if not phase or entered <= 0.0 or exited <= entered:
@@ -3451,6 +3476,52 @@ def record_phase_transition(
     return row
 
 
+def append_phase_history_event(
+    state,
+    *,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+    ts: str | None = None,
+    ts_unix: float | None = None,
+) -> dict[str, Any]:
+    """Append a non-transition marker row for the current phase.
+
+    Uses the same schema and cap as :func:`record_phase_transition` without
+    changing ``state.phase`` or banking elapsed segments.
+
+    Args:
+        reason (str): Human-readable reason for the marker.
+        evidence (dict[str, Any] | None): Structured payload for the event.
+        ts (str | None): Optional ISO timestamp; defaults to now (UTC).
+        ts_unix (float | None): Optional Unix epoch matching ``ts``.
+
+    Returns:
+        dict[str, Any]: The inserted phase_history row.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    import time as _time
+    from ..state.shared_state import _PHASE_HISTORY_CAP
+
+    now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
+    now_unix = float(ts_unix if ts_unix is not None else _time.time())
+    phase = (state.phase or "").strip().upper()
+    row = make_history_row(
+        from_phase=phase,
+        to_phase=phase,
+        reason=(reason or "").strip(),
+        evidence=evidence,
+        ts=now_ts,
+        ts_unix=now_unix,
+        cycle=int(getattr(state, "macro_cycle", 0) or 0),
+    )
+    history = list(state.phase_history or [])
+    history.append(row)
+    if len(history) > _PHASE_HISTORY_CAP:
+        history = history[-_PHASE_HISTORY_CAP:]
+    state.phase_history = history
+    return row
+
+
 def record_lifecycle_event(
     state,
     *,
@@ -3577,6 +3648,9 @@ __all__ = [
     "exit_terminal_prelude",
     "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
+    "append_phase_history_event",
+    "is_phase_transition_row",
+    "phase_history_event_name",
     "baseline_round_cost_sec",
     "benchmark_cost_sec",
     "boot_cost_sec",

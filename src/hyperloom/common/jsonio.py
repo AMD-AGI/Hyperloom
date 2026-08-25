@@ -201,6 +201,66 @@ def extract_first_json_with_key(
     return found
 
 
+def extract_last_json_with_key(
+    text: str,
+    required_key: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the last JSON object in *text* (by start offset) that qualifies.
+
+    Uses one balanced-bracket scan to locate JSON object spans, then checks them
+    from the latest start offset backwards. Objects whose first field is not
+    *required_key* (e.g. ``{"meta": ..., "scores": ...}``) still qualify when
+    the key is present.
+
+    Args:
+        text: Raw model reply that may contain fenced or bare JSON objects.
+        required_key: Top-level key the returned dict must contain. When
+            ``None``, any parsed JSON object qualifies.
+
+    Returns:
+        The last qualifying dict by start offset, or ``None`` when none parses.
+    """
+    if not text:
+        return None
+
+    def _qualifies(data: Any) -> bool:
+        return isinstance(data, dict) and (required_key is None or required_key in data)
+
+    spans: list[tuple[int, int]] = []
+    stack: list[tuple[str, int]] = []
+    in_string = False
+    escaped = False
+    matching = {"}": "{", "]": "["}
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append((char, index))
+        elif char in "}]":
+            if not stack or stack[-1][0] != matching[char]:
+                continue
+            opener, start = stack.pop()
+            if opener == "{":
+                spans.append((start, index + 1))
+
+    for start, end in sorted(spans, key=lambda span: span[0], reverse=True):
+        try:
+            data = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            continue
+        if _qualifies(data):
+            return data
+    return None
+
+
 def iter_sse_objects(raw: str) -> Iterator[Any]:
     """Yield JSON objects decoded from an MCP HTTP response body.
 
@@ -250,6 +310,7 @@ def iter_sse_objects(raw: str) -> Iterator[Any]:
 __all__ = [
     "coerce_dict",
     "extract_first_json_with_key",
+    "extract_last_json_with_key",
     "iter_sse_objects",
     "read_json",
     "read_jsonl",

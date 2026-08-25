@@ -37,6 +37,19 @@ def agent_from_phase(value: Any) -> str:
     return AGENT_BY_PHASE.get(str(value or "").strip().upper(), "")
 
 
+def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
+    """Resolve the immutable authoring phase from recorded ownership evidence."""
+    evidence = evidence or {}
+    if evidence.get("framework_agent_authoring") or evidence.get("framework_agent_candidate_id"):
+        return "FRAMEWORK_AGENT"
+    phase = str(evidence.get("source_phase") or "").strip().upper()
+    if phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+        return "FRAMEWORK_AGENT"
+    if phase == "EXPLORE":
+        return "EXPLORE"
+    return ""
+
+
 def patch_author(evidence: Mapping[str, Any] | None) -> str:
     """Name who wrote a patch, from the markers its applier left behind.
 
@@ -53,13 +66,7 @@ def patch_author(evidence: Mapping[str, Any] | None) -> str:
     Returns:
         The owning agent, or :data:`UNATTRIBUTED`.
     """
-    evidence = evidence or {}
-    if evidence.get("framework_agent_authoring") or evidence.get("framework_agent_candidate_id"):
-        return "framework_agent"
-    provenance = str(evidence.get("provenance") or "").strip().lower()
-    if evidence.get("domain") or provenance.startswith("specialist:"):
-        return "explore"
-    return agent_from_phase(evidence.get("source_phase")) or UNATTRIBUTED
+    return agent_from_phase(patch_owner_phase(evidence)) or UNATTRIBUTED
 
 
 __all__ = [
@@ -67,4 +74,5 @@ __all__ = [
     "UNATTRIBUTED",
     "agent_from_phase",
     "patch_author",
+    "patch_owner_phase",
 ]

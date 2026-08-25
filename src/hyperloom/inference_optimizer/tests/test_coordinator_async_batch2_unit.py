@@ -420,6 +420,7 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
     assert "source_phase" not in coord.shared_state.optimization_stack[-1]
     assert "domain" not in coord.shared_state.optimization_stack[-1]
     assert "framework_agent_authoring" not in coord.shared_state.optimization_stack[-1]
+    assert coord.shared_state.optimization_stack[-1]["recipe_publishable"] is False
     assert coord.shared_state.resume_pending_revalidation is True
 
 
@@ -1699,7 +1700,10 @@ async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatc
         seen.append(dict(intent.payload.get("params") or {}))
 
     monkeypatch.setattr(coord, "_handle_delegate", _fake_delegate)
-    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "wave"})
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"idempotency_key": "wave", "action_name": "specialist"},
+    )
     await coord._fan_out_specialist_wave(
         "orchestration",
         intent,
@@ -2224,6 +2228,70 @@ def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
 
 
 @pytest.mark.asyncio
+async def test_direct_integrate_proposal_inherits_specialist_owner(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    specialist = await coord.tasks.create(
+        kind="specialist",
+        params={
+            "source_phase": "FRAMEWORK_AGENT",
+            "domain": "serving_specialist",
+            "gap_layer": "framework",
+        },
+        idempotency_key="owner-source",
+    )
+    monkeypatch.setattr(
+        coord.router,
+        "_admission_denial_for_action",
+        lambda _action: None,
+    )
+    await coord._handle_propose_action(
+        "orchestration",
+        Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={
+                "action_name": "integrate_patch",
+                "params": {"specialist_task_id": specialist.task_id},
+            },
+        ),
+    )
+
+    pending = next(iter(coord.state.pending_proposals.values()))
+    params = pending.payload["params"]
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
+    assert params["domain"] == "serving_specialist"
+    assert params["gap_layer"] == "framework"
+
+
+def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
+    coord: Coordinator,
+) -> None:
+    coord.shared_state.phase = "KERNEL_AGENT"
+    explore_params = {
+        "domain": "serving_specialist",
+        "gap_layer": "perf_explore",
+    }
+    framework_params = {
+        "domain": "serving_specialist",
+        "gap_layer": "framework",
+    }
+
+    assert coord.router._stamp_specialist_owner(explore_params) == "EXPLORE"
+    assert explore_params["source_phase"] == "EXPLORE"
+    assert coord.router._stamp_specialist_owner(framework_params) == "FRAMEWORK_AGENT"
+    assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
+
+
+def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
+    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+
+    forwarded: dict = {}
+    _forward_integrate_source({}, forwarded)
+    assert "source_phase" not in forwarded
+
+
+@pytest.mark.asyncio
 async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     pending = _pending(
@@ -2244,6 +2312,27 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
     )
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
+
+
+@pytest.mark.asyncio
+async def test_materialize_integrate_patch_rejects_missing_owner(
+    coord: Coordinator,
+) -> None:
+    coord.shared_state.baseline_tput = 800.0
+    pending = _pending(
+        "integrate_patch",
+        {"params": {"specialist_task_id": "missing-specialist"}},
+        msg_id="prop-ownerless",
+    )
+    coord.state.pending_proposals[pending.proposal_msg_id] = pending
+
+    await coord._materialize_approved_proposal(pending)
+
+    assert not [task for task in await coord.tasks.queued() if task.kind == "integrate_patch"]
+    assert pending.proposal_msg_id not in coord.state.pending_proposals
+    assert coord.shared_state.get_specialist_patch_verdict("missing-specialist") == "owner_missing"
+    observations = await coord.bus.tail(topic="observation", n=10)
+    assert any(message.payload.get("reason") == "integrate_patch_owner_missing" for message in observations)
 
 
 @pytest.mark.asyncio

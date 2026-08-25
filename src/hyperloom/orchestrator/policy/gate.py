@@ -1723,27 +1723,7 @@ class PolicyGate:
                 ),
             )
         max_turns_raw = params.get("max_turns")
-        if max_turns_raw is not None:
-            try:
-                max_turns = int(max_turns_raw)
-            except (TypeError, ValueError) as exc:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
-                    rule="specialist_dispatch_source",
-                ) from exc
-            # The in-process backend's turn loop has no wall-clock check, so this
-            # cap is the only bound on that path.
-            if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
-                    rule="specialist_dispatch_source",
-                    hint=(
-                        f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
-                        "(0 = unbounded; depth is bounded by the wall-clock "
-                        "budget, so omit max_turns unless capping a probe early)."
-                    ),
-                )
+        validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
 
@@ -1947,9 +1927,9 @@ class PolicyGate:
             PolicyDenied: when the GPU request fails, the wave is too large, or
                 a task description is empty / too long.
         """
-        # Freeform skips the domain-anchored max_turns gate (bounded by the task
-        # timeout instead), but a GPU request must still clear the same pool
-        # ceiling as a domain specialist.
+        # Freeform applies the same max_turns contract as domain dispatches.
+        # Per-task overrides in a wave are checked per entry below.
+        validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
         # A malformed or empty wave falls through to the single-task path in the
@@ -1964,11 +1944,12 @@ class PolicyGate:
                     hint=(f"Split the wave into batches of at most {SPECIALIST_FREEFORM_WAVE_MAX} tasks."),
                 )
             for i, task in enumerate(wave):
-                if not isinstance(task, dict):
-                    continue
-                desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-                if desc:
-                    self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+                validate_freeform_wave_task(task, index=i)
+                if isinstance(task, dict):
+                    validate_specialist_max_turns_raw(
+                        task.get("max_turns"),
+                        where=f"tasks[{i}].max_turns",
+                    )
             return
         desc = str(params.get("task_description") or "").strip()
         self._check_freeform_task_description(desc, where="params")
@@ -2464,6 +2445,78 @@ def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
     return "\n".join(lines)
 
 
+def validate_specialist_max_turns_raw(
+    max_turns_raw: Any,
+    *,
+    where: str,
+) -> None:
+    """Validate an optional specialist ``max_turns`` dial.
+
+    Args:
+        max_turns_raw: Raw ``max_turns`` value from dispatch params, or ``None``.
+        where: Label used in error messages (e.g. ``params.max_turns``).
+
+    Raises:
+        PolicyDenied: When the value is not an int, is negative, or exceeds
+            :data:`SPECIALIST_MAX_TURNS_HARD_CAP`.
+    """
+    if max_turns_raw is None:
+        return
+    try:
+        max_turns = int(max_turns_raw)
+    except (TypeError, ValueError) as exc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns must be int, got {max_turns_raw!r}",
+            rule="specialist_dispatch_source",
+        ) from exc
+    if max_turns < 0:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} must be >= 0",
+            rule="specialist_dispatch_source",
+            hint=(
+                "Use a non-negative integer. "
+                "0 = unbounded (bounded by the wall-clock budget); "
+                "omit max_turns to use the default turn cap."
+            ),
+        )
+    if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} "
+            f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
+            rule="specialist_dispatch_source",
+            hint=(
+                f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
+                "(0 = unbounded; depth is bounded by the wall-clock "
+                "budget, so omit max_turns unless capping a probe early)."
+            ),
+        )
+
+
+def validate_freeform_wave_task(task: Any, *, index: int) -> str:
+    """Validate one entry in a freeform specialist ``tasks`` wave.
+
+    Args:
+        task: One wave entry; must be a dict with a non-empty description.
+        index: Zero-based index used in error messages.
+
+    Returns:
+        The normalized task description.
+
+    Raises:
+        PolicyDenied: When the entry is malformed or the description is
+            empty / too long.
+    """
+    if not isinstance(task, dict):
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] must be a dict",
+            rule="specialist_freeform_wave_invalid_task",
+            hint="Each wave entry must be an object with task_description.",
+        )
+    desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
+    PolicyGate._check_freeform_task_description(desc, where=f"tasks[{index}]")
+    return desc
+
+
 __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
@@ -2478,6 +2531,8 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
+    "validate_freeform_wave_task",
+    "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",

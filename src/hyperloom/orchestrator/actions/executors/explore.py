@@ -1641,11 +1641,7 @@ class ExploreExecutor:
                             "recipe_delta": {
                                 "extra_server_args": gv.extra_server_args,
                                 "extra_envs": dict(gv.extra_envs or {}),
-                                **{
-                                    key: value
-                                    for key, value in control_fields.items()
-                                    if value not in (None, "", [], {})
-                                },
+                                **control_fields,
                             },
                             "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
                             "effective_extra_server_args": next_effective_args,
