@@ -1411,8 +1411,11 @@ restore_persisted_framework_env() {
   if [ -z "${_VLLM_VENV_ROOT_WAS_SET:-}" ]; then
     local saved_root
     saved_root="$(read_dotenv_var VLLM_VENV_ROOT)"
-    [ -n "$saved_root" ] && VLLM_VENV_ROOT="$saved_root"
+    if [ -n "$saved_root" ]; then
+      VLLM_VENV_ROOT="$saved_root"
+    fi
   fi
+  return 0
 }
 
 read_dotenv_var() {

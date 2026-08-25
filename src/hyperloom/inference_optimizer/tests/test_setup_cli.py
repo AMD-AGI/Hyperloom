@@ -1728,6 +1728,59 @@ def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: 
     )
 
 
+def _run_restore_persisted_framework_env(
+    tmp_path: Path,
+    *,
+    dotenv_content: str | None = None,
+) -> subprocess.CompletedProcess:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    dotenv = tmp_path / ".env"
+    if dotenv_content is None:
+        dotenv.unlink(missing_ok=True)
+    else:
+        dotenv.write_text(dotenv_content, encoding="utf-8")
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"source {lib}",
+                f'DOTENV="{dotenv}"',
+                "INSTALL_FRAMEWORK=none",
+                "restore_persisted_framework_env",
+                'echo "RESTORE_OK"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+
+@pytest.mark.parametrize(
+    ("dotenv_content", "expect_log"),
+    [
+        (None, None),
+        ("HYPERLOOM_FRAMEWORK_ENV=shared\n", "restored framework env from .env (shared)"),
+    ],
+)
+def test_restore_persisted_framework_env_without_vllm_venv_root(
+    tmp_path: Path,
+    dotenv_content: str | None,
+    expect_log: str | None,
+) -> None:
+    """main() calls restore under set -e; missing VLLM_VENV_ROOT must not abort setup."""
+    res = _run_restore_persisted_framework_env(tmp_path, dotenv_content=dotenv_content)
+
+    assert res.returncode == 0, res.stderr
+    assert "RESTORE_OK" in res.stdout
+    if expect_log:
+        assert expect_log in res.stdout
+
+
 def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
     """A re-run with --install-framework none must reuse .env's isolated vLLM
     env so torch/lib sync still targets the venv that runs benchmarks."""
