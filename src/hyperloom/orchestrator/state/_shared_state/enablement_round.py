@@ -81,8 +81,8 @@ class EnablementRound:
     # Why the last round's patches were all dropped for absent targets; injected
     # into the next round's mandate so it stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)
-    # Set when the last round's kept patches targeted more than one source tree.
-    # The prompt injects this so the specialist knows to split into separate rounds.
+    # Whether the last round's kept patches targeted more than one source tree;
+    # injected into the next mandate so the specialist splits them per round.
     patches_span_multiple_roots: bool = False
     # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
     # target); re-installed as a base before the next round's patch.

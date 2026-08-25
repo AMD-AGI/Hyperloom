@@ -333,9 +333,8 @@ def render_reference_script(
             script does not reproduce that layer.
         rounds: Accepted enablement rounds in order, each
             ``{"patches": [...], "artifacts": [...]}`` with script-relative
-            paths. A round's patches are emitted before its artifacts, matching
-            the order integrate_patch applied them, so a round that both patches
-            and whole-file-replaces one file still replays cleanly.
+            paths. A round's patches precede its artifacts, matching the order
+            integrate_patch applied them.
 
     Returns:
         The script text, always terminated by a newline.

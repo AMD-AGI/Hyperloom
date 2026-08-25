@@ -1095,6 +1095,7 @@ class FrameworkPhase(PhaseHandler):
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
+        spanned_roots = bool(state.enablement.patches_span_multiple_roots)
         acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
         acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
         if base_patches or base_setup or base_artifacts or acc_envs or acc_args:
@@ -1136,6 +1137,13 @@ class FrameworkPhase(PhaseHandler):
                 "target path with Glob/Read first."
             )
             notes = (drop_note + "\n\n" + notes).strip() if notes else drop_note
+        if spanned_roots:
+            span_note = (
+                "CROSS-TREE PATCH SET: the prior round's patches targeted more "
+                "than one framework source tree, which integrate_patch cannot "
+                "apply as one set. Submit patches for a single tree per round."
+            )
+            notes = (span_note + "\n\n" + notes).strip() if notes else span_note
         gap_cid = f"gap.enablement.{signature.kind}"
         from hyperloom.agents.framework.enablement import CapabilityGap
 
@@ -1829,11 +1837,11 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
+        # Set on every round so neither outlives the round it describes.
         state.enablement.last_grounding_drop_reason = [
             str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
         ]
-        if res.get("patches_span_multiple_roots"):
-            state.enablement.patches_span_multiple_roots = True
+        state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
