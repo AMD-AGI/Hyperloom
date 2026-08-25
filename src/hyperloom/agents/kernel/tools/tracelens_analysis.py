@@ -6879,11 +6879,22 @@ _REVIEW_STAGED_PROPOSALS = (
 )
 
 #: Rebuilt from ``shapes``, so they must not outlive the dims they described.
+#: ``enrich_candidates_with_runtime_metadata`` runs after this stage and refills
+#: ``input_shapes`` from whatever ``shapes`` now holds, marking it synthetic
+#: again -- which is the whole reason clearing it is safe.
+#:
+#: ``invocation_cases`` and ``raw_arg_spec`` are deliberately NOT here. Nothing
+#: rebuilds them: both are produced only by ``_finalize_candidates``, from the
+#: perf CSV, long before the review runs, and no later pass can re-derive an
+#: ordered scalar argument list from a list of operand dims. They also do not
+#: describe the dims being replaced -- a CSV row can carry a raw arg spec while
+#: yielding no tensor operands at all, which is precisely a row whose ``shapes``
+#: is empty and therefore the row a review supplies dims for. Clearing them
+#: there dropped the scalar signature and collapsed multi-case task groups
+#: (``_expanded_group_rows`` expands ``invocation_cases`` into one workload case
+#: each), so a stage that exists to add operand evidence removed some.
 _REVIEW_STALE_SHAPE_FIELDS = (
     "input_shapes",
-    "invocation_cases",
-    "raw_arg_spec",
-    "shape_donor_operation",
     "_input_shapes_synthetic",
 )
 

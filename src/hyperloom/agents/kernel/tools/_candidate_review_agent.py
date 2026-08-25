@@ -112,11 +112,16 @@ IMMUTABLE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-#: Recomputed from the operand dims, so a revision naming one is dropped with a
-#: note rather than silently overwritten downstream. The session supplies
-#: ``shapes`` and ``input_dtypes``; everything the harness builder needs is
-#: derived from those by :func:`_rederive_after_review`, which keeps the three
-#: representations from drifting apart.
+#: Not proposable: a revision naming one is dropped with a note rather than
+#: silently overwritten downstream. The session supplies ``shapes`` and
+#: ``input_dtypes`` and nothing else about operands.
+#:
+#: Only ``input_shapes`` is recomputed from those dims. The other two are held
+#: rather than rebuilt -- they come from the perf CSV during finalize and carry
+#: an ordered scalar argument list no later pass can derive from a list of
+#: dims, so the stage leaves them alone. Saying "recomputed" here was wrong in
+#: the direction that costs evidence: it read as a guarantee that clearing them
+#: was safe.
 DERIVED_SHAPE_FIELDS: frozenset[str] = frozenset(
     {
         "input_shapes",
@@ -486,8 +491,9 @@ def build_review_prompt(
         "    benchmark_files, shapes and input_dtypes. You may not revise what",
         "    the trace measured (gpu_pct, duration_us, call_count) or the",
         "    identity it is keyed by (kernel_id, name, device_kernel_name);",
-        "    those are ignored if present. input_shapes, invocation_cases and",
-        "    raw_arg_spec are recomputed from shapes, so do not send them.",
+        "    those are ignored if present. Send operands only as shapes and",
+        "    input_dtypes; input_shapes, invocation_cases and raw_arg_spec are",
+        "    the pipeline's to maintain and are ignored if present.",
         "  - benchmark_files comes from a curated table keyed by coarse name",
         "    markers, so it often names a harness for the wrong member of a",
         "    kernel family. Replace it with harnesses you located and can open,",

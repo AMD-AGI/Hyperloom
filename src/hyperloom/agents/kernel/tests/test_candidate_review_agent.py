@@ -1599,23 +1599,38 @@ class TestAdoptReviewedShapes:
         assert item["shapes"] == ["(1,1) fp32"]
         assert item["shape_provenance"] == "torch_trace"
 
-    def test_the_alternate_representations_do_not_outlive_the_dims(self, tmp_path):
-        """A harness built from a mix of old and new dims still benchmarks
-        cleanly, which is why the stale halves are dropped rather than kept.
+    def test_only_the_representation_that_gets_rebuilt_is_dropped(self, tmp_path):
+        """A harness built from a mix of old and new dims benchmarks the wrong
+        thing, so a representation of the replaced dims must not survive -- but
+        only where something rebuilds it.
+
+        ``input_shapes`` is refilled from ``shapes`` by
+        ``enrich_candidates_with_runtime_metadata``, which runs after this stage,
+        so clearing it is safe. ``invocation_cases`` and ``raw_arg_spec`` have no
+        producer after finalize and cannot be re-derived from a list of dims:
+        they carry an ordered scalar argument list, and a CSV row can supply one
+        while yielding no tensor operands at all -- which is exactly a row whose
+        ``shapes`` is empty, so exactly the row this function fires on. Clearing
+        them there dropped the scalar signature and collapsed multi-case task
+        groups, so a stage that exists to add operand evidence removed some.
         """
         item = {
             "name": "k",
             "source_file": "",
             "shapes": [],
             "input_shapes": [["stale"]],
-            "invocation_cases": [{"operation": "stale"}],
-            "raw_arg_spec": {"0": "stale"},
+            "invocation_cases": [{"operation": "scalar_only"}],
+            "raw_arg_spec": {"0": "int 8"},
             "_input_shapes_synthetic": True,
             "review_shapes": ["(8192,6144) bf16"],
         }
         tla._adopt_reviewed_shapes(item)
-        for key in ("input_shapes", "invocation_cases", "raw_arg_spec", "_input_shapes_synthetic"):
-            assert key not in item
+
+        assert "input_shapes" not in item
+        assert "_input_shapes_synthetic" not in item
+        assert item["invocation_cases"] == [{"operation": "scalar_only"}]
+        assert item["raw_arg_spec"] == {"0": "int 8"}
+        assert item["shapes"] == ["(8192,6144) bf16"]
 
     def test_an_unlabelled_adoption_still_records_a_provenance(self, tmp_path):
         """The dispatch gate reads this field; leaving it blank reads as
