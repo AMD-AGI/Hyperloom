@@ -337,15 +337,9 @@ def _reject_cross_provider_pairing() -> None:
         anthropic_endpoint = ""
     offender = ""
     if openai_url and not openai_key and anthropic_key:
-        offender = (
-            "OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an "
-            "Anthropic-side key is configured"
-        )
+        offender = "OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
     elif anthropic_url and not anthropic_key and openai_key:
-        offender = (
-            "ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an "
-            "OPENAI_API_KEY is configured"
-        )
+        offender = "ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
     elif openai_url and anthropic_key and not anthropic_endpoint:
         offender = (
             "an Anthropic-side key is configured without ANTHROPIC_BASE_URL, "
@@ -475,8 +469,7 @@ def _validate_credentials() -> None:
         missing.append("a usable endpoint/key pair")
     if not has_key:
         missing.append(
-            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / "
-            "CLAUDE_CODE_OAUTH_TOKEN)"
+            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)"
         )
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"

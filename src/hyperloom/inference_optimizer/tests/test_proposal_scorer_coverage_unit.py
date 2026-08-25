@@ -13,10 +13,12 @@ import pytest
 from hyperloom.orchestrator.scoring import proposal_scorer as proposal_scorer_module
 from hyperloom.orchestrator.scoring.proposal_scorer import (
     ProposalScorer,
+    _ScoringProposal,
     _clip,
     _coerce_score,
     _extract_scores_json,
     _normalise_model_scores,
+    _prepare_scoring_proposals,
 )
 
 
@@ -27,9 +29,18 @@ def test_extract_scores_json_empty():
 
 def test_extract_scores_json_bare_with_trailing():
     # bare object with trailing prose -> shrink loop trims to valid JSON.
-    text = 'here are scores {"scores": {"a": {"score": 1, "reason": "x"}}} thanks'
+    text = 'here are scores {"scores": {"proposal_0": {"score": 1, "reason": "x"}}} thanks'
     out = _extract_scores_json(text)
-    assert out["scores"]["a"]["score"] == 1
+    assert out["scores"]["proposal_0"]["score"] == 1
+
+
+def test_extract_scores_json_prefers_last_envelope():
+    text = (
+        'draft {"scores": {"proposal_0": {"score": 1, "reason": "old"}}} '
+        'final {"scores": {"proposal_0": {"score": 8, "reason": "new"}}}'
+    )
+    out = _extract_scores_json(text)
+    assert out["scores"]["proposal_0"]["score"] == 8
 
 
 def test_extract_scores_json_wrong_shape():
@@ -41,6 +52,8 @@ def test_extract_scores_json_wrong_shape():
 def test_coerce_score_edges():
     assert _coerce_score("nan") is None
     assert _coerce_score("bad") is None
+    assert _coerce_score(True) is None
+    assert _coerce_score(False) is None
     assert _coerce_score(99) == 10.0
     assert _coerce_score(-5) == 0.0
 
@@ -52,21 +65,45 @@ def test_clip_truncates():
 
 # ---- _normalise_model_scores ----
 def test_normalise_scores_not_dict():
-    assert _normalise_model_scores({"scores": "x"}, proposal_names=["a"]) == {}
+    assert _normalise_model_scores({"scores": "x"}, scoring_entries=[]) == {}
 
 
 def test_normalise_drops_unknown_and_bad_score():
+    entries = [
+        _ScoringProposal(
+            stable_id="proposal_0",
+            output_name="a",
+            label_name="a",
+            proposal={"name": "a"},
+        ),
+        _ScoringProposal(
+            stable_id="proposal_1",
+            output_name="b",
+            label_name="b",
+            proposal={"name": "b"},
+        ),
+    ]
     parsed = {
         "scores": {
-            "a": {"score": 5, "reason": "ok"},
-            "ghost": {"score": 3},  # unknown name -> dropped
-            "b": {"score": "x"},  # bad score -> dropped
+            "proposal_0": {"score": 5, "reason": "ok"},
+            "ghost": {"score": 3},
+            "proposal_1": {"score": "x"},
         }
     }
-    out = _normalise_model_scores(parsed, proposal_names=["a", "b"])
+    out = _normalise_model_scores(parsed, scoring_entries=entries)
     assert "a" in out
     assert "ghost" not in out
     assert "b" not in out
+
+
+def test_prepare_scoring_proposals_rejects_duplicate_names():
+    with pytest.raises(ValueError, match="duplicate proposal name"):
+        _prepare_scoring_proposals(
+            [
+                {"name": "same"},
+                {"name": "same"},
+            ]
+        )
 
 
 # ---- _ensure_client ----
@@ -211,7 +248,7 @@ async def test_score_caps_proposals():
 @pytest.mark.asyncio
 async def test_score_streams_with_usage_and_keeps_the_token_cap():
     """The shared streaming helper adds stream + include_usage; the 4096 cap survives."""
-    client = _FakeClient({"m": '{"scores": {"p": {"score": 5, "reason": "ok"}}}'})
+    client = _FakeClient({"m": '{"scores": {"proposal_0": {"score": 5, "reason": "ok"}}}'})
     scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
     out = await scorer.score(gap={"domain": "d"}, proposals=[{"name": "p"}])
     assert out["models"]["m"]["p"]["score"] == 5.0
@@ -241,16 +278,35 @@ async def test_score_no_usable_scores():
 
 
 @pytest.mark.asyncio
+async def test_score_duplicate_names_recorded_as_input_error():
+    client = _FakeClient({"m": '{"scores": {}}'})
+    scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
+    out = await scorer.score(
+        gap={"domain": "d"},
+        proposals=[{"name": "dup"}, {"name": "dup"}],
+    )
+    assert out["models"] == {}
+    assert "duplicate proposal name" in out["errors"]["input"]
+
+
+@pytest.mark.asyncio
+async def test_score_duplicate_model_slugs_rejected_at_construction():
+    with pytest.raises(ValueError, match="duplicate scorer model slug"):
+        ProposalScorer(models=("m", "m"), client_factory=lambda: object())
+
+
+@pytest.mark.asyncio
 async def test_build_prompt_includes_evidence():
     client = _FakeClient({"m": '{"scores": {}}'})
     scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
     gap = {"domain": "d", "gap_evidence": {"e": 1}, "gap_symptom": "s"}
-    prompt = scorer._build_prompt(
-        gap=gap,
-        proposals=[
+    entries = _prepare_scoring_proposals(
+        [
             {"name": "p", "extra_args": "--x", "extra_envs": {"E": "1"}, "reason": "r", "kb_evidence": ["k"]},
-        ],
+        ]
     )
+    prompt = scorer._build_prompt(gap=gap, scoring_entries=entries)
     assert "evidence:" in prompt
     assert "extra_envs:" in prompt
     assert "kb_evidence:" in prompt
+    assert "id: proposal_0" in prompt

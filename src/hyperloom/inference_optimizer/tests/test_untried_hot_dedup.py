@@ -10,6 +10,7 @@ the id that was actually attempted (k001) left its twin (k002) forever "untried"
 so kernel_work_pending() never went False and KERNEL_AGENT spun until the wall
 cap. The identity dedup collapses the twins so a single rejection retires both.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace

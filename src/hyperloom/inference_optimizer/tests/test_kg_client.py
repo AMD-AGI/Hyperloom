@@ -625,9 +625,7 @@ def test_native_graph_traverse_reads_legacy_punctuation_slug() -> None:
     nodes = kg.graph_traverse(start_entity="foo=1", max_hops=1)
 
     assert [node.entity for node in nodes] == ["target_2"]
-    traversed = [
-        args["slug"] for tool, args in mcp.calls if tool == "traverse_graph"
-    ]
+    traversed = [args["slug"] for tool, args in mcp.calls if tool == "traverse_graph"]
     assert traversed == ["foo_1", "foo=1"]
 
 

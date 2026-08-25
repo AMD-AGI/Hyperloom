@@ -119,9 +119,13 @@ def test_plateau_resets_on_movement():
 def test_gain_plateau_history_resets_on_macro_cycle():
     det = ProgressDetector(ProgressConfig(gain_window_ticks=2, gain_epsilon_pct=0.5))
     det.evaluate(_ctx(tick=0, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
-    out = det.evaluate(_ctx(tick=1, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
+    out = det.evaluate(
+        _ctx(tick=1, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData()
+    )
     assert any(sym.name == "gain_plateau" for sym in out)
-    out = det.evaluate(_ctx(tick=2, macro_cycle=1, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
+    out = det.evaluate(
+        _ctx(tick=2, macro_cycle=1, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData()
+    )
     assert all(sym.name != "gain_plateau" for sym in out)
 
 

@@ -311,5 +311,3 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
             f"skipped={skipped} failed={failed} "
             f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
         )
-
-

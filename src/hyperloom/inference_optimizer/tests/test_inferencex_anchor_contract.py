@@ -111,10 +111,7 @@ def anchors_fingerprint() -> str:
     Returns:
         A hex digest over every anchor's name, target path and pattern.
     """
-    parts = [
-        f"{name}\x1f{'/'.join(rel_parts)}\x1f{anchor}"
-        for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT
-    ]
+    parts = [f"{name}\x1f{'/'.join(rel_parts)}\x1f{anchor}" for name, rel_parts, _sentinel, anchor in _ANCHOR_CONTRACT]
     parts.append(f"probe_target\x1f{PROBE_TARGET_PATH}")
     parts.extend(_magpie_pattern_parts())
     return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()

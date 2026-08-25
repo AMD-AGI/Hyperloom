@@ -626,10 +626,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "code": "bypass_trace_stream_incomplete",
                     "severity": "warning",
-                    "message": (
-                        "bypass reader recovered an incomplete trace stream: "
-                        + "; ".join(stream_errors[:3])
-                    ),
+                    "message": ("bypass reader recovered an incomplete trace stream: " + "; ".join(stream_errors[:3])),
                 }
             )
         if not analyze.get("kernels"):
@@ -901,9 +898,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Optional variant-discriminating TraceShapeManifest (P0-A / WP-1; opt-in via
     # HYPERLOOM_TRACE_SHAPE_MANIFEST). Off by default -> disabled, writes nothing.
-    shape_manifest = _maybe_build_shape_manifest(
-        args, analyze, bypass_dir, generated_at=utc_now(timespec="seconds")
-    )
+    shape_manifest = _maybe_build_shape_manifest(args, analyze, bypass_dir, generated_at=utc_now(timespec="seconds"))
 
     hot_kernels = candidates.get("hot_kernels", [])
     result: dict[str, Any] = {

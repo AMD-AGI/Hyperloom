@@ -54,10 +54,21 @@ def test_generated_driver_exposes_the_expected_entry_points(tmp_path):
     driver, _ = _gen(tmp_path)
     tree = ast.parse(driver)
     funcs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-    for name in ("self_launch", "init_worker", "make_inputs", "snr_db",
-                 "run_candidate", "run_reference", "check_case", "bench_case",
-                 "profile_case", "case_group", "payload_bytes", "build_parser",
-                 "main"):
+    for name in (
+        "self_launch",
+        "init_worker",
+        "make_inputs",
+        "snr_db",
+        "run_candidate",
+        "run_reference",
+        "check_case",
+        "bench_case",
+        "profile_case",
+        "case_group",
+        "payload_bytes",
+        "build_parser",
+        "main",
+    ):
         assert name in funcs, name
 
 
@@ -84,10 +95,7 @@ def test_the_regime_cut_separates_the_traced_shapes(tmp_path, shape, group):
         ast.literal_eval(node.value)
         for node in ast.walk(ast.parse(driver))
         if isinstance(node, ast.Assign)
-        and any(
-            isinstance(t, ast.Name) and t.id == "REGIME_CUT_BYTES"
-            for t in node.targets
-        )
+        and any(isinstance(t, ast.Name) and t.id == "REGIME_CUT_BYTES" for t in node.targets)
     )
 
     payload = shape[0] * shape[1] * 2  # bf16
@@ -127,15 +135,8 @@ def test_correctness_is_the_default_mode(tmp_path):
 def test_driver_reports_runtime_failures_as_json(tmp_path):
     """Rank-zero failures must remain machine-readable."""
     driver, _ = _gen(tmp_path)
-    main = next(
-        node
-        for node in ast.parse(driver).body
-        if isinstance(node, ast.FunctionDef) and node.name == "main"
-    )
-    assert any(
-        isinstance(node, ast.Try) and node.handlers
-        for node in ast.walk(main)
-    )
+    main = next(node for node in ast.parse(driver).body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    assert any(isinstance(node, ast.Try) and node.handlers for node in ast.walk(main))
     assert "error_class" in driver
     assert "allow_nan=False" in driver
 
@@ -243,9 +244,7 @@ def test_unusable_tp_is_rejected(tmp_path):
 
 def test_explicit_tp_does_not_require_contract_world_size(tmp_path):
     contract = {"kind": "collective", "collective_op": "all_reduce"}
-    res = generate_collective_driver(
-        _candidate(kernel_contract=contract), tmp_path, tp=8
-    )
+    res = generate_collective_driver(_candidate(kernel_contract=contract), tmp_path, tp=8)
     assert "WORLD_SIZE = 8" in Path(res["driver"]).read_text(encoding="utf-8")
 
 

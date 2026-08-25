@@ -67,6 +67,7 @@ _TRACE_CONFIRM_BYTES = 64_000_000
 # ``capture_traces/`` file (Deval ref 99.97%; gated low to avoid false-positives).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
 
+
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
     """Stream-decompress ``path`` for ``substring``, reading at most
     ``max_bytes`` (default :data:`_TRACE_CONFIRM_BYTES`).
@@ -472,7 +473,8 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
         chunks removed.
     """
     candidates = [
-        p for p in trace_dir.rglob("*.trace.json.gz")
+        p
+        for p in trace_dir.rglob("*.trace.json.gz")
         if not _is_capture_trace(p, trace_dir) and not _is_split_chunk(p, trace_dir)
     ]
     return sorted(candidates, key=lambda p: (-_trace_size_bytes(p), str(p)))
@@ -869,8 +871,7 @@ class ProfileExecutor(BaselineExecutor):
         candidates = document.get("candidates") or []
         if not candidates:
             log.info(
-                "profile_executor: host probe produced no rewrite candidates "
-                "(ranks_merged=%s); see %s for why",
+                "profile_executor: host probe produced no rewrite candidates (ranks_merged=%s); see %s for why",
                 document.get("ranks_merged"),
                 out_path,
             )

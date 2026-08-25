@@ -45,8 +45,10 @@ class RenderedSection:
     """A single section's render output.
 
     ``markdown_block`` is preserved verbatim; the LLM only sees
-    ``key_facts`` / ``decisions`` / ``warnings``. ``skipped`` tells the
-    compose layer to emit a one-line "not run" note instead of the block.
+    ``key_facts`` / ``decisions`` / ``warnings``. ``skipped`` drops the section
+    from the report body entirely -- its ``warnings`` and ``key_facts`` still
+    reach the reader, through ``GlobalFacts.data_quality_flags``, so that a
+    section nobody ran cannot be mistaken for a section that ran clean.
     """
 
     section_id: str

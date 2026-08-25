@@ -134,8 +134,7 @@ _LOCAL_TRUST_ARGS_PATCHED_BLOCK = (
     'if [[ -n "${SERVER_PID:-}" ]]; then\n'
 )
 _LOCAL_CLIENT_LEGACY_BLOCK = (
-    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
-    "        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n"
+    '        "${SERVER_MONITOR_ARGS[@]}" \\\n        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n'
 )
 _LOCAL_CLIENT_PATCHED_BLOCK = (
     '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
@@ -1230,17 +1229,13 @@ def ensure_client_trust_compat(magpie_dir: Path | str | None = None) -> bool:
     ]
     if not scripts:
         log.info(
-            "_magpie_patcher: no SGLang MI300X/MI355X script resolved — "
-            "skipping client trust patches (not applicable)",
+            "_magpie_patcher: no SGLang MI300X/MI355X script resolved — skipping client trust patches (not applicable)",
         )
         return True
     with _file_lock(_LOCK_PATH):
         # Materialized, not short-circuited: every script must be attempted so
         # one drifted file cannot leave a healthy sibling unpatched.
-        results = [
-            _is_sglang_client_trust_patched(s) or _apply_sglang_client_trust_patch_atomic(s)
-            for s in scripts
-        ]
+        results = [_is_sglang_client_trust_patched(s) or _apply_sglang_client_trust_patch_atomic(s) for s in scripts]
     return all(results)
 
 
@@ -1345,16 +1340,14 @@ def magpie_scripts_patch_status(
         # that patcher so the script's existing behaviour is unchanged.
         if sglang_mi300x_script is not None:
             trust_results.append(
-                _is_remote_trust_patched(sglang_mi300x_script)
-                or _apply_remote_trust_patch_atomic(sglang_mi300x_script)
+                _is_remote_trust_patched(sglang_mi300x_script) or _apply_remote_trust_patch_atomic(sglang_mi300x_script)
             )
         # Both MI300X and MI355X get the full remote + local client trust patch;
         # the client blocks are byte-identical across the two scripts, so one
         # patcher covers each remote-direct and local-server client path.
         for script in sglang_scripts:
             trust_results.append(
-                _is_sglang_client_trust_patched(script)
-                or _apply_sglang_client_trust_patch_atomic(script)
+                _is_sglang_client_trust_patched(script) or _apply_sglang_client_trust_patch_atomic(script)
             )
         if not trust_results:
             log.info(

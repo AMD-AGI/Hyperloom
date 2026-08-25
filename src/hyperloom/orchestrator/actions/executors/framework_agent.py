@@ -511,8 +511,7 @@ class FrameworkAgentExecutor:
             if explicit_framework_root:
                 _error_class = "framework_source_root_rejected"
                 _error = (
-                    f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured source allowlist"
+                    f"framework_source_root {explicit_framework_root!r} is not under the configured source allowlist"
                 )
             else:
                 _error_class = "no_framework_agent_root"
@@ -835,9 +834,7 @@ class FrameworkAgentExecutor:
                 slug=slug,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
-                state_model_path=str(
-                    getattr(extra.get("shared_state") or extra.get("state"), "model_path", "") or ""
-                ),
+                state_model_path=str(getattr(extra.get("shared_state") or extra.get("state"), "model_path", "") or ""),
             )
         except FrameworkScriptMismatchError as exc:
             reverted = self._revert_patches(

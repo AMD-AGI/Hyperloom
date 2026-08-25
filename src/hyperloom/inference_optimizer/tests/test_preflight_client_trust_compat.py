@@ -81,9 +81,7 @@ def upstream_magpie(tmp_path: Path) -> Path:
 def test_upstream_tree_has_no_trust_gate(upstream_magpie: Path):
     """Sanity: the fixture really is the inert shape the fix targets."""
     for name in ("sglang_mi300x.sh", "sglang_mi355x.sh"):
-        text = (upstream_magpie / "Magpie" / "scripts" / "benchmark" / name).read_text(
-            encoding="utf-8"
-        )
+        text = (upstream_magpie / "Magpie" / "scripts" / "benchmark" / name).read_text(encoding="utf-8")
         assert "MAGPIE_TRUST_REMOTE_CODE" not in text
 
 
@@ -129,9 +127,7 @@ def test_still_applies_after_the_eval_concurrency_strip(tmp_path: Path):
     assert "--concurrent-requests" not in stripped
 
     assert ensure_client_trust_compat(tmp_path) is True
-    text = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(
-        encoding="utf-8"
-    )
+    text = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
     assert "magpie_run_benchmark_serving_remote_direct trust" in text
 
 
@@ -154,9 +150,7 @@ def test_one_drifted_script_does_not_starve_its_sibling(tmp_path: Path):
         mi355x=_UPSTREAM_SGLANG_MI355X_SH,
     )
     assert ensure_client_trust_compat(tmp_path) is False
-    mi355x = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(
-        encoding="utf-8"
-    )
+    mi355x = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
     assert "magpie_run_benchmark_serving_remote_direct trust" in mi355x
 
 
@@ -185,9 +179,7 @@ def test_multi_node_patches_through_the_wrapper(upstream_magpie: Path, monkeypat
     """The multi-node path is the one that actually gets the gate."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     assert _ensure_client_trust_compat(str(upstream_magpie)) is True
-    text = (upstream_magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(
-        encoding="utf-8"
-    )
+    text = (upstream_magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
     assert "magpie_run_benchmark_serving_remote_direct trust" in text
 
 

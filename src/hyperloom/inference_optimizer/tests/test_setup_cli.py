@@ -235,9 +235,7 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     assert "LLM_GATEWAY_KEY=" not in text
     assert "SAFE_API_KEY=" not in text
     resolved_env = (tmp_path / "resolved-env.txt").read_text(encoding="utf-8")
-    assert resolved_env == (
-        "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nLLM_GATEWAY_KEY=\n"
-    )
+    assert resolved_env == ("OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nLLM_GATEWAY_KEY=\n")
 
 
 def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: Path):
@@ -683,7 +681,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
                     "OPENAI_BASE_URL=https://gw.example.com/v1",
                     "ANTHROPIC_API_KEY=sk-ant-real",
                     "log() { :; }",
-                    "warn() { echo \"$*\" >&2; }",
+                    'warn() { echo "$*" >&2; }',
                     'die() { echo "$*" >&2; exit 99; }',
                     *stubs,
                     script_text[start:end],
@@ -721,7 +719,7 @@ def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
                 "DRY_RUN=0",
                 "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
-                "warn() { echo \"$*\" >&2; }",
+                'warn() { echo "$*" >&2; }',
                 'die() { echo "$*" >&2; exit 99; }',
                 "is_interactive() { return 1; }",
                 credential_functions,
@@ -1024,8 +1022,8 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
                 # sgl_kernel is only probed once SGLang itself imported.
                 "sglang_ok=1",
                 "INSTALL_FRAMEWORK=none",
-                'log() { :; }',
-                'warn() { :; }',
+                "log() { :; }",
+                "warn() { :; }",
                 '_py_has() { printf "probe %s %s\\n" "$1" "$2"; return 0; }',
                 "run_probe() {",
                 runtime_dep_loop,
@@ -1096,9 +1094,7 @@ def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
         encoding="utf-8",
     )
 
-    out = subprocess.run(
-        ["bash", str(runner)], check=True, text=True, stdout=subprocess.PIPE
-    ).stdout.splitlines()
+    out = subprocess.run(["bash", str(runner)], check=True, text=True, stdout=subprocess.PIPE).stdout.splitlines()
 
     assert out == ["probe triton", "probe aiter"]
 
@@ -1116,8 +1112,7 @@ def test_baremetal_preflight_probes_atom_by_default():
     m = re.search(r'^FRAMEWORKS="\$\{FRAMEWORKS:-([^}]+)\}"', text, re.MULTILINE)
     assert m, "install_baremetal.sh must define an overridable FRAMEWORKS default"
     assert "atom" in m.group(1).split(","), (
-        "atom must be in the default Phase 1 probe list; otherwise setup inside "
-        "an atom-only image fails preflight"
+        "atom must be in the default Phase 1 probe list; otherwise setup inside an atom-only image fails preflight"
     )
 
 
@@ -1229,9 +1224,7 @@ def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
     and every downstream skill defaulted to the wrong engine.
     """
     dotenv = tmp_path / ".env"
-    res = _drive_installer(
-        tmp_path, importable={"atom"}, dotenv=dotenv, body="write_runtime_dotenv"
-    )
+    res = _drive_installer(tmp_path, importable={"atom"}, dotenv=dotenv, body="write_runtime_dotenv")
 
     assert res.returncode == 0, res.stderr
     assert "FRAMEWORK=atom" in _dotenv_lines(dotenv)
@@ -1242,9 +1235,7 @@ def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
     dotenv = tmp_path / ".env"
     dotenv.write_text("FRAMEWORK=sglang\nKEEP_ME=1\n", encoding="utf-8")
 
-    res = _drive_installer(
-        tmp_path, importable=set(), dotenv=dotenv, body="write_runtime_dotenv"
-    )
+    res = _drive_installer(tmp_path, importable=set(), dotenv=dotenv, body="write_runtime_dotenv")
 
     assert res.returncode == 0, res.stderr
     lines = _dotenv_lines(dotenv)
@@ -1255,9 +1246,7 @@ def test_baremetal_clears_stale_framework_when_none_importable(tmp_path: Path):
 def test_baremetal_framework_resolution_keeps_sglang_precedence(tmp_path: Path):
     """Adding atom must not change what an existing sglang host resolves to."""
     dotenv = tmp_path / ".env"
-    res = _drive_installer(
-        tmp_path, importable={"sglang", "atom"}, dotenv=dotenv, body="write_runtime_dotenv"
-    )
+    res = _drive_installer(tmp_path, importable={"sglang", "atom"}, dotenv=dotenv, body="write_runtime_dotenv")
 
     assert res.returncode == 0, res.stderr
     assert "FRAMEWORK=sglang" in _dotenv_lines(dotenv)
@@ -1274,9 +1263,6 @@ def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
 
     assert res.returncode == 0, res.stderr
     assert "- Framework: atom" in res.stdout
-
-
-
 
 
 def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
@@ -1302,6 +1288,7 @@ def test_baremetal_profiler_hotfix_still_skipped_without_any_framework(tmp_path:
 
     assert "HOTFIX_ELIGIBLE" not in res.stdout
     assert "no serving framework importable" in res.stderr
+
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
@@ -1331,8 +1318,8 @@ def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 f"export CALLS_FILE={calls_file}",
-                "checkout_aiter_ref() { printf 'checkout %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; }",
-                "check_torch_triton_alignment() { printf 'align %s\\n' \"$1\" >> \"$CALLS_FILE\"; }",
+                'checkout_aiter_ref() { printf \'checkout %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; }',
+                'check_torch_triton_alignment() { printf \'align %s\\n\' "$1" >> "$CALLS_FILE"; }',
                 install_aiter,
                 f"install_aiter_ref_with_constraints {fake_py} {tmp_path / 'aiter'} v0.1.18 {tmp_path / 'constraints.txt'}",
             ]
@@ -1381,8 +1368,8 @@ def test_baremetal_aiter_install_fails_when_import_fails(tmp_path: Path):
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 f"export CALLS_FILE={calls_file}",
-                "checkout_aiter_ref() { printf 'checkout %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; }",
-                "check_torch_triton_alignment() { printf 'align %s\\n' \"$1\" >> \"$CALLS_FILE\"; return 0; }",
+                'checkout_aiter_ref() { printf \'checkout %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; }',
+                'check_torch_triton_alignment() { printf \'align %s\\n\' "$1" >> "$CALLS_FILE"; return 0; }',
                 install_aiter,
                 f"if install_aiter_ref_with_constraints {fake_py} {tmp_path / 'aiter'} v0.1.18 {tmp_path / 'constraints.txt'}; then",
                 "  echo RESULT=success",
@@ -1424,7 +1411,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 f"  [ -f {import_flag} ] && exit 0 || exit 42",
                 "fi",
                 'if [ "$*" = "-c import sglang" ] || [ "$*" = "-c import sgl_kernel" ]; then exit 0; fi',
-                "if [ \"$1\" = \"-\" ]; then echo 3.12; exit 0; fi",
+                'if [ "$1" = "-" ]; then echo 3.12; exit 0; fi',
                 "exit 0",
             ]
         )
@@ -1454,10 +1441,10 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 "log() { :; }",
                 "warn() { :; }",
                 'die() { echo "$*" >&2; exit 99; }',
-                "_py_has() { [ \"$2\" = aiter ] && return 0; return 0; }",
+                '_py_has() { [ "$2" = aiter ] && return 0; return 0; }',
                 "install_sglang_from_wheel() { :; }",
                 "install_sglang_from_source() { :; }",
-                f"install_compatible_aiter() {{ printf 'install_compatible_aiter %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; touch {import_flag}; }}",
+                f'install_compatible_aiter() {{ printf \'install_compatible_aiter %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; touch {import_flag}; }}',
                 install_sglang_framework,
                 "install_sglang_framework",
             ]

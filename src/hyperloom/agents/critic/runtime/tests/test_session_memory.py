@@ -85,7 +85,6 @@ def test_append_decision_rejects_non_dict(tmp_session_root):
         sm.append_decision("sess_1", "not a dict")  # type: ignore[arg-type]
 
 
-
 def test_priors_cache_hit_and_miss(tmp_session_root, monkeypatch):
     sm = SessionMemory(root=tmp_session_root)
     sm.put_cached_priors("sess_1", "scope-x|topic-y", [{"id": "kb_a"}])
@@ -138,5 +137,3 @@ def test_atomic_write_does_not_leave_tmp_files(tmp_session_root):
     sd = sm.session_dir("sess_1")
     assert (sd / "context.json").exists()
     assert not list(sd.glob("*.tmp"))
-
-

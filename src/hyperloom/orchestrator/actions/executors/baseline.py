@@ -52,6 +52,7 @@ from ._aiter_jit import (
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
+
 # The grid module is the namespace the helpers both benching arms share ended up
 # in: how a sentinel returncode reads back, how a round's cap is clamped to the
 # budget, how the two session bounds are resolved, and the hygiene every launch
@@ -642,6 +643,8 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + _int(
         "AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC
     )
+
+
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
 # above for callers/tests that import them from this module.
 
@@ -656,9 +659,7 @@ def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     """Set the effective eval mode after lifecycle eligibility is known."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     benchmark = cfg.setdefault("benchmark", {})
-    benchmark.setdefault("envs", {})["RUN_EVAL"] = (
-        "true" if enabled else "false"
-    )
+    benchmark.setdefault("envs", {})["RUN_EVAL"] = "true" if enabled else "false"
     config_path.write_text(
         yaml.safe_dump(cfg, sort_keys=False),
         encoding="utf-8",
@@ -1024,13 +1025,7 @@ def _create_patch_snapshot(
     output_dir: Path,
 ) -> dict[str, Any]:
     """Snapshot only patch-touched worktree and index paths."""
-    touched = list(
-        dict.fromkeys(
-            path
-            for content in patch_contents
-            for path in _patch_touched_paths(content)
-        )
-    )
+    touched = list(dict.fromkeys(path for content in patch_contents for path in _patch_touched_paths(content)))
     if not touched:
         raise ValueError("patch has no touched text paths")
     snapshot_dir = output_dir / "warm_patch_snapshot"
@@ -1133,19 +1128,23 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
                     raise OSError("worktree restore verification failed")
             elif target.exists() or target.is_symlink():
                 raise OSError("removed path still exists after restore")
-            actual_index = subprocess.run(
-                [
-                    "git",
-                    *safe_directory_args(
-                        ["ls-files", "-s", "--", rel],
-                        cwd=repo,
-                    ),
-                ],
-                cwd=repo,
-                capture_output=True,
-                timeout=15,
-                check=True,
-            ).stdout.decode(errors="replace").strip()
+            actual_index = (
+                subprocess.run(
+                    [
+                        "git",
+                        *safe_directory_args(
+                            ["ls-files", "-s", "--", rel],
+                            cwd=repo,
+                        ),
+                    ],
+                    cwd=repo,
+                    capture_output=True,
+                    timeout=15,
+                    check=True,
+                )
+                .stdout.decode(errors="replace")
+                .strip()
+            )
             if actual_index != entry:
                 raise OSError("index restore verification failed")
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -1162,9 +1161,7 @@ def _revert_patches(
     manifest = snapshot_manifest
     if isinstance(manifest, (str, Path)):
         try:
-            manifest = json.loads(
-                Path(manifest).read_text(encoding="utf-8")
-            )
+            manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
             result = {"ok": False, "errors": [f"manifest_read:{exc}"]}
             log.warning(
@@ -1203,9 +1200,7 @@ def _revert_patches(
     if caller_repo != manifest_repo:
         result = {
             "ok": False,
-            "errors": [
-                f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"
-            ],
+            "errors": [f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"],
         }
         log.warning(
             "baseline_executor: exact patch restore failed: %s",
@@ -1264,19 +1259,23 @@ def _three_way_residue_snapshot(
 ) -> dict[str, Any]:
     """Capture pre-existing residue only for this patch's paths."""
     root = Path(repo_path).resolve()
-    unmerged = subprocess.run(
-        [
-            "git",
-            *safe_directory_args(
-                ["ls-files", "-u", "--", *touched],
-                cwd=repo_path,
-            ),
-        ],
-        cwd=repo_path,
-        capture_output=True,
-        timeout=15,
-        check=True,
-    ).stdout.decode(errors="replace").splitlines()
+    unmerged = (
+        subprocess.run(
+            [
+                "git",
+                *safe_directory_args(
+                    ["ls-files", "-u", "--", *touched],
+                    cwd=repo_path,
+                ),
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+        .stdout.decode(errors="replace")
+        .splitlines()
+    )
     markers = (b"<<<<<<< ", b"=======", b">>>>>>> ")
     rows: dict[str, Any] = {}
     for rel in touched:
@@ -1284,9 +1283,7 @@ def _three_way_residue_snapshot(
         marker_lines: list[str] = []
         if target.is_file() and not target.is_symlink():
             marker_lines = [
-                line.decode(errors="replace")
-                for line in target.read_bytes().splitlines()
-                if line.startswith(markers)
+                line.decode(errors="replace") for line in target.read_bytes().splitlines() if line.startswith(markers)
             ]
         rows[rel] = {
             "reject": (root / f"{rel}.rej").exists(),
@@ -1330,9 +1327,7 @@ def _verify_three_way_clean(
         marker_lines: list[str] = []
         if target.is_file() and not target.is_symlink():
             marker_lines = [
-                line.decode(errors="replace")
-                for line in target.read_bytes().splitlines()
-                if line.startswith(markers)
+                line.decode(errors="replace") for line in target.read_bytes().splitlines() if line.startswith(markers)
             ]
         if set(marker_lines) - set(prior.get("markers") or []):
             return False, f"new_conflict_marker:{rel}"
@@ -1476,9 +1471,7 @@ def _apply_warm_patches(
                 return {
                     "required": True,
                     "status": "failed",
-                    "patches": [
-                        {"patch_ref": patch_file, "status": "failed", "reason": "blocked"}
-                    ],
+                    "patches": [{"patch_ref": patch_file, "status": "failed", "reason": "blocked"}],
                     "applied": [],
                     "failed_ref": patch_file,
                     "failure": "blocked",
@@ -1511,9 +1504,7 @@ def _apply_warm_patches(
                 return {
                     "required": True,
                     "status": "failed",
-                    "patches": [
-                        {"patch_ref": patch_file, "status": "failed", "reason": reason}
-                    ],
+                    "patches": [{"patch_ref": patch_file, "status": "failed", "reason": reason}],
                     "applied": [],
                     "failed_ref": patch_file,
                     "failure": reason,
@@ -1553,9 +1544,7 @@ def _apply_warm_patches(
             return []
         if snapshot_manifest is not None:
             params["_warm_patch_snapshot_manifest"] = snapshot_manifest
-            if before_mutation is not None and not bool(
-                before_mutation(snapshot_manifest)
-            ):
+            if before_mutation is not None and not bool(before_mutation(snapshot_manifest)):
                 return {
                     "required": required_timeline,
                     "status": "failed",
@@ -1748,9 +1737,7 @@ def _apply_warm_patches(
                             raise RuntimeError(detail)
                 else:
                     detail = (
-                        checked.stderr.decode(errors="replace")[:500]
-                        if checked.stderr
-                        else "git apply --check failed"
+                        checked.stderr.decode(errors="replace")[:500] if checked.stderr else "git apply --check failed"
                     )
                     raise RuntimeError(detail)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
@@ -2405,7 +2392,9 @@ class BaselineExecutor:
                         "baseline_executor: measured round is %.1f%% above the warm-up round "
                         "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
                         "anchor every later gain is graded against may be low",
-                        delta_pct, warm, measured,
+                        delta_pct,
+                        warm,
+                        measured,
                     )
             result["baseline_convergence"] = record
         except Exception:  # noqa: BLE001 - observability must never break a baseline
@@ -3227,9 +3216,7 @@ class BaselineExecutor:
                 materialized_config_path,
                 enabled=False,
             )
-        run_eval_disabled = materialized_run_eval_disabled(
-            materialized_config_path
-        )
+        run_eval_disabled = materialized_run_eval_disabled(materialized_config_path)
 
         # Asked before the lease, because a round that will not be run should not
         # hold a GPU while being refused.
@@ -3276,12 +3263,11 @@ class BaselineExecutor:
             return stopped_result
 
         before_apply_sha = _git_head_sha(patch_target)
+
         def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
             if live_shared_state is None:
                 return True
-            pending = dict(
-                getattr(live_shared_state, "warm_replay_pending", {}) or {}
-            )
+            pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
             pending.update(
                 {
                     "status": "preparing_required_recipe",
@@ -3324,10 +3310,7 @@ class BaselineExecutor:
                     *list(kernel_rollback.get("errors") or []),
                 ]
                 rollback_result = {
-                    "ok": bool(
-                        recipe_rollback.get("ok")
-                        and kernel_rollback.get("ok")
-                    ),
+                    "ok": bool(recipe_rollback.get("ok") and kernel_rollback.get("ok")),
                     "recipe": recipe_rollback,
                     "kernel": kernel_rollback,
                     "errors": rollback_errors,
@@ -3349,9 +3332,7 @@ class BaselineExecutor:
                             "rollback_errors": rollback_errors,
                         }
                         if hasattr(live_shared_state, "set_stop_reason"):
-                            live_shared_state.set_stop_reason(
-                                "warm_replay_rollback_failed"
-                            )
+                            live_shared_state.set_stop_reason("warm_replay_rollback_failed")
                     try:
                         live_shared_state.save(self.session_dir)
                     except Exception:  # noqa: BLE001
@@ -3360,20 +3341,11 @@ class BaselineExecutor:
                             exc_info=True,
                         )
                 return {
-                    "status": (
-                        "required_patch_failed"
-                        if rollback_result["ok"]
-                        else "required_patch_rollback_failed"
-                    ),
+                    "status": ("required_patch_failed" if rollback_result["ok"] else "required_patch_rollback_failed"),
                     "error_class": (
-                        "required_patch_failed"
-                        if rollback_result["ok"]
-                        else "warm_replay_rollback_failed"
+                        "required_patch_failed" if rollback_result["ok"] else "warm_replay_rollback_failed"
                     ),
-                    "error": str(
-                        patch_application.get("failure")
-                        or "required recipe timeline patch failed"
-                    ),
+                    "error": str(patch_application.get("failure") or "required recipe timeline patch failed"),
                     "required_patch_failure": patch_application,
                     "failed_patch_ref": patch_application.get("failed_ref"),
                     "warm_kernel_rolled_back": bool(kernel_rollback.get("ok")),
@@ -3381,20 +3353,14 @@ class BaselineExecutor:
                     "workspace": str(output_dir),
                 }
             if live_shared_state is not None:
-                pending = dict(
-                    getattr(live_shared_state, "warm_replay_pending", {}) or {}
-                )
+                pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
                 pending.update(
                     {
                         "status": "benchmarking",
                         "recipe_patch_target": patch_target,
                         "recipe_patch_pre_sha": _pre_patch_sha,
-                        "recipe_patch_snapshot_manifest": patch_application.get(
-                            "snapshot_manifest"
-                        ),
-                        "recipe_patch_statuses": list(
-                            patch_application.get("patches") or []
-                        ),
+                        "recipe_patch_snapshot_manifest": patch_application.get("snapshot_manifest"),
+                        "recipe_patch_statuses": list(patch_application.get("patches") or []),
                     }
                 )
                 live_shared_state.warm_replay_pending = pending
@@ -3456,13 +3422,9 @@ class BaselineExecutor:
                     result["warm_patch_result"] = patch_application
                     result["warm_patch_pre_sha"] = _pre_patch_sha
                     result["warm_patch_target"] = patch_target
-                    result["warm_patch_snapshot_manifest"] = patch_application.get(
-                        "snapshot_manifest"
-                    )
+                    result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
                     result["warm_patch_canonical_target"] = patch_target
-                    result["warm_kernel_apply_results"] = list(
-                        params.get("warm_kernel_apply_results") or []
-                    )
+                    result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return result
             finally:
                 # A required timeline's tree is promoted by prelude after this
@@ -3477,9 +3439,7 @@ class BaselineExecutor:
                         patch_target,
                         pre_sha=_pre_patch_sha,
                         snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
-                        nogit_backups=list(
-                            params.get("_warm_patch_nogit_backups") or []
-                        ),
+                        nogit_backups=list(params.get("_warm_patch_nogit_backups") or []),
                     )
                 if bench_lease is not None:
                     bench_lease.close()
@@ -3560,13 +3520,9 @@ class BaselineExecutor:
                     warmup_result["warm_patch_result"] = patch_application
                     warmup_result["warm_patch_pre_sha"] = _pre_patch_sha
                     warmup_result["warm_patch_target"] = patch_target
-                    warmup_result["warm_patch_snapshot_manifest"] = patch_application.get(
-                        "snapshot_manifest"
-                    )
+                    warmup_result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
                     warmup_result["warm_patch_canonical_target"] = patch_target
-                    warmup_result["warm_kernel_apply_results"] = list(
-                        params.get("warm_kernel_apply_results") or []
-                    )
+                    warmup_result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
@@ -3589,18 +3545,13 @@ class BaselineExecutor:
                 )
                 if not affordable:
                     if gate_evidence.get("one_more_measurement_sec"):
-                        why = (
-                            "a hot pass (%.0fs) and one variant to read against it "
-                            "(%.0fs) need %.0fs" % (
-                                gate_evidence.get("measure_round_sec", 0.0),
-                                gate_evidence.get("one_more_measurement_sec", 0.0),
-                                gate_evidence.get("expected_cost_sec", 0.0),
-                            )
-                        )
-                    else:
-                        why = "a hot pass needs %.0fs" % (
+                        why = "a hot pass (%.0fs) and one variant to read against it (%.0fs) need %.0fs" % (
+                            gate_evidence.get("measure_round_sec", 0.0),
+                            gate_evidence.get("one_more_measurement_sec", 0.0),
                             gate_evidence.get("expected_cost_sec", 0.0),
                         )
+                    else:
+                        why = "a hot pass needs %.0fs" % (gate_evidence.get("expected_cost_sec", 0.0),)
                     log.warning(
                         "baseline_executor: %s, and %.0fs is left (bound=%s), so the hot "
                         "pass is not run. It would have bought a denominator nothing "
@@ -3653,17 +3604,10 @@ class BaselineExecutor:
                 result["warm_patch_result"] = patch_application
                 result["warm_patch_pre_sha"] = _pre_patch_sha
                 result["warm_patch_target"] = patch_target
-                result["warm_patch_snapshot_manifest"] = patch_application.get(
-                    "snapshot_manifest"
-                )
+                result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
                 result["warm_patch_canonical_target"] = patch_target
-                result["warm_kernel_apply_results"] = list(
-                    params.get("warm_kernel_apply_results") or []
-                )
-            if (
-                result.get("status") != "succeeded"
-                and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS
-            ):
+                result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
+            if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
                 # The gate before this pass admitted it and the run's clock took
                 # it anyway -- the pass overran what it was priced at. Reporting
                 # the round as failed would throw away the warmup's figure too,
@@ -3744,10 +3688,7 @@ class BaselineExecutor:
                             run_eval=True,
                         )
                         try:
-                            accuracy_timeout_sec = int(
-                                params.get("accuracy_timeout_sec")
-                                or timeout_sec
-                            )
+                            accuracy_timeout_sec = int(params.get("accuracy_timeout_sec") or timeout_sec)
                         except (TypeError, ValueError):
                             accuracy_timeout_sec = timeout_sec
                         accuracy_result = await self._run_reported_round(
@@ -3765,9 +3706,7 @@ class BaselineExecutor:
                         )
                         result["accuracy_stage"] = {
                             "status": accuracy_result.get("status"),
-                            "error_class": accuracy_result.get(
-                                "error_class"
-                            ),
+                            "error_class": accuracy_result.get("error_class"),
                             "workspace": accuracy_result.get("workspace"),
                         }
                         if accuracy_result.get("status") == "succeeded":
@@ -3781,9 +3720,7 @@ class BaselineExecutor:
                                     result[key] = accuracy_result[key]
                         else:
                             result.setdefault("nonfatal_warnings", [])
-                            result["nonfatal_warnings"].append(
-                                "post_measure_accuracy_failed"
-                            )
+                            result["nonfatal_warnings"].append("post_measure_accuracy_failed")
                     else:
                         result["accuracy_stage"] = {
                             "status": "skipped",
@@ -3808,10 +3745,7 @@ class BaselineExecutor:
             if (
                 applied_patches
                 and not isinstance(patch_application, dict)
-                and (
-                    _pre_patch_sha
-                    or params.get("_warm_patch_nogit_backups")
-                )
+                and (_pre_patch_sha or params.get("_warm_patch_nogit_backups"))
             ):
                 _revert_warm_patch_state(
                     patch_target,
@@ -4093,9 +4027,7 @@ class BaselineExecutor:
             port=port,
         )
         if run_eval is not None:
-            bench.setdefault("envs", {})["RUN_EVAL"] = (
-                "true" if run_eval else "false"
-            )
+            bench.setdefault("envs", {})["RUN_EVAL"] = "true" if run_eval else "false"
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:
@@ -4359,6 +4291,7 @@ class BaselineExecutor:
                 capture_meta=capture_meta,
             )
         return None
+
     async def _run_single_benchmark(
         self,
         *,

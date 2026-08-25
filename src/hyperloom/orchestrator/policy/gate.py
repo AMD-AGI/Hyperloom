@@ -777,9 +777,7 @@ class PolicyGate:
             raise PolicyDenied("unknown agent 'orchestration'", rule="role")
         trusted_framework_targets: frozenset[str] = frozenset()
         if kind == _WARM_REPLAY_ACTION:
-            trusted_framework_targets = self._validate_warm_replay_targets(
-                params_dict
-            )
+            trusted_framework_targets = self._validate_warm_replay_targets(params_dict)
         self._validate_payload_paths(
             role,
             IntentType.DELEGATE,
@@ -1157,8 +1155,7 @@ class PolicyGate:
         owned_action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
         if kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
             raise PolicyDenied(
-                f"request kind {kind!r} is a Coordinator-owned kernel lane "
-                f"and not LLM-requestable ({role.name})",
+                f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable ({role.name})",
                 rule="phase_incompatible",
                 hint=(
                     "run_fusion / run_collective are dispatched by the "
@@ -1534,10 +1531,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
                 rule="enablement_round_in_flight",
-                hint=(
-                    "Wait for the enablement specialist to finish and rearm "
-                    "before re-running baseline."
-                ),
+                hint=("Wait for the enablement specialist to finish and rearm before re-running baseline."),
             )
         # Checked after the authoring round, which is a reason to wait whatever
         # the anchor says: a specialist rewriting the framework underneath a
@@ -1729,27 +1723,7 @@ class PolicyGate:
                 ),
             )
         max_turns_raw = params.get("max_turns")
-        if max_turns_raw is not None:
-            try:
-                max_turns = int(max_turns_raw)
-            except (TypeError, ValueError) as exc:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
-                    rule="specialist_dispatch_source",
-                ) from exc
-            # The in-process backend's turn loop has no wall-clock check, so this
-            # cap is the only bound on that path.
-            if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
-                    rule="specialist_dispatch_source",
-                    hint=(
-                        f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
-                        "(0 = unbounded; depth is bounded by the wall-clock "
-                        "budget, so omit max_turns unless capping a probe early)."
-                    ),
-                )
+        validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
 
@@ -1817,9 +1791,7 @@ class PolicyGate:
                 rule="specialist_gpu_request_invalid",
             )
         ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0 and not (
-            uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0
-        ):
+        if ceiling <= 0 and not (uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule="specialist_gpu_pool_disabled",
@@ -1955,9 +1927,9 @@ class PolicyGate:
             PolicyDenied: when the GPU request fails, the wave is too large, or
                 a task description is empty / too long.
         """
-        # Freeform skips the domain-anchored max_turns gate (bounded by the task
-        # timeout instead), but a GPU request must still clear the same pool
-        # ceiling as a domain specialist.
+        # Freeform applies the same max_turns contract as domain dispatches.
+        # Per-task overrides in a wave are checked per entry below.
+        validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
         # A malformed or empty wave falls through to the single-task path in the
@@ -1972,11 +1944,12 @@ class PolicyGate:
                     hint=(f"Split the wave into batches of at most {SPECIALIST_FREEFORM_WAVE_MAX} tasks."),
                 )
             for i, task in enumerate(wave):
-                if not isinstance(task, dict):
-                    continue
-                desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-                if desc:
-                    self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+                validate_freeform_wave_task(task, index=i)
+                if isinstance(task, dict):
+                    validate_specialist_max_turns_raw(
+                        task.get("max_turns"),
+                        where=f"tasks[{i}].max_turns",
+                    )
             return
         desc = str(params.get("task_description") or "").strip()
         self._check_freeform_task_description(desc, where="params")
@@ -2087,9 +2060,7 @@ class PolicyGate:
         if self.session_dir is None:
             return None
         try:
-            return self.session_dir.resolve().joinpath(
-                *_REMOTE_RECIPE_FILES_PARTS
-            )
+            return self.session_dir.resolve().joinpath(*_REMOTE_RECIPE_FILES_PARTS)
         except (OSError, RuntimeError):
             return None
 
@@ -2097,10 +2068,7 @@ class PolicyGate:
     def _patch_declared_targets(patch_path: Path) -> frozenset[str]:
         """Read safe relative targets from unified-diff headers."""
         try:
-            if (
-                not patch_path.is_file()
-                or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES
-            ):
+            if not patch_path.is_file() or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES:
                 return frozenset()
             text = patch_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -2125,11 +2093,7 @@ class PolicyGate:
         except ValueError:
             return frozenset()
         relative_posix = relative.as_posix()
-        return (
-            frozenset({relative_posix})
-            if relative_posix and relative_posix != "."
-            else frozenset()
-        )
+        return frozenset({relative_posix}) if relative_posix and relative_posix != "." else frozenset()
 
     def _validate_warm_replay_targets(
         self,
@@ -2165,8 +2129,7 @@ class PolicyGate:
             if not raw_targets:
                 continue
             if not isinstance(raw_targets, list) or not all(
-                isinstance(target, str) and target.strip()
-                for target in raw_targets
+                isinstance(target, str) and target.strip() for target in raw_targets
             ):
                 raise PolicyDenied(
                     f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets "
@@ -2177,14 +2140,12 @@ class PolicyGate:
             raw_patch = entry.get("patch_path")
             if not isinstance(raw_patch, str) or not raw_patch.strip():
                 raise PolicyDenied(
-                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} "
-                    "has no patch_path",
+                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
                     rule="warm_replay_patch_missing",
                 )
             if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
                 raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} is outside "
-                    f"the session KB download root={kb_root!s}",
+                    f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
                     rule="warm_replay_patch_outside_kb_download",
                 )
 
@@ -2209,14 +2170,11 @@ class PolicyGate:
                 active_root = resolve_session_framework_root()
                 if not active_root or not resolved_within(raw_target, active_root):
                     raise PolicyDenied(
-                        f"replay_warm_recipe target_file={raw_target!r} is outside "
-                        "the Session active framework root",
+                        f"replay_warm_recipe target_file={raw_target!r} is outside the Session active framework root",
                         rule="warm_replay_target_outside_framework_roots",
                     )
                 target_candidates = self._framework_relative_candidates(raw_target)
-                if not declared_targets or declared_targets.isdisjoint(
-                    target_candidates
-                ):
+                if not declared_targets or declared_targets.isdisjoint(target_candidates):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} does not "
                         f"match patch targets={sorted(declared_targets)!r}",
@@ -2377,8 +2335,7 @@ class PolicyGate:
             scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
             if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
                 raise PolicyDenied(
-                    f"prune_branch scope={scope!r} not allowed "
-                    f"(allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                    f"prune_branch scope={scope!r} not allowed (allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
                     rule="prune_scope",
                     hint=(
                         f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
@@ -2488,6 +2445,84 @@ def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
     return "\n".join(lines)
 
 
+def validate_specialist_max_turns_raw(
+    max_turns_raw: Any,
+    *,
+    where: str,
+) -> None:
+    """Validate an optional specialist ``max_turns`` dial.
+
+    Args:
+        max_turns_raw: Raw ``max_turns`` value from dispatch params, or ``None``.
+        where: Label used in error messages (e.g. ``params.max_turns``).
+
+    Raises:
+        PolicyDenied: When the value is not an int, is negative, or exceeds
+            :data:`SPECIALIST_MAX_TURNS_HARD_CAP`.
+    """
+    if max_turns_raw is None:
+        return
+    try:
+        max_turns = int(max_turns_raw)
+    except (TypeError, ValueError) as exc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns must be int, got {max_turns_raw!r}",
+            rule="specialist_dispatch_source",
+        ) from exc
+    if max_turns < 0:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} must be >= 0",
+            rule="specialist_dispatch_source",
+            hint=(
+                "Use a non-negative integer. "
+                "0 = unbounded (bounded by the wall-clock budget); "
+                "omit max_turns to use the default turn cap."
+            ),
+        )
+    if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} "
+            f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
+            rule="specialist_dispatch_source",
+            hint=(
+                f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
+                "(0 = unbounded; depth is bounded by the wall-clock "
+                "budget, so omit max_turns unless capping a probe early)."
+            ),
+        )
+
+
+def validate_freeform_wave_task(task: Any, *, index: int) -> str:
+    """Validate one entry in a freeform specialist ``tasks`` wave.
+
+    Args:
+        task: One wave entry; must be a dict with a non-empty description.
+        index: Zero-based index used in error messages.
+
+    Returns:
+        The normalized task description.
+
+    Raises:
+        PolicyDenied: When the entry is malformed or the description is
+            empty / too long.
+    """
+    if not isinstance(task, dict):
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] must be a dict",
+            rule="specialist_freeform_wave_invalid_task",
+            hint="Each wave entry must be an object with task_description.",
+        )
+    desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
+    if not desc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] task_description must be non-empty",
+            rule="specialist_freeform_empty_description",
+            hint=("Each freeform task needs a natural-language task_description (the whole mandate)."),
+        )
+    PolicyGate._check_freeform_task_description(desc, where=f"tasks[{index}]")
+    return desc
+
+
 __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
@@ -2502,6 +2537,8 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
+    "validate_freeform_wave_task",
+    "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",

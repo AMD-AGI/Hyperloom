@@ -131,8 +131,7 @@ def _write_invocation_evidence(candidate: dict[str, Any], output_dir: Path) -> s
         )
     except (OSError, TypeError, ValueError) as exc:
         raise CollectiveInvocationSpecUnavailable(
-            f"cannot record how {candidate.get('source_function') or 'the collective'} "
-            f"is invoked: {exc}"
+            f"cannot record how {candidate.get('source_function') or 'the collective'} is invoked: {exc}"
         ) from exc
     return str(path)
 
@@ -190,11 +189,7 @@ def _build_cmd(
     _add_opt(cmd, args.get("gpu_target"), "--gpu-target")
     _add_opt(cmd, COLLECTIVE_FELLOW, "--fellow")
     _add_opt(cmd, args.get("max_hours"), "--max-hours")
-    if (
-        isinstance(deadline_unix, bool)
-        or not isinstance(deadline_unix, int)
-        or deadline_unix <= 0
-    ):
+    if isinstance(deadline_unix, bool) or not isinstance(deadline_unix, int) or deadline_unix <= 0:
         raise ValueError("deadline_unix must be a positive integer")
     _add_opt(cmd, deadline_unix, "--deadline-unix")
     _add_opt(cmd, args.get("agent_timeout_sec"), "--agent-timeout-sec")
@@ -214,11 +209,7 @@ def _build_cmd(
     bench_repeat = args.get("bench_repeat")
     if bench_repeat in (None, ""):
         bench_repeat = 3
-    if (
-        isinstance(bench_repeat, bool)
-        or not isinstance(bench_repeat, int)
-        or bench_repeat <= 0
-    ):
+    if isinstance(bench_repeat, bool) or not isinstance(bench_repeat, int) or bench_repeat <= 0:
         raise ValueError("bench_repeat must be a positive integer")
     _add_opt(cmd, bench_repeat, "--bench-repeat")
     target_functions = args.get("target_functions")
@@ -234,11 +225,7 @@ def _build_cmd(
     if not resuming:
         source_files = args.get("source_files")
         if isinstance(source_files, list):
-            joined = ",".join(
-                item.strip()
-                for item in source_files
-                if isinstance(item, str) and item.strip()
-            )
+            joined = ",".join(item.strip() for item in source_files if isinstance(item, str) and item.strip())
             _add_opt(cmd, joined, "--source-files")
         _add_opt(cmd, args.get("operator_name"), "--operator-name")
     _add_opt(cmd, args.get("framework"), "--framework")
@@ -248,9 +235,7 @@ def _build_cmd(
     # Gate integrity depends on task preparation pinning the driver digest;
     # disabling preparation would remove it without any local symptom.
     if "--no-prepare-task" in cmd:
-        raise ValueError(
-            "collective driver integrity requires forge-loop task preparation"
-        )
+        raise ValueError("collective driver integrity requires forge-loop task preparation")
     return cmd
 
 
@@ -285,9 +270,7 @@ def _campaign_timeout_sec(args: dict[str, Any], elapsed_sec: float) -> int:
             raise ValueError
         finalize = int(finalize_raw)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"invalid finalize_grace_sec: {finalize_raw!r}"
-        ) from exc
+        raise ValueError(f"invalid finalize_grace_sec: {finalize_raw!r}") from exc
     if finalize < 0:
         raise ValueError("finalize_grace_sec cannot be negative")
     if (
@@ -306,11 +289,7 @@ def _campaign_timeout_sec(args: dict[str, Any], elapsed_sec: float) -> int:
 
 def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.CompletedProcess:
     """Run forge-loop in its own process group and reap the group on timeout."""
-    if (
-        isinstance(timeout_sec, bool)
-        or not isinstance(timeout_sec, int)
-        or timeout_sec <= 0
-    ):
+    if isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec <= 0:
         raise ValueError("timeout_sec must be a positive integer")
     proc = subprocess.Popen(
         cmd,
@@ -438,15 +417,9 @@ def _write_restore_journal(repo: str, restore: dict[str, Any]) -> None:
             "baseline_in_base_commit",
         )
     }
-    payload["backup_b64"] = (
-        base64.b64encode(backup).decode("ascii") if isinstance(backup, bytes) else ""
-    )
-    payload["baseline_tracked_patch_b64"] = base64.b64encode(
-        tracked_patch
-    ).decode("ascii")
-    payload["baseline_tracked_sha256"] = hashlib.sha256(
-        tracked_patch
-    ).hexdigest()
+    payload["backup_b64"] = base64.b64encode(backup).decode("ascii") if isinstance(backup, bytes) else ""
+    payload["baseline_tracked_patch_b64"] = base64.b64encode(tracked_patch).decode("ascii")
+    payload["baseline_tracked_sha256"] = hashlib.sha256(tracked_patch).hexdigest()
     path = _restore_journal_path(repo)
     tmp = path.with_suffix(".tmp")
     # The journal is the only record that can undo an in-place campaign, so it
@@ -474,16 +447,13 @@ def _recorded_tree_matches(repo: str, payload: dict[str, Any]) -> bool:
     if not expected_tracked_sha and isinstance(in_memory_patch, bytes):
         expected_tracked_sha = hashlib.sha256(in_memory_patch).hexdigest()
     if not isinstance(expected_untracked, list) or any(
-        not isinstance(path, str) or not path
-        for path in expected_untracked
+        not isinstance(path, str) or not path for path in expected_untracked
     ):
         raise RuntimeError("collective restore journal has invalid untracked baseline")
     actual_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     actual_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
     if expected_tracked_sha:
-        actual_tracked_sha = hashlib.sha256(
-            _tracked_baseline_patch(repo)
-        ).hexdigest()
+        actual_tracked_sha = hashlib.sha256(_tracked_baseline_patch(repo)).hexdigest()
         tracked_matches = actual_tracked_sha == expected_tracked_sha
     else:
         tracked = _git(repo, "status", "--porcelain", "--untracked-files=no")
@@ -522,9 +492,7 @@ def _recover_stale_inplace(repo: str) -> bool:
         _release_repo_lock(lock)
         raise RuntimeError(f"cannot read current branch for {repo}")
     branch = branch_proc.stdout.strip()
-    parked_on_forge_branch = (
-        branch.startswith("forge/") or branch == "forge-collective-opt"
-    )
+    parked_on_forge_branch = branch.startswith("forge/") or branch == "forge-collective-opt"
     try:
         if not journal.is_file():
             if parked_on_forge_branch:
@@ -538,9 +506,7 @@ def _recover_stale_inplace(repo: str) -> bool:
             raise RuntimeError(f"collective restore journal must be an object: {journal}")
         journal_branch = str(payload.get("branch") or "")
         if parked_on_forge_branch and journal_branch != branch:
-            raise RuntimeError(
-                f"restore journal branch {journal_branch!r} does not match {branch!r}"
-            )
+            raise RuntimeError(f"restore journal branch {journal_branch!r} does not match {branch!r}")
         backup_encoded = payload.get("backup_b64")
         if not isinstance(backup_encoded, str):
             raise RuntimeError(f"restore journal has no source backup: {journal}")
@@ -557,27 +523,16 @@ def _recover_stale_inplace(repo: str) -> bool:
                 validate=True,
             )
         except (ValueError, binascii.Error) as exc:
-            raise RuntimeError(
-                f"invalid tracked baseline in {journal}"
-            ) from exc
-        expected_tracked_sha = str(
-            payload.get("baseline_tracked_sha256") or ""
-        )
-        if expected_tracked_sha and hashlib.sha256(
-            tracked_patch
-        ).hexdigest() != expected_tracked_sha:
-            raise RuntimeError(
-                f"tracked baseline checksum mismatch in {journal}"
-            )
+            raise RuntimeError(f"invalid tracked baseline in {journal}") from exc
+        expected_tracked_sha = str(payload.get("baseline_tracked_sha256") or "")
+        if expected_tracked_sha and hashlib.sha256(tracked_patch).hexdigest() != expected_tracked_sha:
+            raise RuntimeError(f"tracked baseline checksum mismatch in {journal}")
         restore = dict(payload)
         restore["backup"] = backup
         restore["baseline_tracked_patch"] = tracked_patch
         if not parked_on_forge_branch:
             head = _git(repo, "rev-parse", "HEAD").stdout.strip()
-            if (
-                branch != str(payload.get("orig_branch") or "")
-                or head != str(payload.get("orig_head") or "")
-            ):
+            if branch != str(payload.get("orig_branch") or "") or head != str(payload.get("orig_head") or ""):
                 # The repository advanced past the recorded baseline, so the
                 # user has replaced the state this journal describes. Restoring
                 # would roll their commits back.
@@ -628,9 +583,7 @@ def _preserve_campaign(workspace: str, output_dir: Path, name: str) -> None:
                 fcntl.LOCK_EX | fcntl.LOCK_NB,
             )
         except BlockingIOError as exc:
-            raise RuntimeError(
-                f"cannot preserve active Forge campaign: {campaign}"
-            ) from exc
+            raise RuntimeError(f"cannot preserve active Forge campaign: {campaign}") from exc
         destination = output_dir / name
         if destination.exists():
             destination = output_dir / f"{name}_{time.time_ns()}"
@@ -714,11 +667,7 @@ def _prepare_collective_workspace(
                 "branch": branch,
                 "source_file": source_file,
                 "backup": backup,
-                "relpath": str(
-                    Path(source_file)
-                    .resolve()
-                    .relative_to(Path(kernel_repo).resolve())
-                ),
+                "relpath": str(Path(source_file).resolve().relative_to(Path(kernel_repo).resolve())),
                 "base_commit": orig_head,
                 "config_snapshot": config_snapshot,
                 "baseline_untracked": baseline_untracked,
@@ -758,9 +707,7 @@ def _prepare_collective_workspace(
                     "--",
                 )
                 if baseline_check.returncode != 0:
-                    raise RuntimeError(
-                        "in-place preparation did not snapshot the tracked baseline"
-                    )
+                    raise RuntimeError("in-place preparation did not snapshot the tracked baseline")
             restore["baseline_in_base_commit"] = True
             _write_restore_journal(kernel_repo, restore)
             _restore_config(kernel_repo, config_snapshot)
@@ -826,14 +773,8 @@ def _restore_collective_workspace(context: dict[str, Any]) -> None:
             restore = context.get("restore") or {}
             source_file = str(restore.get("source_file") or "")
             backup = restore.get("backup")
-            if (
-                source_file
-                and isinstance(backup, bytes)
-                and Path(source_file).read_bytes() != backup
-            ):
-                raise RuntimeError(
-                    f"collective workspace restore did not recover {source_file}"
-                )
+            if source_file and isinstance(backup, bytes) and Path(source_file).read_bytes() != backup:
+                raise RuntimeError(f"collective workspace restore did not recover {source_file}")
             repo = str(context.get("kernel_repo") or "")
             _restore_config(
                 repo,
@@ -844,8 +785,7 @@ def _restore_collective_workspace(context: dict[str, Any]) -> None:
         except Exception as exc:  # noqa: BLE001
             if preserve_error is not None:
                 raise RuntimeError(
-                    f"workspace restore failed after campaign preservation failed: "
-                    f"{preserve_error!r}"
+                    f"workspace restore failed after campaign preservation failed: {preserve_error!r}"
                 ) from exc
             raise
         if preserve_error is not None:
@@ -917,9 +857,7 @@ def _export_collective_result(
         best_commit,
     )
     if not base_commit or ancestry.returncode != 0:
-        raise RuntimeError(
-            "validated collective best is not descended from this campaign baseline"
-        )
+        raise RuntimeError("validated collective best is not descended from this campaign baseline")
     _, changed = _export_best_artifacts(
         workspace,
         base_commit,
@@ -960,9 +898,7 @@ def _validated_exported_patch(output_dir: str, patch_path: str) -> str:
     try:
         patch.relative_to(expected_root)
     except ValueError as exc:
-        raise ValueError(
-            f"exported patch is outside the output directory: {patch}"
-        ) from exc
+        raise ValueError(f"exported patch is outside the output directory: {patch}") from exc
     if not patch.is_file():
         raise ValueError(f"exported patch does not exist: {patch}")
     try:
@@ -1002,11 +938,7 @@ def _normalize_result(
     try:
         if result_payload is not None and not isinstance(result_payload, dict):
             raise ValueError("Collective result payload must be a mapping")
-        payload = (
-            dict(result_payload)
-            if result_payload is not None
-            else _load_forge_result(output_dir)
-        )
+        payload = dict(result_payload) if result_payload is not None else _load_forge_result(output_dir)
     except ValueError as exc:
         result["error_class"] = "invalid_forge_result"
         result["error"] = str(exc)
@@ -1021,59 +953,37 @@ def _normalize_result(
         result["bandwidth"] = bandwidth
 
     forge_error = payload.get("error")
-    if forge_error is not None and (
-        not isinstance(forge_error, str) or not forge_error.strip()
-    ):
+    if forge_error is not None and (not isinstance(forge_error, str) or not forge_error.strip()):
         result["error_class"] = "invalid_forge_result"
         result["error"] = "forge result has invalid error"
         return result
     improved = payload.get("improved")
-    if (
-        improved is not None
-        and not isinstance(improved, bool)
-    ) or (forge_error is None and improved is None):
+    if (improved is not None and not isinstance(improved, bool)) or (forge_error is None and improved is None):
         result["error_class"] = "invalid_forge_result"
         result["error"] = "forge result requires boolean improved when no error"
         return result
     speedup_raw = payload.get("mean_case_speedup")
-    if (
-        speedup_raw is not None
-        and (
-            isinstance(speedup_raw, bool)
-            or not isinstance(speedup_raw, (int, float))
-        )
-    ):
+    if speedup_raw is not None and (isinstance(speedup_raw, bool) or not isinstance(speedup_raw, (int, float))):
         result["error_class"] = "invalid_forge_result"
         result["error"] = "forge result has invalid mean_case_speedup"
         return result
     speedup = None if speedup_raw is None else float(speedup_raw)
-    if speedup is not None and (
-        not math.isfinite(speedup) or speedup <= 0.0
-    ):
+    if speedup is not None and (not math.isfinite(speedup) or speedup <= 0.0):
         result["error_class"] = "invalid_forge_result"
         result["error"] = "forge result has invalid mean_case_speedup"
         return result
     requested_keep = improved is True
     if requested_keep and (speedup is None or speedup <= 1.0):
         result["error_class"] = "invalid_forge_result"
-        result["error"] = (
-            "improved forge result requires mean_case_speedup greater than one"
-        )
+        result["error"] = "improved forge result requires mean_case_speedup greater than one"
         return result
     if improved is False and speedup is not None and speedup > 1.0:
         result["error_class"] = "invalid_forge_result"
         result["error"] = "forge result has inconsistent improvement fields"
         return result
-    iteration_key = (
-        "iteration"
-        if payload.get("source") == "best_result.json"
-        else "iteration_count"
-    )
+    iteration_key = "iteration" if payload.get("source") == "best_result.json" else "iteration_count"
     iteration_raw = payload.get(iteration_key)
-    if iteration_raw is not None and (
-        isinstance(iteration_raw, bool)
-        or not isinstance(iteration_raw, int)
-    ):
+    if iteration_raw is not None and (isinstance(iteration_raw, bool) or not isinstance(iteration_raw, int)):
         result["error_class"] = "invalid_forge_result"
         result["error"] = f"forge result has invalid {iteration_key}"
         return result
@@ -1094,16 +1004,8 @@ def _normalize_result(
 
     result.update(
         {
-            "status": (
-                "ok"
-                if kept
-                else ("failed" if failed or requested_keep else "complete")
-            ),
-            "micro_decision": (
-                "candidate"
-                if kept
-                else ("failed" if failed or requested_keep else "no_improvement")
-            ),
+            "status": ("ok" if kept else ("failed" if failed or requested_keep else "complete")),
+            "micro_decision": ("candidate" if kept else ("failed" if failed or requested_keep else "no_improvement")),
             "decision": "KEEP" if kept else "REVERT",
             "kept": kept,
             "kernel_speedup": speedup,
@@ -1251,9 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
                 # A published best supersedes a wrapper failure but does not
                 # erase it: the KEEP still came out of an unclean exit.
                 superseded = {
-                    key: forge_payload[key]
-                    for key in ("error", "detail")
-                    if forge_payload.get(key) not in (None, "")
+                    key: forge_payload[key] for key in ("error", "detail") if forge_payload.get(key) not in (None, "")
                 }
                 forge_payload = {**forge_payload, **published_best}
                 forge_payload.pop("error", None)

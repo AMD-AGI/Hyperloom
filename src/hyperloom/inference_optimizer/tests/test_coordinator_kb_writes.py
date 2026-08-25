@@ -121,9 +121,7 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
             }
         )
     )
-    coord._kb_amend_recipe(
-        append_lesson={"statement": "must not write", "measured_impact": ""}
-    )
+    coord._kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
 
 
 def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
@@ -624,18 +622,14 @@ def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> No
             raise AssertionError(f"AgentX amend reached the recipe KB: {name}")
 
     coord.recipe_kb = _ForbiddenRecipeKB()
-    coord._kb_amend_recipe(
-        append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"}
-    )
+    coord._kb_amend_recipe(append_lesson={"statement": "must not reach the KB", "measured_impact": "+9%"})
 
 
 def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its knowledge."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
-    coord._kb_amend_recipe(
-        append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"}
-    )
+    coord._kb_amend_recipe(append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"})
 
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None, "the AgentX gate must not silence the synthetic path"

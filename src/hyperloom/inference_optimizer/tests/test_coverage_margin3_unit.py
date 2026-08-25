@@ -172,8 +172,6 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
     assert gpu_types._autodetect_gpu_type() is None
 
 
-
-
 def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
     from hyperloom.orchestrator.state import kernel_decision_settings as settings
 
