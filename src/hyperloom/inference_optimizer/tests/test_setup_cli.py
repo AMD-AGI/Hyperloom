@@ -1523,6 +1523,51 @@ def test_hotfix_asset_change_keeps_the_vendor_backup(tmp_path: Path):
     assert (torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-v2"
 
 
+def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_path: Path):
+    """When torch never shipped libroctracer64.so, a single-library hotfix bump
+    must not treat the injected tracer as a vendor refresh trigger."""
+    hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=(
+            f"{_SYNC_BODY}\n"
+            f'printf hotfix-hip-v2 > "{hotfix_hip}"\n'
+            f"{_SYNC_BODY}"
+        ),
+        torch_hip=b"VENDOR-hip",
+        torch_tracer=None,
+    )
+    backup = torch_lib / _BACKUP_DIRNAME
+
+    assert res.returncode == 0, res.stderr
+    assert "vendor libs changed" not in res.stdout
+    assert (backup / "libamdhip64.so").read_bytes() == b"VENDOR-hip"
+    assert not (backup / "libroctracer64.so").exists()
+    assert "vendor:libroctracer64.so:absent" in (backup / ".fingerprint").read_text()
+
+
+def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path):
+    """A truncated fingerprint can force a refresh, but the rebuild must not
+    promote hotfix bytes already sitting in torch/lib into the vendor snapshot."""
+    fp = f'"{tmp_path}/torch/lib/{_BACKUP_DIRNAME}/.fingerprint"'
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=(
+            f"{_SYNC_BODY}\n"
+            f"head -n 1 > {fp}.tmp {fp} && mv -f {fp}.tmp {fp}\n"
+            f"{_SYNC_BODY}"
+        ),
+        torch_hip=b"vendor-hip-bytes",
+        torch_tracer=b"vendor-tracer-bytes",
+    )
+    backup = torch_lib / _BACKUP_DIRNAME
+
+    assert res.returncode == 0, res.stderr
+    assert (backup / "libamdhip64.so").read_bytes() == b"vendor-hip-bytes"
+    assert (backup / "libroctracer64.so").read_bytes() == b"vendor-tracer-bytes"
+    assert not (backup / "libroctracer64.so").read_bytes().startswith(b"hotfix")
+
+
 def test_sync_warns_when_framework_imports_but_torch_lib_is_missing(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)

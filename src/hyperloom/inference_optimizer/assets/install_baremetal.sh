@@ -1081,11 +1081,12 @@ _sha256_file() {
 
 _fingerprint_field() {
   local fp="$1" kind="$2" name="$3"
-  grep "^${kind}:${name}:" "$fp" 2>/dev/null | cut -d: -f3-
+  grep "^${kind}:${name}:" "$fp" 2>/dev/null | cut -d: -f3- || true
 }
 
 _write_backup_fingerprint() {
-  local fp="$1" backup_dir="$2" rocm_lib_dir="$3" name src
+  local fp="$1" backup_dir="$2" rocm_lib_dir="$3" name src tmp="${fp}.tmp"
+  rm -f "$tmp"
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
     if [ -e "${backup_dir}/${name}" ]; then
       printf 'vendor:%s:%s\n' "$name" "$(_sha256_file "${backup_dir}/${name}")"
@@ -1094,7 +1095,8 @@ _write_backup_fingerprint() {
     fi
     src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
     printf 'hotfix:%s:%s\n' "$name" "$(_sha256_file "$src")"
-  done > "$fp"
+  done > "$tmp" || return 1
+  mv -f "$tmp" "$fp" || return 1
 }
 
 # Vendor snapshot is stale only when torch's on-disk libs are neither the
@@ -1115,8 +1117,11 @@ _torch_vendor_stale() {
     torch_sha="$(_sha256_file "${torch_lib_dir}/${name}")"
     src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
     if [ -f "$src" ] && [ "$torch_sha" = "$(_sha256_file "$src")" ]; then
-      [ -e "${backup_dir}/${name}" ] \
-        && [ "$(_sha256_file "${backup_dir}/${name}")" = "$vendor_sha" ] || return 0
+      if [ -e "${backup_dir}/${name}" ]; then
+        [ "$(_sha256_file "${backup_dir}/${name}")" = "$vendor_sha" ] || return 0
+      elif [ "$vendor_sha" != "absent" ]; then
+        return 0
+      fi
       continue
     fi
     [ "$torch_sha" = "$hotfix_sha" ] && continue
@@ -1165,11 +1170,38 @@ PY
 ensure_torch_lib_backup() {
   local backup_dir="$1" torch_lib_dir="$2" rocm_lib_dir="$3"
   local name staging fp="${backup_dir}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}"
+  local old_backup old_fp vendor_sha hotfix_sha torch_sha src
 
   if [ -d "$backup_dir" ]; then
     _torch_vendor_stale "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir" || return 0
     log "torch vendor libs changed; refreshing ${backup_dir}"
-    rm -rf "$backup_dir" || return 1
+    old_backup="${backup_dir}.preserve"
+    rm -rf "$old_backup"
+    mv "$backup_dir" "$old_backup" || return 1
+    old_fp="${old_backup}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}"
+
+    staging="${backup_dir}.staging"
+    rm -rf "$staging"
+    install -d "$staging" || { rm -rf "$old_backup"; return 1; }
+    for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+      [ -e "${torch_lib_dir}/${name}" ] || continue
+      vendor_sha="$(_fingerprint_field "$old_fp" vendor "$name")"
+      hotfix_sha="$(_fingerprint_field "$old_fp" hotfix "$name")"
+      torch_sha="$(_sha256_file "${torch_lib_dir}/${name}")"
+      src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+      if [ "$torch_sha" = "$hotfix_sha" ] \
+          || { [ -f "$src" ] && [ "$torch_sha" = "$(_sha256_file "$src")" ]; }; then
+        [ -e "${old_backup}/${name}" ] \
+          && cp -a "${old_backup}/${name}" "${staging}/${name}" || true
+      else
+        cp -a "${torch_lib_dir}/${name}" "${staging}/${name}" \
+          || { rm -rf "$staging" "$old_backup"; return 1; }
+      fi
+    done
+    mv -T "$staging" "$backup_dir" || { rm -rf "$staging" "$old_backup"; return 1; }
+    rm -rf "$old_backup"
+    _write_backup_fingerprint "$fp" "$backup_dir" "$rocm_lib_dir"
+    return 0
   fi
 
   staging="${backup_dir}.staging"
