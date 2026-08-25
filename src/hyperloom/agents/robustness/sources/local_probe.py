@@ -24,7 +24,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
@@ -157,8 +157,6 @@ class LocalProbeConfig:
     optimizer_runs_dirname: str = "optimizer_runs"
     # External-deps probe.
     external_deps_enabled: bool = True
-    # Per-mount stat-latency budget; above this → ``wekafs_degraded``.
-    external_mount_stat_timeout_s: float = 5.0
     # Override gateway probe URL; empty → derive from ``$OPENAI_BASE_URL`` + ``/models``.
     external_gateway_probe_url: str = ""
 
@@ -292,7 +290,6 @@ class LocalProbeSource:
         local_external_deps = (
             await _probe_external_deps(
                 cfg.external_gateway_probe_url,
-                cfg.external_mount_stat_timeout_s,
                 cfg.health_probe_timeout_s,
             )
             if cfg.external_deps_enabled
@@ -339,7 +336,6 @@ class LocalProbeSource:
             coordinator_events=coordinator_events,
             local_task_progress=local_task_progress,
             local_processes_known=sampled_processes is not None,
-            sources_used=[self.name],
         )
 
 
@@ -381,7 +377,7 @@ def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
             # Ordered so the fold below is reproducible: the merge itself is
             # order-independent, but a snapshot whose row order is SQLite's
             # discretion cannot be reasoned about or pinned by a test.
-            ["SELECT task_id, kind, history FROM tasks WHERE state='running' ORDER BY task_id"],
+            "SELECT task_id, kind, history FROM tasks WHERE state='running' ORDER BY task_id",
             (),
         )
     finally:
@@ -487,7 +483,8 @@ def _read_coordinator_events(
 
     Returns:
         list[dict[str, Any]]: Event rows projected to
-        ``{id, agent, topic, payload, ts}``, newest first, or ``[]``.
+        ``{id, agent, topic, payload, ts}``, in chronological (ascending seq)
+        order, or ``[]``.
     """
     if db_path is None or not db_path.exists():
         return []
@@ -504,7 +501,7 @@ def _read_coordinator_events(
         conn.row_factory = sqlite3.Row
         rows = _try_select(
             conn,
-            ["SELECT seq AS id, from_agent AS agent, topic, payload, ts FROM events ORDER BY seq DESC LIMIT ?"],
+            "SELECT seq AS id, from_agent AS agent, topic, payload, ts FROM events ORDER BY seq DESC LIMIT ?",
             (limit,),
         )
         if not rows:
@@ -520,6 +517,7 @@ def _read_coordinator_events(
                     "ts": row["ts"] if "ts" in row.keys() else None,
                 }
             )
+        out.reverse()
         return out
     finally:
         conn.close()
@@ -527,31 +525,24 @@ def _read_coordinator_events(
 
 def _try_select(
     conn: sqlite3.Connection,
-    candidates: Iterable[str],
+    sql: str,
     params: tuple,
 ) -> list[sqlite3.Row]:
-    """Try each candidate SELECT until one succeeds.
+    """Run one SELECT, degrading a foreign schema to no evidence.
 
     Args:
         conn (sqlite3.Connection): Open read-only connection.
-        candidates (Iterable[str]): SQL statements to try in order;
-            schema variants of the same query.
-        params (tuple): Bound parameters applied to each statement.
+        sql (str): The SELECT to run.
+        params (tuple): Bound parameters.
 
     Returns:
-        list[sqlite3.Row]: Rows from the first statement that executes,
-        or ``[]`` when all candidates fail.
+        list[sqlite3.Row]: The rows, or ``[]`` when the statement fails.
     """
-    last_err: sqlite3.Error | None = None
-    for sql in candidates:
-        try:
-            return list(conn.execute(sql, params).fetchall())
-        except sqlite3.Error as exc:
-            last_err = exc
-            continue
-    if last_err is not None:
-        log.debug("local_probe: events select failed: %s", last_err)
-    return []
+    try:
+        return list(conn.execute(sql, params).fetchall())
+    except sqlite3.Error as exc:
+        log.debug("local_probe: select failed: %s", exc)
+        return []
 
 
 def _maybe_decode_json(value: Any) -> Any:
@@ -1794,7 +1785,7 @@ def _sample_critic_workdir(
 
 
 # ---------------------------------------------------------------------------
-# State-integrity probe (state.json / WAL / leases / agent JSONLs / PID)
+# State-integrity probe (state.json / WAL / agent JSONLs / PID)
 # ---------------------------------------------------------------------------
 
 
@@ -1802,11 +1793,11 @@ def _sample_state_integrity(
     session_dir: Path | None,
     optimizer_runs_dirname: str,
 ) -> dict[str, Any]:
-    """Aggregate the I1-I5 state-integrity slots into one payload.
+    """Aggregate the I1-I4 state-integrity slots into one payload.
 
-    Individual sub-slots that fail (missing file / unreadable DB / no
-    PID file) surface their own error markers so the signal layer can
-    branch on absence without mistaking it for healthy state.
+    Individual sub-slots that fail (missing file / no PID file) surface
+    their own error markers so the signal layer can branch on absence
+    without mistaking it for healthy state.
 
     Args:
         session_dir (Path | None): Session root; ``None`` yields ``{}``.
@@ -1814,16 +1805,15 @@ def _sample_state_integrity(
             where ``run_*.pid`` files live.
 
     Returns:
-        dict[str, Any]: ``{state_json, wal, leases, agents,
-        coordinator}`` aggregating the five state slots, or ``{}`` when
-        ``session_dir`` is missing.
+        dict[str, Any]: ``{state_json, wal, agents, coordinator}``
+        aggregating the four state slots, or ``{}`` when ``session_dir``
+        is missing.
     """
     if session_dir is None:
         return {}
     return {
         "state_json": _probe_state_json(session_dir),
         "wal": _probe_wal_size(session_dir),
-        "leases": _probe_leases(session_dir),
         "agents": _probe_agent_files(session_dir),
         "coordinator": _probe_coordinator_pid(
             session_dir,
@@ -1907,64 +1897,6 @@ def _probe_wal_size(session_dir: Path) -> dict[str, Any]:
             out["db_bytes"] = int(db_path.stat().st_size)
     except OSError:
         pass
-    return out
-
-
-def _probe_leases(session_dir: Path) -> list[dict[str, Any]]:
-    """Cross-reference active leases against ``os.kill(pid, 0)``.
-
-    Reads the ``leases`` table from ``storage/coordinator.db``. Each
-    row's ``holder_pid`` is liveness-checked; ``alive=False`` means
-    the lease is stale (holder process gone but lease still held).
-
-    Args:
-        session_dir (Path): Session root containing
-            ``storage/coordinator.db``.
-
-    Returns:
-        list[dict[str, Any]]: One ``{task_id, holder_pid, lane,
-        acquired_at, alive}`` per lease row, or ``[]`` when the DB is
-        absent / unreadable.
-    """
-    db_path = session_dir / "storage" / "coordinator.db"
-    if not db_path.is_file():
-        return []
-    try:
-        conn = sqlite3.connect(
-            f"file:{db_path}?mode=ro",
-            uri=True,
-            timeout=2.0,
-        )
-    except sqlite3.Error as exc:
-        log.debug("local_probe: cannot open leases db: %s", exc)
-        return []
-    try:
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = list(conn.execute("SELECT task_id, holder_pid, lane, acquired_at FROM leases").fetchall())
-        except sqlite3.Error as exc:
-            log.debug("local_probe: leases select failed: %s", exc)
-            return []
-    finally:
-        conn.close()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        keys = row.keys()
-        holder = row["holder_pid"] if "holder_pid" in keys else None
-        try:
-            holder_int = int(holder) if holder is not None else None
-        except (TypeError, ValueError):
-            holder_int = None
-        alive = _is_pid_alive(holder_int) if holder_int is not None else False
-        out.append(
-            {
-                "task_id": row["task_id"] if "task_id" in keys else None,
-                "holder_pid": holder_int,
-                "lane": row["lane"] if "lane" in keys else None,
-                "acquired_at": (row["acquired_at"] if "acquired_at" in keys else None),
-                "alive": alive,
-            }
-        )
     return out
 
 
@@ -2093,7 +2025,6 @@ def _probe_coordinator_pid(
 
 async def _probe_external_deps(
     gateway_probe_url_override: str,
-    mount_timeout_s: float,
     http_timeout_s: float,
 ) -> dict[str, Any]:
     """Async wrapper that runs the external-dependency probes once per tick.
@@ -2102,8 +2033,6 @@ async def _probe_external_deps(
         gateway_probe_url_override (str): Explicit gateway probe URL;
             when empty it is derived from ``$OPENAI_BASE_URL`` +
             ``/models``.
-        mount_timeout_s (float): Per-mount stat-latency budget passed to
-            the mounts probe.
         http_timeout_s (float): Timeout for the gateway HTTP probe.
 
     Returns:
@@ -2116,10 +2045,7 @@ async def _probe_external_deps(
         if base:
             gateway_url = base.rstrip("/") + "/models"
     gateway = await _probe_gateway_health(gateway_url, http_timeout_s) if gateway_url else {}
-    mounts = await asyncio.to_thread(
-        _probe_external_mounts,
-        mount_timeout_s,
-    )
+    mounts = await asyncio.to_thread(_probe_external_mounts)
     tracelens_cli = await asyncio.to_thread(_probe_tracelens_cli)
     if not gateway and not mounts and not tracelens_cli:
         return {}
@@ -2209,23 +2135,20 @@ _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _probe_external_mounts(
-    timeout_s: float,
-) -> list[dict[str, Any]]:
-    """``os.stat`` each external mount, time it, flag slow / failing.
+def _probe_external_mounts() -> list[dict[str, Any]]:
+    """``os.stat`` each external mount, recording reachability and latency.
 
     Mount paths are read from the env names in
     :data:`_EXTERNAL_MOUNT_ENVS` at probe time so an operator can
     relocate them without a rebuild; unset envs are skipped rather than
     falling back to a default path.
 
-    Args:
-        timeout_s (float): Stat-latency budget in seconds; echoed back
-            as ``timeout_ms`` so the signal layer can flag slow mounts.
+    Latency is classified against the ``ExternalDepsConfig`` thresholds
+    in the signal layer.
 
     Returns:
         list[dict[str, Any]]: One ``{env_name, path, ok, error,
-        latency_ms, timeout_ms}`` entry per configured mount.
+        latency_ms}`` entry per configured mount.
     """
     out: list[dict[str, Any]] = []
     for env_name, default_path in _EXTERNAL_MOUNT_ENVS:
@@ -2253,7 +2176,6 @@ def _probe_external_mounts(
                 "ok": ok,
                 "error": error,
                 "latency_ms": round(latency_ms, 2),
-                "timeout_ms": timeout_s * 1000.0,
             }
         )
     return out

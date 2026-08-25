@@ -12,6 +12,7 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
+from .db_maintenance import DEFAULT_EVENTS_KEEP_RECENT
 from .storage.connection import SqliteConnection
 
 
@@ -230,20 +231,28 @@ class MessageBus:
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]
 
-    async def replay_for(self, to_agent: str, *, after_seq: int) -> list[Message]:
+    async def replay_for(
+        self,
+        to_agent: str,
+        *,
+        after_seq: int,
+        limit: int = DEFAULT_EVENTS_KEEP_RECENT,
+    ) -> list[Message]:
         """Used at resume — returns events in monotonic seq order.
 
         Args:
             to_agent (str): Recipient agent id (broadcasts are included).
             after_seq (int): Only return messages with ``seq`` greater than
                 this.
+            limit (int): Maximum rows to return, matching the bus retention
+                watermark so a large backlog is not loaded at once.
 
         Returns:
             list[Message]: Matching messages ordered by ascending ``seq``.
         """
         rows = await self.db.fetchall(
-            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
-            (after_seq, to_agent),
+            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC LIMIT ?",
+            (after_seq, to_agent, limit),
         )
         return [Message.from_row(r) for r in rows]
 

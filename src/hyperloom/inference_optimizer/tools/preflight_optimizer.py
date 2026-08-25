@@ -12,9 +12,9 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
-import shutil
-import subprocess
 import sys
+
+from hyperloom.common import rocm_smi
 
 
 STALE_PROCESS_PATTERNS = (
@@ -23,6 +23,8 @@ STALE_PROCESS_PATTERNS = (
     "sglang.launch_server",
     "vllm.entrypoints",
 )
+
+VRAM_BUSY_FRACTION = 0.01
 
 
 def _read_cmdline(pid: str) -> str:
@@ -61,31 +63,30 @@ def _print_torch_visibility() -> bool:
     return available and count > 0
 
 
-def _print_rocm_snapshot() -> None:
-    """Print a ``rocm-smi`` memory-use snapshot (best-effort, never raises)."""
-    rocm_smi = shutil.which("rocm-smi")
-    if not rocm_smi:
-        print("rocm_smi=missing")
-        return
+def _check_gpu_occupancy() -> bool:
+    """Print per-GPU VRAM usage and report whether every GPU is idle.
 
-    try:
-        result = subprocess.run(
-            [rocm_smi, "--showmemuse", "--json"],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
+    A GPU is busy once its used VRAM exceeds :data:`VRAM_BUSY_FRACTION` of its
+    own capacity. An unreadable GPU state counts as a failure, so an
+    unverifiable launch aborts instead of proceeding.
+
+    Returns:
+        ``True`` when every GPU is under the fraction, ``False`` otherwise.
+    """
+    snapshots = rocm_smi.gpu_vram_usage()
+    if snapshots is None:
+        print("gpu_vram=unreadable")
+        return False
+
+    idle = True
+    for idx, snap in enumerate(snapshots):
+        busy = snap.used_mib > snap.total_mib * VRAM_BUSY_FRACTION
+        print(
+            f"gpu{idx}_vram_used={snap.used_mib:.1f}/{snap.total_mib:.1f} MiB"
+            f" ({snap.used_mib / snap.total_mib:.2%}) {'BUSY' if busy else 'idle'}"
         )
-    except Exception as exc:
-        print("rocm_smi_error=", type(exc).__name__, str(exc)[:300])
-        return
-
-    print("rocm_smi_rc=", result.returncode)
-    if result.stdout.strip():
-        print(result.stdout.strip()[:2000])
-    if result.stderr.strip():
-        print("rocm_smi_stderr=", result.stderr.strip()[:500])
+        idle = idle and not busy
+    return idle
 
 
 def _find_stale_processes() -> list[tuple[str, str]]:
@@ -108,8 +109,9 @@ def _find_stale_processes() -> list[tuple[str, str]]:
 def main() -> int:
     """Run launcher preflight checks and return a process exit code.
 
-    Validates the model path, prints torch/ROCm visibility, and reports any
-    stale optimizer/server processes.
+    Validates the model path, checks torch/ROCm visibility, verifies GPU VRAM
+    occupancy is below the allowed threshold, and reports any stale
+    optimizer/server processes.
 
     Returns:
         ``0`` when every check passes, otherwise ``2``.
@@ -130,7 +132,8 @@ def main() -> int:
     if not _print_torch_visibility():
         ok = False
 
-    _print_rocm_snapshot()
+    if not _check_gpu_occupancy():
+        ok = False
 
     stale = _find_stale_processes()
     for pid, cmdline in stale:

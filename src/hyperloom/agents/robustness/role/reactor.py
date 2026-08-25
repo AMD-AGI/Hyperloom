@@ -24,7 +24,6 @@ from ..sources.base import DegradeRouter
 from ..state_store import DetectorStateStore
 from .envelope import Intent, PolicyViolation
 from .findings import FindingSink
-from .postmortem import PostmortemFinalizer
 from .prompt_inputs import ReactorContext
 
 
@@ -36,7 +35,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ReactorComponents:
-    """Aggregate constructor argument so callers do not pass 6 positional kw."""
+    """Bundle the reactor's collaborators into one constructor argument."""
 
     router: DegradeRouter
     classifier: Classifier
@@ -44,8 +43,6 @@ class ReactorComponents:
     policy: PolicyAware
     sink: FindingSink | None = None
     rca: RcaEngine | None = None
-    # Session-end finalizer: invoked once on ``stop_reason`` empty→non-empty.
-    finalizer: PostmortemFinalizer | None = None
     # Cross-tick state persistence; ``None`` disables (tests).
     state_store: DetectorStateStore | None = None
 
@@ -64,7 +61,7 @@ class Reactor:
         Args:
             components (ReactorComponents): Bundle of the router,
                 classifier, ladder, policy and optional sink / RCA engine /
-                finalizer / state store the pipeline drives each tick.
+                state store the pipeline drives each tick.
         """
         self._router = components.router
         self._classifier = components.classifier
@@ -72,11 +69,8 @@ class Reactor:
         self._policy = components.policy
         self._sink = components.sink
         self._rca: RcaEngine = components.rca or NoopRcaEngine()
-        self._finalizer = components.finalizer
         self._state_store = components.state_store
         self._tick_index = 0
-        # In-memory latch: ``finalizer.finalize`` runs at most once per instance.
-        self._finalize_fired: bool = False
 
     @property
     def tick_index(self) -> int:
@@ -92,8 +86,7 @@ class Reactor:
 
         Advances the tick index, collects a source snapshot, classifies
         symptoms, runs the action ladder, filters intents through the
-        policy gate, persists findings, fires the finalizer once on
-        stop, and flushes cross-tick state.
+        policy gate, persists findings, and flushes cross-tick state.
 
         Args:
             ctx (ReactorContext): Per-tick input parsed from the
@@ -141,9 +134,6 @@ class Reactor:
             except Exception:  # noqa: BLE001 — sink already swallows IO errors
                 log.exception("reactor tick=%d sink.append_many failed", self._tick_index)
 
-        # Run after the sink write so this tick's findings are in the corpus.
-        await self._maybe_finalize(ctx)
-
         # Flush mutated detector/ladder/throttle state last, off the event loop.
         await self._flush_state_store()
 
@@ -180,35 +170,6 @@ class Reactor:
         except Exception:  # noqa: BLE001 — best-effort, never crash tick
             log.exception(
                 "reactor tick=%d state_store flush failed",
-                self._tick_index,
-            )
-
-    async def _maybe_finalize(self, ctx: ReactorContext) -> None:
-        """Fire the postmortem finalizer once on the first stop_reason.
-
-        No-op when no finalizer is configured, the latch has already
-        fired, or ``stop_reason`` is still empty. An in-memory latch plus
-        the finalizer's disk marker guarantee at-most-once semantics.
-
-        Args:
-            ctx (ReactorContext): Per-tick context carrying ``stop_reason``.
-        """
-        if self._finalizer is None or self._finalize_fired:
-            return
-        stop_reason = str(ctx.shared_state.stop_reason or "").strip()
-        if not stop_reason:
-            return
-        # Latch before the disk write so a failed write isn't retried this
-        # instance (spec: fire at most once per session).
-        self._finalize_fired = True
-        try:
-            await asyncio.to_thread(
-                self._finalizer.finalize,
-                stop_reason=stop_reason,
-            )
-        except Exception:  # noqa: BLE001 — finalize is best-effort
-            log.exception(
-                "reactor tick=%d postmortem finalizer raised",
                 self._tick_index,
             )
 

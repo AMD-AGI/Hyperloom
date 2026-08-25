@@ -120,7 +120,6 @@ def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None
     )
     assert config.backend == "kb-store"
     assert config.kb_store_url == "https://kb.test"
-    assert config.gbrain_base_url == "https://gbrain.test"
 
 
 def test_a_remote_child_gets_only_kb_store_credentials() -> None:

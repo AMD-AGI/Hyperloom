@@ -21,17 +21,10 @@ import json
 import os
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any
 
 from hyperloom.common.jsonio import iter_sse_objects
-
-
-def _require_http_url(url: str) -> None:
-    scheme = urllib.parse.urlparse(url).scheme
-    if scheme not in {"http", "https"}:
-        raise ValueError(f"unsupported URL scheme: {scheme!r}")
 
 
 class GbrainPageError(RuntimeError):

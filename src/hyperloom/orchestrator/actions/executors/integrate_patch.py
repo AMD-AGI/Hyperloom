@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
-from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
+from ...specialists.patch_safety import patch_targets_missing
 from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
@@ -41,13 +42,12 @@ from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._nogit_patch import (
     _P_LEVELS,
-    _PATCH_DEV_NULL,
     _apply_patch_no_git,
     _is_git_tree,
     _is_within,
     _revert_patches_no_git,
-    _strip_path_prefix,
 )
+from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     GridVariant,
@@ -1043,147 +1043,6 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     return cp2.returncode == 0, cp2.stderr.strip()
 
 
-def _commit_strip_level(
-    framework_root: Path,
-    pairs: list[tuple[str, str]],
-) -> int:
-    """Pick the ``-p`` strip level resolving the most targets to existing files.
-
-    The patch has already been applied, so modify/create targets exist in the
-    tree; the level that maximises those hits is the one the forward apply used.
-
-    Args:
-        framework_root: The git checkout the patch was applied into.
-        pairs: ``(old_path, new_path)`` header pairs from the patch.
-
-    Returns:
-        The ``-p`` strip level resolving the most targets to existing files.
-    """
-    best_lvl, best_hits = 1, -1
-    for lvl in _P_LEVELS:
-        hits = 0
-        for old, new in pairs:
-            for raw in (new, old):
-                if not raw or raw == _PATCH_DEV_NULL:
-                    continue
-                try:
-                    if (framework_root / _strip_path_prefix(raw, lvl)).exists():
-                        hits += 1
-                except OSError:
-                    continue
-        if hits > best_hits:
-            best_hits, best_lvl = hits, lvl
-    return best_lvl
-
-
-def _patch_touched_paths(
-    framework_root: Path,
-    patches: list[Path],
-) -> list[str]:
-    """Repo-relative paths the applied ``patches`` created / modified / deleted.
-
-    Used to scope the commit-on-KEEP to only the files this patch touched.
-
-    Per header pair (``old`` ``---``, ``new`` ``+++``):
-      * created / modified → the ``new`` target exists post-apply → emit it.
-      * deleted → ``new`` is ``/dev/null`` (or its target is gone)
-        and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
-        ``git add -A -- <path>`` stages the removal of a tracked file.
-    A header that resolves to neither is dropped so ``git add`` cannot error.
-
-    Args:
-        framework_root: The git checkout the patches were applied into.
-        patches: The applied patch files to inspect.
-
-    Returns:
-        The repo-relative paths the patches created/modified (existing
-        post-apply) plus the old paths of pure deletions, so the subsequent
-        ``git add`` stages removals too.
-    """
-    out: list[str] = []
-    for patch in patches:
-        try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        pairs = patch_file_targets(text)
-        if not pairs:
-            continue
-        lvl = _commit_strip_level(framework_root, pairs)
-        for old, new in pairs:
-            rel_new = _strip_path_prefix(new, lvl) if new and new != _PATCH_DEV_NULL else None
-            rel_old = _strip_path_prefix(old, lvl) if old and old != _PATCH_DEV_NULL else None
-            try:
-                new_exists = bool(rel_new) and (framework_root / rel_new).exists()
-            except OSError:
-                new_exists = False
-            if rel_new and new_exists:
-                # Created or modified — the post-apply file is on disk.
-                if rel_new not in out:
-                    out.append(rel_new)
-            elif rel_old:
-                # Deletion — new target is gone; stage the removal of old.
-                if rel_old not in out:
-                    out.append(rel_old)
-    return out
-
-
-def _git_commit_kept(
-    framework_root: Path,
-    message: str,
-    paths: list[str],
-) -> tuple[bool, str]:
-    """Commit only the patch-touched ``paths`` to git for cross-cycle durability.
-
-    Committing each KEEP makes wins survive a later cycle's ``git checkout -- .``
-    revert fallback. The commit is scoped to the exact paths the patch touched
-    (never ``git add -A``). Best-effort: a commit failure is non-fatal.
-
-    Args:
-        framework_root: The git checkout to commit in.
-        message: The commit message for the KEEP.
-        paths: The repo-relative patch-touched paths to stage and commit.
-
-    Returns:
-        A ``(ok, note)`` tuple; ``ok`` is ``True`` on a successful commit or a
-        benign no-op (nothing to commit), and ``note`` carries any detail.
-    """
-    if not paths:
-        return True, "no patch-touched paths to commit"
-    cp_add = _run_git_cp(
-        ["-C", str(framework_root), "add", "-A", "--", *paths],
-        timeout=60.0,
-    )
-    if cp_add is None:
-        return False, "git commit spawn failed"
-    if cp_add.returncode != 0:
-        return False, f"git add failed: {cp_add.stderr.strip()}"
-    cp = _run_git_cp(
-        [
-            "-C",
-            str(framework_root),
-            "-c",
-            "user.email=hyperloom@local",
-            "-c",
-            "user.name=Hyperloom",
-            "commit",
-            "-q",
-            "-m",
-            message,
-        ],
-        timeout=60.0,
-    )
-    if cp is None:
-        return False, "git commit spawn failed"
-    if cp.returncode == 0:
-        return True, ""
-    # "nothing to commit" is a benign no-op.
-    out = (cp.stdout + cp.stderr).lower()
-    if "nothing to commit" in out:
-        return True, "nothing to commit"
-    return False, cp.stderr.strip()
-
-
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -1694,6 +1553,7 @@ class IntegratePatchExecutor:
             config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
             extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
             extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
+            dropped_env_overrides: list[str] = ctx._ip_dropped_env_overrides  # type: ignore[attr-defined]
             setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
             return await self._stage_gate(
@@ -1712,6 +1572,7 @@ class IntegratePatchExecutor:
                 config_changes_applied=config_changes_applied,
                 extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                dropped_env_overrides=dropped_env_overrides,
                 setup_result=setup_result,
             )
         except BaseException:
@@ -2051,6 +1912,30 @@ class IntegratePatchExecutor:
         )
         return None
 
+    @staticmethod
+    def _publish_gate_state(
+        ctx: Any,
+        *,
+        output_root: Path,
+        config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
+        dropped_env_overrides: list[str],
+        setup_result: dict[str, Any],
+    ) -> None:
+        """Publish the values ``_stage_run`` reads back after ``_stage_apply``.
+
+        Every field is required and keyword-only, so an exit that omits one
+        fails here rather than in the gate. Tree-mutation state is published
+        separately, as the tree takes it.
+        """
+        ctx._ip_output_root = output_root  # type: ignore[attr-defined]
+        ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
+        ctx._ip_dropped_env_overrides = dropped_env_overrides  # type: ignore[attr-defined]
+        ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+
     async def _stage_apply(
         self,
         ctx: Any,
@@ -2122,6 +2007,16 @@ class IntegratePatchExecutor:
         raw_extra_envs = params.get("extra_envs")
         if isinstance(raw_extra_envs, dict):
             proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
+        proposal_extra_envs, _dropped = filter_untrusted_env_mapping(
+            proposal_extra_envs,
+            allow_predicate=is_allowed_variant_env_key,
+        )
+        dropped_env_overrides = sorted(_dropped)
+        if dropped_env_overrides:
+            log.warning(
+                "integrate_patch: dropping unsafe env override keys: %s",
+                ", ".join(dropped_env_overrides),
+            )
 
         # Framework-rewrite switches. Every rewrite in such a patch sits behind
         # a switch that defaults OFF, so the applied patch is inert and benching
@@ -2241,16 +2136,20 @@ class IntegratePatchExecutor:
             if params.get("enablement_launch_only"):
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
-                ctx._ip_output_root = output_root  # type: ignore[attr-defined]
                 ctx._ip_framework_root = None  # type: ignore[attr-defined]
                 ctx._ip_stash_state = "clean"  # type: ignore[attr-defined]
                 ctx._ip_stash_note = ""  # type: ignore[attr-defined]
                 ctx._ip_applied = []  # type: ignore[attr-defined]
                 ctx._ip_applied_artifacts = []  # type: ignore[attr-defined]
-                ctx._ip_config_changes_applied = {}  # type: ignore[attr-defined]
-                ctx._ip_extra_server_args_applied = ""  # type: ignore[attr-defined]
-                ctx._ip_extra_envs_applied = {}  # type: ignore[attr-defined]
-                ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+                self._publish_gate_state(
+                    ctx,
+                    output_root=output_root,
+                    config_changes_applied={},
+                    extra_server_args_applied="",
+                    extra_envs_applied={},
+                    dropped_env_overrides=[],
+                    setup_result=setup_result,
+                )
                 return None
             _no_patches: dict[str, Any] = {
                 "status": "no_patches",
@@ -2389,6 +2288,7 @@ class IntegratePatchExecutor:
 
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
+        self._apply_attempted: bool = False
 
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
@@ -2402,6 +2302,7 @@ class IntegratePatchExecutor:
         ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
         ctx._ip_applied = applied  # type: ignore[attr-defined]
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
+        self._apply_attempted = bool(patch_paths)
         for patch in patch_paths:
             if git_tree:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
@@ -2502,6 +2403,7 @@ class IntegratePatchExecutor:
                     "config_changes_applied": config_changes_applied,
                     "extra_server_args_applied": extra_server_args_applied,
                     "extra_envs_applied": extra_envs_applied,
+                    "dropped_env_overrides": dropped_env_overrides,
                     "reason": "apply_only=True; benchmark skipped",
                     "workspace": str(output_root),
                 },
@@ -2509,11 +2411,15 @@ class IntegratePatchExecutor:
 
         # The tree-mutation values are already published above, as the tree took
         # them; what is left is what only the gate reads.
-        ctx._ip_output_root = output_root  # type: ignore[attr-defined]
-        ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
-        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
-        ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
-        ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+        self._publish_gate_state(
+            ctx,
+            output_root=output_root,
+            config_changes_applied=config_changes_applied,
+            extra_server_args_applied=extra_server_args_applied,
+            extra_envs_applied=extra_envs_applied,
+            dropped_env_overrides=dropped_env_overrides,
+            setup_result=setup_result,
+        )
         return None
 
     async def _stage_gate(
@@ -2534,6 +2440,7 @@ class IntegratePatchExecutor:
         config_changes_applied: dict[str, str],
         extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        dropped_env_overrides: list[str],
         setup_result: dict[str, Any],
     ) -> dict[str, Any]:
         """Bench + enablement/perf KEEP/REVERT gate.
@@ -2606,7 +2513,7 @@ class IntegratePatchExecutor:
             )
 
         if params.get("enablement"):
-            return await self._gate_enablement(
+            verdict = await self._gate_enablement(
                 params=params,
                 extra=extra,
                 specialist_task_id=specialist_task_id,
@@ -2625,26 +2532,29 @@ class IntegratePatchExecutor:
                 gate_evidence=gate_evidence,
                 ctx=ctx,
             )
-
-        return await self._gate_perf(
-            params=params,
-            extra=extra,
-            specialist_task_id=specialist_task_id,
-            shared_state=shared_state,
-            done_payload=done_payload,
-            output_root=output_root,
-            framework_root=framework_root,
-            stash_state=stash_state,
-            stash_note=stash_note,
-            applied=applied,
-            applied_artifacts=applied_artifacts,
-            config_changes_applied=config_changes_applied,
-            extra_server_args_applied=extra_server_args_applied,
-            extra_envs_applied=extra_envs_applied,
-            bench_result=bench_result,
-            gate_evidence=gate_evidence,
-            ctx=ctx,
-        )
+        else:
+            verdict = await self._gate_perf(
+                params=params,
+                extra=extra,
+                specialist_task_id=specialist_task_id,
+                shared_state=shared_state,
+                done_payload=done_payload,
+                output_root=output_root,
+                framework_root=framework_root,
+                stash_state=stash_state,
+                stash_note=stash_note,
+                applied=applied,
+                applied_artifacts=applied_artifacts,
+                config_changes_applied=config_changes_applied,
+                extra_server_args_applied=extra_server_args_applied,
+                extra_envs_applied=extra_envs_applied,
+                bench_result=bench_result,
+                gate_evidence=gate_evidence,
+                ctx=ctx,
+            )
+        if dropped_env_overrides:
+            verdict["dropped_env_overrides"] = dropped_env_overrides
+        return verdict
 
     async def _gate_enablement(
         self,
@@ -3871,6 +3781,10 @@ class IntegratePatchExecutor:
         """Reverse-apply the applied patches (best-effort); returns those
         actually reverted.
 
+        On non-git trees the backup ledger — not ``applied`` — decides whether a
+        restore is owed: a patch set that fails part-way through its first patch
+        has already mutated the tree while ``applied`` is still empty.
+
         Args:
             framework_root: The source root to revert in, or ``None`` (no-op).
             applied: The patches that were applied this run.
@@ -3880,12 +3794,18 @@ class IntegratePatchExecutor:
             when the checkout fallback fires).
         """
         reverted: list[Path] = []
-        if framework_root is None or not applied:
+        if framework_root is None:
             return reverted
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
         if nogit_backups is not None and not _is_git_tree(framework_root):
-            _revert_patches_no_git(nogit_backups)
+            if nogit_backups:
+                ok, errors = _revert_patches_no_git(nogit_backups)
+                if not ok:
+                    log.error("integrate_patch: non-git revert incomplete in %s: %s", framework_root, errors)
+                    return []
             return list(applied)
+        if not getattr(self, "_apply_attempted", False) and not applied:
+            return reverted
         # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
         # committed, so HEAD is exactly the accepted stack: kept work is in
         # commits and survives, candidate work is uncommitted and goes. User

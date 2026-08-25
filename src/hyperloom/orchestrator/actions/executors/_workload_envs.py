@@ -34,7 +34,7 @@ from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
-    valid_env_key,
+    is_allowed_variant_env_key,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
@@ -807,7 +807,8 @@ def materialize_config_with_envs(
         config_path: Path to the source Magpie YAML to render.
         output_dir: Directory the materialized YAML is written into.
         extra_server_args: Extra framework server args merged into the env.
-        extra_envs: Overrides applied last over any computed env values.
+        extra_envs: Overrides applied last over any computed env values;
+            shell/loader hijack names and credentials are dropped.
         remove_args: Inherited framework server args to remove before launch.
         unset_envs: Inherited env names to remove before applying
             ``extra_envs``; workload pins are refused.
@@ -1164,7 +1165,8 @@ def materialize_config_with_envs(
             import json as _json
 
             try:
-                extra_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
+                _raw_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
+                extra_body = _raw_body if isinstance(_raw_body, dict) else {}
             except (ValueError, TypeError):
                 extra_body = {}
             # Always override start_step/num_steps (the template has CONC=8
@@ -1269,13 +1271,7 @@ def materialize_config_with_envs(
         _ref_fw_env = server_args_env_name(bench.get("framework"))
         _ref_existing = str(envs.get(_ref_fw_env, "")).strip()
         envs[_ref_fw_env] = merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
-    safe_reference_envs, dropped_reference_envs = filter_untrusted_env_mapping(
-        reference_envs,
-        allow_predicate=valid_env_key,
-    )
-    for _rk in dropped_reference_envs:
-        log.warning("Dropping invalid reference_envs key %s before benchmark materialization", _rk)
-    for _rk, _rv in safe_reference_envs.items():
+    for _rk, _rv in reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
@@ -1297,10 +1293,10 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         extra_envs,
-        allow_predicate=valid_env_key,
+        allow_predicate=is_allowed_variant_env_key,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
+        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────

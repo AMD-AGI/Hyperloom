@@ -357,8 +357,8 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
     await coord._promote_to_shared_state(
         "explore",
         {
-            "winners": [{"name": "v0", "extra_server_args": "--tp 1"}],
-            "best_variant": {"name": "v0", "extra_server_args": "--tp 1"},
+            "winners": [{"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0}],
+            "best_variant": {"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0},
             "output_throughput": 900.0,
             "round_id": "r1",
             "losers": [],

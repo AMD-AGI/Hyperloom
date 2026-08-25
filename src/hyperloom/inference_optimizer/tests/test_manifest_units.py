@@ -219,9 +219,18 @@ class TestDependencyEscapeGuard:
 
         assert out == {"path": str(a), "commit": "", "remote": ""}
 
-    def test_path_is_relative_to_handles_symlink_loop(self, tmp_path):
+    def test_is_path_within_handles_symlink_loop(self, tmp_path):
         a = tmp_path / "a"
         b = tmp_path / "b"
         a.symlink_to(b)
         b.symlink_to(a)
-        assert mf._path_is_relative_to(a, tmp_path) is False
+        assert mf._paths.is_path_within(a, tmp_path) is False
+
+    def test_is_path_within_rejects_symlink_escaping_root(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("x", encoding="utf-8")
+        link = root / "link.txt"
+        link.symlink_to(outside)
+        assert mf._paths.is_path_within(link, root) is False

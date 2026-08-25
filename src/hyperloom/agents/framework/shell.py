@@ -18,6 +18,8 @@ from pathlib import Path
 
 from .models import CommandResult
 
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
 
 def run_command(
     name: str,
@@ -74,8 +76,9 @@ def render_template(
 ) -> str:
     """Render known ``{var}`` placeholders, raise on unknown placeholders.
 
-    Leaves JSON-style ``{...}`` braces that don't match the
-    ``[A-Za-z_][A-Za-z0-9_]*`` identifier pattern untouched.
+    Each placeholder is replaced exactly once; substituted values are never
+    re-scanned, so a value containing ``{x}`` is left as-is. Braces that
+    don't match the identifier pattern are left untouched.
 
     Args:
         template: Template string with ``{var}`` placeholders.
@@ -89,13 +92,19 @@ def render_template(
     Raises:
         ValueError: If any ``{identifier}`` placeholder is left unresolved.
     """
-    rendered = template
-    for key, value in variables.items():
-        replacement = shlex.quote(value) if shell_quote else value
-        rendered = rendered.replace("{" + key + "}", replacement)
-    unknown = sorted(set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", rendered)))
+    unknown: list[str] = []
+
+    def _replace(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name not in variables:
+            unknown.append(name)
+            return m.group(0)
+        value = variables[name]
+        return shlex.quote(value) if shell_quote else value
+
+    rendered = _PLACEHOLDER_RE.sub(_replace, template)
     if unknown:
         raise ValueError(
-            "command template references unknown variable(s): " + ", ".join(repr(item) for item in unknown)
+            "command template references unknown variable(s): " + ", ".join(repr(item) for item in sorted(set(unknown)))
         )
     return rendered

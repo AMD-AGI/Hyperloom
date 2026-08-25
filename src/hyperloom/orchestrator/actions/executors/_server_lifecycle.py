@@ -249,7 +249,9 @@ def teardown_lifecycle_server(
     """Best-effort teardown of a persistent server left by a lifecycle round.
 
     Idempotent and never raises (safe in ``finally``); a no-op on the happy
-    path, real work only on abnormal paths.
+    path, real work only on abnormal paths. The recorded pid is signalled only
+    when its cmdline still names a Hyperloom server, so a recycled pid is not
+    killed; the pid/meta files are removed either way.
 
     Args:
         pid_dir: Directory holding the server pid/meta files.
@@ -274,22 +276,28 @@ def teardown_lifecycle_server(
         pass
 
     if server_pid is not None and os.name == "posix":
-        # Server is setsid'd, so pgid == pid unless the pid file gave one.
-        pgid = server_pgid if server_pgid is not None else server_pid
-        _signal_group(pgid, signal.SIGTERM)
-        deadline = time.monotonic() + TERM_GRACE_SECONDS
-        while time.monotonic() < deadline:
-            if not _process_group_alive(pgid):
-                break
-            time.sleep(0.1)
-        if _process_group_alive(pgid):
-            _signal_group(pgid, signal.SIGKILL)
-        log.info(
-            "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
-            pgid,
-            framework,
-            port,
-        )
+        if not _looks_like_server_process(server_pid):
+            log.warning(
+                "server_lifecycle teardown — pid %d is not a Hyperloom server (pid reuse); not signalling",
+                server_pid,
+            )
+        else:
+            # Server is setsid'd, so pgid == pid unless the pid file gave one.
+            pgid = server_pgid if server_pgid is not None else server_pid
+            _signal_group(pgid, signal.SIGTERM)
+            deadline = time.monotonic() + TERM_GRACE_SECONDS
+            while time.monotonic() < deadline:
+                if not _process_group_alive(pgid):
+                    break
+                time.sleep(0.1)
+            if _process_group_alive(pgid):
+                _signal_group(pgid, signal.SIGKILL)
+            log.info(
+                "server_lifecycle teardown — reaped persistent server pgid=%d (%s:%d)",
+                pgid,
+                framework,
+                port,
+            )
     for p in (pid_file, meta_file):
         try:
             p.unlink()

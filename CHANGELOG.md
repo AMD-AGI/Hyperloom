@@ -5,7 +5,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **`canonical_fingerprint` now uses pair-aware arg normalization.**
+  The previous implementation sorted all arg tokens as a flat list, which
+  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
+  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
+  and were incorrectly treated as duplicates by the `explore_search` dedup
+  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
+  last-wins semantics for repeated flags, matching the semantics of
+  `_shell_safe_dedupe`.<br/>
+  **Operator note**: this changes the hash for any variant whose `extra_args`
+  contains at least one flag with a value.  All fingerprint keys already
+  persisted in `explore_search.tested`, `accepted`, `rejected`, and
+  `name_index` inside `state.json` are invalidated.  On the next resume the
+  session will re-bench its full explored history.
+
 ### Removed
+
+- **`stop_ray_if_owned` and the ownership return value of `ensure_ray_cluster` are gone.**
+  `stop_ray_if_owned` was introduced alongside `parallel_e2e_runner.py` and was
+  called exclusively by `_stop_ray_via_helper` in that script. When
+  `parallel_e2e_runner.py` was retired in `c92784cbf`, the helper was deleted but
+  `stop_ray_if_owned` was left behind with zero production call sites, no test
+  references, and no `__all__` or documentation contract. `ensure_ray_cluster`
+  returned the ownership flag only for that pair; with the pair gone the return
+  value had no consumer. The function is deleted and the signature narrowed to
+  `-> None`. The standard deployment path starts a long-lived shared head via
+  `install.sh`; `ensure_ray_cluster` connects to it and returns immediately, so
+  nothing that previously ran after a `False` return changes behaviour.
+
+- **The `reference_envs` filter inside `materialize_config_with_envs` is gone.**
+  The only writer of that mapping is `cli/bootstrap.py` via
+  `reference_script.parse_reference_script`, which already filters every key
+  through `is_allowed_external_env_key` — strictly stronger than the
+  `valid_env_key` shape check applied here. The pass dropped nothing in
+  production and its warning log could never fire.
 
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and
@@ -17,6 +52,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`force_restart_local_cluster` now routes its `ray stop` through `_stop_ray_force`.**
+  The function previously inlined its own `subprocess.run(["ray", "stop", "--force"], ...)`
+  without a timeout or `OSError` guard, meaning a hung `ray stop` on the
+  version-mismatch recovery path would block indefinitely. `_stop_ray_force`
+  already enforces `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable via
+  `HYPERLOOM_RAY_STOP_TIMEOUT_SEC`) and swallows both `TimeoutExpired` and
+  `OSError`, so the timeout constant now covers all three stop sites instead of
+  only one. Log output is unchanged: `_stop_ray_force` appends the stop command
+  and any timeout note to `log_path` in the same order as before.
+
+- **Multi-node SSH forwarding now uses the shared env-safety definitions.**
+  `multi_node/_internal/env_safety` declared its own nine-name `_DENY_KEYS` set
+  and its own copy of the POSIX key-shape regex. The denylist was missing
+  `CDPATH`, `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
+  `PYTHONINSPECT`, `PYTHONUSERBASE` and `SHELLOPTS`, all of which a
+  shell-launched remote pod is exposed to. Both local definitions are deleted in
+  favour of `BLOCKED_UNTRUSTED_ENV_NAMES` and `valid_env_key`. Forwarding is
+  unaffected: `_collect_forward_env` builds its mapping from a prefix allowlist
+  plus four hardcoded names, none of which are in the blocked set.
+
+- **`BLOCKED_UNTRUSTED_ENV_NAMES` and `BLOCKED_CHILD_ENV_NAMES` no longer list
+  `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, or `RUBYOPT`.** This is a
+  ROCm/Linux-only repository with no macOS platform code and no Ruby tooling, so
+  those three blocked nothing real. Every remaining name corresponds to a process
+  this repository actually spawns: bash benchmark wrappers, Python subprocesses,
+  the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
+  stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
+  timestamped logging shim pipes through.
+
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
   already used, and `forge-fuse` rejects an unknown option outright rather than
@@ -25,6 +89,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   wrapper's own input JSON is unchanged.
 
 ### Fixed
+
+- **Shell and loader hijack names are rejected from the `extra_envs` argument to
+  `materialize_config_with_envs` before the config is persisted.** The predicate
+  was `valid_env_key`, a key-shape check that let `LD_PRELOAD`, `PYTHONPATH` and
+  `PATH` through into the rendered YAML and from there into the benchmark
+  subprocess. It is now `is_allowed_variant_env_key`, the predicate `GridVariant`
+  already uses for per-variant overrides. The credential filter that runs
+  immediately before the YAML is written is unchanged; it still covers the
+  operator `--extra-env` channel, which has no upstream filtering.
+
+- **A specialist's `config_changes` / `extra_envs` proposal is filtered where it
+  enters `integrate_patch`, so the benchmarked configuration and the recorded one
+  can no longer differ.** The raw mapping was assembled with no key validation and
+  then took two paths: the gate bench went through `GridVariant` (which filters)
+  while an `advanced` verdict persisted the unfiltered mapping into
+  `accepted_config` and on into the revalidation baseline. Filtering once at
+  assembly collapses both paths onto the same value. Dropped key names are logged
+  and reported as `dropped_env_overrides` on the gate verdict and in the
+  enablement `round.json`.
 
 - **A reproduced warm replay is recorded as an adopted optimization.** The
   replay was mirrored into the canonical recorder streams before
@@ -43,6 +126,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   records `keep_verdict_unscored` instead of a fabricated `accuracy_pass`. This
   is a forward fix: breakdowns already exported without the adoption are not
   retroactively repaired.
+
+- **`best_result.json` is read again.** `_validated_forge_best_result` gated on
   `schema_version == 1`; KernelForge has stamped `2` into that file since
   2026-08-13. Every published best was therefore rejected and the kernel
   backend fell through to the caller checkpoint or the stdout sentinel, losing

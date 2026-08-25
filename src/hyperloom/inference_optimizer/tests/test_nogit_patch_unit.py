@@ -23,14 +23,21 @@ from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 
 def test_reexport_from_integrate_patch():
-    """All names extracted from integrate_patch must still be importable from it."""
+    """Names integrate_patch still consumes must resolve to the _nogit_patch ones."""
     assert ip._P_LEVELS is ng._P_LEVELS
-    assert ip._PATCH_DEV_NULL is ng._PATCH_DEV_NULL
-    assert ip._strip_path_prefix is ng._strip_path_prefix
     assert ip._is_within is ng._is_within
     assert ip._is_git_tree is ng._is_git_tree
     assert ip._apply_patch_no_git is ng._apply_patch_no_git
     assert ip._revert_patches_no_git is ng._revert_patches_no_git
+
+
+def test_reexport_from_patch_snapshot():
+    """The path-derivation helpers moved to _patch_snapshot keep one definition."""
+    from hyperloom.orchestrator.actions.executors import _patch_snapshot as ps
+
+    assert ps._PATCH_DEV_NULL is ng._PATCH_DEV_NULL
+    assert ps._strip_path_prefix is ng._strip_path_prefix
+    assert ps._P_LEVELS is ng._P_LEVELS
 
 
 # _strip_path_prefix

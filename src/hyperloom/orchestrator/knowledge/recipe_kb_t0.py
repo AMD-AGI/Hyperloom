@@ -315,60 +315,6 @@ def _select_remote_candidate(kb: Any, row: Mapping[str, Any]) -> bool:
         return False
 
 
-def _kg_native_config_donor(
-    *,
-    architectures: "list[str] | None",
-    precision: str,
-    hardware: str,
-    framework: str,
-    model_type: str,
-) -> Mapping[str, Any] | None:
-    """Borrow a cross-model warm-replay donor from the native KG link-graph.
-
-    Active only when a native KG client is reachable. Local mode supplies one
-    automatically; remote mode retains the ``GBRAIN_KG_NATIVE`` gate.
-    Returns a recipe-shaped donor synthesized from the strongest cross-model
-    ``KNOB_IMPROVES`` edge for the target ``arch+precision`` (single_top), or
-    ``None`` to fall back to the recipe-KB sibling search. Fully
-    degradation-safe — any failure yields ``None`` and never blocks warm-start.
-
-    Args:
-        architectures: Current model architecture list.
-        precision: Baseline precision (folded into the KG object node).
-        hardware: Hardware condition filter.
-        framework: Framework condition filter.
-        model_type: Target model type (stamped onto the synthesized donor).
-
-    Returns:
-        A recipe-shaped donor row, or ``None`` when KG is unavailable, not in
-        native mode, or carries no usable cross-model knob.
-    """
-    archs = [a for a in (architectures or []) if str(a or "").strip()]
-    if not archs:
-        return None
-    try:
-        from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import (
-            generate_warmstart_donor_graph_guided,
-            get_kg_client,
-        )
-
-        kg = get_kg_client()
-        if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
-            return None
-        donor = generate_warmstart_donor_graph_guided(
-            kg,
-            architectures=archs,
-            precision=precision or "",
-            hardware=hardware or "",
-            framework=framework or "",
-            model_type=model_type or "",
-        )
-        return donor or None
-    except Exception as exc:  # noqa: BLE001 — KG donor is best-effort/advisory
-        log.info("KG-native config donor skipped: %s", exc)
-        return None
-
-
 def _find_config_donor(
     kb: Any,
     *,
@@ -387,8 +333,7 @@ def _find_config_donor(
 
     Used when no donor config has been established yet — the identity match
     may have no replayable best_config, or it may have one at a non-exact
-    tier that failed :func:`_donor_is_trustworthy`, or the KG-native
-    cross-model lookup may have come up empty. The identity row still
+    tier that failed :func:`_donor_is_trustworthy`. The identity row still
     supplies priors, but the active warm-replay needs a champion config to
     apply. Search and compatibility checks match the main T0 cascade:
     same-architecture class, same GPU ISA, then nearest non-newer framework
@@ -481,11 +426,6 @@ def _build_warm_start_context(
     config_donor: Mapping[str, Any] | None = None,
     config_donor_tier: str = "",
     config_donor_confidence: float | None = None,
-    model_architectures: "list[str] | None" = None,
-    hardware: str = "",
-    framework: str = "",
-    precision: str = "",
-    kg_client: Any = None,
 ) -> dict[str, Any]:
     """Build the model-facing WarmStartContext from a KB recipe row.
 
@@ -588,246 +528,7 @@ def _build_warm_start_context(
                 }
             )
             ctx["recommended_replay"] = recommended_replay
-    # KG enhancement (best-effort, degradable).
-    _enhance_warm_start_with_kg(
-        ctx,
-        model_architectures=model_architectures,
-        hardware=hardware,
-        framework=framework,
-        precision=precision,
-        kg_client=kg_client,
-    )
-    if current_remote:
-        # Current replay is owned exclusively by the downloaded section SDKs.
-        ctx["blocked_patches"] = []
-        ctx["advisory_blocked_patches"] = []
     return ctx
-
-
-def _kg_guided_enabled() -> bool:
-    """Return ``True`` when journal-knob graph guidance is enabled.
-
-    Gated by ``GBRAIN_KG_GUIDED`` (default off) so surfacing
-    ``graph_guided_knobs`` from journal-derived ``KNOB_IMPROVES`` edges is a
-    deliberate opt-in. Read-only: it adds a context key and never writes to
-    the KG.
-    """
-    return os.environ.get("GBRAIN_KG_GUIDED", "").strip().lower() in ("1", "true", "yes")
-
-
-def _arch_norm(value: Any) -> str:
-    """Normalize an architecture/entity token to match KG fact slugs.
-
-    Args:
-        value: Raw architecture or entity name.
-
-    Returns:
-        The lowercased slug (spaces/slashes to underscores).
-    """
-    return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
-
-
-def _enhance_warm_start_with_kg(
-    ctx: dict[str, Any],
-    *,
-    model_architectures: "list[str] | None",
-    hardware: str,
-    framework: str,
-    precision: str = "",
-    kg_client: Any = None,
-) -> None:
-    """Augment the warm-start context with knowledge-graph signals.
-
-    Adds, when a KG backend is reachable:
-
-    * ``blocked_patches`` — cross-recipe hard blocks on the same arch
-      (``REVERTED_ON`` / ``DEGRADES`` / ``CRASHES``).
-    * ``advisory_blocked_patches`` — soft blocks inferred from related
-      architectures (decayed confidence), reached via ``USES_ARCH`` /
-      ``VARIANT_OF`` graph traversal.
-    * ``recommended_knobs`` — ``IMPROVES`` candidates for the current
-      arch+hw+fw (minus anything blocked).
-    * ``graph_guided_knobs`` — journal-derived ``KNOB_IMPROVES`` candidates
-      with runnable config (only when ``GBRAIN_KG_GUIDED`` is on).
-    * ``expired`` markers on replay patches whose ``VALID_FOR`` window
-      has lapsed.
-
-    The whole step is wrapped in a degradation guard: any failure leaves
-    ``ctx`` exactly as the warm-start context builder produced it.
-
-    Args:
-        ctx: The warm-start context to mutate in place.
-        model_architectures: The current model's architecture list.
-        hardware: The current hardware/GPU identifier.
-        framework: The current inference framework.
-        precision: Baseline precision, folded into the KG knob object node.
-        kg_client: Optional injected KG client; when ``None`` the env-built
-            singleton from ``get_kg_client()`` is used (enhancement is
-            skipped only when that also returns ``None`` or is unavailable).
-    """
-    archs = [a for a in (model_architectures or []) if str(a or "").strip()]
-    if not archs:
-        return
-    try:
-        kg = kg_client
-        if kg is None:
-            from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
-
-            kg = get_kg_client()
-        if kg is None or not kg.is_available():
-            return
-    except Exception as exc:  # noqa: BLE001 - availability probe must never raise out
-        log.warning("KG warm-start enhancement skipped (unavailable): %s", exc)
-        return
-
-    try:
-        own_arch = {_arch_norm(a) for a in archs}
-        # Architecture-family graph: reach related architectures.
-        related: set[str] = set(own_arch)
-        for arch in archs:
-            for node in kg.graph_traverse_safe(
-                start_entity=arch,
-                predicate_filter=["USES_ARCH", "VARIANT_OF"],
-                max_hops=2,
-                direction="both",
-            ):
-                if node.entity:
-                    related.add(node.entity)
-
-        # Cross-recipe negatives → hard (own arch) vs advisory (related).
-        already_blocked = {
-            _arch_norm(b.get("patch_file")) for b in (ctx.get("blocked_patches") or []) if isinstance(b, dict)
-        }
-        hard: list[dict[str, Any]] = []
-        advisory: list[dict[str, Any]] = []
-        seen_adv: set[str] = set()
-        for fact in kg.query_facts_safe(
-            object=sorted(related),
-            predicate=["REVERTED_ON", "DEGRADES", "CRASHES"],
-            limit=100,
-        ):
-            patch = fact.subject
-            if not patch:
-                continue
-            if fact.object in own_arch:
-                if patch in already_blocked:
-                    continue
-                already_blocked.add(patch)
-                hard.append(
-                    {
-                        "patch_file": patch,
-                        "reason": f"{fact.predicate}: {fact.properties.get('error') or fact.properties.get('reason', '')}",
-                        "confidence": fact.confidence,
-                        "block_type": "hard",
-                        "source": "kg",
-                    }
-                )
-            else:
-                if patch in seen_adv or patch in own_arch:
-                    continue
-                seen_adv.add(patch)
-                advisory.append(
-                    {
-                        "patch_file": patch,
-                        "reason": f"{fact.predicate} on related arch {fact.object}",
-                        "confidence": round(fact.confidence * 0.6, 3),
-                        "block_type": "advisory",
-                        "source": "kg",
-                    }
-                )
-        if hard:
-            ctx.setdefault("blocked_patches", []).extend(hard)
-        if advisory:
-            ctx["advisory_blocked_patches"] = advisory
-
-        # Positive candidates for current arch+hw+fw, minus blocked.
-        conditions: dict[str, Any] = {}
-        if hardware:
-            conditions["hw"] = hardware
-        if framework:
-            conditions["fw"] = framework
-        blocked_now = {_arch_norm(b.get("patch_file")) for b in (ctx.get("blocked_patches") or [])}
-        recommended: list[dict[str, Any]] = []
-        seen_rec: set[str] = set()
-        for fact in kg.query_facts_safe(
-            object=sorted(own_arch),
-            predicate=["IMPROVES"],
-            conditions=conditions or None,
-            limit=50,
-        ):
-            knob = fact.subject
-            if not knob or knob in blocked_now or knob in seen_rec:
-                continue
-            seen_rec.add(knob)
-            recommended.append(
-                {
-                    "knob": knob,
-                    "expected_gain": fact.gain,
-                    "confidence": fact.confidence,
-                    "source": "kg_graph",
-                }
-            )
-        if recommended:
-            recommended.sort(key=lambda r: -(r.get("expected_gain") or 0.0))
-            ctx["recommended_knobs"] = recommended
-
-        # Journal-derived config knobs (KNOB_IMPROVES), behind a flag; ride a
-        # separate ctx key from ``recommended_knobs`` above.
-        if _kg_guided_enabled():
-            from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import generate_knob_candidates_graph_guided
-
-            knobs = generate_knob_candidates_graph_guided(
-                kg,
-                architectures=archs,
-                precision=precision,
-                hardware=hardware,
-                framework=framework,
-                max_variants=8,
-            )
-            if knobs:
-                ctx["graph_guided_knobs"] = knobs
-
-        # Validity check: flag replay patches whose VALID_FOR has lapsed.
-        replay = ctx.get("recommended_replay")
-        if isinstance(replay, Mapping):
-            for patch in replay.get("patches") or []:
-                if not isinstance(patch, dict):
-                    continue
-                pf = patch.get("patch_file") or ""
-                if not pf:
-                    continue
-                for v in kg.query_facts_safe(subject=pf, predicate=["VALID_FOR"], limit=10):
-                    if _validity_expired(v.properties):
-                        patch["expired"] = True
-                        patch["expire_reason"] = f"valid_for {v.properties.get('version', '')}".strip()
-                        break
-    except Exception as exc:  # noqa: BLE001 - enhancement is advisory only
-        log.warning("KG warm-start enhancement degraded: %s", exc)
-
-
-def _validity_expired(props: Mapping[str, Any]) -> bool:
-    """Return ``True`` when a ``VALID_FOR`` fact's ``expires`` date is past.
-
-    Only an explicit ``expires`` ISO date triggers expiry; free-form
-    version ranges are intentionally not parsed here (avoids false
-    positives) and are deferred to the native KG validity engine.
-
-    Args:
-        props: The ``VALID_FOR`` fact's properties.
-
-    Returns:
-        ``True`` when ``expires`` is a past date, else ``False``.
-    """
-    expires = str(props.get("expires") or "").strip()
-    if not expires:
-        return False
-    try:
-        exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if exp.tzinfo is None:
-        exp = exp.replace(tzinfo=timezone.utc)
-    return exp < datetime.now(timezone.utc)
 
 
 def _build_t0_trace_extras(
@@ -1518,31 +1219,6 @@ def run_t0_anchor(
         config_donor = warm_point
         config_donor_tier = "self"
         config_donor_conf = warm_conf
-    # KG-native cross-model donor (automatic locally, GBRAIN_KG_NATIVE-gated
-    # remotely): prefer the strongest edge; degrade to recipe-KB search.
-    if config_donor is None and warm_point and not current_remote_point:
-        kg_donor = _kg_native_config_donor(
-            architectures=_architectures_val if isinstance(_architectures_val, list) else None,
-            precision=_precision or "",
-            hardware=hw,
-            framework=_framework or "",
-            model_type=_model_type_val,
-        )
-        if kg_donor is not None:
-            if _donor_is_trustworthy(
-                kg_donor,
-                target_arch_slug=_arch_slug,
-                target_model_type=_model_type_val,
-                target_conc=_tgt_conc,
-                target_isl=_tgt_isl,
-                target_osl=_tgt_osl,
-            ):
-                config_donor = kg_donor
-                config_donor_tier = "kg_cross_model"
-                try:
-                    config_donor_conf = float(kg_donor.get("confidence"))
-                except (TypeError, ValueError):
-                    config_donor_conf = 0.0
     if config_donor is None and warm_point and not current_remote_point:
         donor, dtier, dconf = _find_config_donor(
             kb,
@@ -1615,10 +1291,6 @@ def run_t0_anchor(
             canonical_id=cid,
             source=warm_source,
             recipe=warm_point or None,
-            model_architectures=_architectures_val if isinstance(_architectures_val, list) else None,
-            hardware=hw,
-            framework=_framework or "",
-            precision=_precision or "",
         )
     except Exception:  # noqa: BLE001 — defensive; context is advisory
         log.exception("warm_start_context build failed")

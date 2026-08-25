@@ -56,7 +56,7 @@ def test_collect_enablement_build_manifest_surfaced():
                 "aiter_sha": "abc1234",
                 "arch": "gfx950",
             },
-            "built_artifacts": ["/s/enablement/builds/t1/module_aiter_core.so"],
+            "build_probes": ["import aiter: ok"],
             "build_log_path": "/s/enablement/builds/t1/build.log",
         }
     ]
@@ -93,7 +93,7 @@ def test_collect_enablement_routing_sentinels_excluded():
             "failure_summary": "x",
             "attempt_root": "/a",
             "installed_versions": {},
-            "built_artifacts": [],
+            "build_probes": [],
         },
     ]
     out = collect_enablement(Path("/tmp"), _state(enablement_build_manifest=manifest), [])
@@ -109,7 +109,7 @@ def test_collect_enablement_multiple_attempts():
             "failure_summary": "t1",
             "attempt_root": "/a1",
             "installed_versions": {},
-            "built_artifacts": [],
+            "build_probes": [],
             "action": {"component": "aiter", "ref": "v0.1.0", "gpu_arch": "gfx950"},
         },
         {
@@ -118,7 +118,7 @@ def test_collect_enablement_multiple_attempts():
             "failure_summary": "",
             "attempt_root": "/a2",
             "installed_versions": {"aiter_ref": "v0.2.0", "arch": "gfx950"},
-            "built_artifacts": ["/a2/lib.so"],
+            "build_probes": ["import aiter: ok"],
             "action": {"component": "aiter"},
         },
     ]
@@ -136,7 +136,7 @@ def test_collect_enablement_vllm_ref_surfaced():
             "failure_summary": "",
             "attempt_root": "/a",
             "installed_versions": {"vllm_ref": "v0.19.0", "arch": "gfx950"},
-            "built_artifacts": ["/a/vllm/_C.so"],
+            "build_probes": ["import vllm: ok"],
             "build_log_path": "/a/build.log",
         }
     ]
@@ -168,7 +168,7 @@ def test_collect_enablement_combined_rung3_and_rung5():
                     "failure_summary": "fp4_moe missing",
                     "attempt_root": "/b",
                     "installed_versions": {},
-                    "built_artifacts": [],
+                    "build_probes": [],
                 }
             ],
             enablement_last_build_failure={"failure_class": "symbol_missing", "failure_summary": "fp4_moe missing"},

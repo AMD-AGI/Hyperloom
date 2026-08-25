@@ -44,8 +44,6 @@ class KnowledgeConfig:
     local_root: str
     kb_store_url: str = ""
     kb_store_token: str = ""
-    gbrain_base_url: str = ""
-    gbrain_token: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "KnowledgeConfig":
@@ -64,8 +62,6 @@ class KnowledgeConfig:
         )
         kb_store_url = str(source.get("KB_STORE_URL") or "").strip()
         kb_store_token = str(source.get("KB_STORE_TOKEN") or "").strip()
-        gbrain_base_url = str(source.get("GBRAIN_BASE_URL") or "").strip()
-        gbrain_token = str(source.get("GBRAIN_TOKEN") or "").strip()
         if mode is KnowledgeStoreMode.REMOTE:
             missing = [
                 name
@@ -82,10 +78,6 @@ class KnowledgeConfig:
             local_root=local_root,
             kb_store_url=kb_store_url if mode is KnowledgeStoreMode.REMOTE else "",
             kb_store_token=kb_store_token if mode is KnowledgeStoreMode.REMOTE else "",
-            # GBrain is no longer a Recipe backend. Keep its optional
-            # credentials available for KG and Framework PR integrations.
-            gbrain_base_url=gbrain_base_url,
-            gbrain_token=gbrain_token,
         )
 
     @property
@@ -105,8 +97,7 @@ class KnowledgeConfig:
         else:
             env.pop("KB_STORE_URL", None)
             env.pop("KB_STORE_TOKEN", None)
-        # Rewrite knowledge is owned by KB Store. Legacy GBrain credentials
-        # remain available to Hyperloom's own KG/Framework integrations but
+        # GBrain credentials are used by the Framework PR client but must
         # never cross into the KernelForge child.
         env.pop("GBRAIN_BASE_URL", None)
         env.pop("GBRAIN_TOKEN", None)

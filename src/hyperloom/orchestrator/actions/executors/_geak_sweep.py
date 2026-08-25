@@ -209,7 +209,7 @@ async def sweep_via_geak(
             err: str | None = None
             try:
                 proc = await asyncio.to_thread(_run)
-                summ = read_json(out_dir / "bench_summary.json", default={})
+                summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
                 tput = summ.get("output_throughput_tok_s_median")
                 ttft = summ.get("ttft_ms_median")
                 tpot = summ.get("tpot_ms_median")

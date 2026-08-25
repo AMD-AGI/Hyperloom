@@ -33,10 +33,6 @@ from .decision.rca_engine import (
     RcaThrottleConfig,
 )
 from .role.findings import FindingSink, FindingSinkConfig
-from .role.postmortem import (
-    PostmortemFinalizer,
-    PostmortemFinalizerConfig,
-)
 from .role.reactor import Reactor, ReactorComponents
 from .state_store import DetectorStateStore
 from .signals import Classifier, SymptomSeverity
@@ -142,7 +138,6 @@ def _build_local_probe_config(config: Config) -> LocalProbeConfig:
         max_extra_server_logs=config.server_log_max_extra,
         state_integrity_enabled=config.state_integrity_enabled,
         external_deps_enabled=config.external_deps_enabled,
-        external_mount_stat_timeout_s=(config.external_mount_stat_timeout_s),
         external_gateway_probe_url=config.external_gateway_probe_url,
     )
 
@@ -172,24 +167,11 @@ def build_reactor_components(
         the caller must manage.
     """
     # Multi-node guard: the probe only sees its own pod, so it is disabled there.
-    primary: Source
-    if config.disable_local_probe:
-        primary = _QuietSource(
-            name="local-probe",
-            reason="local-probe disabled: config.disable_local_probe is True",
-        )
-    else:
-        primary = LocalProbeSource(_build_local_probe_config(config))
-
-    # LocalProbe raises when every sub-probe is empty; degrade to silence.
-    fallback: Source = _QuietSource(
-        name="quiet-fallback",
-        reason="local probe produced no data",
+    source: Source = (
+        _BlindSource() if config.disable_local_probe else LocalProbeSource(_build_local_probe_config(config))
     )
-
     router = DegradeRouter(
-        primary,
-        fallback,
+        source,
         fail_threshold=config.source_fail_threshold,
         recheck_interval_s=config.source_recheck_interval_s,
     )
@@ -281,7 +263,6 @@ def build_reactor_components(
         "state_integrity": StateIntegrityConfig(
             wal_bytes_warn_threshold=config.state_wal_bytes_warn_threshold,
             wal_bytes_critical_threshold=(config.state_wal_bytes_critical_threshold),
-            stale_lease_min_age_s=config.state_stale_lease_min_age_s,
             inbox_bloat_warn_bytes=config.state_inbox_bloat_warn_bytes,
             inbox_bloat_critical_bytes=(config.state_inbox_bloat_critical_bytes),
         ),
@@ -315,20 +296,6 @@ def build_reactor_components(
         )
     )
 
-    finalizer = (
-        PostmortemFinalizer(
-            session_dir=config.session_dir,
-            session_id=sink_session_id,
-            config=PostmortemFinalizerConfig(
-                reports_subdir=config.finalize_reports_subdir,
-                max_findings_in_report=config.finalize_max_findings_in_report,
-                max_tasks_per_action=config.finalize_max_tasks_per_action,
-            ),
-        )
-        if config.finalize_enabled
-        else None
-    )
-
     components = ReactorComponents(
         router=router,
         classifier=classifier,
@@ -336,7 +303,6 @@ def build_reactor_components(
         policy=PolicyAware(),
         sink=sink,
         rca=rca_engine,
-        finalizer=finalizer,
         state_store=state_store,
     )
     return ReactorBundle(
@@ -440,34 +406,26 @@ def _parse_severity(value: str) -> SymptomSeverity:
 
 
 @dataclass
-class _QuietSource:
-    """Source that collects nothing, carrying its reason for saying so.
+class _BlindSource:
+    """Stands in for the local probe when it is disabled.
 
-    Returns empty :class:`SourceData` rather than raising, so probe-derived
-    rules see "no data" and stay quiet instead of failing the tick. The reason
-    stays visible via ``degraded_reason``.
+    Never raises, so the router stays HEALTHY rather than reporting a degrade
+    that a deliberately disabled probe did not suffer.
     """
 
-    name: str
-    reason: str
+    name: str = "local-probe-disabled"
 
     async def fetch(self, ctx: Any) -> SourceData:  # noqa: ARG002 - protocol
-        """Return empty source data annotated with this source's reason.
+        """Return empty data with process visibility marked unknown.
 
         Args:
-            ctx: Fetch context supplied by the source protocol; unused because
-                this source never collects data.
+            ctx: Fetch context; unused because this source never collects data.
 
         Returns:
-            A :class:`SourceData` with no signals and a ``degraded_reason``.
+            A :class:`SourceData` with no signals and
+            ``local_processes_known=False``.
         """
-        return SourceData(
-            degraded_reason=self.reason,
-            # Nothing looked: an empty process list here is ignorance, not
-            # evidence that no server is running.
-            local_processes_known=False,
-            sources_used=[self.name],
-        )
+        return SourceData(local_processes_known=False)
 
 
 __all__ = [

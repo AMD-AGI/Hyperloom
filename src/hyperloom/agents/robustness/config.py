@@ -230,24 +230,15 @@ class Config:
     state_integrity_enabled: bool = True
     state_wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     state_wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
-    state_stale_lease_min_age_s: float = 60.0
     state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
     # -- external-deps signals --
     # Disable for hosts that audit gateway / mounts externally.
     external_deps_enabled: bool = True
-    external_mount_stat_timeout_s: float = 5.0
     external_gateway_probe_url: str = ""  # empty → derive from OPENAI_BASE_URL
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0
-
-    # -- postmortem finalizer --
-    # False disables the flashpoint + decision_trace writers.
-    finalize_enabled: bool = True
-    finalize_reports_subdir: str = "reports"
-    finalize_max_findings_in_report: int = 20
-    finalize_max_tasks_per_action: int = 50
 
     # -- phase budget / conversation progress signals --
     phase_budget_warn_used_pct: float = 90.0

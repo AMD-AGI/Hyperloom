@@ -22,6 +22,7 @@ logical ``0..N-1`` view Ray exposes instead). Off the Ray path (multi-node /
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ from datetime import datetime, timezone
 from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
+
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
@@ -77,6 +81,23 @@ def _parse_gpu_list(raw: str) -> list[int]:
     return out
 
 
+def _explicit_pool() -> list[int] | None:
+    """Resolve the operator's explicit GPU pool, or ``None`` when unset.
+
+    An unset or blank value is treated as absent so the caller falls back to
+    the visible-device mask. A non-blank value that parses to no valid ids is
+    treated as a misconfiguration and fails closed rather than widening to the
+    pool the operator intended to override.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
+    if raw is None or not raw.strip():
+        return None
+    ids = _parse_gpu_list(raw)
+    if not ids:
+        log.error("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES=%r has no valid GPU ids", raw)
+    return ids
+
+
 def _visible_device_mask() -> tuple[list[int], bool]:
     """Resolve the process's visible-GPU mask as absolute device ids.
 
@@ -109,7 +130,8 @@ def resolve_gpu_specialist_devices(
     1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool,
        capped to ``capacity``. The operator has already carved a
        specialist-only set here, so it is trusted verbatim and the serving
-       cards are *not* subtracted again.
+       cards are *not* subtracted again. Set but unparseable yields ``[]``
+       rather than falling through to the wider pool it was meant to override.
     2. The process visible-device mask (``ROCR_VISIBLE_DEVICES``, then
        ``HIP``/``CUDA``), serving cards carved off the front, capped to
        ``capacity``. The leased ids are written verbatim into each specialist
@@ -144,8 +166,8 @@ def resolve_gpu_specialist_devices(
     cap = max(0, int(capacity or 0))
     if cap <= 0:
         return []
-    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
-    if explicit:
+    explicit = _explicit_pool()
+    if explicit is not None:
         return explicit[:cap]
     serving = max(0, int(serving_tp or 0))
     mask_ids, mask_present = _visible_device_mask()
@@ -166,7 +188,7 @@ def resolve_whole_machine_devices() -> list[int]:
     Id-source precedence mirrors :func:`resolve_gpu_specialist_devices`:
 
     1. ``INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES`` — explicit operator pool
-       (used verbatim, uncapped here).
+       (used verbatim, uncapped here); set but unparseable yields ``[]``.
     2. The process visible-device mask (``ROCR_VISIBLE_DEVICES`` →
        ``HIP``/``CUDA``) — used verbatim.
     3. No mask set → ``range(detect_gpu_count())`` (the machine's detected GPU
@@ -176,8 +198,8 @@ def resolve_whole_machine_devices() -> list[int]:
         The absolute GPU ids available to a framework whole-machine lease;
         ``[]`` when the mask is set-but-empty or nothing can be resolved.
     """
-    explicit = _parse_gpu_list(os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", ""))
-    if explicit:
+    explicit = _explicit_pool()
+    if explicit is not None:
         return explicit
     mask_ids, mask_present = _visible_device_mask()
     if mask_present:
@@ -239,6 +261,9 @@ class SpecialistGpuPool:
     ) -> GpuLease | None:
         """Acquire ``count`` GPU ids or return ``None`` if the pool is full.
 
+        Same holder_id + task_id is idempotent: a live lease is returned as-is
+        (with its TTL refreshed) rather than allocating additional GPUs.
+
         Args:
             count: Number of GPU ids to acquire.
             holder_id: Identifier of the lease holder.
@@ -265,6 +290,36 @@ class SpecialistGpuPool:
                 "DELETE FROM gpu_leases WHERE expires_at <= ?",
                 (now_iso,),
             )
+            # Same-holder/task acquire is idempotent when the existing lease
+            # already satisfies the request: same count and every id still in
+            # this pool. If either condition fails the old lease is stale and is
+            # released so the request can be satisfied from the current pool.
+            cur.execute(
+                "SELECT gpu_id, acquired_at FROM gpu_leases WHERE holder_id=? AND task_id=?",
+                (holder_id, task_id),
+            )
+            existing_rows = cur.fetchall()
+            if existing_rows:
+                existing_ids = tuple(int(r["gpu_id"]) for r in existing_rows)
+                pool_set = set(self.gpu_ids)
+                if len(existing_ids) == n and set(existing_ids) <= pool_set:
+                    acquired_at = existing_rows[0]["acquired_at"]
+                    cur.execute(
+                        "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE holder_id=? AND task_id=?",
+                        (expires_iso, now_iso, holder_id, task_id),
+                    )
+                    return GpuLease(
+                        holder_id=holder_id,
+                        task_id=task_id,
+                        gpu_ids=existing_ids,
+                        acquired_at=acquired_at,
+                        expires_at=expires_iso,
+                    )
+                # Stale lease — release it and fall through to a fresh acquire.
+                cur.execute(
+                    "DELETE FROM gpu_leases WHERE holder_id=? AND task_id=?",
+                    (holder_id, task_id),
+                )
             placeholders = ",".join("?" * len(self.gpu_ids))
             cur.execute(  # nosec B608 - placeholders string is generated from configured GPU id count.
                 f"SELECT gpu_id FROM gpu_leases WHERE gpu_id IN ({placeholders})",  # nosec B608 - generated placeholders only.

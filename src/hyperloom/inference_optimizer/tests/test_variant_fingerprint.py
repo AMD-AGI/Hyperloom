@@ -91,6 +91,30 @@ def test_fingerprint_unbalanced_quotes_does_not_crash() -> None:
     assert fp1 == fp2
 
 
+def test_fingerprint_value_swap_differs() -> None:
+    """Swapping values across different flags must produce distinct fingerprints.
+
+    The flat-token sort bug caused --max-num-seqs 128 --max-model-len 4096 to
+    collide with --max-num-seqs 4096 --max-model-len 128 because both produce
+    the same sorted token list. Pair-aware hashing preserves the flag->value
+    binding.
+    """
+    fp_a = canonical_fingerprint("--max-num-seqs 128 --max-model-len 4096", {})
+    fp_b = canonical_fingerprint("--max-num-seqs 4096 --max-model-len 128", {})
+    assert fp_a != fp_b
+
+    fp_c = canonical_fingerprint("--kv-cache-dtype fp8 --block-size 16", {})
+    fp_d = canonical_fingerprint("--kv-cache-dtype 16 --block-size fp8", {})
+    assert fp_c != fp_d
+
+
+def test_fingerprint_last_wins_for_repeated_flag() -> None:
+    """A repeated flag collapses to its last occurrence."""
+    fp_repeat = canonical_fingerprint("--max-num-seqs 128 --max-num-seqs 256", {})
+    fp_last = canonical_fingerprint("--max-num-seqs 256", {})
+    assert fp_repeat == fp_last
+
+
 def test_variant_result_fingerprint_matches_grid_variant() -> None:
     args = "--block-size 128 --foo bar"
     envs = {"NCCL_ALGO": "Ring", "TP": "8"}
@@ -143,3 +167,24 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
     assert es["rejected"] == []
     assert "winners_history" in es
     assert "synergy_attempted" in es
+
+
+def test_fingerprint_single_dash_flag_differs_from_missing_value() -> None:
+    """-x 1 -y 1 and -x 1 -y must hash differently: one flag has a value, the other does not."""
+    fp_with = canonical_fingerprint("-x 1 -y 1", {})
+    fp_without = canonical_fingerprint("-x 1 -y", {})
+    assert fp_with != fp_without
+
+
+def test_fingerprint_single_dash_flag_order_independent() -> None:
+    """-x 1 -y 2 and -y 2 -x 1 must collide: same bindings, different order."""
+    fp1 = canonical_fingerprint("-x 1 -y 2", {})
+    fp2 = canonical_fingerprint("-y 2 -x 1", {})
+    assert fp1 == fp2
+
+
+def test_fingerprint_negative_number_is_value_not_flag() -> None:
+    """A token like -1 is a numeric value, not a flag, and must not cause collisions."""
+    fp_flag = canonical_fingerprint("-k -1", {})
+    fp_val = canonical_fingerprint("-1 -k", {})
+    assert fp_flag != fp_val

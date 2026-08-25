@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""State-integrity signals (I1-I5).
+"""State-integrity signals (I1-I4).
 
-Five detectors guard the session files Coordinator relies on and the
+Four detectors guard the session files Coordinator relies on and the
 process it runs as:
 
 * **I1 ``state_json_corrupt``** — ``state.json`` failed to parse or
@@ -11,11 +11,9 @@ process it runs as:
   baseline / current_best / explore_search ledgers.
 * **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` past the
   size threshold (default 1 GiB); un-checkpointed WAL tanks SQLite I/O.
-* **I3 ``stale_lease``** — a ``leases`` row held by a dead PID, freezing
-  every downstream proposal on that lane.
-* **I4 ``inbox_bloat``** — a role's ``inbox/outbox.jsonl`` past the
+* **I3 ``inbox_bloat``** — a role's ``inbox/outbox.jsonl`` past the
   threshold; per-tick JSONL parsing slows then agent backends time out.
-* **I5 ``coordinator_zombie``** — recorded PID dead but ``state.json``
+* **I4 ``coordinator_zombie``** — recorded PID dead but ``state.json``
   has no ``stop_reason``; HIGH, operator must restart manually.
 """
 
@@ -23,8 +21,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-
-from hyperloom.common.coerce import to_unix
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
@@ -38,9 +34,7 @@ class StateIntegrityConfig:
     # I2 — WAL size warn/crit.
     wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
-    # I3 — min stale-lease age before firing.
-    stale_lease_min_age_s: float = 60.0
-    # I4 — agent-file thresholds.
+    # I3 — agent-file thresholds.
     inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
@@ -51,10 +45,11 @@ def evaluate_state_integrity_signals(
     *,
     config: StateIntegrityConfig | None = None,
 ) -> list[Symptom]:
-    """Run the I1-I5 state-integrity rules and aggregate their symptoms.
+    """Run the I1-I4 state-integrity rules and aggregate their symptoms.
 
     Args:
-        ctx (ReactorContext): Reactor context for the current tick.
+        ctx (ReactorContext): Unused; required by the classifier's evaluator
+            signature.
         data (SourceData): Collected source data including
             ``local_state_integrity``.
         config (StateIntegrityConfig | None): Tunables; defaults to
@@ -71,7 +66,6 @@ def evaluate_state_integrity_signals(
     out: list[Symptom] = []
     out.extend(_state_json_symptoms(si))
     out.extend(_wal_bloat_symptoms(si, cfg))
-    out.extend(_stale_lease_symptoms(ctx, si, cfg))
     out.extend(_inbox_bloat_symptoms(si, cfg))
     out.extend(_coordinator_zombie_symptoms(si))
     return out
@@ -85,7 +79,7 @@ def evaluate_state_integrity_signals(
 def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
     """I1: fire ``state_json_corrupt`` when ``state.json`` is unreadable.
 
-    Stays silent for a merely-absent file (normal on tick 0); I5 covers the
+    Stays silent for a merely-absent file (normal on tick 0); I4 covers the
     "should exist but the run died" case.
 
     Args:
@@ -101,7 +95,7 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
     if state.get("valid"):
         return []
     error = str(state.get("error") or "unknown")
-    # "missing" is normal pre-first-persist; stay silent (I5 covers the
+    # "missing" is normal pre-first-persist; stay silent (I4 covers the
     # should-exist-but-died case).
     if error == "missing":
         return []
@@ -190,70 +184,7 @@ def _wal_bloat_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# I3 — stale leases (holder PID dead but lease not released)
-# ---------------------------------------------------------------------------
-
-
-def _stale_lease_symptoms(
-    ctx: ReactorContext,
-    si: dict[str, Any],
-    cfg: StateIntegrityConfig,
-) -> list[Symptom]:
-    """I3: fire ``stale_lease`` for leases held by dead PIDs past the min age.
-
-    Args:
-        ctx (ReactorContext): Reactor context (provides the current unix time).
-        si (dict[str, Any]): The state-integrity probe sample.
-        cfg (StateIntegrityConfig): Tunables (provides the minimum stale age).
-
-    Returns:
-        list[Symptom]: One ``stale_lease`` symptom per stale lease, possibly
-            empty.
-    """
-    leases = si.get("leases")
-    if not isinstance(leases, list) or not leases:
-        return []
-    now = float(ctx.now_unix or 0.0)
-    out: list[Symptom] = []
-    for entry in leases:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("alive") is not False:
-            continue
-        # Skip recently-acquired leases; coerce unix-seconds or ISO
-        # ``acquired_at``.
-        acquired_unix = to_unix(entry.get("acquired_at"))
-        age_s = (now - acquired_unix) if acquired_unix is not None and now > 0 else cfg.stale_lease_min_age_s + 1.0
-        if age_s < cfg.stale_lease_min_age_s:
-            continue
-        task_id = str(entry.get("task_id") or "unknown")
-        out.append(
-            Symptom(
-                name="stale_lease",
-                severity=SymptomSeverity.HIGH,
-                summary=(
-                    f"lease for task_id={task_id!r} on lane={entry.get('lane')!r} "
-                    f"is held by dead pid={entry.get('holder_pid')!r}; "
-                    f"downstream proposals on the same lane are blocked"
-                ),
-                evidence={
-                    "task_id": task_id,
-                    "holder_pid": entry.get("holder_pid"),
-                    "lane": entry.get("lane"),
-                    "acquired_at": entry.get("acquired_at"),
-                    "age_s": round(age_s, 2),
-                    "stale_lease_min_age_s": cfg.stale_lease_min_age_s,
-                },
-                subject={"task_id": task_id},
-                source="local",
-                suggestion="no action needed; the dispatcher reaps dead lease holders every tick",
-            )
-        )
-    return out
-
-
-# ---------------------------------------------------------------------------
-# I4 — inbox / outbox bloat
+# I3 — inbox / outbox bloat
 # ---------------------------------------------------------------------------
 
 
@@ -261,7 +192,7 @@ def _inbox_bloat_symptoms(
     si: dict[str, Any],
     cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
-    """I4: fire ``inbox_bloat`` for agent inbox/outbox files over threshold.
+    """I3: fire ``inbox_bloat`` for agent inbox/outbox files over threshold.
 
     Args:
         si (dict[str, Any]): The state-integrity probe sample.
@@ -318,12 +249,12 @@ def _inbox_bloat_symptoms(
 
 
 # ---------------------------------------------------------------------------
-# I5 — coordinator zombie (PID dead but state.json says running)
+# I4 — coordinator zombie (PID dead but state.json says running)
 # ---------------------------------------------------------------------------
 
 
 def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
-    """I5: fire ``coordinator_zombie`` when the PID is dead but no stop reason.
+    """I4: fire ``coordinator_zombie`` when the PID is dead but no stop reason.
 
     Args:
         si (dict[str, Any]): The state-integrity probe sample.

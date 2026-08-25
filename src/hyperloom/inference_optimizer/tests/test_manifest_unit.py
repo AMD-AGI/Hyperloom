@@ -62,9 +62,10 @@ def test_git_remote_at(monkeypatch):
 
 
 # ---- path containment + dependency escape warning -------------------------
-def test_path_is_relative_to(tmp_path):
-    assert mf._path_is_relative_to(tmp_path / "a", tmp_path) is True
-    assert mf._path_is_relative_to(Path("/etc"), tmp_path) is False
+def test_is_path_within(tmp_path):
+    assert mf._paths.is_path_within(tmp_path / "a", tmp_path) is True
+    assert mf._paths.is_path_within(Path("/etc"), tmp_path) is False
+    assert mf._paths.is_path_within(tmp_path / ".." / "elsewhere", tmp_path) is False
 
 
 def test_warn_if_dependency_escapes_no_user_data(monkeypatch):

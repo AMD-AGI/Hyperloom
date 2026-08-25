@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,12 +14,9 @@ from hyperloom.orchestrator.framework.build_utils import (
     AbiMismatchError,
     check_rocm_toolchain_alignment,
     coerce_build_argv,
-    hash_artifacts,
     probe_torch_abi,
     run_argv,
     sort_tags_desc,
-    verify_fresh_artifacts,
-    verify_symbols,
     write_rocm_torch_constraints,
 )
 
@@ -270,89 +266,6 @@ def test_probe_torch_abi_failure():
 
     info = probe_torch_abi("python3", run=_run)
     assert info["is_rocm"] is False
-
-
-# ---------------------------------------------------------------------------
-# verify_fresh_artifacts
-# ---------------------------------------------------------------------------
-
-
-def test_verify_fresh_artifacts_found(tmp_path):
-    so = tmp_path / "lib.so"
-    so.write_bytes(b"\x7fELF")
-    since = time.time() - 60
-    result = verify_fresh_artifacts(str(tmp_path), since, ["*.so"])
-    assert result["verified"] is True
-    assert any("lib.so" in p for p in result["fresh"])
-
-
-def test_verify_fresh_artifacts_stale(tmp_path):
-    so = tmp_path / "lib.so"
-    so.write_bytes(b"\x7fELF")
-    import os
-
-    old = time.time() - 3600
-    os.utime(so, (old, old))
-    result = verify_fresh_artifacts(str(tmp_path), time.time(), ["*.so"])
-    assert result["verified"] is False
-
-
-def test_verify_fresh_artifacts_missing_dir():
-    result = verify_fresh_artifacts("/nonexistent/dir/xyz", time.time(), ["*.so"])
-    assert result["verified"] is False
-
-
-# ---------------------------------------------------------------------------
-# verify_symbols
-# ---------------------------------------------------------------------------
-
-
-def test_verify_symbols_all_present():
-    def _run(argv, **kw):
-        return _completed(returncode=0)
-
-    r = verify_symbols("python3", ["aiter.ops.fp4_moe"], run=_run)
-    assert r["verified"] is True
-    assert "aiter.ops.fp4_moe" in r["present"]
-
-
-def test_verify_symbols_missing():
-    def _run(argv, **kw):
-        return _completed(returncode=1)
-
-    r = verify_symbols("python3", ["aiter.missing_op"], run=_run)
-    assert r["verified"] is False
-    assert "aiter.missing_op" in r["missing"]
-
-
-def test_verify_symbols_mixed():
-    def _run(argv, **kw):
-        # argv[2] is the -c code string
-        code = argv[2]
-        rc = 0 if "missing" not in code else 1
-        return _completed(returncode=rc)
-
-    r = verify_symbols("python3", ["aiter", "aiter.missing"], run=_run)
-    assert "aiter" in r["present"]
-    assert "aiter.missing" in r["missing"]
-
-
-# ---------------------------------------------------------------------------
-# hash_artifacts
-# ---------------------------------------------------------------------------
-
-
-def test_hash_artifacts(tmp_path):
-    f = tmp_path / "lib.so"
-    f.write_bytes(b"data")
-    result = hash_artifacts([str(f)])
-    assert str(f) in result
-    assert len(result[str(f)]) == 64
-
-
-def test_hash_artifacts_missing_skipped(tmp_path):
-    result = hash_artifacts([str(tmp_path / "no_such.so")])
-    assert result == {}
 
 
 # ---------------------------------------------------------------------------

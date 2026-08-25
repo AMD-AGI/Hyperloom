@@ -576,10 +576,6 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
     if add.returncode != 0:
         raise _WorktreePreparationError("git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip()))
 
-    # Local git identity so IterationLoop commit/revert works.
-    _run_git(["-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
-    _run_git(["-C", str(wt), "config", "user.email", "forge-bot@local"], timeout=30)
-
     return str(wt), str(wt / rel), base_commit
 
 
@@ -1080,8 +1076,6 @@ def _prepare_inplace(
             backup = Path(source_file).read_bytes()
         except OSError:
             return _skip()
-        _run_git(["-C", repo, "config", "user.name", "forge-bot"], timeout=30)
-        _run_git(["-C", repo, "config", "user.email", "forge-bot@local"], timeout=30)
         # Create a temp branch for the forge loop to commit/revert on (deleted
         # in _restore_inplace).
         cb = _run_git(["-C", repo, "checkout", "-b", branch], timeout=60)
@@ -1094,7 +1088,20 @@ def _prepare_inplace(
         _run_git(["-C", repo, "add", "-u"], timeout=60)
         dirty = _run_git(["-C", repo, "diff", "--cached", "--quiet"], timeout=30)
         if dirty.returncode != 0:
-            _run_git(["-C", repo, "commit", "-m", "forge: pre-existing dirty baseline"], timeout=60)
+            _run_git(
+                [
+                    "-C",
+                    repo,
+                    "-c",
+                    "user.name=forge-bot",
+                    "-c",
+                    "user.email=forge-bot@local",
+                    "commit",
+                    "-m",
+                    "forge: pre-existing dirty baseline",
+                ],
+                timeout=60,
+            )
             base_commit = _run_git(["-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip() or orig_head
         else:
             base_commit = orig_head
@@ -2785,6 +2792,11 @@ def _run_loop_via_cli(
     _apply_gpu_type_env(env, gpu_type)
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
+    # Identity for the commits the loop makes, so no repo .git/config is touched.
+    env.setdefault("GIT_AUTHOR_NAME", "forge-bot")
+    env.setdefault("GIT_AUTHOR_EMAIL", "forge-bot@local")
+    env.setdefault("GIT_COMMITTER_NAME", "forge-bot")
+    env.setdefault("GIT_COMMITTER_EMAIL", "forge-bot@local")
     # KernelForge owns content-addressed AITER cache invalidation. Do not set
     # AITER_REBUILD globally: cpp_itfs interprets it by deleting the whole build
     # tree on every driver-process import, causing repeated attention rebuilds.
@@ -3472,6 +3484,11 @@ def _finalize_forge_workspace(
     directory moves the producer's published bundle with it, so its artifact paths
     are repointed rather than left naming a directory this just emptied.
     """
+    # --git-common-dir resolves to the live repo even from a linked worktree, so
+    # the exclude entry outlives a worktree run unless it is removed here too.
+    if not nogit_scratch:
+        _restore_generated_driver_exclude(Path(workspace))
+
     if inplace:
         cleanup_errors: list[str] = []
         campaign_root = Path(workspace) / "forge_experiments"
@@ -3521,7 +3538,6 @@ def _finalize_forge_workspace(
                 pass  # already gone -- nothing to clean up
             except OSError as error:
                 cleanup_errors.append(f"failed to remove generated in-place driver: {error}")
-        _restore_generated_driver_exclude(Path(workspace))
         workspace_root = Path(workspace).resolve()
         for raw in temporary_paths or []:
             declared = Path(str(raw))

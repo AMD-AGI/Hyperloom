@@ -438,3 +438,88 @@ def test_invocation_renders_framework_args_source() -> None:
     assert "### Invocation" in md
     assert "yaml_cmd" in md, md
     assert "**source**" in md, md
+
+
+# ---- one bad section must not cost the report ------------------------------
+@pytest.fixture
+def restore_registry():
+    """Undo renderer registrations made inside a test."""
+    saved = list(REGISTRY)
+    yield
+    REGISTRY[:] = saved
+
+
+def test_a_raising_renderer_does_not_lose_the_other_sections(restore_registry) -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
+
+    @register_renderer("session")
+    def _boom(_breakdown):  # noqa: ANN001, ANN202
+        raise TypeError("drifted shape")
+
+    r = render_session_report(_fixture_breakdown())
+
+    assert r.markdown
+    assert "## Performance Results" in r.markdown
+    broken = next(s for s in r.sections if s.section_id == "session")
+    assert broken.warnings == ["section could not be rendered: TypeError: drifted shape"]
+    assert len(r.sections) == len(REGISTRY)
+
+
+def test_a_renderer_failure_is_reported_not_swallowed(restore_registry) -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters.base import register_renderer
+
+    @register_renderer("baseline")
+    def _boom(_breakdown):  # noqa: ANN001, ANN202
+        raise ValueError("bad row")
+
+    r = render_session_report(_fixture_breakdown())
+
+    assert any("[baseline] section could not be rendered" in f for f in r.global_facts.data_quality_flags)
+    assert "section could not be rendered: ValueError: bad row" in r.markdown
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["session", "workload", "baseline", "final", "attribution", "kernel_lifecycle", "capability_summary"],
+)
+def test_a_section_that_drifted_to_a_string_still_yields_a_report(section: str) -> None:
+    """Producers are not schema-checked, so a drifted shape must cost one section."""
+    r = render_session_report({"session": {"session_id": "s"}, section: "drifted"})
+
+    assert r.markdown.startswith("# Hyperloom Session Report")
+
+
+def test_every_section_drifting_at_once_still_yields_a_report() -> None:
+    bd = {sid: "drifted" for sid, _ in REGISTRY}
+    bd["session"] = "drifted"
+
+    r = render_session_report(bd)
+
+    assert r.markdown.startswith("# Hyperloom Session Report")
+    assert r.global_facts.kernel_pipeline_funnel["detected"] == 0
+
+
+def test_a_drifted_section_yields_neutral_facts() -> None:
+    r = render_session_report(
+        {
+            "session": {"session_id": "s", "stop_reason": "target_reached"},
+            "kernel_lifecycle": ["not", "a", "dict"],
+        }
+    )
+
+    facts = r.global_facts
+    assert facts.kernel_pipeline_funnel["detected"] == 0
+    # Facts that do not depend on the drifted section keep their values.
+    assert facts.stop_reason == "target_reached"
+
+
+def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
+    r = render_session_report(
+        {
+            "session": {"session_id": "s"},
+            "baseline": {"throughput_tok_s_per_gpu": "2205"},
+            "final": {"throughput_tok_s_per_gpu": "2447", "cumulative_gain_pct_validated": "10.99"},
+        }
+    )
+
+    assert "+10.99% validated gain" in r.global_facts.headline

@@ -17,6 +17,7 @@ from typing import Any
 
 from hyperloom.common.jsonio import read_json
 
+from ...session.paths import is_path_within
 from ._common import (
     _rel,
     _to_float,
@@ -648,14 +649,12 @@ def _geak_reconstruct_from_disk(
         return None
 
     def _load_json(p: Path) -> dict[str, Any]:
-        if not p.is_file():
-            return {}
-        obj = read_json(
+        return read_json(
             p,
             default={},
+            require_dict=True,
             on_error=lambda exc: warnings.append(f"geak: reconstruct read failed for {p.name}: {exc}"),
         )
-        return obj if isinstance(obj, dict) else {}
 
     stages: list[str] = []
     recon: dict[str, Any] = {}
@@ -950,7 +949,7 @@ def collect_geak(
             return p
         try:
             pp = Path(str(p))
-            if pp.is_absolute() and str(pp).startswith(str(session_dir)):
+            if pp.is_absolute() and is_path_within(pp, session_dir):
                 return _rel(pp, session_dir)
         except (ValueError, OSError) as exc:
             # Relativizing is cosmetic: keep the absolute path on failure.

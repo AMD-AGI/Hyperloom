@@ -13,17 +13,16 @@ Three helpers wrapping framework-agent internals without a full
 * :func:`evaluate_candidate_outcome` - stateless winner check given
   pre-computed benchmark/accuracy JSON blobs.
 
-The CLI reaches these helpers indirectly (``explorer`` uses ``_metric_float``;
-``phase-audit`` uses ``fetch_pr_audit_material``); this module never imports
-the CLI.
+The CLI reaches these helpers indirectly via ``explorer`` and
+``phase-audit``; this module never imports the CLI.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable
 
+from hyperloom.common.coerce import first_float
 from hyperloom.common.jsonio import coerce_dict
 
 from ..models import Candidate
@@ -184,24 +183,6 @@ def fetch_pr_audit_material(
     }
 
 
-def _metric_float(data: dict, keys: Iterable[str]) -> float | None:
-    """Return the first int/float among ``keys`` in ``data``.
-
-    Args:
-        data (dict): Mapping to look up.
-        keys (Iterable[str]): Candidate keys checked in order.
-
-    Returns:
-        float | None: The first numeric value coerced to float, or ``None`` if
-            no key holds a numeric value.
-    """
-    for k in keys:
-        v = data.get(k)
-        if isinstance(v, (int, float)):
-            return float(v)
-    return None
-
-
 def evaluate_candidate_outcome(
     benchmark: dict | Path | str | None,
     accuracy: dict | Path | str | None = None,
@@ -237,8 +218,8 @@ def evaluate_candidate_outcome(
 
     bench = coerce_dict(benchmark)
     acc = coerce_dict(accuracy)
-    throughput = _metric_float(bench, ("throughput", "output_throughput"))
-    acc_value = _metric_float(acc, ("accuracy", "gsm8k", "exact_match", "score"))
+    throughput = first_float(*(bench.get(k) for k in ("throughput", "output_throughput")))
+    acc_value = first_float(*(acc.get(k) for k in ("accuracy", "gsm8k", "exact_match", "score")))
     completed = str(bench.get("completed") or bench.get("Completed") or "")
 
     result: dict = {

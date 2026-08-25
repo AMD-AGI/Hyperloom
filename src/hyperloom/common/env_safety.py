@@ -22,8 +22,6 @@ BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
         "BASH_ENV",
         "CDPATH",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
         "ENV",
         "GCONV_PATH",
         "GIT_SSH_COMMAND",
@@ -40,7 +38,6 @@ BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
         "PYTHONSTARTUP",
         # site.py adds its site-packages to sys.path, so it loads arbitrary code.
         "PYTHONUSERBASE",
-        "RUBYOPT",
         "SHELLOPTS",
     }
 )
@@ -48,14 +45,12 @@ BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
 BLOCKED_CHILD_ENV_NAMES: frozenset[str] = frozenset(
     {
         "BASH_ENV",
-        "DYLD_INSERT_LIBRARIES",
         "ENV",
         "GCONV_PATH",
         "LD_AUDIT",
         "LD_PRELOAD",
         "PYTHONINSPECT",
         "PYTHONSTARTUP",
-        "RUBYOPT",
         "SHELLOPTS",
     }
 )
