@@ -66,6 +66,16 @@ from ..trace.parse_usage import (
 
 log = logging.getLogger(__name__)
 
+# The specialist writes its own deliverables inside the worktree, so the diff
+# capture must exclude them or the patch files and the done payload would be
+# captured as new source files and land in the framework tree on apply.
+_WORKTREE_DIFF_PATHSPEC: tuple[str, ...] = (
+    ".",
+    ":(exclude)patches",
+    ":(exclude)specialist_done.json",
+    ":(exclude)specialist_done.partial.json",
+)
+
 
 class SpecialistAgentUnavailableError(RuntimeError):
     """Raised when the agent CLI the deployment needs cannot be assembled.
@@ -1612,9 +1622,9 @@ class SpecialistSubprocessDispatcher:
     ) -> tuple[str, bool]:
         """Capture the specialist's worktree edits as a patch file via ``git diff``.
 
-        ``git add -N`` runs first so new files appear in the diff without being
-        staged. The diff's root is the worktree by construction, so a capture
-        needs no root inference.
+        ``git add -N`` runs first so a newly created source file appears in the
+        diff without being staged. The diff's root is the worktree by
+        construction, so a capture needs no root inference.
 
         Args:
             worktree: Per-task git worktree directory, or ``None``.
@@ -1629,11 +1639,11 @@ class SpecialistSubprocessDispatcher:
         """
         if worktree is None or not (worktree / ".git").exists():
             return "", False
-        intent_cp = _run_git_cp(["-C", str(worktree), "add", "-N", "."], timeout=30.0)
+        intent_cp = _run_git_cp(["-C", str(worktree), "add", "-N", "--", *_WORKTREE_DIFF_PATHSPEC], timeout=30.0)
         if intent_cp is None or intent_cp.returncode != 0:
             log.warning("specialist: git add -N failed in %s; falling back to scanned patch files", worktree)
             return "", False
-        diff_cp = _run_git_cp(["-C", str(worktree), "diff"], timeout=60.0)
+        diff_cp = _run_git_cp(["-C", str(worktree), "diff", "--", *_WORKTREE_DIFF_PATHSPEC], timeout=60.0)
         if diff_cp is None:
             log.warning("specialist: git diff failed in %s; falling back to scanned patch files", worktree)
             return "", False
