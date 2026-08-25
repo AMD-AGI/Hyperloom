@@ -22,9 +22,9 @@ idempotent, the second run is fast and safe.
 ```
 
 ```{note}
-The `@` file reference follows the recommended `pip install --target .` layout.
-In a source checkout, use `@src/hyperloom/inference_optimizer/SKILL.md`. The
-shell commands resolve either layout on their own via `$HYPERLOOM_PKG`.
+Paths in the prompts on this page follow the recommended `pip install --target .`
+layout. In a source checkout, replace the `hyperloom/` prefix with
+`src/hyperloom/`.
 ```
 
 ```text
@@ -42,9 +42,7 @@ Optimize inference for this workload:
 - Budget: 24 hours
 
 Before launch, run exactly:
-export HYPERLOOM_PKG="$REPO_ROOT/hyperloom"
-[ -d "$HYPERLOOM_PKG" ] || export HYPERLOOM_PKG="$REPO_ROOT/src/hyperloom"
-bash "$HYPERLOOM_PKG/inference_optimizer/assets/install.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
 export USER_DATA_PATH='/path/to/hyperloom-run'
 
