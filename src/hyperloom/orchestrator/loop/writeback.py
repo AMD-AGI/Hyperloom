@@ -3251,9 +3251,7 @@ class WritebackCollaborator:
                     # score (``eval_ran`` true, ``replay_accuracy`` None); that
                     # is adopted on the keep verdict alone and must record
                     # ``keep_verdict_unscored``, not a passed accuracy gate.
-                    "validated": (
-                        True if outcome.get("replay_accuracy") is not None else None
-                    ),
+                    "validated": (True if outcome.get("replay_accuracy") is not None else None),
                 }
             )
             if gain is not None:

@@ -2310,12 +2310,8 @@ def _warm_replay_ledger(session_dir):
     parts = assemble_parts(session_dir)
     operations = list(parts.get("operations") or [])
     measurements = list(parts.get("measurements") or [])
-    operations.append(
-        {"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]}
-    )
-    measurements.append(
-        {"measurement_id": "m-base", "name": "throughput", "value": 600.0}
-    )
+    operations.append({"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]})
+    measurements.append({"measurement_id": "m-base", "name": "throughput", "value": 600.0})
     return collect_recorded_optimizations(
         "s1",
         operations,
