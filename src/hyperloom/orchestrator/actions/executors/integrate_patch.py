@@ -2463,6 +2463,12 @@ class IntegratePatchExecutor:
                 "config_changes_applied": {},
             }
 
+        # The stash is on the stack and the tree is about to be mutated, so
+        # ``__call__``'s undo has to be able to see both before anything writes.
+        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
+        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
+        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
+
         self._replay_base_artifacts(params)
 
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
@@ -2472,12 +2478,7 @@ class IntegratePatchExecutor:
         applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
-        # From here on the tree is mutable and the stash is on the stack, so
-        # ``__call__``'s undo has to be able to see both before this stage
-        # returns: ``applied`` is published by identity and appended to in place.
-        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
-        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
-        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
+        # ``applied`` is published by identity and appended to in place.
         ctx._ip_applied = applied  # type: ignore[attr-defined]
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         for patch in patch_paths:
