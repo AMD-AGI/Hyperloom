@@ -139,27 +139,45 @@ def write_setting_script(
     from hyperloom.inference_optimizer.reference_script import render_reference_script
 
     framework_root = str(enablement.framework_root or "").strip()
-
-    script_patches: list[str] = []
-    if framework_root:
-        patches_dest = enablement_dir(Path(session_dir)) / "patches"
-        for idx, patch_str in enumerate(enablement.kept_patches or [], start=1):
-            src = Path(str(patch_str))
-            name = f"{idx:03d}_{src.name}"
-            if _copy(src, patches_dest / name):
-                script_patches.append(f"patches/{name}")
-
+    patches_dest = enablement_dir(Path(session_dir)) / "patches"
     artifacts_dest = enablement_dir(Path(session_dir)) / "artifacts"
-    script_artifacts: list[dict[str, str]] = []
-    for idx, art in enumerate(enablement.kept_artifacts or [], start=1):
-        target = str(art.get("target") or "")
-        name = f"{idx:03d}_{Path(target).name}"
-        if not _copy(Path(str(art.get("source") or "")), artifacts_dest / name):
-            continue
-        # ``artifact_backups/`` is outside PACKAGE_GLOBS, so this is the only
-        # copy of the pre-image that reaches the archive.
-        _copy(Path(str(art.get("backup") or "")), artifacts_dest / f"{name}.orig")
-        script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
+
+    patch_counter = 0
+    artifact_counter = 0
+    script_rounds: list[dict] = []
+
+    kept_rounds_raw = list(enablement.kept_rounds or [])
+    if not kept_rounds_raw and (enablement.kept_patches or enablement.kept_artifacts):
+        kept_rounds_raw = [
+            {
+                "patches": list(enablement.kept_patches or []),
+                "artifacts": list(enablement.kept_artifacts or []),
+            }
+        ]
+
+    for rnd in kept_rounds_raw:
+        rnd_script_patches: list[str] = []
+        rnd_script_artifacts: list[dict[str, str]] = []
+
+        if framework_root:
+            for patch_str in rnd.get("patches") or []:
+                patch_counter += 1
+                src = Path(str(patch_str))
+                name = f"{patch_counter:03d}_{src.name}"
+                if _copy(src, patches_dest / name):
+                    rnd_script_patches.append(f"patches/{name}")
+
+        for art in rnd.get("artifacts") or []:
+            artifact_counter += 1
+            target = str(art.get("target") or "")
+            name = f"{artifact_counter:03d}_{Path(target).name}"
+            if not _copy(Path(str(art.get("source") or "")), artifacts_dest / name):
+                continue
+            _copy(Path(str(art.get("backup") or "")), artifacts_dest / f"{name}.orig")
+            rnd_script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
+
+        if rnd_script_patches or rnd_script_artifacts:
+            script_rounds.append({"patches": rnd_script_patches, "artifacts": rnd_script_artifacts})
 
     accepted_cfg = dict(enablement.accepted_config or {})
     extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}
@@ -177,10 +195,9 @@ def write_setting_script(
         max_model_len=max_model_len,
         gpu_type=gpu_type,
         setup_commands=list(enablement.setup_commands or []) or None,
-        patches=script_patches or None,
-        framework_root=framework_root if script_patches else None,
+        framework_root=framework_root if any(r.get("patches") for r in script_rounds) else None,
         runtime=runtime_path or None,
-        artifacts=script_artifacts or None,
+        rounds=script_rounds or None,
     )
 
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"

@@ -40,8 +40,12 @@ class EnablementRound:
     inflight_task_id: str = ""
     # Task id of the most recently completed enablement specialist round.
     last_specialist_task_id: str = ""
-    # Ordered, deduped patch paths from prior enablement rounds that made forward
-    # progress; re-applied as a base before the next round's patch.
+    # Authoritative per-round record: list of {"patches": [...], "artifacts": [...]}
+    # dicts, one entry per accepted round in order. kept_patches and kept_artifacts
+    # are derived from this list and kept for downstream compatibility.
+    kept_rounds: list = field(default_factory=list)
+    # Flat ordered deduped patch paths derived from kept_rounds; re-applied as a
+    # base before the next round's patch.
     kept_patches: list = field(default_factory=list)
     # Framework source tree the kept patches were applied against. Persisted so a
     # phase-synthesised round, which carries no framework_root, does not drop it.
@@ -80,8 +84,8 @@ class EnablementRound:
     # Set when the last round's kept patches targeted more than one source tree.
     # The prompt injects this so the specialist knows to split into separate rounds.
     patches_span_multiple_roots: bool = False
-    # Whole-file installs from prior rounds that made progress; re-installed as a
-    # base before the next round's patch, the way kept_patches are re-applied.
+    # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
+    # target); re-installed as a base before the next round's patch.
     kept_artifacts: list = field(default_factory=list)
 
     @classmethod
