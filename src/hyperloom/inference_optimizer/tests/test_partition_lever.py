@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from hyperloom.orchestrator.actions.executors import _partition_lever as pl
 from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
 from hyperloom.orchestrator.actions.executors import explore
 from hyperloom.orchestrator.actions.executors._latency_budget import (
+    LATENCY_BUDGET_ENV,
     REASON_OVER_BUDGET,
     REASON_UNMEASURED,
     latency_keep_block,
@@ -87,16 +89,33 @@ def _run(tmp_path: Path, monkeypatch, envs: dict | None = None):
     return rc, error, (workspace / "ran.marker").is_file(), seen
 
 
+#: Every variable the lever reads or publishes. Restored around each case
+#: because ``_export_partition_lever`` writes ``os.environ`` directly, which
+#: ``monkeypatch`` cannot undo on its behalf -- and a budget or a mode list left
+#: behind here silently changes the KEEP gate for every test that runs after.
+_LEVER_ENV = (
+    pl.PARTITION_MODE_ENV,
+    pl.PARTITION_MODES_ENV,
+    pl.STREAMS_PER_PARTITION_ENV,
+    pl.PARTITION_GPU_ENV,
+    LATENCY_BUDGET_ENV,
+)
+
+
 @pytest.fixture(autouse=True)
-def _clean_lever_env(monkeypatch):
-    """No ambient lever: these cases each state their own."""
-    for name in (
-        pl.PARTITION_MODE_ENV,
-        pl.PARTITION_MODES_ENV,
-        pl.STREAMS_PER_PARTITION_ENV,
-        pl.PARTITION_GPU_ENV,
-    ):
-        monkeypatch.delenv(name, raising=False)
+def _clean_lever_env():
+    """No ambient lever: these cases each state their own, and leak none."""
+    saved = {name: os.environ.get(name) for name in _LEVER_ENV}
+    for name in _LEVER_ENV:
+        os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_lever_off_leaves_the_run_untouched(tmp_path, monkeypatch):
@@ -624,3 +643,75 @@ def test_launch_refuses_the_lever_on_a_serving_framework(capsys):
         )
     assert excinfo.value.code == 2
     assert "scriptable framework" in capsys.readouterr().err
+
+
+def test_launch_refuses_the_lever_on_a_multi_node_session(capsys):
+    """One card, no cluster coordination -- and the report is silent there.
+
+    Left to run it would mutate one node's GPU and file the result as a property
+    of the whole topology, with the report saying nothing about the privileged
+    change because it skips multi-node sessions.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        cli._export_partition_lever(
+            modes_raw="dpx",
+            streams_per_partition=2,
+            max_latency_ms=400.0,
+            framework="custom",
+            nodes=2,
+        )
+    assert excinfo.value.code == 2
+    assert "one card" in capsys.readouterr().err
+
+
+def test_launch_validates_the_card_the_session_will_actually_mutate(monkeypatch):
+    """Not card 0, when the session manages another.
+
+    Validating a different board than the apply path touches would defeat the
+    reason this check happens at launch instead of at the mode change.
+    """
+    monkeypatch.setenv(pl.PARTITION_GPU_ENV, "3")
+    asked: list[int] = []
+    monkeypatch.setattr(gp, "supported_modes", lambda gpu_id: (asked.append(gpu_id), ("SPX", "DPX"))[1])
+    monkeypatch.setattr(gp, "unsupported_modes", lambda modes, gpu_id=0: (asked.append(gpu_id), ())[1])
+    monkeypatch.setattr(gp, "partition_count_conflicts", lambda gpu_id=0: (asked.append(gpu_id), ())[1])
+
+    cli._export_partition_lever(
+        modes_raw="dpx",
+        streams_per_partition=2,
+        max_latency_ms=400.0,
+        framework="custom",
+    )
+    assert asked == [3, 3, 3]
+
+
+class TestUnpartitionedRunOnASplitCard:
+    """A failed restore must not turn later baselines into silent lies.
+
+    ``partitioned`` logs a restore failure rather than raising, so it cannot mask
+    the exception that caused the exit. The cost is that the card can be left
+    split, and the runs requesting *no* mode are the ones with nothing to notice.
+    """
+
+    def test_a_split_card_refuses_a_run_that_asked_for_no_mode(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", _FakeSmi("QPX"))
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "spx,dpx")
+        rc, error, ran, _ = _run(tmp_path, monkeypatch)
+        # Refused before the benchmark started: the number would have been filed
+        # as the unpartitioned baseline.
+        assert (rc, ran) == (2, False)
+        assert "QPX" in str(error) and "no partition mode" in str(error)
+
+    def test_an_unpartitioned_card_runs_as_before(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", _FakeSmi("SPX"))
+        monkeypatch.setenv(pl.PARTITION_MODES_ENV, "spx,dpx")
+        rc, error, ran, seen = _run(tmp_path, monkeypatch)
+        assert (rc, error, ran) == (0, None, True)
+        assert seen == {}
+
+    def test_the_check_is_silent_when_the_lever_is_off(self, tmp_path, monkeypatch):
+        # A split card with no lever is the operator's own arrangement, and
+        # nothing here has touched the hardware.
+        monkeypatch.setattr(subprocess, "run", _FakeSmi("CPX"))
+        rc, error, ran, _ = _run(tmp_path, monkeypatch)
+        assert (rc, error, ran) == (0, None, True)

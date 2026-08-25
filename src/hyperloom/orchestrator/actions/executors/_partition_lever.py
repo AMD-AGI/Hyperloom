@@ -35,6 +35,7 @@ from contextlib import contextmanager, nullcontext
 from typing import Any, Iterator, Sequence
 
 from hyperloom.common.gpu_partition import (
+    MODE_PARTITION_COUNTS,
     PartitionError,
     PartitionLayout,
     fits_in_partition,
@@ -42,6 +43,7 @@ from hyperloom.common.gpu_partition import (
     parse_modes,
     partitioned,
     read_hbm_gib,
+    read_partition_mode,
 )
 
 log = logging.getLogger(__name__)
@@ -400,6 +402,45 @@ def runtime_env(layout: PartitionLayout, streams: int) -> dict[str, str]:
     }
 
 
+def _refuse_split_card_for_unpartitioned_run() -> None:
+    """Refuse a mode-less run on a card that is still split.
+
+    :func:`partitioned` logs a failed restore instead of raising, so it cannot
+    mask the exception that caused the exit. That is right, but it means a
+    session can carry on with the card left in a mode nobody asked for -- and
+    the runs that request *no* mode are the ones with nothing to notice it. They
+    would measure a split card and be recorded as the unpartitioned baseline,
+    which is the mislabelling this module refuses everywhere else, arrived at
+    from the one direction that had no check.
+
+    Only speaks when the session lever is engaged. With the lever off nothing
+    here has touched the hardware, so a split card is the operator's own
+    arrangement and none of this module's business.
+
+    Raises:
+        PartitionError: If the managed card is in a split mode. An unreadable
+            mode is left alone: "cannot tell" is not evidence of a problem, and
+            the apply path already refuses what it cannot verify.
+    """
+    if not resolve_session_modes():
+        return
+    gpu_id = partition_gpu_id()
+    try:
+        current = read_partition_mode(gpu_id)
+    except PartitionError as exc:
+        log.debug("cannot check GPU %d topology before an unpartitioned run: %s", gpu_id, exc)
+        return
+    if MODE_PARTITION_COUNTS.get(current) == 1:
+        return
+    raise PartitionError(
+        f"GPU {gpu_id} is in {current}, but this run requested no partition mode. "
+        f"Measuring it now would file a split card's number as the unpartitioned "
+        f"baseline. A restore this session failed, or the card was already split "
+        f"when the session started; return it to a single partition before "
+        f"continuing."
+    )
+
+
 def plan_partition_run(
     envs: dict[str, Any] | None,
     *,
@@ -419,10 +460,13 @@ def plan_partition_run(
         PartitionError: If a mode was requested but cannot be described -- an
             unknown mode or an unrecognised board. Raised rather than ignored:
             the request was explicit, so silently not honouring it would
-            mislabel the measurement.
+            mislabel the measurement. Also if no mode was requested but the
+            managed card is still split; see
+            :func:`_refuse_split_card_for_unpartitioned_run`.
     """
     mode = requested_mode(envs)
     if not mode:
+        _refuse_split_card_for_unpartitioned_run()
         return "", {}
     layout = layout_for(gpu_type, mode)
     streams = streams_per_partition()

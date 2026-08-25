@@ -1643,6 +1643,7 @@ def _export_partition_lever(
     streams_per_partition: int,
     max_latency_ms: float | None,
     framework: str | None = None,
+    nodes: int = 1,
 ) -> tuple[str, ...]:
     """Validate and project the compute-partition lever into env.
 
@@ -1661,6 +1662,9 @@ def _export_partition_lever(
         framework: The session's framework. Checked because only the scriptable
             runner applies a mode; unset skips the check for callers that run
             before the framework is resolved.
+        nodes: The resolved node count. The lever manages one card, so a
+            multi-node session is refused here for the same reason a serving
+            framework is.
 
     Returns:
         The canonical modes, empty when the lever is off.
@@ -1673,6 +1677,7 @@ def _export_partition_lever(
         supported_modes,
         unsupported_modes,
     )
+    from hyperloom.orchestrator.actions.executors._partition_lever import partition_gpu_id
 
     budget = float(max_latency_ms or 0.0)
     if budget > 0:
@@ -1712,6 +1717,19 @@ def _export_partition_lever(
         )
         sys.exit(2)
 
+    # The lever repartitions a single card, and nothing coordinates that across
+    # a cluster. Left to run, it would mutate one node's GPU and record the
+    # result as a property of the whole topology -- and the report stays silent
+    # on multi-node sessions, so the privileged change would go unmentioned too.
+    if nodes >= 2:
+        print(
+            f"ERROR: --compute-partition-modes manages one card and does not "
+            f"coordinate across nodes; this session has --nodes {nodes}. Partition "
+            f"the card in a single-node session, or drop the flag.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     # Scope the request to what this card says it can do. The name being one of
     # the four known modes does not mean this board offers it, and the
     # alternative to checking here is discovering it at the apply site -- a
@@ -1723,7 +1741,11 @@ def _export_partition_lever(
     # unanswerable query warns and proceeds rather than blocking a session that
     # may be perfectly able to run -- and says so, because "not validated" and
     # "validated as fine" must not look alike in a log.
-    available = supported_modes(0)
+    # The card the session will actually mutate, not card 0: validating a
+    # different board than the one the apply path touches would defeat the
+    # reason this check happens at launch at all.
+    gpu_id = partition_gpu_id()
+    available = supported_modes(gpu_id)
     if not available:
         print(
             "WARN: could not read this card's supported partition profiles, so "
@@ -1733,10 +1755,10 @@ def _export_partition_lever(
             file=sys.stderr,
         )
     else:
-        rejected = unsupported_modes(modes)
+        rejected = unsupported_modes(modes, gpu_id)
         if rejected:
             print(
-                f"ERROR: this card does not support {','.join(rejected)}. "
+                f"ERROR: GPU {gpu_id} does not support {','.join(rejected)}. "
                 f"It reports: {','.join(available)}.",
                 file=sys.stderr,
             )
@@ -1745,7 +1767,7 @@ def _export_partition_lever(
         # and that number drives the CU arithmetic device selection matches on.
         # A disagreement means the sizing is wrong, so it stops the session here
         # rather than surfacing as a benchmark that finds no device.
-        conflicts = partition_count_conflicts(0)
+        conflicts = partition_count_conflicts(gpu_id)
         if conflicts:
             print(
                 "ERROR: this card's partition ladder disagrees with the built-in "
@@ -1903,6 +1925,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         streams_per_partition=int(getattr(args, "streams_per_partition", 2) or 2),
         max_latency_ms=getattr(args, "max_latency_ms", None),
         framework=str(getattr(args, "framework", "") or "").strip().lower(),
+        nodes=nodes_resolved,
     )
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
@@ -2131,6 +2154,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             streams_per_partition=int(getattr(args, "streams_per_partition", None) or 2),
             max_latency_ms=getattr(args, "max_latency_ms", None),
             framework=str(getattr(args, "framework", "") or "").strip().lower(),
+            # A resume must re-pass --nodes, so the persisted count is the one
+            # that says whether this session was ever multi-node.
+            nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
         )
         _persist_partition_lever(state)
         if state.compute_partition_modes:
