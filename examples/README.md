@@ -6,15 +6,14 @@ installation instructions, see the
 pages.
 
 The recommended path is to prepare a dedicated workspace, open that directory in
-Cursor, Claude Code, or Codex, and install the wheel into the current directory
-with `pip install --target .`. For source installation instructions, please refer
-to the [full installation instructions](https://rocm.docs.amd.com/projects/hyperloom/en/latest/install/install.html#source-checkout-manual-installation).
+Claude Code, and install the wheel into the current directory with `pip install --target .`.
+For source installation instructions, please refer to the [full installation instructions](https://rocm.docs.amd.com/projects/hyperloom/en/latest/install/install.html#source-checkout-manual-installation).
 
 ## Pip install Hyperloom
 
 The current directory serves as both the install target and the agent workspace.
-Prepare a dedicated clean directory first, then open that directory in Cursor,
-Claude Code, or Codex before running the install command.
+Prepare a dedicated clean directory first, then open that directory in Claude
+Code before running the install command.
 
 > **Recommended run mode: Docker.** Running the demos inside the provided
 > [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
@@ -49,10 +48,7 @@ With the agent still opened in the same workspace, run:
 /hyperloom-setup
 ```
 
-In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
-`$hyperloom-setup`.
-
-That command runs the setup skill installed from
+This command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
 
 The setup skill is interactive. It creates or updates `.env` in the current
@@ -218,9 +214,8 @@ must never be printed.
 - If the current workspace contains many package folders after `pip install
   --target .`, that is expected.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
-  (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor), or
-  `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`;
+  restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
   framework torch wheel expects different ROCm user-space libraries; align
   `ROCM_PATH` and `LD_LIBRARY_PATH`.

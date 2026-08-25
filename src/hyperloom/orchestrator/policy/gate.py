@@ -2513,12 +2513,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
             hint="Each wave entry must be an object with task_description.",
         )
     desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-    if not desc:
-        raise PolicyDenied(
-            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] task_description must be non-empty",
-            rule="specialist_freeform_empty_description",
-            hint=("Each freeform task needs a natural-language task_description (the whole mandate)."),
-        )
     PolicyGate._check_freeform_task_description(desc, where=f"tasks[{index}]")
     return desc
 

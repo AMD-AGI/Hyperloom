@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
 from hyperloom.common.coerce import to_float
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
@@ -66,32 +69,11 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
 def _forward_integrate_source(
     src: dict[str, Any],
     dst: dict[str, Any],
-    *,
-    current_phase: str,
 ) -> None:
     """Preserve proposal ownership across delayed ``integrate_patch`` execution."""
 
     domain = str(src.get("domain") or src.get("source_domain") or "").strip()
-    gap_layer = str(src.get("gap_layer") or "").strip().lower()
-    recorded_phase = str(src.get("source_phase") or "").strip().upper()
-    if bool(src.get("framework_agent_authoring")) or gap_layer == "framework":
-        source_phase = "FRAMEWORK_AGENT"
-    elif recorded_phase in {"FRAMEWORK", "FRAMEWORK_AGENT", "EXPLORE"}:
-        source_phase = recorded_phase
-    elif gap_layer in {"explore", "perf_explore"} or domain:
-        # Specialist-produced runtime/source candidates are EXPLORE-owned unless
-        # explicit framework-authoring metadata says otherwise. In particular,
-        # never inherit a later KERNEL_AGENT completion phase.
-        source_phase = "EXPLORE"
-    elif str(current_phase or "").strip().upper() in {
-        "FRAMEWORK",
-        "FRAMEWORK_AGENT",
-        "EXPLORE",
-    }:
-        source_phase = str(current_phase).strip().upper()
-    else:
-        source_phase = ""
-
+    source_phase = patch_owner_phase(src)
     if source_phase:
         dst["source_phase"] = source_phase
     if domain:
@@ -1568,7 +1550,6 @@ class ExplorePhase(PhaseHandler):
         _forward_integrate_source(
             spec_params,
             integrate_params,
-            current_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
@@ -1735,7 +1716,6 @@ class ExplorePhase(PhaseHandler):
         _forward_integrate_source(
             spec_params,
             integrate_params,
-            current_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
         # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
