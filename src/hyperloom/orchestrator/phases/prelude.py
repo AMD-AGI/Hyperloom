@@ -2125,12 +2125,6 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return
             outcome["status"] = "reproduced"
-            # Publish the reproduced verdict before the stack push / cumulative
-            # update below. Those can raise, and the caller swallows it; the
-            # post-ruling mirror reads this in-memory outcome, so persisting it
-            # first keeps the canonical adoption from disagreeing with a stack
-            # entry that was already pushed.
-            state.warm_replay_outcome = outcome
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
                 outcome["replayed_patch_refs"] = replayed_patch_refs
@@ -2197,6 +2191,14 @@ class PreludePhase(PhaseHandler):
                 },
                 entry_extra=entry_extra,
             )
+            # Publish the reproduced verdict now that the stack entry exists but
+            # before the cumulative update (the one step below that can raise and
+            # is swallowed by the caller). The post-ruling mirror reads this
+            # in-memory outcome: persisting it here keeps the canonical adoption
+            # in step with the stack. Placed after the lift on purpose -- if the
+            # lift itself raises, the outcome stays in_flight and both the stack
+            # and the mirror agree there is nothing adopted.
+            state.warm_replay_outcome = outcome
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput)
             log.info(
