@@ -46,7 +46,7 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang v0.5.17, ROCm 7.2).
+# Framework versions track docs/compatibility.rst (SGLang v0.5.17, ROCm 7.2.4).
 # vLLM installs 0.27.1+rocm723 from the wheels.vllm.ai pip index, matching the
 # vllm/vllm-openai-rocm:v0.27.1 Docker image. The rocm723 variant puts the
 # vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
@@ -55,14 +55,15 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 SGLANG_REF="${SGLANG_REF:-v0.5.17}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
-SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
+SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm724}"
 if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
   case "$SGLANG_ROCM_EXTRA" in
     rocm700) SGLANG_ROCM_PYPI_VERSION="7.0.0" ;;
+    rocm724) SGLANG_ROCM_PYPI_VERSION="7.2.4" ;;
     *)       SGLANG_ROCM_PYPI_VERSION="7.2.0" ;;
   esac
 fi
-SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
+SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.4}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
@@ -164,7 +165,7 @@ warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (run inside an AMD ROCm \
-SGLang/vLLM image such as rocm/hyperloom:sglang-*-rocm7.2.0-mi300x|mi350x or \
+SGLang/vLLM image such as lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x|mi35x-* or \
 vllm/vllm-openai-rocm:v0.27.1, or install an equivalent ROCm torch + \
 framework stack), then re-run."
 

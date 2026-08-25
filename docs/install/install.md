@@ -188,7 +188,7 @@ Bare-metal setup might also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
 tag or commit; when unset the installer selects the newest tag compatible with
 the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
-is controlled by `SGLANG_ROCM_EXTRA` (default `rocm720`) and
+is controlled by `SGLANG_ROCM_EXTRA` (default `rocm724`) and
 `SGLANG_ROCM_PYPI_VERSION`. Kernel-agent paths (`MAGPIE_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
 workload skill's `install.sh`.
@@ -387,8 +387,8 @@ framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
-- `sglang` MI300X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x`
-- `sglang` MI355X: `docker.io/rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-20260821`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:

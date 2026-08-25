@@ -120,8 +120,8 @@ The following inference frameworks are supported:
      - ROCm version
      - Notes
    * - SGLang
-     - 7.2.0
-     - Default framework
+     - 7.2.4
+     - Default framework; recommended docker/bare-metal stack uses ``rocm724`` (see below)
    * - vLLM
      - 7.2.3
      - Do not mix frameworks within one session
@@ -139,9 +139,9 @@ Container images
 ----------------
 
 Pick the image that matches your environment. Public Docker Hub refs are used
-on your own GPU machine: ``rocm/hyperloom:<tag>`` for SGLang and the official
-upstream ``vllm/vllm-openai-rocm:<tag>`` for vLLM. If your deployment uses a
-private registry mirror, set the registry prefix accordingly.
+on your own GPU machine: the official upstream ``lmsysorg/sglang-rocm:<tag>``
+for SGLang and ``vllm/vllm-openai-rocm:<tag>`` for vLLM. If your deployment
+uses a private registry mirror, set the registry prefix accordingly.
 
 .. list-table::
    :header-rows: 1
@@ -149,9 +149,9 @@ private registry mirror, set the registry prefix accordingly.
 
    * - Image
      - GPU
-   * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x``
+   * - ``lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821``
      - MI300X / MI308X / MI325X
-   * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x``
+   * - ``lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-20260821``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.27.1``
      - MI300X / MI308X / MI325X / MI355X
@@ -160,7 +160,7 @@ The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.
 
 Browse all available tags at
-`hub.docker.com/r/rocm/hyperloom/tags <https://hub.docker.com/r/rocm/hyperloom/tags>`_
+`hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_
 and
 `hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_.
 
@@ -179,7 +179,7 @@ Hyperloom does not install ROCm or torch itself.
      - Notes
    * - ROCm
      - 7.2.x
-     - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.0 (see the note below).
+     - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
    * - Python
      - 3.12
      - Required by the vLLM ROCm wheel.
@@ -187,8 +187,8 @@ Hyperloom does not install ROCm or torch itself.
      - ROCm build matching the host ROCm
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
-     - v0.5.17 (rocm720)
-     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.0 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm720``), so the SGLang ROCm layer is 7.2.0. Note: ``SGLANG_REF`` (v0.5.17) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release.
+     - v0.5.17 (rocm724)
+     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.4 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm724``), so the SGLang ROCm layer is 7.2.4. Note: ``SGLANG_REF`` (v0.5.17) only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release.
    * - vLLM
      - v0.27.1 (rocm723), isolated venv
      - Installs ``vllm==0.27.1+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
@@ -196,10 +196,10 @@ Hyperloom does not install ROCm or torch itself.
 Bare-metal ROCm patch levels differ per framework, and each one matches its
 container image. The vLLM stack installs the ``rocm723`` variant (ROCm
 7.2.3), matching ``vllm/vllm-openai-rocm:v0.27.1``; the SGLang stack
-installs from the ROCm 7.2.0 AMD wheel index, matching the two
-``sglang-v0.5.17-rocm7.2.0`` images. ``docker`` mode is still the preferred
-route for a pre-validated stack, since the images also pin the surrounding
-torch, Triton, and AITER builds.
+installs from the ROCm 7.2.4 AMD wheel index, matching the two
+``lmsysorg/sglang-rocm:v0.5.17-rocm724-*`` images. ``docker`` mode is still
+the preferred route for a pre-validated stack, since the images also pin the
+surrounding torch, Triton, and AITER builds.
 
 These are recommended defaults, not hard pins. Framework and ROCm versions are
 overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,
