@@ -269,6 +269,8 @@ class RecipeReplayKB:
         recipe = self._sections.warm_start_dir / "recipe.json"
         try:
             document = json.loads(recipe.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
         except (OSError, ValueError) as exc:
             raise RemoteRecipeValidationError(f"current Recipe is unreadable: {exc}") from exc
         knowledge = document.get("knowledge") if isinstance(document.get("knowledge"), Mapping) else document

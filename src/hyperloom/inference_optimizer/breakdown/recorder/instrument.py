@@ -651,7 +651,12 @@ def _mirror_action_v4(
                 }
             )
     agent = _resolve_agent(action, result=result, phase=phase)
-    gain_pct = to_float(result.get("delta_pct") or result.get("best_gain_pct"))
+    # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured
+    # zero is a verdict, not a missing value.
+    _raw_gain = result.get("delta_pct")
+    if _raw_gain is None:
+        _raw_gain = result.get("best_gain_pct")
+    gain_pct = to_float(_raw_gain)
     keep_threshold_pct = to_float(result.get("keep_threshold_pct"))
     decision_reason = str(result.get("decision_reason") or result.get("reason") or "")
     if keep_threshold_pct is not None:

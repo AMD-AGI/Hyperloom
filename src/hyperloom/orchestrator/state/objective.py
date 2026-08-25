@@ -9,11 +9,12 @@ TimeOnly. `build_objective(env)` takes at most one TARGET_* var.
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from hyperloom.common.jsonio import read_json as _read_json
 
 from .shared_state import resolve_grading_anchor_tput
 
@@ -229,8 +230,7 @@ class TargetBaselineObjective(_RatioObjective):
         candidates = sorted(path.rglob("benchmark_report.json"))
         if not candidates:
             raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")
-        with candidates[-1].open(encoding="utf-8") as f:
-            ref = json.load(f)
+        ref = _read_json(candidates[-1], default={}, require_dict=True)
         tput = (ref.get("throughput") or {}).get("output_throughput")
         if not isinstance(tput, (int, float)) or tput <= 0:
             raise ObjectiveError(f"TargetBaselineObjective: invalid output_throughput in {candidates[-1]}")

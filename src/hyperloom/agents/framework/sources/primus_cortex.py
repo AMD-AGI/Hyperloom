@@ -18,17 +18,17 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from hyperloom.common.url_safety import require_http_url as _base_require_http_url
+
 from ._shared import GitHubPr, _repo_slug
-
-
-def _require_http_url(url: str) -> None:
-    scheme = urllib.parse.urlparse(url).scheme
-    if scheme not in {"http", "https"}:
-        raise PrimusCortexError(f"unsupported PR Monitor URL scheme: {scheme!r}")
 
 
 class PrimusCortexError(RuntimeError):
     """Raised when a primus_cortex request cannot be completed (CLI exit code 2)."""
+
+
+def _require_http_url(url: str) -> None:
+    _base_require_http_url(url, error=PrimusCortexError, context="PR Monitor URL")
 
 
 def _normalise_base_url(base_url: str) -> str:

@@ -583,8 +583,6 @@ class SpecialistRunner:
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
-                kg_recommended_knobs=[p for p in (params.get("kg_recommended_knobs") or []) if isinstance(p, dict)],
-                kg_guided_knobs=[p for p in (params.get("kg_guided_knobs") or []) if isinstance(p, dict)],
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
@@ -856,6 +854,9 @@ class SpecialistRunner:
             record = ConversationRecord(
                 session_id=self.session_dir.name,
                 component="specialist",
+                # Same metadata dict as the token row for this turn, so both
+                # halves carry the backend's call_id when it stamped one.
+                call_id=md.get("call_id"),
                 task_id=task_id,
                 turn=turn,
                 tick=tick,

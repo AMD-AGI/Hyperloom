@@ -1084,9 +1084,9 @@ class DispatcherCollaborator:
     ) -> None:
         """Charge a failure for each task reclaimed from a dead lease holder.
 
-        A holder killed from outside this process (lease reaped,
-        ``lease_dead_holder_reaped``) never returns a result, so without this
-        the per-action streak counters never see the death and the streak-based
+        A holder killed from outside this process (its lease reaped by
+        ``reap_dead_holders``) never returns a result, so without this the
+        per-action streak counters never see the death and the streak-based
         auto-terminate stays blind to the whole failure mode.
 
         Args:
@@ -1350,15 +1350,6 @@ class DispatcherCollaborator:
                     self._record_coordinator_exception(
                         stage="dispatcher_fact_write",
                         exc=exc,
-                    )
-            # Real-time KG edge for a framework KEEP/REVERT (best-effort).
-            if task.kind == "framework_agent":
-                try:
-                    self._emit_framework_agent_kg_decision(task=task, result=result, kept=kept)
-                except Exception:  # noqa: BLE001 — real-time KG edge is best-effort
-                    log.exception(
-                        "dispatcher: framework KG decision emit failed for task=%s",
-                        task.task_id,
                     )
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":

@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from ..prompts.transport import TRANSPORT_TOOLS
+from ..trace.llm_trace import new_call_id
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -509,6 +510,9 @@ class ClaudeBackend:
             metadata={
                 "tool_blocks": tool_block_count,
                 "model": self.model,
+                # Pairs this turn's token row with its conversation row; both
+                # halves are written from this one metadata dict.
+                "call_id": new_call_id(),
                 # Why the model stopped ("end_turn" / "max_tokens" / ...).
                 # Without it a truncated reply looks like a malformed one.
                 "stop_reason": stop_reason,

@@ -20,7 +20,7 @@ Doc, GEMM tuning, Read A, and Read C are unchanged.
 | `KNOWLEDGE_LOCAL_ROOT` | Local knowledge root. Defaults to `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` |
 | `KB_STORE_URL` | Required only in `remote` mode |
 | `KB_STORE_TOKEN` | Required only in `remote` mode |
-| `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` | Optional non-Recipe configuration for GBrain KG and Framework PR capabilities |
+| `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` | Optional GBrain credentials for Framework PR capabilities |
 
 Unknown modes fail configuration. Remote mode fails before use if either
 credential is missing. `--degraded-kb` remains a complete Recipe KB opt-out; it
@@ -74,37 +74,6 @@ history, or attempt data is created. A KB Store transport failure is logged and
 remains non-fatal; invalid or missing startup configuration fails before the
 optimization run starts.
 
-## Local knowledge graph
-
-Local mode also constructs `LocalGraphStore`, an in-process filesystem
-GraphStore backend adapter for `KGClient`. It does not start or connect to a
-local MCP server and performs no HTTP, network, or subprocess work. Ambient
-GBrain credentials are ignored.
-
-Its durable root is `$KNOWLEDGE_LOCAL_ROOT/hyperloom/kg`:
-
-```text
-hyperloom/kg/
-├── pages/<slug>.md
-├── edges/outbound/<slug>.json
-├── edges/inbound/<slug>.json
-├── .lock
-└── .edge-transaction.json  # present only while recovering an edge update
-```
-
-Slugs are validated before path construction, including every component of a
-slash-separated slug; absolute paths, `.`/`..`, backslashes, empty components,
-and unsupported characters are rejected. Pages and edge indexes use
-fsync-plus-atomic-rename replacement. A module-level per-root thread lock and a
-POSIX `fcntl` lock serialize all instances and processes. `add_link` updates
-the outbound and inbound indexes under one exclusive lock, replacing context
-for an existing `(from, to, type)` edge. A durable intent journal completes
-both index replacements after interruption.
-
-An empty first-run graph is available but returns no facts, so T0 and warm
-replay continue with Recipe KB results. Framework fact emission materializes
-entity pages and writes local edges through the same `KGClient` API.
-
 ## KernelForge bridge
 
 Hyperloom's `KernelExperienceBridge` only:
@@ -112,8 +81,8 @@ Hyperloom's `KernelExperienceBridge` only:
 1. validates and forwards the shared mode/root;
 2. forwards validated KB Store credentials in Recipe remote mode and strips
    them in local mode;
-3. keeps optional GBrain credentials in the Hyperloom parent for KG/Framework
-   PR clients, but never forwards them to KernelForge children;
+3. keeps optional GBrain credentials in the Hyperloom parent for Framework PR
+   clients, but never forwards them to KernelForge children;
 4. forces the legacy `KERNELFORGE_GBRAIN_ENABLED` Recipe-derived flag off; and
 5. collects bounded capability/result provenance returned by KernelForge.
 

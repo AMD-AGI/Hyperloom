@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
@@ -118,12 +119,16 @@ def make_entry(
     Returns:
         The entry dict.
     """
+    if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
+        safe_gpu_pct = 0.0
+    else:
+        safe_gpu_pct = float(gpu_pct)
     entry = {
         "kernel_id": str(kernel_id or ""),
         "name": str(name or ""),
-        "gpu_pct": float(gpu_pct or 0.0),
+        "gpu_pct": safe_gpu_pct,
         "source_file": str(source_file or ""),
-        "source_line": source_line,
+        "source_line": source_line if isinstance(source_line, int) else None,
         "source_function": str(source_function or ""),
         "method": str(method or METHOD_UNRESOLVED),
         "confidence": confidence,
@@ -172,6 +177,7 @@ def validate_document(doc: Any) -> list[str]:
     if not isinstance(entries, list):
         problems.append(f"entries is {type(entries).__name__}, expected list")
         return problems
+    seen_ids: set[str] = set()
     for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             problems.append(f"entries[{i}] is {type(entry).__name__}, expected dict")
@@ -179,6 +185,20 @@ def validate_document(doc: Any) -> list[str]:
         for key in REQUIRED_ENTRY_KEYS:
             if key not in entry:
                 problems.append(f"entries[{i}] missing required key {key!r}")
+        kernel_id = str(entry.get("kernel_id") or "")
+        if not kernel_id:
+            problems.append(f"entries[{i}] has empty kernel_id")
+        elif kernel_id in seen_ids:
+            problems.append(f"entries[{i}] has duplicate kernel_id {kernel_id!r}")
+        else:
+            seen_ids.add(kernel_id)
+        gpu_pct = entry.get("gpu_pct")
+        if gpu_pct is not None:
+            if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
+                problems.append(f"entries[{i}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
+        source_line = entry.get("source_line")
+        if source_line is not None and not isinstance(source_line, int):
+            problems.append(f"entries[{i}] has invalid source_line {source_line!r}; expected int or null")
         method = str(entry.get("method") or "")
         if method and method not in KNOWN_METHODS:
             problems.append(f"entries[{i}] has unknown method {method!r}")
@@ -249,13 +269,16 @@ def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
     text = strip_line_suffix(path)
     if not text or not os.path.isfile(text):
         return ""
-    real = os.path.realpath(text)
+    real = Path(os.path.realpath(text))
     for root in roots:
         if not root:
             continue
-        resolved_root = os.path.realpath(str(root)).rstrip(os.sep)
-        if real == resolved_root or real.startswith(resolved_root + os.sep):
-            return real
+        resolved_root = Path(os.path.realpath(str(root)))
+        try:
+            real.relative_to(resolved_root)
+            return str(real)
+        except ValueError:
+            continue
     return ""
 
 

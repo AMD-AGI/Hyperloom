@@ -84,10 +84,11 @@ def _slug(value: str, default: str) -> str:
 
     Args:
         value: The raw value to slugify.
-        default: Fallback slug returned when ``value`` is empty.
+        default: Fallback slug returned when ``value`` yields no slug.
 
     Returns:
-        The slugified value, or ``default`` when empty.
+        The slugified value, or ``default`` when the result would be empty
+        or dot-only.
     """
     raw = (value or "").strip()
     if not raw:
@@ -97,7 +98,8 @@ def _slug(value: str, default: str) -> str:
     cleaned = raw.lower()
     for ch in (" ", "\t", "/"):
         cleaned = cleaned.replace(ch, "_")
-    return cleaned or default
+    # A dot-only result ("." / "..") is a traversal component, not an identity.
+    return cleaned if cleaned.strip(".") else default
 
 
 def _architectures_slug(value: "str | list[str]") -> str:

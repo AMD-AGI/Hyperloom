@@ -538,6 +538,14 @@ class RemoteRecipeClient:
                     value=optimized_throughput,
                     scope=scope_payload,
                 )
+            else:
+                return RemoteWriteResult(
+                    "written",
+                    "champion_not_promoted",
+                    canonical_id,
+                    session_id,
+                    optimized_throughput,
+                )
         return RemoteWriteResult(
             "written",
             "",

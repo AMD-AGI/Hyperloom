@@ -836,3 +836,32 @@ def test_the_merged_section_measures_its_own_elapsed_time():
         {"elapsed_minutes": 0.0},
     )
     assert merged["elapsed_minutes"] == 120.0
+
+
+# ---- every collector is isolated ----
+
+
+def test_a_failing_collector_does_not_abort_the_build(tmp_path, monkeypatch):
+    """source_files was the one collector called outside the isolation wrapper."""
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+
+    def _boom(*_a, **_kw):
+        raise OSError("filesystem gone")
+
+    monkeypatch.setattr(ex.collectors, "collect_source_files", _boom)
+
+    out = ex.build(tmp_path)
+
+    assert out["source_files"] == {}
+    assert any("collector:source_files failed" in w for w in out["warnings"])
+
+
+def test_collector_arguments_are_evaluated_inside_the_isolation(tmp_path, monkeypatch):
+    """A drifted section must not raise while building a collector's arguments."""
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(ex.collectors, "collect_sweep", lambda *_a, **_kw: {"all_variants": ["not-a-dict"]})
+
+    out = ex.build(tmp_path)
+
+    assert out["source_files"] == {}
+    assert any("collector:source_files failed" in w for w in out["warnings"])

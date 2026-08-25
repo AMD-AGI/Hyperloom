@@ -151,7 +151,7 @@ that runs **before** `python -m hyperloom.inference_optimizer.cli optimize` is e
 
 Before every `python -m hyperloom.inference_optimizer.cli optimize` invocation (fresh start OR
 `--resume-from`), verify that every visible GPU on this pod has **zero
-foreign serving PIDs and ≲ 500 MiB VRAM in use**. A leftover
+foreign serving PIDs and VRAM usage below 1% of each card's total capacity**. A leftover
 `sglang.launch_server` / `vllm.entrypoints` / `Magpie` from a previous
 run silently degrades the next `baseline` by 5–30 % (shares VRAM +
 schedules on the same XCD); `current_best` cannot detect this
@@ -636,35 +636,15 @@ creates `$USER_DATA_PATH/<model_basename>/<UTC_ts>/` and pins
 ## Portable Preflight
 
 Implements **IR-1**. Run order is always **IR-2 → IR-1 → launch**:
-without IR-2 the script below has no `torch` to import. Verify the
-model path, GPU visibility, and that no stale serving process holds
-VRAM; exit non-zero on any violation so the calling shell aborts
-before `python -m hyperloom.inference_optimizer.cli optimize` is spawned. Never print tokens.
+IR-2 must complete first so `torch` is available. Run the preflight tool
+and abort on any non-zero exit before spawning the optimizer:
 
 ```bash
-export MODEL_PATH=/path/to/model
-test -d "$MODEL_PATH"
-
-"$PYTHON" - <<'PY'
-import os
-try:
-    import torch
-    print("torch_cuda_available=", torch.cuda.is_available())
-    print("torch_cuda_device_count=", torch.cuda.device_count())
-except Exception as exc:
-    print("torch_check_error=", type(exc).__name__, str(exc)[:300])
-
-patterns = ("hyperloom.inference_optimizer.cli", "Magpie", "sglang.launch_server")
-for pid in filter(str.isdigit, os.listdir("/proc")):
-    try:
-        cmd = open(f"/proc/{pid}/cmdline", "rb").read()
-    except Exception:
-        continue
-    text = cmd.replace(b"\0", b" ").decode("utf-8", "ignore")
-    if text and any(p in text for p in patterns):
-        print(f"existing_process {pid}: {text[:300]}")
-PY
+"$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/preflight_optimizer.py" "$MODEL_PATH"
 ```
+
+A non-zero exit means the GPU state is unknown or a violation was detected;
+do not continue to `python -m hyperloom.inference_optimizer.cli optimize`.
 
 ## Benchmark Config
 

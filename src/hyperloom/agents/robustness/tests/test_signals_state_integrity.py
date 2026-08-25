@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for I1-I5 state-integrity signals."""
+"""Unit tests for I1-I4 state-integrity signals."""
 
 from __future__ import annotations
 
@@ -115,74 +115,7 @@ def test_i2_silent_below_warn():
     assert all(s.name != "coordinator_wal_bloat" for s in out)
 
 
-def test_i3_stale_lease_fires_when_holder_dead():
-    """Lease held by dead PID for > stale_lease_min_age_s → HIGH."""
-    data = SourceData(
-        local_state_integrity={
-            "leases": [
-                {
-                    "task_id": "tsk-7",
-                    "holder_pid": 9999,
-                    "lane": "benchmark_lane",
-                    "alive": False,
-                    "acquired_at": 1_999_000.0,
-                },
-            ],
-        }
-    )
-    out = evaluate_state_integrity_signals(_ctx(now_unix=2_000_000.0), data)
-    sym = next(s for s in out if s.name == "stale_lease")
-    assert sym.severity is SymptomSeverity.HIGH
-    assert sym.evidence["task_id"] == "tsk-7"
-    assert sym.evidence["holder_pid"] == 9999
-
-
-def test_i3_silent_when_holder_alive():
-    data = SourceData(
-        local_state_integrity={
-            "leases": [
-                {"task_id": "tsk-8", "holder_pid": 1234, "lane": "lane-1", "alive": True, "acquired_at": 1_999_000.0},
-            ],
-        }
-    )
-    out = evaluate_state_integrity_signals(_ctx(now_unix=2_000_000.0), data)
-    assert all(s.name != "stale_lease" for s in out)
-
-
-def test_i3_silent_when_lease_too_young():
-    """Lease acquired 10s ago; reaper hasn't had a chance yet."""
-    data = SourceData(
-        local_state_integrity={
-            "leases": [
-                {"task_id": "tsk-9", "holder_pid": 9999, "lane": "lane-1", "alive": False, "acquired_at": 1_999_990.0},
-            ],
-        }
-    )
-    out = evaluate_state_integrity_signals(_ctx(now_unix=2_000_000.0), data)
-    assert all(s.name != "stale_lease" for s in out)
-
-
-def test_i3_handles_iso_timestamp_in_acquired_at():
-    now_2026 = 1_780_000_000.0  # ~2026-05
-    data = SourceData(
-        local_state_integrity={
-            "leases": [
-                {
-                    "task_id": "tsk-10",
-                    "holder_pid": 9999,
-                    "lane": "lane-1",
-                    "alive": False,
-                    "acquired_at": "2020-01-01T00:00:00+00:00",
-                },
-            ],
-        }
-    )
-    out = evaluate_state_integrity_signals(_ctx(now_unix=now_2026), data)
-    sym = next(s for s in out if s.name == "stale_lease")
-    assert sym.evidence["task_id"] == "tsk-10"
-
-
-def test_i4_inbox_bloat_low_at_warn():
+def test_i3_inbox_bloat_low_at_warn():
     data = SourceData(
         local_state_integrity={
             "agents": {
@@ -201,7 +134,7 @@ def test_i4_inbox_bloat_low_at_warn():
     assert sym.evidence["kind"] == "inbox"
 
 
-def test_i4_inbox_bloat_medium_at_critical():
+def test_i3_inbox_bloat_medium_at_critical():
     data = SourceData(
         local_state_integrity={
             "agents": {
@@ -218,7 +151,7 @@ def test_i4_inbox_bloat_medium_at_critical():
     assert sym.severity is SymptomSeverity.MEDIUM
 
 
-def test_i4_silent_below_threshold():
+def test_i3_silent_below_threshold():
     data = SourceData(
         local_state_integrity={
             "agents": {
@@ -233,7 +166,7 @@ def test_i4_silent_below_threshold():
     assert all(s.name != "inbox_bloat" for s in out)
 
 
-def test_i4_separate_symptom_per_role_and_kind():
+def test_i3_separate_symptom_per_role_and_kind():
     data = SourceData(
         local_state_integrity={
             "agents": {
@@ -259,7 +192,7 @@ def test_i4_separate_symptom_per_role_and_kind():
     }
 
 
-def test_i5_coordinator_zombie_fires():
+def test_i4_coordinator_zombie_fires():
     """PID dead + state.json valid + empty stop_reason → HIGH."""
     data = SourceData(
         local_state_integrity={
@@ -277,7 +210,7 @@ def test_i5_coordinator_zombie_fires():
     assert sym.evidence["recorded_pid"] == 1234
 
 
-def test_i5_silent_when_coordinator_alive():
+def test_i4_silent_when_coordinator_alive():
     data = SourceData(
         local_state_integrity={
             "state_json": {"valid": True, "stop_reason": ""},
@@ -292,7 +225,7 @@ def test_i5_silent_when_coordinator_alive():
     assert all(s.name != "coordinator_zombie" for s in out)
 
 
-def test_i5_silent_when_graceful_stop_reason():
+def test_i4_silent_when_graceful_stop_reason():
     """PID dead but stop_reason set → clean wind-down."""
     data = SourceData(
         local_state_integrity={
@@ -308,7 +241,7 @@ def test_i5_silent_when_graceful_stop_reason():
     assert all(s.name != "coordinator_zombie" for s in out)
 
 
-def test_i5_silent_when_no_pid_recorded():
+def test_i4_silent_when_no_pid_recorded():
     data = SourceData(
         local_state_integrity={
             "state_json": {"valid": True, "stop_reason": ""},
@@ -323,19 +256,18 @@ def test_custom_thresholds_apply():
     cfg = StateIntegrityConfig(
         wal_bytes_warn_threshold=100 * 1024 * 1024,
         wal_bytes_critical_threshold=500 * 1024 * 1024,
-        stale_lease_min_age_s=0.0,
+        inbox_bloat_warn_bytes=1 * 1024 * 1024,
+        inbox_bloat_critical_bytes=8 * 1024 * 1024,
     )
     data = SourceData(
         local_state_integrity={
             "wal": {"wal_bytes": 250 * 1024 * 1024, "db_bytes": 0},
-            "leases": [
-                {"task_id": "tsk-x", "holder_pid": 9999, "alive": False, "acquired_at": 1_999_999.5, "lane": "lane-1"},
-            ],
+            "agents": {"orchestration": {"inbox_bytes": 4 * 1024 * 1024}},
         }
     )
     out = evaluate_state_integrity_signals(_ctx(now_unix=2_000_000.0), data, config=cfg)
     assert any(s.name == "coordinator_wal_bloat" for s in out)
-    assert any(s.name == "stale_lease" for s in out)
+    assert any(s.name == "inbox_bloat" for s in out)
 
 
 def test_evaluator_returns_empty_when_no_data():

@@ -310,76 +310,6 @@ class PreludePhase(PhaseHandler):
         state.warm_history_injected = True
         return added
 
-    def _filter_warm_patches_with_kg(
-        self,
-        patches: list,
-        advisory_blocked: list,
-        state: Any,
-    ) -> list:
-        """Filter replay patches using KG advisory blocks, expiry, conflicts.
-
-        Removes patches that are (a) advisory-blocked at/above a fixed 0.75
-        confidence threshold, (b) flagged ``expired`` by the
-        warm-start validity check, or (c) in a ``CONFLICTS_WITH`` relation
-        with another patch in the set. Best-effort: any failure returns the
-        input patches unchanged so replay never breaks on a KG hiccup.
-
-        Args:
-            patches: The candidate replay patches from ``recommended_replay``.
-            advisory_blocked: The ``advisory_blocked_patches`` list from the
-                warm-start context.
-            state: The live SharedState (for hardware/framework conditions).
-
-        Returns:
-            The filtered patch list.
-        """
-        if not patches:
-            return patches
-        threshold = 0.75
-
-        def _norm(value: Any) -> str:
-            return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
-
-        try:
-            advisory_drop = {
-                _norm(ab.get("patch_file"))
-                for ab in (advisory_blocked or [])
-                if isinstance(ab, dict) and float(ab.get("confidence") or 0.0) >= threshold
-            }
-            kept = [
-                p
-                for p in patches
-                if isinstance(p, dict) and not p.get("expired") and _norm(p.get("patch_file")) not in advisory_drop
-            ]
-            for p in patches:
-                if isinstance(p, dict) and _norm(p.get("patch_file")) in advisory_drop:
-                    log.info("warm-replay advisory block (conf>=%.2f): %s", threshold, p.get("patch_file"))
-
-            if len(kept) >= 2:
-                from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
-
-                kg = get_kg_client()
-                if kg is not None and kg.is_available():
-                    knobs = [str(p.get("patch_file") or "") for p in kept]
-                    conflicts = kg.find_conflicts_safe(
-                        knobs=knobs,
-                        hardware=str(getattr(state, "gpu_type", "") or getattr(state, "hardware", "") or ""),
-                        framework=str(getattr(state, "framework", "") or ""),
-                    )
-                    drop = {_norm(c.get("knob")) for c in conflicts}
-                    if drop:
-                        for c in conflicts:
-                            log.info(
-                                "warm-replay conflict: %s conflicts_with %s",
-                                c.get("knob"),
-                                c.get("conflicts_with"),
-                            )
-                        kept = [p for p in kept if _norm(p.get("patch_file")) not in drop]
-            return kept
-        except Exception as exc:  # noqa: BLE001 - filtering is advisory only
-            log.warning("warm-replay KG patch filtering degraded: %s", exc)
-            return patches
-
     def _collect_warm_kernel_plan(self, kb: Any) -> list[dict[str, Any]]:
         """Resolve the prior-champion kernel columns into a local apply plan.
 
@@ -1481,10 +1411,6 @@ class PreludePhase(PhaseHandler):
             if isinstance(wsc, dict)
             else []
         )
-        wsc_blocked = [] if current_remote else wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
-        wsc_advisory = (
-            [] if current_remote else wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
-        )
         required_patch_timeline = bool(
             current_remote
             and sdk_replay.get("timeline")
@@ -1492,12 +1418,7 @@ class PreludePhase(PhaseHandler):
         )
         if recipe_suppressed:
             wsc_patches = []
-            wsc_blocked = []
             required_patch_timeline = False
-        # Current-contract order is authoritative and fail-closed. Local legacy
-        # lists retain advisory filtering and gain-prioritized behavior.
-        if not required_patch_timeline:
-            wsc_patches = self._filter_warm_patches_with_kg(wsc_patches, wsc_advisory, state)
         if wsc_patches:
             from ..framework.paths import resolve_warm_replay_framework_root
 
@@ -1650,7 +1571,6 @@ class PreludePhase(PhaseHandler):
             "baseline_tput_anchor": float(baseline_tput),
             # Code patches to apply before server launch.
             "patches": list(wsc_patches),
-            "blocked_patches": list(wsc_blocked),
             "required_patch_timeline": required_patch_timeline,
             "warm_kernel_plan": kernel_pending,
             "warm_kernel_apply_results": kernel_applied,
@@ -2283,6 +2203,14 @@ class PreludePhase(PhaseHandler):
                 },
                 entry_extra=entry_extra,
             )
+            # Publish the reproduced verdict now that the stack entry exists but
+            # before the cumulative update (the one step below that can raise and
+            # is swallowed by the caller). The post-ruling mirror reads this
+            # in-memory outcome: persisting it here keeps the canonical adoption
+            # in step with the stack. Placed after the lift on purpose -- if the
+            # lift itself raises, the outcome stays in_flight and both the stack
+            # and the mirror agree there is nothing adopted.
+            state.warm_replay_outcome = outcome
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput)
             log.info(

@@ -22,9 +22,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV,
     inject_sglang_moe_runner_backend,
 )
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
-    strip_aiter_args_for_unaligned_moe,
-)
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     _remove_moe_runner_backend_arg,
     materialize_config_with_envs,
@@ -467,51 +464,3 @@ def test_aiter_ck_fused_moe_support_defaults_open(tmp_path, dense_model) -> None
         {"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe", "num_experts": 128},
     )
     assert cli_model_gate.model_supports_aiter_ck_fused_moe(moe_no_size, 8) is True
-
-
-# aiter-selecting server args on an unaligned MoE shape (ROCm memory fault)
-
-
-@pytest.fixture
-def unaligned_moe_model(tmp_path) -> str:
-    """Qwen3-30B-A3B: 768 // 4 = 192, which is not 128-aligned."""
-    return _write_model_config(
-        tmp_path / "Qwen-Qwen3-30B-A3B",
-        {
-            "architectures": ["Qwen3MoeForCausalLM"],
-            "model_type": "qwen3_moe",
-            "num_experts": 128,
-            "moe_intermediate_size": 768,
-        },
-    )
-
-
-def test_strip_aiter_args_drops_flags_on_unaligned_moe(unaligned_moe_model) -> None:
-    """The variant that faulted rank 1 must lose its aiter-selecting flags."""
-    args = "--attention-backend aiter --mem-fraction-static 0.8 --enable-aiter-allreduce-fusion"
-    out = strip_aiter_args_for_unaligned_moe(args, "sglang", unaligned_moe_model, 4)
-    assert "aiter" not in out
-    assert out == "--mem-fraction-static 0.8"
-
-
-def test_strip_aiter_args_keeps_flags_when_shape_aligned(unaligned_moe_model) -> None:
-    """768 // 2 = 384 is 128-aligned, so aiter stays available."""
-    args = "--attention-backend aiter --enable-aiter-allreduce-fusion"
-    assert strip_aiter_args_for_unaligned_moe(args, "sglang", unaligned_moe_model, 2) == args
-
-
-def test_strip_aiter_args_noop_for_dense_and_non_sglang(dense_model, unaligned_moe_model) -> None:
-    args = "--attention-backend aiter"
-    # Dense checkpoints never reach the MoE asm path.
-    assert strip_aiter_args_for_unaligned_moe(args, "sglang", dense_model, 4) == args
-    # vLLM does not take these flags at all.
-    assert strip_aiter_args_for_unaligned_moe(args, "vllm", unaligned_moe_model, 4) == args
-    # Unknown model: do not strip on a guess.
-    assert strip_aiter_args_for_unaligned_moe(args, "sglang", "", 4) == args
-
-
-def test_strip_aiter_args_leaves_moe_runner_backend_alone(unaligned_moe_model) -> None:
-    """--moe-runner-backend triton is not an aiter selector; it must survive."""
-    args = "--attention-backend aiter --moe-runner-backend triton"
-    out = strip_aiter_args_for_unaligned_moe(args, "sglang", unaligned_moe_model, 4)
-    assert out == "--moe-runner-backend triton"

@@ -41,6 +41,14 @@ def _identity_bare(full: str) -> str:
     return full.rsplit("/", 1)[-1] if "/" in full else full
 
 
+def _is_hf_repo_id(raw: str) -> bool:
+    """True when *raw* is a plain ``org/repo`` HuggingFace repo id (exactly one ``/``, no path indicators)."""
+    parts = raw.split("/")
+    if len(parts) != 2:
+        return False
+    return all(p and not p.startswith(".") for p in parts)
+
+
 def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[str]]:
     """Return ``(full, bare)`` casefolded identity candidate sets.
 
@@ -53,10 +61,15 @@ def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[s
     if not raw:
         return set(), set()
     p = Path(raw)
-    segments = [p.name]
-    # HF hub cache hides the repo name in a mid-path models--org--repo segment;
-    # the snapshots/<hash> basename alone cannot recover it.
-    segments += [part for part in p.parts if part.startswith("models--")]
+
+    if _is_hf_repo_id(raw):
+        full = {raw}
+        bare = {_identity_bare(raw)}
+        return {f.casefold() for f in full}, {b.casefold() for b in bare}
+
+    cache_segs = [part for part in p.parts if part.startswith("models--")]
+    segments: list[str] = cache_segs if cache_segs else [p.name]
+
     full = {_identity_leaf(s) for s in segments if s}
     full = {f for f in full if f}
     bare = {_identity_bare(f) for f in full}

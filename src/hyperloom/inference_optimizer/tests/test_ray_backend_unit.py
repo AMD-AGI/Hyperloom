@@ -1450,7 +1450,6 @@ def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
     def _fake_ensure(*, num_gpus=None, log_path=None):
         calls["ensure"] += 1
         calls["num_gpus"] = num_gpus
-        return True
 
     def _fake_init(*, num_gpus=None, log_path=None):
         calls["init"] += 1

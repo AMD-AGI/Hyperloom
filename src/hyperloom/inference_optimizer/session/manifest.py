@@ -94,24 +94,6 @@ def _git_remote_at(path: Path) -> str:
     return _git_capture(path, ["config", "--get", "remote.origin.url"])
 
 
-def _path_is_relative_to(path: Path, root: Path) -> bool:
-    """Return True when ``path`` is inside ``root`` after best-effort resolution.
-
-    Args:
-        path: The path to test.
-        root: The root directory ``path`` may be nested under.
-
-    Returns:
-        True when ``path`` is provably inside ``root``.
-    """
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
-    except (OSError, ValueError, RuntimeError):
-        # Treat resolution failures as "not provably inside root".
-        return False
-
-
 # Pod-local, non-persistent roots: a dependency checkout under one of these is
 # erased on pod recycle. A shared checkout elsewhere is legitimate.
 _POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")  # nosec B108 - path-prefix heuristic only.
@@ -130,7 +112,7 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
     if not user_data:
         return
     dep_path = Path(raw)
-    if _path_is_relative_to(dep_path, Path(user_data)):
+    if _paths.is_path_within(dep_path, Path(user_data)):
         return
     try:
         resolved = str(dep_path.resolve(strict=False))

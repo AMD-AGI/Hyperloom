@@ -21,8 +21,14 @@ its own context before launching the optimizer. Because `install.sh` is
 idempotent, the second run is fast and safe.
 ```
 
+```{note}
+Paths in the prompts on this page follow the recommended `pip install --target .`
+layout. In a source checkout, replace the `hyperloom/` prefix with
+`src/hyperloom/`.
+```
+
 ```text
-@src/hyperloom/inference_optimizer/SKILL.md
+@hyperloom/inference_optimizer/SKILL.md
 
 Optimize inference for this workload:
 - Model: /path/to/your/model
@@ -36,9 +42,10 @@ Optimize inference for this workload:
 - Budget: 24 hours
 
 Before launch, run exactly:
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
-source '/path/to/hyperloom-run/runtime/kernel-agent.env.sh'
+export REPO_ROOT="$(pwd -P)"
 export USER_DATA_PATH='/path/to/hyperloom-run'
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
+source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
@@ -77,7 +84,7 @@ happens in each phase.
 Paste this prompt into the Claude Code chat to resume an existing session:
 
 ```text
-@src/hyperloom/inference_optimizer/SKILL.md
+@hyperloom/inference_optimizer/SKILL.md
 
 Resume the existing Hyperloom optimization session.
 

@@ -1502,6 +1502,14 @@ def test_profile_server_args_sanitizer_preserves_json_value_quotes():
     assert "--torch-compile-max-bs" not in sanitized
 
 
+def test_profile_server_args_sanitizer_degrades_on_unbalanced_quote():
+    """An unbalanced quote must not raise; the function falls back to whitespace split."""
+    result = _sanitize_profile_server_args("--foo 'unterminated --bar baz")
+    assert isinstance(result, str)
+    assert "--foo" in result
+    assert "--bar" in result
+
+
 # $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path.
 def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
     monkeypatch.delenv("FRAMEWORK", raising=False)
@@ -1737,8 +1745,12 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tmp_path):
-    """A cleanup/profile wrapper failure must not discard completed requests."""
+async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
+    """A parseable measurement must not launder a non-zero process exit into success.
+
+    The round cannot be the number a later comparison anchors to. Same contract
+    ``run_grid`` enforces for a variant.
+    """
     db = SqliteConnection(tmp_path / "baseline.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -1779,13 +1791,12 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
         res = await sub.run_task(task)
 
-    assert res.state == "succeeded"
-    assert res.result["status"] == "succeeded"
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "magpie_nonzero_after_valid_measurement"
+    assert res.result["returncode"] == 1
+    assert "cleanup failed" in res.result["error"]
     assert res.result["reported_success"] is False
-    assert res.result["output_throughput"] == 1872.0
-    assert res.result["completed_requests"] == 320
-    assert "benchmark_report_success_false" in res.result["nonfatal_warnings"]
-    assert "magpie_nonzero_after_valid_measurement" in res.result["nonfatal_warnings"]
+    assert "output_throughput" not in res.result
     db.close()
 
 
@@ -2488,12 +2499,15 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_forwards_explicit_top_k(
+async def test_trace_analyze_handler_does_not_forward_top_k(
     session_dir,
     monkeypatch,
 ):
-    """An explicit ``top_k`` request param is still forwarded to
-    the tool as ``--top-k <n>`` (operator/LLM override path)."""
+    """``top_k`` is not a tool flag; the live dial is ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K``.
+
+    A payload still carrying the key must be ignored rather than reach an
+    argparse that no longer defines it.
+    """
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
@@ -2513,9 +2527,7 @@ async def test_trace_analyze_handler_forwards_explicit_top_k(
         session_dir=session_dir,
     )
     assert res["status"] in ("ok", "succeeded", "failed")
-    cmd = captured["cmd"]
-    assert "--top-k" in cmd
-    assert cmd[cmd.index("--top-k") + 1] == "20"
+    assert "--top-k" not in captured["cmd"]
 
 
 @pytest.mark.asyncio

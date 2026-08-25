@@ -3,9 +3,10 @@
 
 """A lease-reaped task death must count as a failure for its action.
 
-A holder killed from outside this process (``lease_dead_holder_reaped``) never
-returns a ``delegated_result``, so ``baseline_failure_streak`` used to stay 0
-and the streak-3 auto-terminate never fired — the run could not leave PRELUDE.
+A holder killed from outside this process (its lease reaped by
+``reap_dead_holders``) never returns a ``delegated_result``, so
+``baseline_failure_streak`` used to stay 0 and the streak-3 auto-terminate
+never fired — the run could not leave PRELUDE.
 """
 
 from __future__ import annotations

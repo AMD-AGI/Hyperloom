@@ -21,6 +21,7 @@ Adds two local-store-specific helpers:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
@@ -35,6 +36,9 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     detect_framework_version,
     recipe_canonical_id,
 )
+
+# One canonical-id segment: a path component safe to join onto a store root.
+SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 
 
 # Documented prefix for recipe-snapshot v2 ids; bumping it is a compatibility
@@ -74,9 +78,9 @@ def cid_to_path_components(
 ) -> tuple[str, str, str, str, str, str, str]:
     """Decompose a canonical id into its seven identity slugs.
 
-    The shape is enforced to exactly eight segments so a malformed id
-    cannot quietly route writes to a sibling directory and silently
-    shadow a real recipe.
+    Exactly eight segments are required and each dimension must be a safe
+    single path component, so a malformed id cannot route writes outside its
+    own directory and silently shadow a real recipe.
 
     Returns the tuple in the order
     ``(model, hardware, framework_name, model_type, architectures,
@@ -91,8 +95,8 @@ def cid_to_path_components(
             slugs.
 
     Raises:
-        InvalidCanonicalIdError: If the id is empty, has a bad prefix,
-            or contains an empty segment.
+        InvalidCanonicalIdError: If the id is empty, has a bad prefix, or
+            contains a segment that is empty or unsafe as a path component.
     """
     raw = (canonical_id or "").strip()
     if not raw:
@@ -116,6 +120,12 @@ def cid_to_path_components(
             raw,
             "empty segment(s) detected — every dimension must be non-empty",
         )
+    for seg in parts[1:]:
+        if not SLUG_PART_RE.fullmatch(seg):
+            raise InvalidCanonicalIdError(
+                raw,
+                f"segment {seg!r} is not a safe path component",
+            )
     return (model, hardware, framework_name, model_type, architectures, framework_version, precision)
 
 

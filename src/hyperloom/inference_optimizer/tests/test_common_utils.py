@@ -412,6 +412,42 @@ def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, mo
     assert calls == ["write", "plan", "ingest"]
 
 
+def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.cli import recover
+    import hyperloom.inference_optimizer.breakdown as breakdown_mod
+    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
+    monkeypatch.setattr(
+        emitter,
+        "read_receipt",
+        lambda _session_dir: {"counts": {"breakdown_recorded": 1}, "counts_final": True},
+    )
+
+    # A recorded breakdown that is no longer on disk must not read as complete.
+    status = recover._session_recovery_status(session)
+    assert status["close_done"] is True
+    assert status["breakdown_recorded"] is True
+    assert status["breakdown_exists"] is False
+    assert status["looks_complete"] is False
+
+    rebuilt: list[Path] = []
+    monkeypatch.setattr(
+        breakdown_mod,
+        "write_breakdown_json",
+        lambda s: rebuilt.append(s) or s / breakdown_mod.BREAKDOWN_FILENAME,
+    )
+    monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda _s: None)
+    monkeypatch.setattr(breakdown_mod, "package_session_artifacts", lambda _s: None)
+    monkeypatch.setattr(emitter, "flush_session", lambda _s: None)
+    monkeypatch.setattr(emitter, "record_session_breakdown", lambda _s: None)
+
+    assert recover._run_recover_session(argparse.Namespace(session_dir=session, force=False, backfill_trace=False)) == 0
+    assert rebuilt == [session]
+
+
 # ---------------------------------------------------------------------------
 # inference_optimizer.cli.multi_node / multi_node commands
 # ---------------------------------------------------------------------------
@@ -1063,8 +1099,11 @@ def test_framework_audit_common_patch_sources(tmp_path: Path, monkeypatch: pytes
         "-def gone(): pass\n"
     )
     changes = common.parse_unified_diff(diff)
-    assert [c.path for c in changes] == ["pkg/a.py"]
+    # The deleted file keeps its own path: ``+++ /dev/null`` names no target, so
+    # the ``---`` side is what the change touched.
+    assert [c.path for c in changes] == ["pkg/a.py", "pkg/old.py"]
     assert changes[0].is_new is True
+    assert changes[1].is_deleted is True
     assert common._symbols(changes[0].added) == ["Added", "run"]
 
     root = tmp_path / "src"

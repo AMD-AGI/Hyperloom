@@ -41,7 +41,8 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from ..trace.parse_usage import reasoning_output_tokens
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
@@ -76,6 +77,26 @@ _ANTHROPIC_USAGE_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+
+
+def _accumulate_reasoning_tokens(acc: dict[str, int], usage: Any) -> None:
+    """Fold a reply's reasoning-output tokens into the accumulator, when reported.
+
+    The key is only created when the provider reported a count, so a model
+    without a reasoning split still writes ``None`` (not ``0``) to the ledger —
+    the documented difference between "no reasoning concept" and "no reasoning
+    tokens spent".
+
+    Args:
+        acc: The running accumulator, updated in place.
+        usage: A provider usage payload (mapping or SDK object).
+    """
+    count = reasoning_output_tokens(usage)
+    if count is None:
+        return
+    acc["reasoning_output_tokens"] = acc.get("reasoning_output_tokens", 0) + count
+
+
 # HTTP client timeout defaults for critic review calls. A completion is not
 # streamed, so the read half is what bounds generation: the server holds the
 # connection open until the whole reply exists.
@@ -1044,10 +1065,14 @@ class CriticAgentBackend:
             f"{_REVIEW_OUTPUT_INSTRUCTIONS}"
         )
         max_tokens = self._resolve_max_completion_tokens()
+        # One id per review call, shared by its token row and its conversation
+        # row so the two halves pair on the call rather than on a ts second.
+        call_id = new_call_id()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=max_tokens,
+            call_id=call_id,
         )
 
         # Mirror the full prompt + reply onto conversations.jsonl so the critic
@@ -1056,6 +1081,7 @@ class CriticAgentBackend:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response=text,
+            call_id=call_id,
         )
         review = _extract_review_json(text)
 
@@ -1079,11 +1105,13 @@ class CriticAgentBackend:
                 finish,
                 retry_tokens,
             )
+            retry_call_id = new_call_id()
             try:
                 text, finish = await self._run_reasoning_loop(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_tokens=retry_tokens,
+                    call_id=retry_call_id,
                 )
             except BackendError as exc:
                 # A provider whose own output limit sits below the doubled cap
@@ -1099,6 +1127,7 @@ class CriticAgentBackend:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 response=text,
+                call_id=retry_call_id,
             )
             review = _extract_review_json(text)
             max_tokens = retry_tokens
@@ -1122,6 +1151,7 @@ class CriticAgentBackend:
         system_prompt: str | None,
         user_prompt: str,
         max_tokens: int,
+        call_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Issue one review inference call and return ``(text, finish_reason)``.
 
@@ -1133,6 +1163,7 @@ class CriticAgentBackend:
             system_prompt: The system instruction, or ``None``.
             user_prompt: The judge bundle plus output instructions.
             max_tokens: Output-token cap for this call.
+            call_id: Per-call id stamped on the token row this call writes.
 
         Returns:
             A tuple of the reply text and the finish/stop reason.
@@ -1145,11 +1176,13 @@ class CriticAgentBackend:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=max_tokens,
+                call_id=call_id,
             )
         return await self._run_openai_reasoning(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=max_tokens,
+            call_id=call_id,
         )
 
     async def _run_openai_reasoning(
@@ -1158,6 +1191,7 @@ class CriticAgentBackend:
         system_prompt: str | None,
         user_prompt: str,
         max_tokens: int,
+        call_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Issue one Codex chat-completions call and return ``(text, finish_reason)``.
 
@@ -1189,7 +1223,7 @@ class CriticAgentBackend:
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, result.usage)
-        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
+        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms, call_id=call_id)
         return result.text, result.finish_reason
 
     async def _run_anthropic_reasoning(
@@ -1198,6 +1232,7 @@ class CriticAgentBackend:
         system_prompt: str | None,
         user_prompt: str,
         max_tokens: int,
+        call_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Issue one single-shot Anthropic completion for the review.
 
@@ -1238,7 +1273,7 @@ class CriticAgentBackend:
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
         self._accumulate_anthropic_usage(usage_acc, result.usage)
-        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
+        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms, call_id=call_id)
         stop_reason = result.stop_reason
         return (result.text or "", stop_reason if isinstance(stop_reason, str) and stop_reason else None)
 
@@ -1270,6 +1305,7 @@ class CriticAgentBackend:
                 acc[key] = acc.get(key, 0) + int(usage.get(key, 0) or 0)
             except (TypeError, ValueError):
                 continue
+        _accumulate_reasoning_tokens(acc, usage)
 
     @staticmethod
     def _accumulate_usage(
@@ -1297,6 +1333,7 @@ class CriticAgentBackend:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
             pass
+        _accumulate_reasoning_tokens(acc, usage)
 
     def set_trace_context(
         self,
@@ -1322,6 +1359,7 @@ class CriticAgentBackend:
         usage_acc: dict[str, int],
         *,
         latency_ms: int | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
 
@@ -1339,12 +1377,14 @@ class CriticAgentBackend:
             usage_acc: Accumulated token counts for this reasoning loop.
             latency_ms: Summed wall-clock latency of the reasoning loop, when
                 measured.
+            call_id: Per-call id shared with this call's conversation row.
         """
         try:
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
+                call_id=call_id,
                 model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,
@@ -1352,6 +1392,7 @@ class CriticAgentBackend:
                 output_tokens=usage_acc.get("output_tokens"),
                 cache_read_input_tokens=usage_acc.get("cache_read_input_tokens"),
                 cache_creation_input_tokens=usage_acc.get("cache_creation_input_tokens"),
+                reasoning_output_tokens=usage_acc.get("reasoning_output_tokens"),
                 latency_ms=latency_ms,
                 reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
@@ -1423,6 +1464,7 @@ class CriticAgentBackend:
         system_prompt: str | None,
         user_prompt: str,
         response: str,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a critic reasoning loop.
 
@@ -1435,6 +1477,7 @@ class CriticAgentBackend:
                 prompt.
             user_prompt: The judge-bundle user prompt the critic reasoned over.
             response: The model's externally-visible reply text.
+            call_id: Per-call id shared with this call's token row.
         """
         try:
             prompt = f"{system_prompt}\n---\n{user_prompt}" if system_prompt else user_prompt
@@ -1444,6 +1487,7 @@ class CriticAgentBackend:
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
+                call_id=call_id,
                 model=self._review_model,
                 prompt=prompt or "",
                 response=response or "",

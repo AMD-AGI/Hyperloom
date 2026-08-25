@@ -1,6 +1,6 @@
 .. meta::
-   :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM), container images, and component dependencies.
-   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI355X, SGLang, vLLM, ROCm, container images, GPU support
+   :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM, Atom, xDiT), container images, and component dependencies.
+   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI308X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
 
 ******************************
 Hyperloom compatibility matrix
@@ -42,21 +42,22 @@ Hyperloom support matrix
 
 The following table lists the minimum requirements for running Hyperloom.
 
-+---------------------+---------------------------------------+
-| Requirement         | Support                               |
-+=====================+=======================================+
-| AMD Instinct™ GPU   | MI300X, MI325X, MI355X                |
-+---------------------+---------------------------------------+
-| Operating System    | Ubuntu 22.04, Ubuntu 24.04            |
-+---------------------+---------------------------------------+
-| ROCm Version        | 7.2.x, 10.0                           |
-+---------------------+---------------------------------------+
-| Python              | >= 3.10                               |
-+---------------------+---------------------------------------+
-| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0)  |
-+---------------------+---------------------------------------+
-| Kernel Languages    | HIP, Triton, FlyDSL                   |
-+---------------------+---------------------------------------+
++---------------------+--------------------------------------------------------+
+| Requirement         | Support                                                |
++=====================+========================================================+
+| AMD Instinct™ GPU   | MI300X, MI308X, MI325X, MI355X                         |
++---------------------+--------------------------------------------------------+
+| Operating System    | Ubuntu 22.04, Ubuntu 24.04                             |
++---------------------+--------------------------------------------------------+
+| ROCm Version        | 7.2.x, 10.0                                            |
++---------------------+--------------------------------------------------------+
+| Python              | >= 3.10                                                |
++---------------------+--------------------------------------------------------+
+| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), Atom, xDiT, plus |
+|                     | ``custom`` for your own benchmark script               |
++---------------------+--------------------------------------------------------+
+| Kernel Languages    | HIP, Triton, FlyDSL                                    |
++---------------------+--------------------------------------------------------+
 
 Component support matrix
 ========================
@@ -101,10 +102,10 @@ The following table lists the validated Hyperloom version and component combinat
 
 .. note::
 
-   MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom
-   keeps the resolved GPU type distinct (``mi325x``), but Magpie benchmark
-   rendering reuses the MI300X runner scripts and image family unless a dedicated
-   image is supplied.
+   MI308X and MI325X share the gfx942/CDNA3 runner family with MI300X. Hyperloom
+   keeps the resolved GPU types distinct (``mi308x``, ``mi325x``), but Magpie
+   benchmark rendering reuses the MI300X runner scripts and image family unless a
+   dedicated image is supplied.
 
 Inference frameworks
 --------------------
@@ -130,6 +131,9 @@ The following inference frameworks are supported:
    * - xDiT (diffusion)
      - 7.2.0
      - Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency ``e2el_mean_ms`` (ms).
+   * - ``custom``
+     - Host-defined
+     - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
 
 Container images
 ----------------
@@ -146,11 +150,11 @@ private registry mirror, set the registry prefix accordingly.
    * - Image
      - GPU
    * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x``
-     - MI300X / MI325X
+     - MI300X / MI308X / MI325X
    * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.27.1``
-     - MI300X / MI325X / MI355X
+     - MI300X / MI308X / MI325X / MI355X
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.

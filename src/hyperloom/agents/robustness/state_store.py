@@ -231,8 +231,6 @@ class DetectorStateView:
 
     Owners don't know (and shouldn't care) what other slots exist; they
     just call :meth:`load` / :meth:`save` against their own namespace.
-    Construction with ``store=None`` (e.g. legacy tests) keeps the API
-    surface usable but in-memory only.
     """
 
     __slots__ = ("_store", "_slot")
@@ -240,14 +238,13 @@ class DetectorStateView:
     def __init__(
         self,
         *,
-        store: DetectorStateStore | None,
+        store: DetectorStateStore,
         slot: str,
     ) -> None:
-        """Bind a view to one slot of a store (or to nothing).
+        """Bind a view to one slot of a store.
 
         Args:
-            store (DetectorStateStore | None): Backing store, or ``None``
-                for an in-memory-only no-op view (legacy tests).
+            store (DetectorStateStore): Backing store.
             slot (str): Slot namespace this view reads and writes.
         """
         self._store = store
@@ -258,22 +255,16 @@ class DetectorStateView:
 
         Returns:
             dict[str, Any]: The slot's content, or an empty dict when the
-            view has no backing store.
+            slot is absent.
         """
-        if self._store is None:
-            return {}
         return self._store.load_slot(self._slot)
 
     def save(self, payload: dict[str, Any]) -> None:
         """Save content into this view's slot.
 
-        No-op when the view has no backing store.
-
         Args:
             payload (dict[str, Any]): New slot content.
         """
-        if self._store is None:
-            return
         self._store.save_slot(self._slot, payload)
 
 

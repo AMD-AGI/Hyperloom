@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.bus.gpu_pool import resolve_gpu_specialist_devices
+from hyperloom.orchestrator.bus.gpu_pool import (
+    SpecialistGpuPool,
+    resolve_gpu_specialist_devices,
+    resolve_whole_machine_devices,
+)
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
 _MASK_VARS = (
@@ -99,3 +104,87 @@ def test_explicit_operator_pool_ignores_serving_tp(monkeypatch) -> None:
     # The operator pool is already carved; serving_tp must NOT subtract again.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "4;5;6;7")
     assert resolve_gpu_specialist_devices(4, serving_tp=4) == [4, 5, 6, 7]
+
+
+def test_explicit_pool_all_invalid_fails_closed(monkeypatch) -> None:
+    """An explicit pool that parses to empty must return [] (fail closed), not fall through."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "gpu4,gpu5")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    result = resolve_gpu_specialist_devices(4)
+    assert result == [], f"expected [] (fail closed), got {result!r}"
+
+
+def test_whole_machine_explicit_pool_all_invalid_fails_closed(monkeypatch) -> None:
+    """resolve_whole_machine_devices also fails closed on an unusable explicit pool."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "-1,-2")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    result = resolve_whole_machine_devices()
+    assert result == [], f"expected [] (fail closed), got {result!r}"
+
+
+def test_empty_string_env_falls_back_to_mask(monkeypatch) -> None:
+    """An empty INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES is treated as unset."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    assert resolve_gpu_specialist_devices(4) == [0, 1, 2, 3]
+    assert resolve_whole_machine_devices() == [0, 1, 2, 3]
+
+
+def test_blank_string_env_falls_back_to_mask(monkeypatch) -> None:
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "   ")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    assert resolve_gpu_specialist_devices(2) == [4, 5]
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_same_holder_task_is_idempotent(tmp_path) -> None:
+    """Repeated try_acquire for the same holder_id + task_id returns the existing lease."""
+    db = SqliteConnection(tmp_path / "test.db")
+    pool = SpecialistGpuPool(db, gpu_ids=[0, 1, 2, 3])
+
+    lease_a = await pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_a is not None
+    assert len(lease_a.gpu_ids) == 2
+
+    lease_b = await pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_b is not None
+    assert set(lease_b.gpu_ids) == set(lease_a.gpu_ids), "idempotent re-acquire must return the same GPU ids"
+
+    lease_c = await pool.try_acquire(count=2, holder_id="h2", task_id="t2")
+    assert lease_c is not None, "the remaining 2 GPUs must still be available for a different holder"
+    assert set(lease_c.gpu_ids).isdisjoint(set(lease_a.gpu_ids))
+
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_reallocates_when_count_mismatches(tmp_path) -> None:
+    """When a re-acquire requests more GPUs the stale lease is released and a fresh one granted."""
+    db = SqliteConnection(tmp_path / "test.db")
+    pool = SpecialistGpuPool(db, gpu_ids=[0, 1, 2, 3])
+
+    lease_a = await pool.try_acquire(count=1, holder_id="h1", task_id="t1")
+    assert lease_a is not None and len(lease_a.gpu_ids) == 1
+
+    lease_b = await pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_b is not None, "count mismatch must trigger reallocation"
+    assert len(lease_b.gpu_ids) == 2
+
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_reallocates_when_pool_shrinks(tmp_path) -> None:
+    """When the pool no longer contains the existing lease ids a fresh lease is granted."""
+    db = SqliteConnection(tmp_path / "test.db")
+    full_pool = SpecialistGpuPool(db, gpu_ids=[0, 1, 2, 3])
+
+    lease_a = await full_pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_a is not None
+
+    small_pool = SpecialistGpuPool(db, gpu_ids=[2, 3])
+    lease_b = await small_pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_b is not None
+    assert set(lease_b.gpu_ids) <= {2, 3}, "re-acquired ids must all be in the current pool"
+
+    db.close()

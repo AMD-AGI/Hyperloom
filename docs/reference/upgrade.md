@@ -28,27 +28,24 @@ These labels are used throughout this page to indicate urgency:
 Hyperloom doesn't mutate your `.env` on upgrade; all migrations
 below are explicit.
 
+```{note}
+Shell paths on this page follow the recommended `pip install --target .` layout.
+In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
+
+The `${USER_DATA_PATH:-/workspace/hyperloom}` fallback below is the last resort
+in the chain and only correct where `/workspace` is writable; on a bare-metal
+host the CLI defaults to `session/` under the current directory instead. Prefer
+`KERNEL_AGENT_ENV`, which the installer writes for you.
+```
+
 ---
 
 ## Upgrading from 0.5.x → 0.6.0
 
 Apply the following changes in order. Required steps must be completed before running; recommended and optional steps improve behavior or unlock new features.
-
-### Required: rename `INFERENCE_OPTIMIZER_SESSION_DIR` → `USER_DATA_PATH`
-
-The session directory env was renamed and the legacy variable is no
-longer read. Any launcher that exports the old name will silently
-fall back to the default `/workspace/hyperloom` instead of honouring
-your override.
-
-```diff
-# .env, run launchers, k8s ConfigMaps
-- INFERENCE_OPTIMIZER_SESSION_DIR=/shared/hyperloom-sessions/me
-+ USER_DATA_PATH=/shared/hyperloom-sessions/me
-```
-
-Same for `WORKSPACE_PATH` — it is legacy-only and still used in narrow
-fallbacks, but new launchers should rename it to `USER_DATA_PATH`.
 
 ### Required: rename multi-node image / GPU flags and envs
 
@@ -119,7 +116,7 @@ Earlier launchers might have waited for the Coordinator to emit a
 ```diff
 # launcher.sh
 - python3 -m hyperloom.inference_optimizer.cli optimize ... # expects setup as first action
-+ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
++ bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 + . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
 + python3 -m hyperloom.inference_optimizer.cli optimize ...
@@ -227,7 +224,7 @@ Deployments that explicitly keep `--local-kb-root` or
 For any minor or patch upgrade:
 
 1. Pull the new Hyperloom revision into `$REPO_ROOT`.
-2. Re-run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"`. The
+2. Re-run `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
    refreshes generated LLM gateway aliases, and regenerates `kernel-agent.env.sh`.
 3. Re-source the env file:

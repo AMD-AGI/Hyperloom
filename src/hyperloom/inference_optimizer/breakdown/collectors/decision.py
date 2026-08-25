@@ -46,6 +46,13 @@ _TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
 _TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
 
 
+# Hidden reasoning output. Billed like completion tokens but absent from the
+# visible reply, so it is rolled up in its own column and folded into
+# ``grand_total`` (the all-in spend figure) rather than into ``total_out``
+# (which is what the model actually said).
+_TOKEN_REASONING_KEY = "reasoning_output_tokens"
+
+
 # Terminal-status key + its success value, re-declared for the same reason as the
 # token keys above. A ``status="error"`` row records a call that never returned,
 # so it carries no tokens and must stay out of every spend / call-count rollup.
@@ -60,6 +67,7 @@ _TOKEN_KEYS_ALL: tuple[str, ...] = (
     _TOKEN_OUT_KEY,
     _TOKEN_CACHE_CREATE_KEY,
     _TOKEN_CACHE_READ_KEY,
+    _TOKEN_REASONING_KEY,
 )
 
 
@@ -94,6 +102,7 @@ def _empty_token_bucket() -> dict[str, int]:
         "total_out": 0,
         "total_cache_creation": 0,
         "total_cache_read": 0,
+        "total_reasoning_out": 0,
         "calls": 0,
     }
 
@@ -109,6 +118,7 @@ def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None
     bucket["total_out"] += _coerce_token(call.get(_TOKEN_OUT_KEY))
     bucket["total_cache_creation"] += _coerce_token(call.get(_TOKEN_CACHE_CREATE_KEY))
     bucket["total_cache_read"] += _coerce_token(call.get(_TOKEN_CACHE_READ_KEY))
+    bucket["total_reasoning_out"] += _coerce_token(call.get(_TOKEN_REASONING_KEY))
     bucket["calls"] += 1
 
 
@@ -344,8 +354,11 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
 
     Handles both bucket shapes: the rollup view (split
     ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
-    (pre-summed ``total_cache``). ``total_in_out`` is prompt+completion only;
-    ``grand_total`` folds in every cache token too.
+    (pre-summed ``total_cache``). ``total_in_out`` is the visible
+    prompt+completion pair only; ``grand_total`` is the all-in spend, so it
+    folds in every cache token *and* the hidden reasoning output — leaving
+    reasoning out would under-report a reasoning model's bill by most of its
+    output budget.
 
     Args:
         bucket (dict[str, Any] | None): A token bucket in either shape, or
@@ -365,8 +378,9 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
         + int(b.get("total_cache_creation", 0) or 0)
         + int(b.get("total_cache_read", 0) or 0)
     )
+    reasoning = int(b.get("total_reasoning_out", 0) or 0)
     b["total_in_out"] = ti + to
-    b["grand_total"] = ti + to + cache
+    b["grand_total"] = ti + to + cache + reasoning
     cc = int(b.get("total_cache_creation", 0) or 0)
     cr = int(b.get("total_cache_read", 0) or 0)
     b["cache_hit_rate"] = round(cr / (cc + cr), 4) if (cc + cr) else 0.0
@@ -766,6 +780,7 @@ def collect_decision_trace(
                     "total_in": agg["total_in"],
                     "total_out": agg["total_out"],
                     "total_cache": agg["total_cache_creation"] + agg["total_cache_read"],
+                    "total_reasoning_out": agg["total_reasoning_out"],
                     "calls": agg["calls"],
                 },
             }

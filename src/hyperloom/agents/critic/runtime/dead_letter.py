@@ -167,13 +167,15 @@ class DeadLetter:
                 summary.scanned += 1
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError as exc:
+                    if not isinstance(record, dict):
+                        raise ValueError(f"expected a JSON object, got {type(record).__name__}")
+                except (json.JSONDecodeError, ValueError) as exc:
                     summary.failed += 1
                     summary.failed_details.append(
                         {
                             "file": str(path),
                             "line": lineno,
-                            "reason": f"json: {exc}",
+                            "reason": str(exc),
                         }
                     )
                     failed_lines.append(line)

@@ -32,7 +32,9 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     Returns:
         dict[str, Any]: A status mapping with ``close_done``,
             ``breakdown_exists``, ``breakdown_recorded``, ``counts_final``,
-            and ``looks_complete`` flags.
+            and ``looks_complete``, which requires ``close_done``,
+            ``breakdown_recorded`` and ``breakdown_exists`` together so a
+            breakdown recorded before going missing is still rebuilt.
     """
 
     from ..breakdown import BREAKDOWN_FILENAME
@@ -60,7 +62,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
         "breakdown_exists": breakdown_exists,
         "breakdown_recorded": breakdown_recorded,
         "counts_final": counts_final,
-        "looks_complete": close_done and breakdown_recorded,
+        "looks_complete": close_done and breakdown_recorded and breakdown_exists,
     }
 
 

@@ -101,10 +101,10 @@ def classify_closure(paths: list[str]) -> ClosureVerdict:
 
 
 def parse_diff_paths(diff_text: str) -> list[str]:
-    """Return the repo-relative paths a unified diff touches (first-seen order)."""
+    """Return the repo-relative paths a unified diff modifies or adds (first-seen order)."""
     from hyperloom.agents.framework._audit_common import parse_unified_diff
 
-    return [c.path for c in parse_unified_diff(diff_text or "") if c.path]
+    return [c.path for c in parse_unified_diff(diff_text or "") if c.path and not c.is_deleted]
 
 
 def synthesize_vendor_diff(files: list[tuple[str, str, str]]) -> str:

@@ -57,6 +57,59 @@ _TOKEN_KEYS: tuple[str, ...] = (
 )
 
 
+# Provider spellings for a reply's hidden reasoning output. The Codex CLI and
+# the codex-agent metadata use the canonical name; the OpenAI HTTP shape nests
+# it one level down under ``completion_tokens_details``. Read through one helper
+# so every producer of an ``llm_calls`` row reports the same number for the same
+# model, instead of the ledger depending on which call path wrote it.
+_REASONING_TOKEN_KEYS: tuple[str, ...] = ("reasoning_output_tokens", "reasoning_tokens")
+_REASONING_DETAIL_KEYS: tuple[str, ...] = ("completion_tokens_details", "output_tokens_details")
+
+
+def _field(usage: Any, key: str) -> Any:
+    """Read ``key`` off a usage payload that may be a mapping or an SDK object.
+
+    Args:
+        usage: A usage mapping or provider response object.
+        key: The field to read.
+
+    Returns:
+        The raw value, or ``None`` when absent.
+    """
+    if isinstance(usage, dict):
+        return usage.get(key)
+    return getattr(usage, key, None)
+
+
+def reasoning_output_tokens(usage: Any) -> int | None:
+    """Recover the reasoning-output token count from any provider usage shape.
+
+    Reasoning output is billed but absent from the visible reply, so it is
+    carried next to ``output_tokens`` rather than folded into it.
+
+    Args:
+        usage: A usage mapping, provider usage object, or ``None``.
+
+    Returns:
+        The reasoning-output count, or ``None`` when the provider reports none.
+    """
+    if usage is None:
+        return None
+    for key in _REASONING_TOKEN_KEYS:
+        value = coerce_optional_int(_field(usage, key))
+        if value is not None:
+            return value
+    for detail_key in _REASONING_DETAIL_KEYS:
+        details = _field(usage, detail_key)
+        if details is None:
+            continue
+        for key in _REASONING_TOKEN_KEYS:
+            value = coerce_optional_int(_field(details, key))
+            if value is not None:
+                return value
+    return None
+
+
 def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | None:
     """Project an arbitrary ``usage`` dict onto the canonical four keys.
 
@@ -797,7 +850,9 @@ def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
                          "cache_creation_input_tokens": ..., ...}
 
     Recovers the last such marker (the authoritative run total). Returns
-    ``None`` when no marker is present.
+    ``None`` when no marker is present. Reasoning-output tokens ride along
+    beside the canonical four (as they do for Codex) so a reasoning model's
+    hidden spend is not dropped on the way to the ledger.
     """
     if not stdout or "FORGE_LLM_USAGE" not in stdout:
         return None
@@ -815,7 +870,13 @@ def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
             continue
         if isinstance(obj, dict) and obj:
             last_usage = obj
-    return normalize_usage(last_usage)
+    canonical = normalize_usage(last_usage)
+    if canonical is None:
+        return None
+    reasoning = reasoning_output_tokens(last_usage)
+    if reasoning is not None:
+        canonical["reasoning_output_tokens"] = reasoning
+    return canonical
 
 
 def parse_forge_steps(stdout: str) -> dict[str, Any] | None:
@@ -862,4 +923,5 @@ __all__ = [
     "parse_codex_jsonl_usage",
     "parse_forge_steps",
     "parse_forge_usage",
+    "reasoning_output_tokens",
 ]

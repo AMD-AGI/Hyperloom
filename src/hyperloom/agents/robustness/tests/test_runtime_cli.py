@@ -261,9 +261,9 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 
     captured: dict[str, object] = {}
 
-    from hyperloom.agents.robustness import runtime as runtime_pkg
+    from hyperloom.agents.robustness.runtime import cli as runtime_cli
 
-    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+    real_build = runtime_cli.build_reactor_components
 
     def _spy_build(config, *, rca=None, session_id=None):
         captured["config"] = config
@@ -273,7 +273,7 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
     async def _zero_tick(_self, _ctx):
         return []
 
-    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    monkeypatch.setattr(runtime_cli, "build_reactor_components", _spy_build)
     from hyperloom.agents.robustness.role.reactor import Reactor
 
     monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
@@ -300,9 +300,9 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
     """A drained RCA usage block is surfaced on the emit payload."""
-    from hyperloom.agents.robustness import runtime as runtime_pkg
+    from hyperloom.agents.robustness.runtime import cli as runtime_cli
 
-    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+    real_build = runtime_cli.build_reactor_components
 
     usage = {"input_tokens": 12, "output_tokens": 5, "calls": 1, "latency_ms": 30, "model": "claude-opus-4-7"}
 
@@ -323,7 +323,7 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
     async def _zero_tick(_self, _ctx):
         return []
 
-    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    monkeypatch.setattr(runtime_cli, "build_reactor_components", _spy_build)
     from hyperloom.agents.robustness.role.reactor import Reactor
 
     monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
@@ -343,9 +343,9 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
     """No RCA call → no ``llm_usage`` key on the emit payload."""
-    from hyperloom.agents.robustness import runtime as runtime_pkg
+    from hyperloom.agents.robustness.runtime import cli as runtime_cli
 
-    real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
+    real_build = runtime_cli.build_reactor_components
 
     def _spy_build(config, *, rca=None, session_id=None):
         return real_build(config, rca=rca, session_id=session_id)
@@ -353,7 +353,7 @@ async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
     async def _zero_tick(_self, _ctx):
         return []
 
-    monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
+    monkeypatch.setattr(runtime_cli, "build_reactor_components", _spy_build)
     from hyperloom.agents.robustness.role.reactor import Reactor
 
     monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)

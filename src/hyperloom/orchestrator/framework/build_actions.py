@@ -64,8 +64,6 @@ class TargetedBuildAction:
         autoselect_tag_glob: Tag glob for autoselect when ``ref`` is empty.
         gpu_arch: EXPLICIT ``gfx942`` / ``gfx950`` (never inferred).
         max_jobs: Parallelism cap; 0 means the per-component default.
-        expected_symbols: Symbols the artifact verifier must find.
-        expected_artifacts: Artifact globs the verifier must find fresh.
         build_command: argv-only build command (no shell strings).
         torch_constraint_mode: How the ROCm torch pin is applied.
         build_budget_sec: Wall-clock hard timeout; 0 means per-component default.
@@ -86,8 +84,6 @@ class TargetedBuildAction:
     autoselect_tag_glob: str = "v*"
     gpu_arch: str = ""
     max_jobs: int = 0
-    expected_symbols: tuple[str, ...] = ()
-    expected_artifacts: tuple[str, ...] = ()
     build_command: tuple[str, ...] = ()
     torch_constraint_mode: Literal["constraint_file", "wheel_index_pin"] = "constraint_file"
     build_budget_sec: int = 0
@@ -109,8 +105,6 @@ class TargetedBuildAction:
             "autoselect_tag_glob": self.autoselect_tag_glob,
             "gpu_arch": self.gpu_arch,
             "max_jobs": self.max_jobs,
-            "expected_symbols": list(self.expected_symbols),
-            "expected_artifacts": list(self.expected_artifacts),
             "build_command": list(self.build_command),
             "torch_constraint_mode": self.torch_constraint_mode,
             "build_budget_sec": self.build_budget_sec,
@@ -156,8 +150,6 @@ class TargetedBuildAction:
             autoselect_tag_glob=str(d.get("autoselect_tag_glob") or "v*"),
             gpu_arch=str(d.get("gpu_arch") or ""),
             max_jobs=_int("max_jobs"),
-            expected_symbols=_tuple("expected_symbols"),
-            expected_artifacts=_tuple("expected_artifacts"),
             build_command=_tuple("build_command"),
             torch_constraint_mode=mode,  # type: ignore[arg-type]
             build_budget_sec=_int("build_budget_sec"),
@@ -173,10 +165,10 @@ class BuildResult:
     """Outcome of one :class:`TargetedBuildAction`.
 
     Attributes:
-        ok: Whether the build + artifact verify succeeded.
+        ok: Whether the build probe and install succeeded.
         attempt_root: The attempt directory the build ran in.
         runtime: The resolved runtime a KEEP promotes (empty on failure).
-        built_artifacts: Verified artifact paths.
+        build_probes: Successful post-build probe descriptors (e.g. ``"import aiter: ok"``).
         installed_versions: torch(+hip) / ref-tag+sha / arch, for reproducibility.
         build_log_path: Path to the compile log.
         verify_log_path: Path to the verify log.
@@ -188,7 +180,7 @@ class BuildResult:
     ok: bool
     attempt_root: str = ""
     runtime: FrameworkRuntime = field(default_factory=FrameworkRuntime)
-    built_artifacts: tuple[str, ...] = ()
+    build_probes: tuple[str, ...] = ()
     installed_versions: Mapping[str, str] = field(default_factory=dict)
     build_log_path: str = ""
     verify_log_path: str = ""
@@ -202,7 +194,7 @@ class BuildResult:
             "ok": self.ok,
             "attempt_root": self.attempt_root,
             "runtime": self.runtime.to_state(),
-            "built_artifacts": list(self.built_artifacts),
+            "build_probes": list(self.build_probes),
             "installed_versions": dict(self.installed_versions),
             "build_log_path": self.build_log_path,
             "verify_log_path": self.verify_log_path,
@@ -217,13 +209,13 @@ class BuildResult:
         d = d or {}
         raw_versions = d.get("installed_versions")
         versions = {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
-        raw_artifacts = d.get("built_artifacts")
-        artifacts = tuple(str(x) for x in raw_artifacts) if isinstance(raw_artifacts, (list, tuple)) else ()
+        raw_probes = d.get("build_probes")
+        probes = tuple(str(x) for x in raw_probes) if isinstance(raw_probes, (list, tuple)) else ()
         return cls(
             ok=bool(d.get("ok")),
             attempt_root=str(d.get("attempt_root") or ""),
             runtime=FrameworkRuntime.from_state(d.get("runtime")),
-            built_artifacts=artifacts,
+            build_probes=probes,
             installed_versions=versions,
             build_log_path=str(d.get("build_log_path") or ""),
             verify_log_path=str(d.get("verify_log_path") or ""),

@@ -68,6 +68,7 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
             "patches_applied": res.get("patches_applied") or [],
             "config_changes_applied": res.get("config_changes_applied") or {},
             "extra_envs_applied": res.get("extra_envs_applied") or {},
+            "dropped_env_overrides": res.get("dropped_env_overrides") or [],
             "extra_server_args_applied": res.get("extra_server_args_applied") or "",
             "setup_commands_applied": res.get("setup_commands_applied") or [],
             "framework_switch_problems": res.get("framework_switch_problems") or [],

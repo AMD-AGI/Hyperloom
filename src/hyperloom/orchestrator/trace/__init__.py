@@ -42,6 +42,7 @@ from .llm_trace import (
     LLMCallRecord,
     LLMTraceRowError,
     append_llm_call,
+    new_call_id,
 )
 from .orchestration_trace import (
     write_mcp_setup_once,
@@ -66,6 +67,7 @@ __all__ = [
     "flush_session",
     "get_emitter",
     "langfuse_live_enabled",
+    "new_call_id",
     "normalize_usage",
     "parse_claude_stream_json_usage",
     "parse_codex_jsonl_error",

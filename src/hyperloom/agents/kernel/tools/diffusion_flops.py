@@ -195,11 +195,11 @@ _BASENAME_HINTS: dict[str, dict[str, Any]] = {
 def _denoiser_config(model_dir: Path) -> tuple[dict[str, Any] | None, str]:
     """Return ``(config, subdir)`` for the transformer or unet denoiser."""
     for sub in ("transformer", "unet"):
-        c = read_json(model_dir / sub / "config.json")
+        c = read_json(model_dir / sub / "config.json", require_dict=True)
         if c:
             return c, sub
     # single-file / top-level config
-    c = read_json(model_dir / "config.json")
+    c = read_json(model_dir / "config.json", require_dict=True)
     return c, ""
 
 

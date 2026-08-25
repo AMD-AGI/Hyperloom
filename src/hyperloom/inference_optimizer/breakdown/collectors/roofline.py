@@ -263,6 +263,11 @@ def _normalize_roofline_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
         "theoretical_peak_tok_per_sec": _to_float(snap.get("theoretical_peak_tok_per_sec")) or 0.0,
         "within_roofline_pct": _to_float(snap.get("within_roofline_pct")) or 0.0,
         "gap_to_roofline_pct": _to_float(snap.get("gap_to_roofline_pct")) or 0.0,
+        # ``within`` is capped at 100; the uncapped ratio and its flag carry the
+        # overshoot, which says the modelled ceiling is wrong rather than that
+        # the run beat physics.
+        "within_roofline_pct_uncapped": _to_float(snap.get("within_roofline_pct_uncapped")),
+        "roofline_ceiling_exceeded": bool(snap.get("roofline_ceiling_exceeded")),
         # Scriptable/diffusion (xDiT) latency-roofline pair — the ms analogue of
         # the tok/s ceiling, used for an independent image-model latency ceiling.
         "e2e_mean_ms": _to_float(snap.get("e2e_mean_ms")),
