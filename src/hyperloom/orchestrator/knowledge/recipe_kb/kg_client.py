@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,38 @@ log = logging.getLogger(__name__)
 # Cap the number of fact lines parsed per page (mirrors the mirror-side
 # write cap) so a malformed/oversized page never blows up a query tick.
 _MAX_FACTS_PER_PAGE = 50
+
+# ``emit_fact`` on the page backend is a read-modify-write over a whole markdown
+# page, so two concurrent emits can each write a page that lacks the other's
+# fact. Threads are serialised per slug, and the write is verified by re-reading
+# the page so a lost update is retried instead of silently dropped.
+_PAGE_MUTEXES: dict[str, threading.Lock] = {}
+_PAGE_MUTEX_REGISTRY_LOCK = threading.Lock()
+_EMIT_FACT_MAX_ATTEMPTS = 3
+# Confirmation re-reads per write attempt, and the linear backoff between them,
+# so a page store that serves a moment-stale read is not mistaken for a lost
+# write. Kept small: this only runs on the unconfirmed path.
+_EMIT_FACT_CONFIRM_READS = 3
+_EMIT_FACT_CONFIRM_BACKOFF_S = 0.05
+
+
+def _page_mutex(slug: str) -> threading.Lock:
+    """Return the process-wide mutex guarding mutations of one page slug.
+
+    Args:
+        slug: The page slug being mutated.
+
+    Returns:
+        threading.Lock: The mutex shared by every writer of that slug.
+    """
+    with _PAGE_MUTEX_REGISTRY_LOCK:
+        mutex = _PAGE_MUTEXES.get(slug)
+        if mutex is None:
+            mutex = threading.Lock()
+            _PAGE_MUTEXES[slug] = mutex
+        return mutex
+
+
 # Hard ceiling on BFS breadth to bound client-side traversal cost.
 _MAX_TRAVERSE_NODES = 200
 # Default TTL for the per-client search cache (seconds). One warm-start
@@ -878,6 +911,16 @@ class KGClient:
         ``## Facts`` header (or creates the fence), and writes it back. A
         duplicate ``(subject, predicate, object)`` line is a no-op.
 
+        The page backend has no compare-and-set, so the whole read-modify-write
+        runs under a per-slug mutex and every write is confirmed by re-reading
+        the page (with a short backoff, so an eventually-consistent read gets a
+        chance to catch up). A write that cannot be confirmed — an in-band RPC
+        error, an unreadable page, or a page that came back without our fact
+        because a concurrent writer replaced it — is retried up to
+        :data:`_EMIT_FACT_MAX_ATTEMPTS` and then reported as **not** written.
+        Reporting an unconfirmed write as done is the silent failure this guards
+        against.
+
         Args:
             page_slug: Target page slug.
             subject: Subject entity.
@@ -886,25 +929,91 @@ class KGClient:
             properties: Optional fact properties.
 
         Returns:
-            ``True`` when the page was written, ``False`` on no-op.
+            ``True`` only when the fact was confirmed on the page by this call;
+            ``False`` on a no-op (already present) or when the write could not
+            be confirmed.
         """
         if self._native:
             return self._native_emit_fact(subject, predicate, object, properties)
-        content = self._page_content_raw(page_slug)
-        if content is None:
-            return False
+        triple = (_entity(subject), str(predicate).strip().upper(), _entity(object))
         line = format_fact_line(subject, predicate, object, properties)
-        existing = {(f.subject, f.predicate, f.object) for f in parse_facts_fence(content)}
-        if (_entity(subject), str(predicate).strip().upper(), _entity(object)) in existing:
-            return False
-        if "## Facts" in content:
-            new_content = content.replace("## Facts\n", f"## Facts\n{line}\n", 1)
-        else:
-            sep = "" if content.endswith("\n") else "\n"
-            new_content = f"{content}{sep}\n## Facts\n{line}\n"
-        self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
-        self._search_cache.clear()
-        return True
+        with _page_mutex(page_slug):
+            for attempt in range(_EMIT_FACT_MAX_ATTEMPTS):
+                content = self._page_content_raw(page_slug)
+                if content is None:
+                    log.warning("kg emit_fact %s: page %s unreadable", triple, page_slug)
+                    return False
+                if triple in self._page_triples(content):
+                    # Present already: our own retry landing counts as a write,
+                    # a first-pass hit is the documented no-op.
+                    return attempt > 0
+                if "## Facts" in content:
+                    new_content = content.replace("## Facts\n", f"## Facts\n{line}\n", 1)
+                else:
+                    sep = "" if content.endswith("\n") else "\n"
+                    new_content = f"{content}{sep}\n## Facts\n{line}\n"
+                res = self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
+                self._search_cache.clear()
+                if _rpc_failed(res):
+                    log.warning(
+                        "kg put_page %s error: %s (attempt %d/%d)",
+                        page_slug,
+                        res.get("error") if isinstance(res, dict) else res,
+                        attempt + 1,
+                        _EMIT_FACT_MAX_ATTEMPTS,
+                    )
+                    continue
+                if self._fact_confirmed(page_slug, triple):
+                    return True
+                log.warning(
+                    "kg emit_fact %s on %s unconfirmed (attempt %d/%d)",
+                    triple,
+                    page_slug,
+                    attempt + 1,
+                    _EMIT_FACT_MAX_ATTEMPTS,
+                )
+        log.warning(
+            "kg emit_fact %s on %s could not be confirmed after %d attempts",
+            triple,
+            page_slug,
+            _EMIT_FACT_MAX_ATTEMPTS,
+        )
+        return False
+
+    def _fact_confirmed(self, page_slug: str, triple: tuple[str, str, str]) -> bool:
+        """Re-read a page until the triple shows up, with a bounded backoff.
+
+        A page store that serves a slightly stale read is not the same failure
+        as a lost write, but from one read they look identical — so the read is
+        repeated a few times before the write is called unconfirmed.
+
+        Args:
+            page_slug: The page just written.
+            triple: The ``(subject, predicate, object)`` that must be present.
+
+        Returns:
+            ``True`` as soon as a read shows the triple, ``False`` once the
+            reads are exhausted.
+        """
+        for read_idx in range(_EMIT_FACT_CONFIRM_READS):
+            if read_idx:
+                time.sleep(_EMIT_FACT_CONFIRM_BACKOFF_S * read_idx)
+            content = self._page_content_raw(page_slug)
+            if content is not None and triple in self._page_triples(content):
+                return True
+        return False
+
+    @staticmethod
+    def _page_triples(content: str) -> set[tuple[str, str, str]]:
+        """Return the ``(subject, predicate, object)`` triples already on a page.
+
+        Args:
+            content: Raw page markdown.
+
+        Returns:
+            The set of triples parsed from the page's ``## Facts`` fence.
+        """
+        return {(f.subject, f.predicate, f.object) for f in parse_facts_fence(content)}
 
     def _native_emit_fact(
         self,

@@ -214,11 +214,15 @@ def utc_second_key(ts: str | None) -> str:
 def pair_key(row: dict[str, Any]) -> tuple:
     """Stable join key pairing a token row with its conversation row.
 
-    Keys on every per-call identity field both streams carry --
-    (component, task_id, dyn_id, tick, turn, role, model) -- falling back to
-    the UTC-second of ``ts`` to disambiguate. ``turn`` / ``task_id`` / ``dyn_id``
-    keep a burst of calls in the same second from cross-pairing; ``model`` keeps
-    concurrently scored proposals apart. Missing fields degrade to ``None``.
+    A row carrying ``call_id`` keys on that alone: it identifies the one call
+    both halves describe, so the pair survives a call whose two rows land either
+    side of a second boundary and can never marry two calls made inside one
+    second. Without it the key falls back to every per-call identity field both
+    streams carry -- (component, task_id, dyn_id, tick, turn, role, model) --
+    plus the UTC-second of ``ts`` to disambiguate. ``turn`` / ``task_id`` /
+    ``dyn_id`` keep a burst of calls in the same second from cross-pairing;
+    ``model`` keeps concurrently scored proposals apart. Missing fields degrade
+    to ``None``.
 
     Args:
         row: A token or conversation trace row dict.
@@ -226,6 +230,9 @@ def pair_key(row: dict[str, Any]) -> tuple:
     Returns:
         A tuple join key pairing the row across streams.
     """
+    call_id = str(row.get("call_id") or "").strip()
+    if call_id:
+        return ("call_id", call_id)
     return (
         str(row.get("component") or ""),
         row.get("task_id"),
@@ -239,9 +246,12 @@ def pair_key(row: dict[str, Any]) -> tuple:
 
 
 def usage_details(row: dict[str, Any]) -> dict[str, int]:
-    """Project a token row's four counters onto Langfuse ``usage_details``.
+    """Project a token row's counters onto Langfuse ``usage_details``.
 
-    Drops ``None`` counters and maps canonical names onto the short Langfuse keys.
+    Drops ``None`` counters and maps canonical names onto the short Langfuse
+    keys. ``reasoning_output`` is reported as its own key: on a reasoning model
+    it dominates the output budget while being absent from the visible reply, so
+    folding it into ``output`` would misreport both.
 
     Args:
         row: A token trace row dict.
@@ -254,6 +264,7 @@ def usage_details(row: dict[str, Any]) -> dict[str, int]:
         "output": row.get("output_tokens"),
         "cache_creation_input": row.get("cache_creation_input_tokens"),
         "cache_read_input": row.get("cache_read_input_tokens"),
+        "reasoning_output": row.get("reasoning_output_tokens"),
     }
     return {k: int(v) for k, v in raw.items() if v is not None}
 

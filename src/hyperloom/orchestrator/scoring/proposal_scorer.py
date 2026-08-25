@@ -37,7 +37,8 @@ from hyperloom.common.llm_config import (
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
 from ..trace.conversation_trace import ConversationRecord, append_conversation
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from ..trace.parse_usage import reasoning_output_tokens
 
 log = logging.getLogger(__name__)
 
@@ -373,6 +374,10 @@ class ProposalScorer:
             )
             raise
         latency_ms = int((time.perf_counter() - _t0) * 1000)
+        # One id for both halves of this call, so the emitter pairs them on the
+        # call itself instead of on a ts-second bucket shared with the other
+        # models being scored concurrently.
+        call_id = new_call_id()
         # Record this model's token spend before parsing (best-effort).
         self._trace_scorer_llm_call(
             model,
@@ -381,6 +386,7 @@ class ProposalScorer:
             task_id=task_id,
             tick=tick,
             phase=phase,
+            call_id=call_id,
         )
         # Persist the full (redacted) prompt + reply alongside the token row.
         self._record_scorer_conversation(
@@ -390,6 +396,7 @@ class ProposalScorer:
             task_id=task_id,
             tick=tick,
             phase=phase,
+            call_id=call_id,
         )
         parsed = _extract_scores_json(text)
         if parsed is None:
@@ -405,6 +412,7 @@ class ProposalScorer:
         task_id: str | None = None,
         tick: int | None = None,
         phase: str | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
 
@@ -419,6 +427,7 @@ class ProposalScorer:
             task_id: The specialist round this scoring spend is attributed to.
             tick: Timeline tick threaded from the coordinator dispatch point.
             phase: Optimization phase threaded from the coordinator dispatch point.
+            call_id: Per-call id shared with this call's conversation row.
         """
         if self.session_dir is None:
             return
@@ -434,12 +443,17 @@ class ProposalScorer:
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",  # must match the conversation row's role
+                call_id=call_id,
                 model=str(model),
                 task_id=task_id,
                 tick=tick,
                 phase=phase,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                # A scoring model with a reasoning split bills it separately;
+                # reading it here keeps the ledger consistent with the backends
+                # that report it on their turn metadata.
+                reasoning_output_tokens=reasoning_output_tokens(usage),
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
@@ -506,6 +520,7 @@ class ProposalScorer:
         task_id: str | None = None,
         tick: int | None = None,
         phase: str | None = None,
+        call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a proposal-scoring call.
 
@@ -522,6 +537,7 @@ class ProposalScorer:
             task_id: The specialist round this scoring spend is attributed to.
             tick: Timeline tick threaded from the coordinator dispatch point.
             phase: Optimization phase threaded from the coordinator dispatch point.
+            call_id: Per-call id shared with this call's token row.
         """
         if self.session_dir is None:
             return
@@ -532,6 +548,7 @@ class ProposalScorer:
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",
+                call_id=call_id,
                 task_id=task_id,
                 tick=tick,
                 phase=phase,
