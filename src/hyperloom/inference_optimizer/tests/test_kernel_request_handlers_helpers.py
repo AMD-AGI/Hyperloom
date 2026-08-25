@@ -325,8 +325,7 @@ def test_the_skip_whitelist_covers_every_reason_the_filter_emits() -> None:
     }
     unclassified = {r for r in emitted if not krh.unattempted_skip_reason(r)}
     assert unclassified == {"not_live"}, (
-        "either whitelist the reason or decide it means a real attempt: "
-        f"{sorted(unclassified)}"
+        f"either whitelist the reason or decide it means a real attempt: {sorted(unclassified)}"
     )
 
 

@@ -371,9 +371,7 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
 
 
 @pytest.mark.asyncio
-async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(
-    coord: Coordinator, monkeypatch
-):
+async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(coord: Coordinator, monkeypatch):
     """The phase dispatches its own kernel_opt on both entry routes.
 
     The dispatch sat on the GEMM route alone, so skipping GEMM tuning removed
@@ -408,9 +406,7 @@ async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(
 
 
 @pytest.mark.asyncio
-async def test_kernel_entry_does_not_dispatch_without_untried_candidates(
-    coord: Coordinator, monkeypatch
-):
+async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: Coordinator, monkeypatch):
     """Nothing routable left is the one reason to hand the phase back."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
     monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
@@ -502,31 +498,23 @@ _BASE_ENVS = {"VLLM_ROCM_USE_AITER": "1"}
         ("nothing moved", lambda s: None, False),
         (
             "explore added a server arg",
-            lambda s: s.current_best.__setitem__(
-                "extra_server_args", _BASE_ARGS + " --max-num-batched-tokens 16384"
-            ),
+            lambda s: s.current_best.__setitem__("extra_server_args", _BASE_ARGS + " --max-num-batched-tokens 16384"),
             True,
         ),
         (
             "explore added an env",
-            lambda s: s.current_best.__setitem__(
-                "extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER_MOE": "1"}
-            ),
+            lambda s: s.current_best.__setitem__("extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER_MOE": "1"}),
             True,
         ),
         (
             "an env changed value",
-            lambda s: s.current_best.__setitem__(
-                "extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER": "0"}
-            ),
+            lambda s: s.current_best.__setitem__("extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER": "0"}),
             True,
         ),
         ("the workload changed", lambda s: setattr(s, "isl", int(s.isl or 0) + 4096), True),
     ],
 )
-def test_serving_config_changes_still_force_a_reprofile(
-    coord: Coordinator, label, mutate, expected
-):
+def test_serving_config_changes_still_force_a_reprofile(coord: Coordinator, label, mutate, expected):
     """Forgiving the parameterization must not forgive a real config change.
 
     A configuration EXPLORE found and integrated changes which kernels run, so a

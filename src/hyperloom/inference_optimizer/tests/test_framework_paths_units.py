@@ -197,9 +197,7 @@ class TestResolveKernelSearchRoots:
         parent = tmp_path / "dist-packages"
         (parent / "vllm").mkdir(parents=True)
         monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: (f"{parent}/",))
-        monkeypatch.setattr(
-            fp, "_discover_installed_framework_roots", lambda: (f"{parent}/vllm/",)
-        )
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (f"{parent}/vllm/",))
         roots = fp.resolve_kernel_search_roots()
         assert f"{parent}/vllm/" in roots
         assert f"{parent}/" not in roots

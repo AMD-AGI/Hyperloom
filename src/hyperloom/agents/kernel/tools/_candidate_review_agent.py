@@ -78,9 +78,7 @@ try:
 except ImportError:  # pragma: no cover - standalone invocation
     REVIEW_BACKFILL_PROVENANCE = "review_backfill"
     REVIEW_DERIVED_PROVENANCE = "review_derived"
-    REVIEW_SHAPE_PROVENANCE = frozenset(
-        {REVIEW_BACKFILL_PROVENANCE, REVIEW_DERIVED_PROVENANCE}
-    )
+    REVIEW_SHAPE_PROVENANCE = frozenset({REVIEW_BACKFILL_PROVENANCE, REVIEW_DERIVED_PROVENANCE})
 
 #: Written by the agent; its presence is what marks the session successful.
 REVISIONS_FILENAME = "kernel_candidates_revisions.json"
@@ -781,9 +779,7 @@ def _verified_harnesses(proposed: Any) -> list[str] | None:
     if not isinstance(proposed, list):
         return None
     return [
-        str(entry)
-        for entry in proposed
-        if isinstance(entry, str) and entry.strip() and os.path.isfile(entry.strip())
+        str(entry) for entry in proposed if isinstance(entry, str) and entry.strip() and os.path.isfile(entry.strip())
     ]
 
 
@@ -839,16 +835,11 @@ def _record_shape_proposal(
         notes.append(f"{kernel_id}: empty shapes proposal ignored")
         return
     entry["review_shapes"] = shapes
-    entry["review_shape_provenance"] = _proposed_shape_provenance(
-        revision.get("shape_provenance")
-    )
+    entry["review_shape_provenance"] = _proposed_shape_provenance(revision.get("shape_provenance"))
     dtypes = _proposed_strings(revision.get("input_dtypes"))
     if dtypes:
         entry["review_input_dtypes"] = dtypes
-    notes.append(
-        f"{kernel_id}: shapes -> {len(shapes)} operand(s) "
-        f"({entry['review_shape_provenance']})"
-    )
+    notes.append(f"{kernel_id}: shapes -> {len(shapes)} operand(s) ({entry['review_shape_provenance']})")
 
 
 def _record_judgement_proposals(
@@ -881,10 +872,7 @@ def _record_judgement_proposals(
         if proposed_reusable or skip_text:
             entry["review_reusable_hint"] = proposed_reusable
         else:
-            notes.append(
-                f"{kernel_id}: veto ignored, no skip_reason given "
-                "(a refusal has to say why)"
-            )
+            notes.append(f"{kernel_id}: veto ignored, no skip_reason given (a refusal has to say why)")
     harnesses = _verified_harnesses(revision.get("benchmark_files"))
     if harnesses is not None:
         entry["review_benchmark_files"] = harnesses
@@ -918,9 +906,7 @@ def apply_revisions(
     Returns:
         list[str]: One note per applied or rejected revision.
     """
-    by_id = {
-        str(c.get("kernel_id") or ""): c for c in candidates if isinstance(c, dict)
-    }
+    by_id = {str(c.get("kernel_id") or ""): c for c in candidates if isinstance(c, dict)}
     notes: list[str] = []
     for revision in revisions:
         kernel_id = str(revision.get("kernel_id") or "").strip()
@@ -940,10 +926,7 @@ def apply_revisions(
             notes.append(f"{kernel_id}: ignored measured field(s) {', '.join(touched)}")
         derived = sorted(DERIVED_SHAPE_FIELDS.intersection(revision))
         if derived:
-            notes.append(
-                f"{kernel_id}: ignored derived field(s) {', '.join(derived)}; "
-                "propose shapes instead"
-            )
+            notes.append(f"{kernel_id}: ignored derived field(s) {', '.join(derived)}; propose shapes instead")
         reason = str(revision.get("reason") or "").strip()
 
         # Operand dims are worth having whether or not the path moved, and the
@@ -1145,8 +1128,7 @@ def run_candidate_review(
         pass
     else:
         raise RuntimeError(
-            "run_candidate_review() owns an event loop; await "
-            "run_candidate_review_async() from async callers"
+            "run_candidate_review() owns an event loop; await run_candidate_review_async() from async callers"
         )
     return asyncio.run(
         run_candidate_review_async(

@@ -1757,9 +1757,7 @@ def kernel_search_roots() -> tuple[str, ...]:
     else:
         discovered.extend(
             location
-            for location in (
-                _installed_package_dir(package) for package in _KERNEL_SOURCE_PACKAGES
-            )
+            for location in (_installed_package_dir(package) for package in _KERNEL_SOURCE_PACKAGES)
             if location
         )
         discovered.extend(_FALLBACK_SEARCH_ROOTS)
@@ -2584,9 +2582,7 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     ),
     # --- GEMM A8W8 blockscale ---
     (
-        (
-            "gemm_a8w8_blockscale",
-        ),
+        ("gemm_a8w8_blockscale",),
         (
             "aiter/op_tests/test_gemm_a8w8_blockscale.py",
             "aiter/op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py",
@@ -2609,9 +2605,7 @@ _KNOWN_HARNESS_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
             "batch_invariant",
             "addmm",
         ),
-        (
-            "sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",
-        ),
+        ("sglang/test/registered/unit/batch_invariant_ops/test_batch_invariant_ops.py",),
     ),
 )
 
@@ -6784,9 +6778,7 @@ def _adopt_reviewed_shapes(item: dict[str, Any]) -> None:
     if item.get("shapes"):
         return
     item["shapes"] = list(proposed)
-    item["shape_provenance"] = str(
-        item.get("review_shape_provenance") or _REVIEW_DERIVED_PROVENANCE
-    )
+    item["shape_provenance"] = str(item.get("review_shape_provenance") or _REVIEW_DERIVED_PROVENANCE)
     reviewed_dtypes = item.get("review_input_dtypes")
     if isinstance(reviewed_dtypes, list) and reviewed_dtypes:
         item["input_dtypes"] = list(reviewed_dtypes)
@@ -6852,9 +6844,7 @@ def _rederive_after_review(item: dict[str, Any], op_cat_map: dict[str, str] | No
     item["source_path"] = new_source
     item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
     item["source_type"] = source_type_for(item.get("name", ""), new_source)
-    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
-        item.get("name", ""), new_source
-    ):
+    if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(item.get("name", ""), new_source):
         item["source_type"] = "vendor_binary"
         item["vendor_dispatch_wrapper"] = True
     item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
@@ -7035,13 +7025,9 @@ def _run_candidate_review_stage(
         return artifacts
 
     op_cat_map = load_op_category_map(tracelens_dir / "perf_report_csvs")
-    before_state = {
-        str(c.get("kernel_id") or ""): str(c.get("source_file") or "") for c in candidates
-    }
+    before_state = {str(c.get("kernel_id") or ""): str(c.get("source_file") or "") for c in candidates}
     protected_ids = {
-        str(c.get("kernel_id") or "")
-        for c in candidates
-        if isinstance(c, dict) and _is_curated_resolution(c)
+        str(c.get("kernel_id") or "") for c in candidates if isinstance(c, dict) and _is_curated_resolution(c)
     }
     notes = apply_revisions(
         candidates,

@@ -80,32 +80,24 @@ class TestDiscoverKernelSearchRoots:
         tl.kernel_search_roots.cache_clear()
         assert tl.kernel_search_roots() == (str(first), str(second))
 
-    def test_falls_back_to_local_discovery_without_the_orchestrator(
-        self, monkeypatch, tmp_path
-    ):
+    def test_falls_back_to_local_discovery_without_the_orchestrator(self, monkeypatch, tmp_path):
         """Standalone CLI use must still find the installed frameworks."""
         located = tmp_path / "aiter"
         located.mkdir()
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", None)
         monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ("aiter",))
         monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", ())
-        monkeypatch.setattr(
-            tl, "_installed_package_dir", lambda package: str(located) if package == "aiter" else ""
-        )
+        monkeypatch.setattr(tl, "_installed_package_dir", lambda package: str(located) if package == "aiter" else "")
         tl.kernel_search_roots.cache_clear()
         assert tl.kernel_search_roots() == (str(located),)
 
-    def test_pinned_layouts_are_a_last_resort_not_a_requirement(
-        self, monkeypatch, tmp_path
-    ):
+    def test_pinned_layouts_are_a_last_resort_not_a_requirement(self, monkeypatch, tmp_path):
         """A pinned root is used only when it exists, never assumed."""
         checkout = tmp_path / "sgl-workspace" / "vllm"
         checkout.mkdir(parents=True)
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", None)
         monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ())
-        monkeypatch.setattr(
-            tl, "_FALLBACK_SEARCH_ROOTS", (str(checkout), "/sgl-workspace/gone")
-        )
+        monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", (str(checkout), "/sgl-workspace/gone"))
         tl.kernel_search_roots.cache_clear()
         assert tl.kernel_search_roots() == (str(checkout),)
 

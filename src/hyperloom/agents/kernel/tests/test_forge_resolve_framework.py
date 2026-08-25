@@ -69,19 +69,17 @@ def test_logical_operator_is_stable_across_launch_attribution():
     """
     composite = {"name": "hipModuleLaunchKernel->_gqa_sparse_fwd_kernel"}
     bare = {"name": "_gqa_sparse_fwd_kernel"}
-    assert (
-        forge_submit._logical_operator(composite)
-        == forge_submit._logical_operator(bare)
-        == "_gqa_sparse_fwd_kernel"
-    )
+    assert forge_submit._logical_operator(composite) == forge_submit._logical_operator(bare) == "_gqa_sparse_fwd_kernel"
     # Graph-launched rows carry a different call and must not fork the identity.
-    assert forge_submit._logical_operator(
-        {"name": "hipGraphLaunch->_gqa_sparse_decode_kernel"}
-    ) == "_gqa_sparse_decode_kernel"
+    assert (
+        forge_submit._logical_operator({"name": "hipGraphLaunch->_gqa_sparse_decode_kernel"})
+        == "_gqa_sparse_decode_kernel"
+    )
     # A namespaced operation has no launch call to strip and is left alone.
-    assert forge_submit._logical_operator(
-        {"operation": "vllm::unified_attention_with_output"}
-    ) == "vllm::unified_attention_with_output"
+    assert (
+        forge_submit._logical_operator({"operation": "vllm::unified_attention_with_output"})
+        == "vllm::unified_attention_with_output"
+    )
 
 
 def test_resolve_framework_follows_kernel_sources_across_packages():

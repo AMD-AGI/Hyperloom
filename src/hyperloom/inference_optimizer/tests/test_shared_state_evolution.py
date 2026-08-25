@@ -517,8 +517,7 @@ def test_class_constants_are_not_persisted_fields():
     """
     leaked = sorted(f.name for f in dataclasses.fields(SharedState) if f.name.isupper())
     assert not leaked, (
-        "constants declared as dataclass fields (annotate them ClassVar[...] "
-        f"or move them to module level): {leaked}"
+        f"constants declared as dataclass fields (annotate them ClassVar[...] or move them to module level): {leaked}"
     )
 
 
@@ -536,16 +535,10 @@ def test_the_profile_identity_keys_stay_off_disk(tmp_path):
     assert "PROFILE_WORKLOAD_IDENTITY_KEYS" not in raw
 
     # An older state.json carrying the key cannot reintroduce it either.
-    (sd / "state.json").write_text(
-        json.dumps({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]})
-    )
+    (sd / "state.json").write_text(json.dumps({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}))
     loaded = SharedState.load_or_init(sd)
-    assert loaded.PROFILE_WORKLOAD_IDENTITY_KEYS == (
-        SharedState.PROFILE_WORKLOAD_IDENTITY_KEYS
-    )
-    assert loaded.apply_changes(
-        {"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False
-    ) == {}
+    assert loaded.PROFILE_WORKLOAD_IDENTITY_KEYS == (SharedState.PROFILE_WORKLOAD_IDENTITY_KEYS)
+    assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
 
 
 def test_v6_rename_table_targets_are_real_fields():
@@ -563,9 +556,7 @@ def test_v6_carries_the_pre_rename_kernel_opt_optout(tmp_path):
     """A resumed opt-out keeps opting out instead of reverting to the default."""
     sd = tmp_path / "session"
     sd.mkdir()
-    (sd / "state.json").write_text(
-        json.dumps({"schema_version": 5, "continue_kernel_after_gemm": False})
-    )
+    (sd / "state.json").write_text(json.dumps({"schema_version": 5, "continue_kernel_after_gemm": False}))
 
     loaded = SharedState.load_or_init(sd)
 

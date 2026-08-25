@@ -883,9 +883,7 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     return (
         f"\n## {heading}\n\n"
         "Build your harness shape sweep / `get_inputs()` from EXACTLY these\n"
-        f"argument shapes{bound_line} -- do NOT invent shapes.\n"
-        + origin
-        + f"- args: {rendered}\n"
+        f"argument shapes{bound_line} -- do NOT invent shapes.\n" + origin + f"- args: {rendered}\n"
         "Correctness golden: the ORIGINAL kernel's output on these shapes "
         "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
         + _build_kernel_contract_block(candidate)
@@ -3031,11 +3029,7 @@ def resolve_deploy_repo_root(
     # rooted at. Longest tail first, so a descriptor that is merely a basename
     # collision cannot claim the anchor ahead of the full relative path.
     anchors = sorted(
-        (
-            Path(str(desc.get("path") or ""))
-            for desc in descriptors
-            if str(desc.get("path") or "")
-        ),
+        (Path(str(desc.get("path") or "")) for desc in descriptors if str(desc.get("path") or "")),
         key=lambda rel: len(rel.parts),
         reverse=True,
     )

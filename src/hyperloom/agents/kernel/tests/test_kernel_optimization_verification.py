@@ -138,16 +138,12 @@ def test_captured_shapes_block_claims_measurement_only_for_a_measurement():
     measured is exactly what a later reader needs when the tuned kernel turns
     out not to move end-to-end throughput.
     """
-    measured = ko._build_captured_shapes_block(
-        {"shapes": ["(8192,6144) bf16"], "shape_provenance": "torch_trace"}
-    )
+    measured = ko._build_captured_shapes_block({"shapes": ["(8192,6144) bf16"], "shape_provenance": "torch_trace"})
     assert "TraceLens-captured" in measured
     assert "do NOT invent" in measured
 
     for provenance in ("review_backfill", "review_derived"):
-        reviewed = ko._build_captured_shapes_block(
-            {"shapes": ["(8192,6144) bf16"], "shape_provenance": provenance}
-        )
+        reviewed = ko._build_captured_shapes_block({"shapes": ["(8192,6144) bf16"], "shape_provenance": provenance})
         assert "TraceLens-captured" not in reviewed
         assert "reconstructed" in reviewed
         assert provenance in reviewed
@@ -1126,9 +1122,7 @@ def test_resolve_deploy_repo_root_anchors_on_the_traced_source(tmp_path):
 
     # Both ancestors carry the relative path, so the walk cannot decide.
     assert shallow.exists() and deep.exists()
-    assert ko.resolve_deploy_repo_root(str(deep), descriptors) == str(
-        pkg / "_triton_kernels"
-    )
+    assert ko.resolve_deploy_repo_root(str(deep), descriptors) == str(pkg / "_triton_kernels")
     # The shallower copy anchors on its own root, not on whichever comes first.
     assert ko.resolve_deploy_repo_root(str(shallow), descriptors) == str(pkg)
 
@@ -1154,10 +1148,13 @@ def test_resolve_deploy_repo_root_anchor_still_requires_the_preimage(tmp_path):
     assert ko.resolve_deploy_repo_root(str(source), descriptors) == ""
 
     # A traversal entry is refused rather than resolved by subtraction.
-    assert ko.resolve_deploy_repo_root(
-        str(source),
-        [{"op": "write", "path": "../etc/passwd", "is_new": False}],
-    ) == ""
+    assert (
+        ko.resolve_deploy_repo_root(
+            str(source),
+            [{"op": "write", "path": "../etc/passwd", "is_new": False}],
+        )
+        == ""
+    )
 
 
 def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):

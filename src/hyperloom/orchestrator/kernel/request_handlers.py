@@ -5736,9 +5736,7 @@ async def run_optimization_handler(
                         "reason": skip_reason,
                         "kernel_id": canon,
                         "kernels_considered": len(all_candidates),
-                        "message": (
-                            f"kernel {canon} was not dispatched: {skip_reason}"
-                        ),
+                        "message": (f"kernel {canon} was not dispatched: {skip_reason}"),
                     }
                 # Otherwise the guards below decide, and they need the candidate
                 # to report against. Without it the attempt ledger files this
@@ -6896,11 +6894,7 @@ async def _run_optimization_single(
     # kernel_id plus source_file. Carrying the source through means a rejection
     # and a later real dispatch share one identity instead of splitting into an
     # empty-source row nothing can reconcile.
-    guard_source = str(
-        payload.get("source_file")
-        or (payload.get("candidate") or {}).get("source_file")
-        or ""
-    )
+    guard_source = str(payload.get("source_file") or (payload.get("candidate") or {}).get("source_file") or "")
 
     def _with_source(guard: HandlerResult) -> HandlerResult:
         """Stamp the resolved source onto a guard result that omitted it."""

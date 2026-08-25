@@ -69,6 +69,7 @@ def unattempted_skip_reason(reason: str) -> bool:
     """Whether ``reason`` means the kernel was never handed to a backend."""
     return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
 
+
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).

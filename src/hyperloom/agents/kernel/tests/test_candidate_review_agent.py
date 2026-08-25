@@ -369,9 +369,7 @@ class TestApplyRevisions:
         root, _ = tree
         row = _candidate(source_file="/repo/current.py")
         before = dict(row)
-        assert cra.apply_revisions(
-            [row], [{"kernel_id": "k001", "action": "keep"}], framework_roots=(str(root),)
-        ) == []
+        assert cra.apply_revisions([row], [{"kernel_id": "k001", "action": "keep"}], framework_roots=(str(root),)) == []
         assert row == before
 
     @pytest.mark.parametrize("action", ["unresolve", "drop"])
@@ -393,9 +391,7 @@ class TestApplyRevisions:
         """Silence is not a verdict; only named rows move."""
         root, _ = tree
         rows = [_candidate(), _candidate(kernel_id="k002", source_file="/repo/other.py")]
-        cra.apply_revisions(
-            rows, [{"kernel_id": "k001", "action": "unresolve"}], framework_roots=(str(root),)
-        )
+        cra.apply_revisions(rows, [{"kernel_id": "k001", "action": "unresolve"}], framework_roots=(str(root),))
         assert rows[1]["source_file"] == "/repo/other.py"
         assert "review_action" not in rows[1]
 
@@ -475,7 +471,7 @@ class TestVerifiedHarnesses:
         assert cra._verified_harnesses(["/gone/test_pa.py", str(defines)]) == [str(defines)]
 
     def test_an_explicit_empty_list_is_honoured(self):
-        """"This kernel has no harness" is an answer worth keeping."""
+        """ "This kernel has no harness" is an answer worth keeping."""
         assert cra._verified_harnesses([]) == []
 
     @pytest.mark.parametrize("proposed", [None, "not-a-list", 42])
@@ -727,6 +723,7 @@ class TestRunCandidateReview:
 
         A provider can report an error after the answer already landed.
         """
+
         def _runner(*, prompt, run_dir, model, timeout_sec):
             (run_dir / cra.REVISIONS_FILENAME).write_text(
                 json.dumps({"revisions": [{"kernel_id": "k001", "action": "keep"}]}),
@@ -746,9 +743,7 @@ class TestRunCandidateReview:
             calls["n"] += 1
             if calls["n"] == 1:
                 return "gateway 502"
-            (run_dir / cra.REVISIONS_FILENAME).write_text(
-                json.dumps({"revisions": []}), encoding="utf-8"
-            )
+            (run_dir / cra.REVISIONS_FILENAME).write_text(json.dumps({"revisions": []}), encoding="utf-8")
             return ""
 
         out = cra.run_candidate_review(**self._args(tmp_path), session_runner=_runner)
@@ -768,9 +763,7 @@ class TestRunCandidateReview:
         def _boom(**_kwargs):
             raise RuntimeError("https://secret.example/?token=leak")
 
-        out = cra.run_candidate_review(
-            **self._args(tmp_path), attempts=1, session_runner=_boom
-        )
+        out = cra.run_candidate_review(**self._args(tmp_path), attempts=1, session_runner=_boom)
         assert not out.ok
         assert "leak" not in out.detail and "RuntimeError" in out.detail
 
@@ -780,9 +773,7 @@ class TestRunCandidateReview:
             json.dumps({"revisions": [{"kernel_id": "stale", "action": "drop"}]}),
             encoding="utf-8",
         )
-        out = cra.run_candidate_review(
-            **self._args(tmp_path), attempts=1, session_runner=lambda **_kwargs: "no answer"
-        )
+        out = cra.run_candidate_review(**self._args(tmp_path), attempts=1, session_runner=lambda **_kwargs: "no answer")
         assert not out.ok
 
     def test_an_async_caller_awaits_the_coroutine(self, tmp_path):
@@ -795,11 +786,7 @@ class TestRunCandidateReview:
             )
             return ""
 
-        out = asyncio.run(
-            cra.run_candidate_review_async(
-                **self._args(tmp_path), session_runner=_runner
-            )
-        )
+        out = asyncio.run(cra.run_candidate_review_async(**self._args(tmp_path), session_runner=_runner))
         assert out.ok and out.revisions == [{"kernel_id": "k001", "action": "keep"}]
 
     def test_the_sync_wrapper_says_what_to_await_instead(self, tmp_path):
@@ -808,9 +795,7 @@ class TestRunCandidateReview:
 
         async def _from_a_loop():
             with pytest.raises(RuntimeError, match="run_candidate_review_async"):
-                cra.run_candidate_review(
-                    **self._args(tmp_path), session_runner=lambda **_kwargs: ""
-                )
+                cra.run_candidate_review(**self._args(tmp_path), session_runner=lambda **_kwargs: "")
 
         asyncio.run(_from_a_loop())
 
@@ -857,9 +842,7 @@ class TestWriteBoundaryGuard:
     def test_a_write_inside_the_run_directory_is_allowed(self, tmp_path):
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        decision = self._decide(
-            run_dir, "Write", {"file_path": str(run_dir / cra.REVISIONS_FILENAME)}
-        )
+        decision = self._decide(run_dir, "Write", {"file_path": str(run_dir / cra.REVISIONS_FILENAME)})
         assert decision.behavior == "allow"
 
     def test_a_write_outside_the_run_directory_is_refused(self, tmp_path):
@@ -924,14 +907,13 @@ class TestReviewStageBoundary:
         usable, and killing a multi-hour run over an advisory pass trades a
         small loss for a total one.
         """
+
         def _boom(*_args, **_kwargs):
             raise RuntimeError("unforeseen")
 
         monkeypatch.setattr(tla, "_run_candidate_review_stage", _boom)
         warnings: list[dict] = []
-        out = tla.run_candidate_review_stage(
-            tmp_path, candidates=[], args=self._args(), trace_health_warnings=warnings
-        )
+        out = tla.run_candidate_review_stage(tmp_path, candidates=[], args=self._args(), trace_health_warnings=warnings)
         assert out == {}
         assert warnings[0]["code"] == "candidate_review_failed"
         assert warnings[0]["severity"] == "error"
@@ -943,9 +925,9 @@ class TestReviewStageBoundary:
             "_run_candidate_review_stage",
             lambda *_a, **_kw: {"kernel_candidates_raw": "/x/raw.json"},
         )
-        assert tla.run_candidate_review_stage(
-            tmp_path, candidates=[], args=self._args()
-        ) == {"kernel_candidates_raw": "/x/raw.json"}
+        assert tla.run_candidate_review_stage(tmp_path, candidates=[], args=self._args()) == {
+            "kernel_candidates_raw": "/x/raw.json"
+        }
 
     def test_the_session_is_only_pointed_at_supported_outputs(self, tmp_path, monkeypatch):
         """The reference list is what the session is invited to read.
@@ -968,9 +950,7 @@ class TestReviewStageBoundary:
             assert internal not in offered
         assert "analysis.md" in offered
 
-    def test_a_file_created_beside_the_traced_source_discards_the_review(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_file_created_beside_the_traced_source_discards_the_review(self, tmp_path, monkeypatch):
         """The file print cannot see a file the session added.
 
         A module that shadows the traced source only has to exist beside it to
@@ -1058,9 +1038,7 @@ class TestReviewStageBoundary:
             trace_health_warnings=warnings,
         )
 
-        uncovered = next(
-            w for w in warnings if w["code"] == "candidate_review_tamper_check_uncovered"
-        )
+        uncovered = next(w for w in warnings if w["code"] == "candidate_review_tamper_check_uncovered")
         assert uncovered["severity"] == "warning"
         assert uncovered["paths"] == ["/nonexistent/serving/container/attn.py"]
         # Advisory: the reviewed table is still produced.
@@ -1101,9 +1079,7 @@ class TestReviewStageBoundary:
             ),
         )
 
-        tla._run_candidate_review_stage(
-            tmp_path, candidates=[candidate], args=self._args()
-        )
+        tla._run_candidate_review_stage(tmp_path, candidates=[candidate], args=self._args())
 
         assert candidate["shapes"] == ["(8192,8,128) bf16", "(8192,1,128) bf16"]
         assert candidate["shape_provenance"] == cra.REVIEW_BACKFILL_PROVENANCE

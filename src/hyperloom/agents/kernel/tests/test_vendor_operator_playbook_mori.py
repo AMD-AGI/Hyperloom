@@ -383,9 +383,7 @@ def test_a_playbook_candidate_is_not_open_to_review_rewriting():
     }
     assert tla._is_curated_resolution(resolved_by_grep) is False
 
-    assert tla._is_curated_resolution(
-        {**resolved_by_grep, "patch_strategy": "vendor_playbook"}
-    ) is True
+    assert tla._is_curated_resolution({**resolved_by_grep, "patch_strategy": "vendor_playbook"}) is True
 
 
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --
