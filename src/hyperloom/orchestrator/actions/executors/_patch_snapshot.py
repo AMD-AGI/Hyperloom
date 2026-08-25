@@ -291,17 +291,7 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
                     raise OSError("worktree restore verification failed")
             elif target.exists() or target.is_symlink():
                 raise OSError("removed path still exists after restore")
-            actual_index = (
-                subprocess.run(
-                    ["git", *safe_directory_args(["ls-files", "-s", "--", rel], cwd=repo)],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-                .stdout.decode(errors="replace")
-                .strip()
-            )
+            actual_index = _index_entries(repo, [rel]).get(rel, "")
             if actual_index != entry:
                 raise OSError("index restore verification failed")
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
