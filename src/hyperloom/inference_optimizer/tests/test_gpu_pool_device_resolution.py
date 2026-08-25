@@ -122,6 +122,20 @@ def test_whole_machine_explicit_pool_all_invalid_fails_closed(monkeypatch) -> No
     assert result == [], f"expected [] (fail closed), got {result!r}"
 
 
+def test_empty_string_env_falls_back_to_mask(monkeypatch) -> None:
+    """An empty INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES is treated as unset."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    assert resolve_gpu_specialist_devices(4) == [0, 1, 2, 3]
+    assert resolve_whole_machine_devices() == [0, 1, 2, 3]
+
+
+def test_blank_string_env_falls_back_to_mask(monkeypatch) -> None:
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES", "   ")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    assert resolve_gpu_specialist_devices(2) == [4, 5]
+
+
 @pytest.mark.asyncio
 async def test_try_acquire_same_holder_task_is_idempotent(tmp_path) -> None:
     """Repeated try_acquire for the same holder_id + task_id returns the existing lease."""
@@ -139,5 +153,38 @@ async def test_try_acquire_same_holder_task_is_idempotent(tmp_path) -> None:
     lease_c = await pool.try_acquire(count=2, holder_id="h2", task_id="t2")
     assert lease_c is not None, "the remaining 2 GPUs must still be available for a different holder"
     assert set(lease_c.gpu_ids).isdisjoint(set(lease_a.gpu_ids))
+
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_reallocates_when_count_mismatches(tmp_path) -> None:
+    """When a re-acquire requests more GPUs the stale lease is released and a fresh one granted."""
+    db = SqliteConnection(tmp_path / "test.db")
+    pool = SpecialistGpuPool(db, gpu_ids=[0, 1, 2, 3])
+
+    lease_a = await pool.try_acquire(count=1, holder_id="h1", task_id="t1")
+    assert lease_a is not None and len(lease_a.gpu_ids) == 1
+
+    lease_b = await pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_b is not None, "count mismatch must trigger reallocation"
+    assert len(lease_b.gpu_ids) == 2
+
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_reallocates_when_pool_shrinks(tmp_path) -> None:
+    """When the pool no longer contains the existing lease ids a fresh lease is granted."""
+    db = SqliteConnection(tmp_path / "test.db")
+    full_pool = SpecialistGpuPool(db, gpu_ids=[0, 1, 2, 3])
+
+    lease_a = await full_pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_a is not None
+
+    small_pool = SpecialistGpuPool(db, gpu_ids=[2, 3])
+    lease_b = await small_pool.try_acquire(count=2, holder_id="h1", task_id="t1")
+    assert lease_b is not None
+    assert set(lease_b.gpu_ids) <= {2, 3}, "re-acquired ids must all be in the current pool"
 
     db.close()
