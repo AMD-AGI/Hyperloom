@@ -1728,6 +1728,108 @@ def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: 
     )
 
 
+def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
+    """A re-run with --install-framework none must reuse .env's isolated vLLM
+    env so torch/lib sync still targets the venv that runs benchmarks."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+
+    shared_torch_lib = tmp_path / "shared" / "torch" / "lib"
+    venv_torch_lib = tmp_path / "vllm-venv" / "torch" / "lib"
+    for d in (shared_torch_lib, venv_torch_lib):
+        d.mkdir(parents=True)
+        (d / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
+        (d / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
+
+    venv_root = tmp_path / "vllm-venv"
+    shared_py = _fake_python_for_torch_lib(tmp_path / "shared-python", shared_torch_lib, importable=frozenset())
+    _fake_python_for_torch_lib(venv_root / "bin" / "python", venv_torch_lib, importable=frozenset({"vllm"}))
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "HYPERLOOM_FRAMEWORK_ENV=isolated",
+                f"VLLM_VENV_ROOT={venv_root}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                "INSTALL_FRAMEWORK=none",
+                f'DOTENV="{dotenv}"',
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{shared_py}"; }}',
+                "restore_persisted_framework_env",
+                _SYNC_BODY,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert res.returncode == 0, res.stderr
+    assert "restored framework env from .env (isolated)" in res.stdout
+    assert (venv_torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-bytes"
+    assert (shared_torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
+
+
+def test_hotfix_logs_partial_apply_when_torch_sync_fails(tmp_path: Path):
+    """Fresh /opt/rocm overlay must not claim full success when torch/lib sync fails."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+    torch_lib = tmp_path / "torch" / "lib"
+    torch_lib.mkdir(parents=True)
+    (torch_lib / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
+    (torch_lib / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
+    py = _fake_python_for_torch_lib(tmp_path / "fake-python-torch", torch_lib, runtime_ok=False)
+    extract = tmp_path / "extract"
+    extract.mkdir()
+    (extract / _HOTFIX_HIP_SONAME).write_bytes(b"hotfix-hip-bytes")
+    (extract / _HOTFIX_TRACER_SONAME).write_bytes(b"hotfix-tracer-bytes")
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                "rocm_profiler_hotfix_compatible() { return 0; }",
+                "rocm_profiler_hotfix_applied() { return 1; }",
+                "verify_rocm_profiler_hotfix() { return 0; }",
+                "backup_rocm_profiler_hotfix_targets() { :; }",
+                "install_rocm_profiler_hotfix_libs() { return 0; }",
+                f'download_rocm_profiler_hotfix_libs() {{ printf "%s" "{extract}"; }}',
+                "apply_rocm_profiler_hotfix",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert res.returncode == 0, res.stderr
+    assert "ROCm profiler hotfix partially applied" in res.stderr
+    assert "ROCm profiler hotfix applied" not in res.stdout
+    assert "torch lib sync reported issues" in res.stderr
+
+
 def _drive_hotfix_gate(
     tmp_path: Path,
     *,

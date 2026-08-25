@@ -68,6 +68,7 @@ AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
+_VLLM_VENV_ROOT_WAS_SET="${VLLM_VENV_ROOT+x}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
 REQUIRE_FRAMEWORKS=0
 SKIP_BASE_CHECK=0
@@ -147,7 +148,12 @@ while [ "$#" -gt 0 ]; do
         *) echo "[install-baremetal] ERROR: --framework-env must be one of: shared, isolated" >&2; exit 2 ;;
       esac
       ;;
-    --vllm-venv-root)   [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-venv-root requires a value" >&2; exit 2; }; shift; VLLM_VENV_ROOT="${1:-}" ;;
+    --vllm-venv-root)
+      [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-venv-root requires a value" >&2; exit 2; }
+      shift
+      VLLM_VENV_ROOT="${1:-}"
+      _VLLM_VENV_ROOT_WAS_SET="x"
+      ;;
     --require-frameworks) REQUIRE_FRAMEWORKS=1 ;;
     --skip-base-check)  SKIP_BASE_CHECK=1 ;;
     --check-only)       CHECK_ONLY=1 ;;
@@ -1319,11 +1325,14 @@ verify_rocm_profiler_torch_lib_sync() {
 }
 
 sync_torch_profiler_libs() {
-  local target_dir="$1" verify="${2:-0}"
-  sync_rocm_profiler_libs_to_torch_lib "$target_dir" || warn "torch lib sync reported issues"
+  local target_dir="$1" verify="${2:-0}" rc=0
+  sync_rocm_profiler_libs_to_torch_lib "$target_dir" \
+    || { warn "torch lib sync reported issues"; rc=1; }
   if [ "$verify" -eq 1 ]; then
-    verify_rocm_profiler_torch_lib_sync "$target_dir" || warn "torch lib sync verification reported issues"
+    verify_rocm_profiler_torch_lib_sync "$target_dir" \
+      || { warn "torch lib sync verification reported issues"; rc=1; }
   fi
+  return "$rc"
 }
 
 apply_rocm_profiler_hotfix() {
@@ -1340,7 +1349,7 @@ apply_rocm_profiler_hotfix() {
     log "check-only: ROCm profiler hotfix release asset will not be downloaded"
     log "current libamdhip64.so -> $(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || echo missing)"
     log "current libroctracer64.so -> $(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || echo missing)"
-    sync_torch_profiler_libs "$target_dir"
+    sync_torch_profiler_libs "$target_dir" || true
     return 0
   fi
 
@@ -1348,7 +1357,7 @@ apply_rocm_profiler_hotfix() {
     log "would download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
     log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
     log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
-    sync_torch_profiler_libs "$target_dir"
+    sync_torch_profiler_libs "$target_dir" || true
     return 0
   fi
 
@@ -1359,7 +1368,7 @@ apply_rocm_profiler_hotfix() {
   if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then
     log "ROCm profiler hotfix already applied (${hip_lib}, ${tracer_lib})"
     verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib" || warn "existing ROCm profiler hotfix verification reported issues"
-    sync_torch_profiler_libs "$target_dir" 1
+    sync_torch_profiler_libs "$target_dir" 1 || true
     rm -rf "$extract_dir"
     return 0
   fi
@@ -1378,8 +1387,32 @@ apply_rocm_profiler_hotfix() {
     die "ROCm profiler hotfix failed and rollback did not complete"
   fi
   rm -rf "$extract_dir"
-  log "ROCm profiler hotfix applied"
-  sync_torch_profiler_libs "$target_dir"
+  if sync_torch_profiler_libs "$target_dir"; then
+    log "ROCm profiler hotfix applied"
+  else
+    warn "ROCm profiler hotfix partially applied (/opt/rocm overlay only; torch/lib sync failed)"
+  fi
+}
+
+# Re-read framework env persisted by a prior setup run so Phase 3 targets the
+# same interpreter/venv on re-runs with --install-framework none.
+restore_persisted_framework_env() {
+  if [ -z "$_FRAMEWORK_ENV_WAS_SET" ]; then
+    local saved_fw
+    saved_fw="$(read_dotenv_var HYPERLOOM_FRAMEWORK_ENV)"
+    if [ -n "$saved_fw" ]; then
+      FRAMEWORK_ENV="$saved_fw"
+      log "restored framework env from .env (${FRAMEWORK_ENV})"
+    elif [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
+      FRAMEWORK_ENV="isolated"
+      log "vLLM selected; defaulting to isolated framework env"
+    fi
+  fi
+  if [ -z "${_VLLM_VENV_ROOT_WAS_SET:-}" ]; then
+    local saved_root
+    saved_root="$(read_dotenv_var VLLM_VENV_ROOT)"
+    [ -n "$saved_root" ] && VLLM_VENV_ROOT="$saved_root"
+  fi
 }
 
 read_dotenv_var() {
@@ -1766,13 +1799,7 @@ EOF
 }
 
 main() {
-  # vLLM defaults to an isolated venv (its ROCm wheel pins a torch that would
-  # clash with the shared host stack). Operators can still force shared with an
-  # explicit $FRAMEWORK_ENV / --framework-env.
-  if [ "$INSTALL_FRAMEWORK" = "vllm" ] && [ -z "$_FRAMEWORK_ENV_WAS_SET" ]; then
-    FRAMEWORK_ENV="isolated"
-    log "vLLM selected; defaulting to isolated framework env"
-  fi
+  restore_persisted_framework_env
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
