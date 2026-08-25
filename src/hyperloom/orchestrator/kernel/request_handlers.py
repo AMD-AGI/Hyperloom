@@ -2171,24 +2171,47 @@ def _resolve_forge_shapes(
 
     # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
     # traces can describe a backend that is no longer active.
-    def _extracted() -> str:
+    candidates_path = str(last_trace.get("candidates_path") or "")
+
+    def _extracted(scope: str = precision) -> str:
         return _extract_gemm_shapes_from_candidates(
-            str(last_trace.get("candidates_path") or ""),
+            candidates_path,
             session_dir,
-            precision=precision,
+            precision=scope,
         )
+
+    def _mxfp4_unscoped_fallback() -> str:
+        """MXFP4 models often trace ``gemm_a16w16`` with bf16 labels; scoped fp4
+        extraction then yields nothing even though the (M,N,K) decode tiles are
+        the ones the a4w4_blockscale tuner must optimize."""
+        if _canonical_dtype(precision) != "fp4":
+            return ""
+        unscoped = _extracted(scope="")
+        if unscoped:
+            log.info(
+                "Forge GEMM shapes: %r scoped extraction empty; using unscoped "
+                "trace shapes (MXFP4 models often label GEMM tensors as bf16)",
+                precision,
+            )
+        return unscoped
 
     if _canonical_dtype(precision):
         scoped = _extracted()
         if scoped:
             return scoped
+        fallback = _mxfp4_unscoped_fallback()
+        if fallback:
+            return fallback
 
     for candidate in candidates:
         p = Path(candidate)
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
-    return _extracted()
+    final = _extracted()
+    if final:
+        return final
+    return _mxfp4_unscoped_fallback()
 
 
 # TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.

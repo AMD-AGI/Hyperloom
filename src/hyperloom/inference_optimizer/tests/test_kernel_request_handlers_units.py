@@ -5042,6 +5042,45 @@ class TestRunGemmTuningHandler:
 
         assert krh._resolve_forge_shapes(state, session_dir) == str(artifact)
 
+    def test_resolve_forge_shapes_mxfp4_falls_back_to_unscoped_bf16_labels(self, tmp_path):
+        """Qwen3.8 MXFP4 traces label decode GEMMs as bf16; fp4 scoping must not
+        leave the a4w4_blockscale tuner with no shapes."""
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a16w16",
+                            "input_shapes": [
+                                {"call_num": 2944, "shape": "(64,8192) bf16"},
+                                {"call_num": 2944, "shape": "(4608,8192) bf16"},
+                            ],
+                        },
+                        {
+                            "name": "aiter::gemm_a16w16",
+                            "input_shapes": [
+                                {"call_num": 2208, "shape": "(64,256) bf16"},
+                                {"call_num": 2208, "shape": "(8192,256) bf16"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = SharedState(last_trace_analyze={"candidates_path": str(candidates)})
+
+        resolved = krh._resolve_forge_shapes(state, session_dir, precision="mxfp4")
+
+        assert resolved, "mxfp4 scoped extraction was empty and unscoped fallback failed"
+        assert json.loads(Path(resolved).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 4608, "K": 8192},
+            {"M": 64, "N": 8192, "K": 256},
+        ]
+
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
 class TestDefaultKernelBatchParallel:
