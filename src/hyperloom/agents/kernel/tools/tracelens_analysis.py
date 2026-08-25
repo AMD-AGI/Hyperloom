@@ -45,9 +45,13 @@ except ImportError:
 
 try:
     from hyperloom.orchestrator.framework.paths import (
+        FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
+    )
+    from hyperloom.orchestrator.framework.paths import (
         resolve_kernel_search_roots as _resolve_kernel_search_roots,
     )
 except ImportError:
+    _FRAMEWORK_SOURCE_PACKAGES = None
     _resolve_kernel_search_roots = None
 
 try:
@@ -1683,12 +1687,26 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
 #: Packages whose trees hold rewritable kernel source. Located at runtime so a
 #: wheel install, an editable checkout and a serving image all resolve, rather
 #: than only the one layout a literal happens to name.
-_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
+#:
+#: Taken from the orchestrator's resolver whenever that package is importable,
+#: which is every path except standalone CLI use. A second literal here is what
+#: let the two disagree: this tool listed ``sgl_kernel`` while the resolver it
+#: defers to did not, so on a host with a standalone ``sgl_kernel`` wheel the
+#: package was named in the "looked for" message and never actually searched.
+#: The literal below is the standalone default only, and
+#: ``test_kernel_search_roots`` fails if it drifts from the authoritative tuple.
+_STANDALONE_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
     "aiter",
     "aiter_meta",
     "sglang",
     "sgl_kernel",
     "vllm",
+    "atom",
+    "xfuser",
+)
+
+_KERNEL_SOURCE_PACKAGES: tuple[str, ...] = (
+    _FRAMEWORK_SOURCE_PACKAGES if _FRAMEWORK_SOURCE_PACKAGES is not None else _STANDALONE_KERNEL_SOURCE_PACKAGES
 )
 
 #: Last-resort checkout layouts for a host where nothing above is importable.

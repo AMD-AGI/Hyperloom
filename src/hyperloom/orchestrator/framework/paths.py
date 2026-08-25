@@ -40,13 +40,52 @@ _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/app/xDiT/",
 )
 
-_FRAMEWORK_PACKAGES: tuple[str, ...] = ("aiter", "sglang", "vllm", "atom", "xfuser")
+#: Every package whose installed tree counts as framework source. The single
+#: authoritative list: importlib discovery, the ``$VIRTUAL_ENV`` glob and the
+#: install-parent glob all derive their patterns from it, so a package added
+#: here reaches all three. Naming one in only some of them is how a standalone
+#: ``sgl_kernel`` wheel stayed invisible to root discovery while the tool that
+#: greps for kernel source listed it -- and a root that is never searched reads
+#: downstream exactly like a kernel whose source is not on this host.
+FRAMEWORK_SOURCE_PACKAGES: tuple[str, ...] = (
+    "aiter",
+    "aiter_meta",
+    "sglang",
+    "sgl_kernel",
+    "vllm",
+    "atom",
+    "xfuser",
+)
+
+#: Backwards-compatible private alias.
+_FRAMEWORK_PACKAGES: tuple[str, ...] = FRAMEWORK_SOURCE_PACKAGES
+
+#: Packages an isolated vLLM venv may hold. Deliberately narrower than
+#: :data:`FRAMEWORK_SOURCE_PACKAGES`: that tree exists because vLLM needs its
+#: own interpreter, so only vLLM and the kernel library it links against are
+#: expected to live there.
+_VLLM_VENV_PACKAGES: tuple[str, ...] = ("vllm", "aiter", "aiter_meta")
 
 # Parents scanned for ``python*/{site,dist}-packages/<pkg>`` wheel layouts.
 _INSTALL_GLOB_PARENTS: tuple[Path, ...] = (
     Path("/usr/local/lib"),
     Path("/opt/venv/lib"),
 )
+
+
+def _site_packages_patterns(packages: Sequence[str], *, flavours: Sequence[str]) -> tuple[str, ...]:
+    """Build ``python*/<flavour>-packages/<pkg>`` globs for each package.
+
+    Args:
+        packages: Package names to match.
+        flavours: ``site`` / ``dist`` -- both spellings exist depending on how
+            the interpreter was built.
+
+    Returns:
+        One pattern per (flavour, package) pair, in that order.
+    """
+    return tuple(f"python*/{flavour}-packages/{package}" for flavour in flavours for package in packages)
+
 
 # aiter device sources often live in the sibling ``aiter_meta`` package.
 _AITER_META_CSRC_ROOT = "/aiter_meta/csrc/"
@@ -214,20 +253,7 @@ def _glob_install_package_roots() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: Normalised, de-duplicated package root paths.
     """
-    patterns = (
-        "python*/dist-packages/aiter",
-        "python*/dist-packages/aiter_meta",
-        "python*/dist-packages/sglang",
-        "python*/dist-packages/vllm",
-        "python*/dist-packages/atom",
-        "python*/dist-packages/xfuser",
-        "python*/site-packages/aiter",
-        "python*/site-packages/aiter_meta",
-        "python*/site-packages/sglang",
-        "python*/site-packages/vllm",
-        "python*/site-packages/atom",
-        "python*/site-packages/xfuser",
-    )
+    patterns = _site_packages_patterns(FRAMEWORK_SOURCE_PACKAGES, flavours=("dist", "site"))
     found: list[str] = []
     seen: set[str] = set()
     parents: list[Path] = list(_INSTALL_GLOB_PARENTS)
@@ -281,14 +307,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
     if venv:
         site = Path(venv) / "lib"
         if site.is_dir():
-            for pattern in (
-                "python*/site-packages/vllm",
-                "python*/site-packages/sglang",
-                "python*/site-packages/aiter",
-                "python*/site-packages/aiter_meta",
-                "python*/site-packages/atom",
-                "python*/site-packages/xfuser",
-            ):
+            for pattern in _site_packages_patterns(FRAMEWORK_SOURCE_PACKAGES, flavours=("site",)):
                 for match in sorted(site.glob(pattern)):
                     if match.is_dir():
                         add(match)
@@ -300,11 +319,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
         if vllm_venv:
             site = Path(vllm_venv) / "lib"
             if site.is_dir():
-                for pattern in (
-                    "python*/site-packages/vllm",
-                    "python*/site-packages/aiter",
-                    "python*/site-packages/aiter_meta",
-                ):
+                for pattern in _site_packages_patterns(_VLLM_VENV_PACKAGES, flavours=("site",)):
                     for match in sorted(site.glob(pattern)):
                         if match.is_dir():
                             add(match)
@@ -920,6 +935,7 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "FRAMEWORK_SOURCE_PACKAGES",
     "WarmReplayPatchSource",
     "WarmReplayRootResolution",
     "probe_framework_source_roots_for_env",

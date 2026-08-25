@@ -137,3 +137,26 @@ class TestRefreshKernelSearchRoots:
 
     def teardown_method(self):
         tl.kernel_search_roots.cache_clear()
+
+
+class TestThePackageListHasOneOwner:
+    """Two lists of kernel-source packages is one list that goes stale.
+
+    This tool named ``sgl_kernel`` while the resolver it defers to did not, and
+    because the resolver imports successfully in every non-standalone run, the
+    local list was never consulted: a standalone ``sgl_kernel`` wheel appeared
+    in the "looked for" message and was never actually searched. That is the
+    failure this whole module exists to prevent, reached through a second
+    definition of the same fact.
+    """
+
+    def test_the_tool_defers_to_the_orchestrator_list(self):
+        from hyperloom.orchestrator.framework.paths import FRAMEWORK_SOURCE_PACKAGES
+
+        assert tl._KERNEL_SOURCE_PACKAGES == FRAMEWORK_SOURCE_PACKAGES
+
+    def test_the_standalone_default_does_not_drift_from_it(self):
+        """The literal is the standalone fallback, not a competing answer."""
+        from hyperloom.orchestrator.framework.paths import FRAMEWORK_SOURCE_PACKAGES
+
+        assert set(tl._STANDALONE_KERNEL_SOURCE_PACKAGES) == set(FRAMEWORK_SOURCE_PACKAGES)
