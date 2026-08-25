@@ -52,6 +52,7 @@ from ..trace.task_progress import heartbeat_while_output_flows
 from ..trace.parse_usage import (
     parse_forge_steps,
     parse_forge_usage,
+    reasoning_output_tokens,
 )
 
 from ._recorder_trace import trace_recording_skipped
@@ -5281,9 +5282,6 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
-    # Only forward --top-k on an explicit override; else the tool applies its own default.
-    if payload.get("top_k") is not None:
-        cmd += ["--top-k", str(payload.get("top_k"))]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
@@ -7117,6 +7115,9 @@ def _trace_kernel_attempt_usage(
                 output_tokens=usage.get("output_tokens"),
                 cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
                 cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+                # Read through the shared helper so a reasoning model spends the
+                # same way here as it does on the in-process backends' rows.
+                reasoning_output_tokens=reasoning_output_tokens(usage),
             )
             append_llm_call(session_dir=session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break optimization

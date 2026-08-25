@@ -24,7 +24,7 @@ Symptoms come from these signal families; knowing the family helps you interpret
 | F — Kernel pipeline | `ray_pending_starvation`, `geak_budget_starvation`, `kernel_opt_no_progress` |
 | G — Decision audit | `empty_patch_kept`, `decision_threshold_violated`, `kernel_dispatch_bypassed`, `kernel_negative_delta_kept`, `ci_metrics_baseline_zero`, `ci_metrics_schema_drift` |
 | H — Time / budget | `budget_strategy_drift`, `budget_burn_no_gain`, `deadline_imminent`, `deadline_warning`, `deadline_hard_cutoff` |
-| I — State integrity | `state_json_corrupt`, `coordinator_wal_bloat`, `stale_lease`, `inbox_bloat`, `coordinator_zombie` |
+| I — State integrity | `state_json_corrupt`, `coordinator_wal_bloat`, `inbox_bloat`, `coordinator_zombie` |
 | J — External deps | `gateway_auth_outage`, `wekafs_degraded`, `tracelens_cli_missing` |
 | baseline / stall | `agent_stall`, `agent_quiet_work_progressing`, `crash_count_rising`, `crash_count_high`, `crash_count_emergency`, `repeated_policy_denied`, `repeated_failure`, `recover_unsuccessful` |
 

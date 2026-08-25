@@ -3092,100 +3092,6 @@ class FrameworkPhase(PhaseHandler):
                 return fw
         return ""
 
-    def _emit_framework_agent_kg_decision(
-        self,
-        *,
-        task: "Task",
-        result: Any,
-        kept: bool,
-    ) -> None:
-        """Emit a real-time KG edge for a framework-agent KEEP/REVERT decision."""
-        del task, kept
-        result_dict = result.result if hasattr(result, "result") else (result or {})
-        if not isinstance(result_dict, dict):
-            return
-        status = str(result_dict.get("status") or "")
-        if status not in ("kept", "kept_inert", "reverted"):
-            return
-        patches_applied = result_dict.get("patches_applied") or []
-        patch_path = patches_applied[0] if patches_applied else ""
-        delta_pct = result_dict.get("delta_pct") or 0.0
-        error_class = result_dict.get("error_class") or ""
-        # An inert KEEP is not a throughput win, so ``_emit_kg_decision`` only
-        # records an IMPROVES edge for a positive-gain KEEP or a REVERT edge.
-        outcome = "KEEP" if status == "kept" else "KEEP_INERT" if status == "kept_inert" else "REVERT"
-        self._emit_kg_decision(
-            patch_file=str(patch_path),
-            outcome=outcome,
-            gain_pct=float(delta_pct or 0.0),
-            error_class=str(error_class or ""),
-            archs=list(getattr(self.shared_state, "model_architectures", None) or []),
-        )
-
-    def _emit_kg_decision(
-        self,
-        *,
-        patch_file: str,
-        outcome: str,
-        gain_pct: float,
-        error_class: str,
-        archs: list[Any],
-    ) -> None:
-        """Emit a real-time KG edge for a KEEP/REVERT patch decision.
-
-        Mirrors the bulk kb-mirror's recipe edge mapping (a KEEP with a
-        positive gain becomes ``patch IMPROVES arch``; a REVERT becomes
-        ``patch REVERTED_ON arch``) so the live link graph reflects the
-        decision immediately, instead of only after the next mirror cron.
-
-        Native-only and best-effort: local mode supplies a native filesystem
-        graph client automatically; remote mode requires ``GBRAIN_KG_NATIVE``
-        (otherwise edges would be written as a ``## Facts`` fence that gbrain
-        ingest discards). All failures degrade silently via the ``*_safe``
-        wrappers so a KG hiccup never affects the run.
-
-        Args:
-            patch_file: The patch identifier (edge subject).
-            outcome: ``KEEP`` or ``REVERT``.
-            gain_pct: Measured throughput delta (signed percent).
-            error_class: Failure class for a REVERT (edge ``error`` property).
-            archs: Applicable architectures (one edge per arch).
-        """
-        if not patch_file or not archs:
-            return
-        try:
-            from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import get_kg_client
-
-            kg = get_kg_client()
-            if kg is None or not getattr(kg, "_native", False) or not kg.is_available():
-                return
-            ss = self.shared_state
-            hw = str(getattr(ss, "gpu_type", "") or getattr(ss, "hardware", "") or "")
-            fw = str(getattr(ss, "framework", "") or "")
-            for raw_arch in archs:
-                arch = str(raw_arch or "").strip()
-                if not arch:
-                    continue
-                if outcome == "KEEP" and gain_pct > 0:
-                    kg.emit_fact_safe(
-                        page_slug="",
-                        subject=patch_file,
-                        predicate="IMPROVES",
-                        object=arch,
-                        properties={"gain": f"{gain_pct:+.1f}%", "hw": hw, "fw": fw},
-                    )
-                elif outcome == "REVERT":
-                    kg.emit_fact_safe(
-                        page_slug="",
-                        subject=patch_file,
-                        predicate="REVERTED_ON",
-                        object=arch,
-                        properties={"loss": f"{gain_pct:.1f}%", "error": error_class, "hw": hw, "fw": fw},
-                    )
-            log.info("kg write-back: emitted %s edge(s) for %s [%s]", len(archs), patch_file, outcome)
-        except Exception as exc:  # noqa: BLE001 - write-back is advisory
-            log.warning("kg write-back degraded: %s", exc)
-
     def _record_framework_agent_phase_done(
         self,
         *,
@@ -4489,7 +4395,7 @@ class FrameworkPhase(PhaseHandler):
 
         The build is recorded as accounted for only once there is something to
         account for. A probe the budget refused leaves it unrouted on purpose: it
-        is still a verified build nothing has launched, and the manifest saying
+        is still a probed build nothing has launched, and the manifest saying
         otherwise is what would strand it for the rest of the session.
 
         Args:
@@ -4519,7 +4425,7 @@ class FrameworkPhase(PhaseHandler):
             self._note_build_routed(task_id)
             return
 
-        log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
+        log.info("ENABLEMENT: targeted_build probe-verified → enqueue launch probe task=%s", task_id)
         probe_tid, generation = await self._enqueue_build_launch_probe(
             task_id,
             br,

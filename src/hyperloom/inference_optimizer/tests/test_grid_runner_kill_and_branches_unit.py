@@ -9,6 +9,7 @@ measurement)."""
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -329,6 +330,48 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
         "benchmark_report_invalid_metric",
         "benchmark_report_missing",
     }
+
+
+@pytest.mark.asyncio
+async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkeypatch):
+    """A parseable measurement must not launder a non-zero exit code into success."""
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _nonzero_but_valid(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "sglang",
+                    "throughput": {
+                        "output_throughput": 1200.0,
+                        "request_throughput": 120.0,
+                        "completed_requests": 640,
+                        "duration_seconds": 120.0,
+                    },
+                }
+            )
+        )
+        return 1, "stdout tail", "server exited 1"
+
+    monkeypatch.setattr(gr, "_run_magpie", _nonzero_but_valid)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA")],
+        output_root=tmp_path / "out",
+        variant_timeout_sec=5,
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "magpie_nonzero_after_valid_measurement"
+    assert r.returncode == 1
+    markers = list((tmp_path / "out").rglob("abort_reason.json"))
+    assert len(markers) == 1
+    assert json.loads(markers[0].read_text())["error_class"] == "magpie_nonzero_after_valid_measurement"
 
 
 @pytest.mark.asyncio

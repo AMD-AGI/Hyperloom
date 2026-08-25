@@ -218,6 +218,8 @@ orchestration turn returns HTTP 401 and the run idles in `PRELUDE` for the whole
 budget. See [Authentication and credentials](../reference/authentication.md).
 
 ```bash
+# Run from the workspace holding the hyperloom package; no installer exports REPO_ROOT.
+export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
 # .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
 # value the caller exported. Wider than install.sh, which guards a fixed list.
 _dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"

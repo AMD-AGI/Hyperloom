@@ -81,9 +81,13 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
         isolation_level=None,
         check_same_thread=False,
     )
-    conn.row_factory = sqlite3.Row
-    _apply_pragmas(conn)
-    ensure_schema(conn)
+    try:
+        conn.row_factory = sqlite3.Row
+        _apply_pragmas(conn)
+        ensure_schema(conn)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 

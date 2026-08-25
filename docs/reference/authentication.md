@@ -13,6 +13,14 @@ environment configuration in Hyperloom. If any other document
 `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
 page, this page wins. Open an issue against the contradicting file.
 
+```{note}
+Shell paths on this page follow the recommended `pip install --target .` layout.
+In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
+```
+
 Hyperloom needs at most two classes of configuration:
 
 - **LLM gateway credentials**: At least one provider side, configured with both
@@ -20,8 +28,9 @@ Hyperloom needs at most two classes of configuration:
    [LLM gateway credentials](#llm-gateway-credentials)).
 - **Path / workspace layout**: Run bare-metal setup from the installed
    Hyperloom target directory. You normally only set `USER_DATA_PATH`
-   (writable artifact root; default `/workspace/hyperloom`); setup writes the
-   runtime env files and updates `.env`.
+   (writable artifact root; defaults to `/workspace/hyperloom` when `/workspace`
+   is writable, otherwise to `session/` under the current directory); setup
+   writes the runtime env files and updates `.env`.
 
 Hyperloom never borrows one provider's key or endpoint for the other. A side is
 configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, or by
@@ -260,7 +269,7 @@ loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 
 | Variable               | Set by operator? | Default                                          | Description                                                                                                      |
 |------------------------|------------------|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
-| `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom`                           | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Replaces retired `WORKSPACE_PATH` / `INFERENCE_OPTIMIZER_SESSION_DIR`. |
+| `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Bare-metal hosts without a writable `/workspace` take the second form, which is also what setup offers. |
 | `REPO_ROOT`            | rarely           | auto-detected from script location               | This Hyperloom checkout. Locates `.env`, skills, scripts.                                                        |
 | `KERNEL_AGENT_ENV`     | rarely           | `$USER_DATA_PATH/runtime/kernel-agent.env.sh`    | Output of `install.sh`; exports resolved paths and LLM aliases.                                                  |
 | `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (env files, GEAK config, Recipe KB bookkeeping).                                             |
@@ -281,12 +290,6 @@ explicit path pointing at a missing directory fails preflight.
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (MAF measured on-device)                             | Optional internal TraceLens extension that backfills MAF without an on-device benchmark. When unset, Hyperloom measures MAF on an idle GPU (microbenchmark) — roofline gap / MI355+ MAF analysis is still produced, just measured locally. Hyperloom never clones it. |
 | `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
-
-```{note}
-`INFERENCE_OPTIMIZER_SESSION_DIR` is no longer read. `WORKSPACE_PATH` is
-legacy-only and still used in narrow fallbacks; prefer `USER_DATA_PATH`. See
-[Upgrade Hyperloom version](upgrade.md).
-```
 
 ---
 
@@ -310,7 +313,7 @@ At preflight, the inference optimizer CLI:
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
 2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
-   `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
+   `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    resolved Anthropic-side upstream gateway.
 

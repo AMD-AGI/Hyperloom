@@ -470,9 +470,9 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         report_path.write_text(json.dumps(data))
         return subprocess.CompletedProcess(
             args=cmd,
-            returncode=1,
+            returncode=0,
             stdout="",
-            stderr="cleanup failed",
+            stderr="",
         )
 
     payload = {
@@ -490,6 +490,33 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
     assert res["status"] == "ok"
     assert res["decision"] == "KEEP"
     assert res["new_tput"] == 900.0
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_rejects_rebaseline_that_exited_nonzero(session_dir, tmp_path):
+    """A non-zero re-baseline cannot promote, however good its throughput looks."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="cleanup failed")
+
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_nonzero",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] != "KEEP"
 
 
 @pytest.mark.asyncio

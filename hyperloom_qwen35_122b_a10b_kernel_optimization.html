@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperloom · Qwen3.5-122B-A10B-FP8 优化产出图 (kernel-centric)</title>
+<style>
+  :root{
+    --bg:#0c1020; --panel:#151b30; --panel2:#1b2340; --ink:#e8ecf8; --muted:#97a0c0;
+    --line:#2b3559;
+    --prelude:#3b82f6; --framework:#8b5cf6; --explore:#22c55e; --kernel:#f59e0b;
+    --sweep:#06b6d4; --close:#ec4899;
+    --good:#34d399; --warn:#fbbf24; --bad:#fb7185;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#16203f 0%,var(--bg) 55%);
+       color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:32px 28px 60px;line-height:1.5}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:16px;margin:34px 0 14px;color:var(--ink);display:flex;align-items:center;gap:8px}
+  h3{font-size:13.5px;margin:18px 0 8px;color:var(--ink)}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:6px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 6px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:12px;color:var(--muted)}
+  .chip b{color:var(--ink)}
+  .headline{display:flex;gap:18px;flex-wrap:wrap;margin:18px 0 6px}
+  .kpi{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
+       border-radius:14px;padding:14px 18px;min-width:150px}
+  .kpi .v{font-size:26px;font-weight:700}
+  .kpi .l{font-size:12px;color:var(--muted)}
+  .kpi .v.good{color:var(--good)}
+  .kpi .v.kern{color:var(--kernel)}
+  .kpi.hi{border-color:#d97706}
+
+  /* pipeline */
+  .pipe{display:flex;align-items:stretch;gap:0;margin:10px 0 8px;overflow-x:auto;padding-bottom:6px}
+  .stage{flex:1;min-width:150px;position:relative;padding:0 6px}
+  .stagehead{border-radius:12px 12px 0 0;padding:10px 12px;font-weight:700;font-size:13px;color:#0b0f1e;text-align:center;
+             clip-path:polygon(0 0,calc(100% - 14px) 0,100% 50%,calc(100% - 14px) 100%,0 100%,14px 50%)}
+  .stage:first-child .stagehead{clip-path:polygon(0 0,calc(100% - 14px) 0,100% 50%,calc(100% - 14px) 100%,0 100%)}
+  .stage:last-child .stagehead{clip-path:polygon(0 0,100% 0,100% 100%,0 100%,14px 50%)}
+  .body{background:var(--panel);border:1px solid var(--line);border-top:none;border-radius:0 0 12px 12px;
+        padding:10px;min-height:250px}
+  .role{font-size:11px;color:var(--muted);margin-bottom:8px;text-align:center}
+
+  .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;border-radius:9px;
+        padding:9px 10px;margin-bottom:9px}
+  .card .t{font-weight:700;font-size:12.5px}
+  .card .src{font-size:10.5px;color:var(--muted);margin:2px 0 6px}
+  .card code{background:#0c1124;border:1px solid var(--line);border-radius:5px;padding:1px 5px;
+             font-size:10.5px;color:#cfe3ff;display:inline-block;word-break:break-all}
+  .delta{display:inline-block;font-size:11px;font-weight:700;border-radius:6px;padding:1px 7px;margin-top:6px}
+  .delta.good{background:rgba(52,211,153,.14);color:var(--good)}
+  .delta.flat{background:rgba(151,160,192,.14);color:var(--muted)}
+  .delta.warn{background:rgba(251,191,36,.14);color:var(--warn)}
+  .delta.bad{background:rgba(251,113,133,.14);color:var(--bad)}
+  .empty{color:var(--muted);font-size:11.5px;font-style:italic;text-align:center;margin-top:30px}
+  .loop{float:right;font-size:10px;font-weight:800;border-radius:6px;padding:1px 7px;letter-spacing:.02em}
+  .loop.l1{background:rgba(245,158,11,.18);color:#fcd34d;border:1px solid #d97706}
+  .loop.l2{background:rgba(34,197,94,.18);color:#86efac;border:1px solid #16a34a}
+
+  /* loop timeline */
+  .loops{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .loopcard{flex:1;min-width:170px;background:linear-gradient(180deg,var(--panel2),var(--panel));
+            border:1px solid var(--line);border-radius:12px;padding:12px 14px;position:relative}
+  .loopcard .ln{font-size:12px;color:var(--muted);font-weight:700}
+  .loopcard .lg{font-size:22px;font-weight:800;margin:4px 0 2px}
+  .loopcard .lc{font-size:11px;color:var(--muted)}
+  .loopcard .lwhat{font-size:11px;color:var(--ink);margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
+  .loopcard.win{border-color:#d97706}
+  .loopcard.win2{border-color:#16a34a}
+  .loopcard.zero{opacity:.72}
+  .barwrap{height:8px;background:#0c1124;border-radius:6px;margin-top:8px;overflow:hidden}
+  .barwrap i{display:block;height:100%;border-radius:6px}
+
+  /* kernel funnel / steps */
+  .kbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-top:6px}
+  .kbox.hl{border-color:#d97706;background:linear-gradient(180deg,rgba(245,158,11,.05),var(--panel))}
+  .steps{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+  .step{flex:1;min-width:180px;background:var(--panel2);border:1px solid var(--line);border-top:3px solid var(--kernel);
+        border-radius:10px;padding:11px 12px}
+  .step .n{font-size:10.5px;font-weight:800;color:var(--kernel);letter-spacing:.06em}
+  .step .st{font-size:13px;font-weight:700;margin:3px 0 5px}
+  .step .sd{font-size:11.5px;color:var(--muted)}
+  .step .sm{font-size:11px;color:var(--ink);margin-top:7px;border-top:1px solid var(--line);padding-top:6px}
+
+  /* iteration ladder */
+  .iters{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+  .iter{display:grid;grid-template-columns:74px 1fr 128px;gap:12px;align-items:center;
+        background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--kernel);
+        border-radius:10px;padding:10px 12px}
+  .iter .ib{font-size:11px;font-weight:800;color:var(--kernel)}
+  .iter .ib s{display:block;text-decoration:none;color:var(--muted);font-weight:600;font-size:10px}
+  .iter .it{font-size:12.5px;font-weight:700}
+  .iter .id2{font-size:11px;color:var(--muted);margin-top:2px}
+  .iter .iv{text-align:right}
+  .iter .iv b{font-size:16px;color:var(--good)}
+  .iter .iv s{display:block;text-decoration:none;font-size:10.5px;color:var(--muted)}
+  .msbar{height:6px;background:#0c1124;border-radius:5px;margin-top:6px;overflow:hidden}
+  .msbar i{display:block;height:100%;background:var(--kernel);border-radius:5px}
+
+  /* technique cards */
+  .techs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+  @media(max-width:900px){.techs{grid-template-columns:1fr}}
+  .tech{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .tech .tt{font-size:12.5px;font-weight:700;margin-bottom:3px}
+  .tech .tw{font-size:11.5px;color:var(--muted);margin-bottom:7px}
+  .tech pre{background:#0c1124;border:1px solid var(--line);border-radius:7px;padding:8px 10px;margin:0;
+            font-size:10.5px;color:#cfe3ff;overflow-x:auto;line-height:1.45}
+  .tech pre .add{color:#86efac}
+  .tech pre .del{color:#fda4af}
+  .tech pre .cm{color:var(--muted)}
+
+  /* gate flow */
+  .gate{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;align-items:stretch}
+  .gcard{flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .gcard.ok{border-color:#16a34a}
+  .gcard.rev{border-color:#d97706}
+  .gcard .gh{font-size:11px;color:var(--muted);font-weight:700}
+  .gcard .gv{font-size:15px;font-weight:800;margin:4px 0 3px}
+
+  /* waterfall */
+  .wf{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 14px 6px;margin-top:6px;overflow-x:auto}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin:10px 2px 0;font-size:12px;color:var(--muted)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:12.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em}
+  td code{background:#0c1124;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:11px;color:#cfe3ff}
+  .tag{font-size:10.5px;border-radius:5px;padding:1px 7px;font-weight:700}
+  tr.hi td{background:rgba(245,158,11,.07)}
+  .footnote{color:var(--muted);font-size:11.5px;margin-top:10px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:820px){.two{grid-template-columns:1fr}}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .bad-note{border-left:3px solid var(--bad);padding-left:10px}
+</style>
+</head>
+<body>
+
+<h1>Hyperloom · Qwen3.5-122B-A10B-FP8 优化产出图</h1>
+<div class="sub">long-horizon agentic optimization session — 重点:<b>KernelForge 如何把 prefill attention kernel 的 1.187x 微基准加速转化为 +7.56% 端到端吞吐</b></div>
+
+<div class="meta">
+  <span class="chip">模型 <b>Qwen3.5-122B-A10B-FP8 (MoE · 256 experts · 混合线性注意力)</b></span>
+  <span class="chip">框架 <b>vLLM 0.25.0</b></span>
+  <span class="chip">GPU <b>MI325X → mi300x runner (gfx942)</b></span>
+  <span class="chip">精度 <b>FP8 block-scale (128×128)</b></span>
+  <span class="chip">工作负载 <b>TP=2 · CONC=64 · ISL=8192 · OSL=1024</b></span>
+  <span class="chip">会话 <b>20260811T060518Z</b></span>
+  <span class="chip">退出 <b>global_converged (未用满 48h)</b></span>
+</div>
+
+<div class="headline">
+  <div class="kpi"><div class="v">716.3</div><div class="l">baseline tok/s/gpu (实测)</div></div>
+  <div class="kpi"><div class="v good">906.5</div><div class="l">最终 best tok/s/gpu</div></div>
+  <div class="kpi"><div class="v good">+26.55%</div><div class="l">累计增益 (全栈 rebench)</div></div>
+  <div class="kpi hi"><div class="v kern">+7.56%</div><div class="l">⭐ 其中 KERNEL 贡献 (E2E)</div></div>
+  <div class="kpi hi"><div class="v kern">1.187x</div><div class="l">⭐ kernel 微基准加速</div></div>
+  <div class="kpi"><div class="v">4</div><div class="l">完成 macro-cycle 数</div></div>
+</div>
+
+<h2>① 按 Loop(宏周期)拆分收益</h2>
+<div class="sub">cyclic 阶段机跑了 4 个宏周期。<b>Loop 1 一轮就吃掉了全部增益:EXPLORE 的调度器参数栈 (+17.7%) 与 KERNEL 的 attention 内核重写 (+7.56%)</b>;Loop 2–4 因剩余预算不足,每个阶段都以 force_exit 快速穿过,未再产出新杠杆,最终以 <code>global_converged</code> 收敛退出。</div>
+<div class="loops">
+  <div class="loopcard win">
+    <div class="ln">Loop 1 <span style="float:right;font-weight:500">Aug11 06:05 – Aug12 01:36</span></div>
+    <div class="lg" style="color:#fcd34d">+26.55%</div>
+    <div class="lc">716.3 → 906.5 tok/s</div>
+    <div class="barwrap"><i style="width:100%;background:linear-gradient(90deg,var(--explore) 0 70%,var(--kernel) 70% 100%)"></i></div>
+    <div class="lwhat">EXPLORE 参数栈 716.3→842.8 (+17.7%)<br>⭐ KERNEL <code>prefix_prefill.py</code> 842.8→906.5 (+7.56%)<br><b>两个杠杆全部在 Loop 1 落地</b></div>
+  </div>
+  <div class="loopcard zero">
+    <div class="ln">Loop 2 <span style="float:right;font-weight:500">Aug12 01:36 – 06:54</span></div>
+    <div class="lg" style="color:var(--muted)">验证</div>
+    <div class="lc">SWEEP 内完成 k001 的 KEEP 复测</div>
+    <div class="barwrap"><i style="width:0%"></i></div>
+    <div class="lwhat">conc_sweep(8 档并发)+ 第二次 roofline(23 hot kernels),无新 KEEP</div>
+  </div>
+  <div class="loopcard zero">
+    <div class="ln">Loop 3 <span style="float:right;font-weight:500">Aug12 06:54 – 07:01</span></div>
+    <div class="lg" style="color:var(--muted)">穿过</div>
+    <div class="lc">预算不足,各阶段 force_exit</div>
+    <div class="barwrap"><i style="width:0%"></i></div>
+    <div class="lwhat">FRAMEWORK / EXPLORE / KERNEL 均 <code>force_exit_low_budget</code></div>
+  </div>
+  <div class="loopcard zero">
+    <div class="ln">Loop 4 <span style="float:right;font-weight:500">Aug12 07:01 – 07:12</span></div>
+    <div class="lg" style="color:var(--muted)">收敛</div>
+    <div class="lc">→ CLOSE</div>
+    <div class="barwrap"><i style="width:0%"></i></div>
+    <div class="lwhat">连续多周期无增益 → <code>global_converged</code></div>
+  </div>
+</div>
+
+<h2>② Hyperloom 阶段流水线 → 每步产出的优化</h2>
+<div class="sub">循环阶段机:PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE</div>
+
+<div class="pipe">
+  <!-- PRELUDE -->
+  <div class="stage">
+    <div class="stagehead" style="background:var(--prelude)">PRELUDE</div>
+    <div class="body">
+      <div class="role">baseline · roofline · TraceLens</div>
+      <div class="card" style="border-left-color:var(--prelude)">
+        <div class="t">baseline (双轮冷启动保护)</div>
+        <div class="src">warmup 轮 729.7 丢弃 → measure 轮取值<br>gsm8k 精度 0.9742</div>
+        <div><span class="delta flat">建立基线 716.3 tok/s/gpu</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--prelude)">
+        <div class="t">roofline #1 (2h08m)</div>
+        <div class="src">eager 模式 profile(禁 HIP graph)+ TraceLens<br>trace 1.8 GB → 22 hot kernels</div>
+        <code>HYPERLOOM_PROFILE_MAX_ITERS=16</code>
+        <div><span class="delta flat">产出 analysis.md + kernel_candidates</span></div>
+      </div>
+    </div>
+  </div>
+  <!-- FRAMEWORK -->
+  <div class="stage">
+    <div class="stagehead" style="background:var(--framework)">FRAMEWORK_AGENT</div>
+    <div class="body">
+      <div class="role">framework-agent 发现/测 PR</div>
+      <div class="card" style="border-left-color:var(--framework)">
+        <div class="t">候选发现 250 个 PR</div>
+        <div class="src">ROCm/vllm PR 池 + PR ledger 先验排序<br>(#1069 / #1075 / #1077 / #1080 / #1083 …)</div>
+        <code>critic_denied ×6 → plateau 退出</code>
+        <div><span class="delta bad">净增益 0% · 245 个候选未处理</span></div>
+      </div>
+      <div class="empty" style="margin-top:12px">Critic 把 <code>candidate.score/prior_rank</code><br>误判为 specialist 编造的量化承诺,<br>逐个否决 → 已修复(见 ⑦)</div>
+    </div>
+  </div>
+  <!-- EXPLORE -->
+  <div class="stage">
+    <div class="stagehead" style="background:var(--explore)">EXPLORE</div>
+    <div class="body">
+      <div class="role">参数 / 环境 / 后端搜索</div>
+      <div class="card" style="border-left-color:var(--explore)">
+        <div class="t">⭐ 调度器参数栈 <span class="loop l1">Loop 1</span></div>
+        <div class="src">来源:<code>specialist:research_scout_specialist</code><br>(从 24 个 PR 提炼 8 条 hints)</div>
+        <code>--async-scheduling --max-num-batched-tokens 16384 --max-num-seqs 64 --gpu-memory-utilization 0.92</code>
+        <div><span class="delta good">716.3 → 842.8 · +17.7%</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--explore)">
+        <div class="t">aiter 统一注意力后端</div>
+        <div class="src">随参数栈一并进入 optimization_stack</div>
+        <code>VLLM_ROCM_USE_AITER=1 · VLLM_ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN</code>
+        <div><span class="delta good">单测 715–733(噪声内)</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--explore)">
+        <div class="t">被否的变体</div>
+        <div class="src">aiter-master-on · aiter-fa-attention-backend · aiter-fa-recipe-port-lm-only</div>
+        <div><span class="delta flat">stack rebench 714–741 → 无增益</span></div>
+      </div>
+    </div>
+  </div>
+  <!-- KERNEL -->
+  <div class="stage">
+    <div class="stagehead" style="background:var(--kernel)">KERNEL_AGENT</div>
+    <div class="body">
+      <div class="role">TraceLens · KernelForge 重写 · E2E 门禁</div>
+      <div class="card" style="border-left-color:var(--kernel)">
+        <div class="t">⭐ k001 attention 重写 <span class="loop l1">Loop 1</span></div>
+        <div class="src">backend=forge(KernelForge)· agent=claude-opus-5<br>3 轮迭代 · 55 min · micro 1.187x · KEEP</div>
+        <code>vllm/v1/attention/ops/prefix_prefill.py</code>
+        <div><span class="delta good">842.8 → 906.5 · E2E +7.56%</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--kernel)">
+        <div class="t">k002 GEMM 重写</div>
+        <div class="src">aiter::gemm_a8w8_blockscale_ck(GPU 12.5%)<br>forge-loop rc=1,333s 后无产物</div>
+        <code>agent_error → REVERT</code>
+        <div><span class="delta bad">0% · 进 rejected_kernel_ids</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--kernel)">
+        <div class="t">13 个候选未尝试</div>
+        <div class="src">7 不可重用原生核 · 4 低于优先级阈值 · 2 无源文件</div>
+        <div><span class="delta flat">见 ⑥ 候选全景</span></div>
+      </div>
+    </div>
+  </div>
+  <!-- SWEEP -->
+  <div class="stage">
+    <div class="stagehead" style="background:var(--sweep)">SWEEP</div>
+    <div class="body">
+      <div class="role">并发前沿验证 + 复测</div>
+      <div class="card" style="border-left-color:var(--sweep)">
+        <div class="t">k001 第二次 E2E 复测</div>
+        <div class="src">补上 accuracy_round → 清掉 NEEDS_REVIEW</div>
+        <div><span class="delta good">906.5 · gsm8k 0.9765 · KEEP</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--sweep)">
+        <div class="t">conc_sweep(8 档)</div>
+        <div class="src">optimized CONC 2→128;baseline 仅 128/256 成功</div>
+        <div><span class="delta warn">暴露 CONC≥128 反向(见 ⑦)</span></div>
+      </div>
+    </div>
+  </div>
+  <!-- CLOSE -->
+  <div class="stage">
+    <div class="stagehead" style="background:var(--close)">CLOSE</div>
+    <div class="body">
+      <div class="role">report · session_breakdown</div>
+      <div class="card" style="border-left-color:var(--close)">
+        <div class="t">收敛退出</div>
+        <div class="src">4 个宏周期后杠杆耗尽<br><code>global_converged</code>(非 time_exhausted)</div>
+        <div><span class="delta good">最终 906.5 tok/s · +26.55%</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2>③ ⭐ 内核优化是怎么拿到的 — 五步全过程</h2>
+<div class="sub">这是本次会话的核心产出。从 trace 定位到 E2E 落地,全链路 <b>Aug11 17:43 → Aug12 02:29(约 8h45m)</b>,其中 KernelForge 搜索仅占 55 分钟。</div>
+
+<div class="kbox hl">
+<div class="steps">
+  <div class="step">
+    <div class="n">STEP 1 · 定位</div>
+    <div class="st">TraceLens 找到唯一大靶</div>
+    <div class="sd">KERNEL_AGENT 入口自动触发 roofline(profile + TraceLens,2h24m),从 23 个热点核里排序。<code>vllm::unified_attention_with_output</code> 一枝独秀:<b>占 GPU 时间 24.41%,而 roofline 效率只有 6.96%</b>,compute-bound。</div>
+    <div class="sm">15 个 top 候选 → 2 个可尝试。判定为 <code>reusable_native_kernel</code>,源文件可定位到 <code>prefix_prefill.py</code>(Triton),因此走"源码重写"而非"后端切换"。</div>
+  </div>
+  <div class="step">
+    <div class="n">STEP 2 · 派发</div>
+    <div class="st">生成 invocation spec 交给 Forge</div>
+    <div class="sd">Coordinator 把真实服务形状固化进 invocation spec:<code>QTOKENS=16384 · QHEADS=16 · KVHEADS=1 · HEADSIZE=256</code>,2 个 case,取自实际 CONC=64 / TP=2 / 192 请求的 batch 观测。</div>
+    <div class="sm">backend ladder = <code>forge</code>(<code>KERNEL_OPT_BACKEND_ORDER=forge</code>)· agent <code>claude-opus-5</code> · fellow <code>triton-fellow</code> · gpu <code>gfx942</code> · knowledge <code>remote/gbrain</code></div>
+  </div>
+  <div class="step">
+    <div class="n">STEP 3 · 迭代</div>
+    <div class="st">3 轮 KEEP,每轮先过正确性</div>
+    <div class="sd">55 分钟内跑完 3 轮迭代、143 个 agent turn。每轮由 in-session gate 守门:<b>只有"正确 且 比当前最优更快"才 ALLOW</b>,否则 BLOCK/DENY 并回滚。</div>
+    <div class="sm">1.9259 ms → <b>1.6183 ms</b>,mean case speedup <b>1.1868x</b>;全套验证 PASS,<b>SNR 52.97 dB</b>。8 次 LLM 调用 / 150k 输出 token / $18.32。</div>
+  </div>
+  <div class="step">
+    <div class="n">STEP 4 · 手法</div>
+    <div class="st">5 类 ISA 级改写(+172/−47 行)</div>
+    <div class="sd">不是调参,是针对 gfx942 后端行为的真实代码改写:contiguity 特化、base-2 softmax、软流水预取、对角线下免掩码快路、最长作业优先派发。</div>
+    <div class="sm">明细见下方"内核改写手法"。全部落在同一个文件 <code>vllm/v1/attention/ops/prefix_prefill.py</code>。</div>
+  </div>
+  <div class="step">
+    <div class="n">STEP 5 · 门禁</div>
+    <div class="st">两次 E2E 才拿到 KEEP</div>
+    <div class="sd">微基准快 ≠ 可接受。第 1 次 integrate 吞吐已达 908.3(+7.78%),但因缺精度证据被判 <b>NEEDS_REVIEW</b>;第 2 次补跑 accuracy_round 后才 KEEP。</div>
+    <div class="sm">最终 <b>906.5 tok/s · +7.56% · gsm8k 0.9765</b>(基线 0.9742,无精度回退)→ 进 optimization_stack。</div>
+  </div>
+</div>
+</div>
+
+<h3>STEP 3 展开 · KernelForge 三轮迭代阶梯</h3>
+<div class="kbox">
+  <div class="iters">
+    <div class="iter">
+      <div class="ib">iter 001<s>43 turns</s></div>
+      <div>
+        <div class="it">exp2 softmax + 对角线下免掩码注意力循环</div>
+        <div class="id2">把 softmax 换到 base-2 空间以启用原生指数指令;并为因果块中"完全有效"的 key tile 开辟免掩码路径。canonical correctness PASS</div>
+        <div class="msbar"><i style="width:38%"></i></div>
+      </div>
+      <div class="iv"><b>1.0655x</b><s>1.9259 → 1.8079 ms</s></div>
+    </div>
+    <div class="iter">
+      <div class="ib">iter 002<s>22 turns</s></div>
+      <div>
+        <div class="it">预取下一 tile 的分页 block-table 索引</div>
+        <div class="id2">把 B_Loc 索引查表提前一个迭代发出,使 K/V 寻址不再串行等待它;<b>实测同时预取 K/V tile 反而更慢</b>(多出的 live tile 挤占 occupancy),故只旋转索引加载</div>
+        <div class="msbar"><i style="width:83%"></i></div>
+      </div>
+      <div class="iv"><b>1.1581x</b><s>→ 1.6614 ms</s></div>
+    </div>
+    <div class="iter">
+      <div class="ib">iter 003<s>78 turns</s></div>
+      <div>
+        <div class="it">反转 M 块索引 → 最长作业优先派发</div>
+        <div class="id2">纯索引重命名,不改语义:让最重的块先上,便宜的块填尾,压紧最后一轮 dispatch。同轮还含 <code>TRITON_BLOCK_SIZE 32→64</code></div>
+        <div class="msbar"><i style="width:100%"></i></div>
+      </div>
+      <div class="iv"><b>1.1868x</b><s>→ 1.6183 ms</s></div>
+    </div>
+  </div>
+  <div class="footnote">in-session gate 抽样:<code>edit=6 ALLOW 1.1641x</code> · <code>edit=20 <b>BLOCK</b>(正确但不更快:1.1660x vs best 1.1581x)</code> · <code>edit=32 ALLOW 1.1815x</code>;另有多次 <code>DENY</code> 拦住了 agent 试图改写受保护的 <code>.forge_driver_*.py</code> 基准脚本的行为 —— 这道守卫防的正是"改测量工具而非改内核"的作弊路径。</div>
+</div>
+
+<h3>STEP 4 展开 · 内核改写手法(节选真实 diff)</h3>
+<div class="techs">
+  <div class="tech">
+    <div class="tt">① 把 cache 内层 stride 声明为 <code>constexpr</code> —— 修复访存合并</div>
+    <div class="tw">最有"含金量"的一处:Triton 的 AxisInfo 无法证明 <code>stride*offset</code> 的连续性,AMD 后端于是把整块 cache tile 退化成<b>逐元素 <code>buffer_load_ushort</code></b>。ISA dump 实测:每个 context tile 63 条 2 字节标量加载,对 64 条 MFMA。声明为编译期常量后,分析可看到 8 元素(K,沿 head-dim)/ PHYSICAL_BLOCK_SIZE 元素(V,沿 token)的连续段并加宽访存。<b>值没变,只是把本来就固定的 stride 特化给 JIT。</b></div>
+<pre><span class="del">-    stride_k_cache_x,</span>
+<span class="add">+    stride_k_cache_x: tl.constexpr,</span>
+<span class="del">-    stride_v_cache_bl,</span>
+<span class="add">+    stride_v_cache_bl: tl.constexpr,</span></pre>
+  </div>
+  <div class="tech">
+    <div class="tt">② base-2 softmax + 缩放下沉到行最大值</div>
+    <div class="tw">qk 预乘 log2(e) 后用 <code>tl.exp2</code>,可发原生 <code>v_exp_f32</code> 而不是 libm 的 expf 多项式。同时 <b>不再缩放 [BLOCK_M, BLOCK_SIZE] 的整块分数</b>(每元素多一条 VALU 且正好压在两次 MFMA 之间的关键路径上),而是把正缩放因子作用在已归约的 [BLOCK_M] 行最大值上,折进指数里收缩成一条 <code>v_fma_f32</code>。</div>
+<pre><span class="del">-    qk = sm_scale * tl.dot(q, k, ...)</span>
+<span class="add">+    qk = tl.dot(q, k, ...)</span>
+<span class="add">+    qk_scale = sm_scale * RCP_LN2</span>
+<span class="del">-    m_ij = tl.maximum(m_i, tl.max(qk, axis=1))</span>
+<span class="del">-    p = tl.exp(qk - m_ij[:, None])</span>
+<span class="del">-    p = tl.where(m_ij[:,None]==-inf, 0.0, p)</span>
+<span class="add">+    m_ij = tl.maximum(m_i, tl.max(qk,axis=1)*qk_scale)</span>
+<span class="add">+    p = tl.exp2(qk * qk_scale - m_ij[:, None])</span>
+<span class="cm"># max(s·x)==s·max(x) for s&gt;0,-inf·s 仍是 -inf</span></pre>
+  </div>
+  <div class="tech">
+    <div class="tt">③ 分页 context 循环软流水化</div>
+    <div class="tw">原循环在每次 <code>tl.dot</code> 前串行两次<b>相互依赖</b>的全局加载:block-table 查表产出物理页号,K/V 地址才能算。<code>num_stages=1</code> 下编译器无法跨迭代提升这条依赖链。只把链头旋转一个迭代:本 tile 用已就绪的页号立即发 K/V,同时把下一 tile 的查表放飞。预取索引被钳到最后一个有效 tile/token,免谓词且不越界。</div>
+<pre><span class="add">+    bn = bn_pf          <span class="cm"># 上一轮预取好的页号</span></span>
+<span class="add">+    bn_pf = tl.load(B_Loc + ... +</span>
+<span class="add">+        tl.minimum(tl.minimum(start_n+BLOCK_SIZE,</span>
+<span class="add">+            ctx_last_start)+offs_bs_n, ctx_last_tok)</span>
+<span class="add">+        // PHYSICAL_BLOCK_SIZE * stride_b_loc_s)</span></pre>
+  </div>
+  <div class="tech">
+    <div class="tt">④ 对角线下免掩码快路 <code>NO_MASK_OK</code></div>
+    <div class="tw">因果块中严格位于对角带之下的 key tile 全部有效:既不需要 load 掩码,也不需要注意力掩码、−inf select 和全掩码行保护。<b>长 prefill 下这是绝大多数 tile</b>,走通用带掩码主体等于每个 tile 白扔一次谓词加载加三次 [BLOCK_M, BLOCK_N] 的 select。快路里还把 V 与 K 并发发出,让 V 取数重叠 q@k 的 MFMA 与整条 softmax 链。</div>
+<pre><span class="add">+ NO_MASK_OK: tl.constexpr = (CAUSAL</span>
+<span class="add">+   and SLIDING_WINDOW &lt;= 0</span>
+<span class="add">+   and BLOCK_DMODEL == BLOCK_DMODEL_PADDED</span>
+<span class="add">+   and BLOCK_M % BLOCK_N == 0)</span>
+<span class="add">+ if NO_MASK_OK:</span>
+<span class="add">+   for start_n in tl.range(0, diag_start, BLOCK_N,</span>
+<span class="add">+       loop_unroll_factor=..., num_stages=2):</span>
+<span class="add">+     k = tl.load(...); v = tl.load(...)  <span class="cm"># 无谓词</span></span></pre>
+  </div>
+  <div class="tech">
+    <div class="tt">⑤ 最长作业优先(LPT)派发</div>
+    <div class="tw">每个 program 的工作量随 <code>start_m</code> 线性增长 —— 因果自注意力循环在固定 context 循环之上多跑 <code>start_m</code> 个 tile,<b>最后一个 M 块的工作量约为第一个的 2 倍</b>。而块是按线性 id 升序交给 CU 的、M 是最慢变分量,于是默认顺序把最便宜的块排在最前,尾部清一色是最贵的块。反转索引让重块先跑、轻块填尾。<b>纯索引重命名,每个 (batch, head, m) 三元组仍恰好执行一次。</b></div>
+<pre><span class="del">-    start_m = tl.program_id(2)</span>
+<span class="add">+    start_m = tl.num_programs(2) - 1 - tl.program_id(2)</span></pre>
+  </div>
+  <div class="tech">
+    <div class="tt">⑥ 删掉已成死代码的保护 select</div>
+    <div class="tw">该循环的 tile 必然含至少一个范围内的 context key(循环边界保证 <code>start_n &lt; cur_batch_ctx_len</code>),且越界 query 行读到的 q 为 0,故 <code>m_ij</code> 永不为 −inf。通用路径需要的两个保护 select(全掩码行的 p==0 / alpha==0)在此已是死代码 —— <code>exp2(-inf - finite)</code> 本就精确得 0。删掉它们等于每迭代省下两个完整的 [BLOCK_M, BLOCK_SIZE] select。</div>
+<pre><span class="del">-    alpha = tl.exp(m_i - m_ij)</span>
+<span class="del">-    alpha = tl.where(m_i == -inf, 0.0, alpha)</span>
+<span class="add">+    alpha = tl.exp2(m_i - m_ij)</span></pre>
+  </div>
+</div>
+<div class="footnote">另有 <code>TRITON_BLOCK_SIZE 32 → 64</code>(in-session gate 记录 <code>edit=32 ALLOW 1.1815x</code>)。补丁最终形态取自 <code>forge_experiments/best/iter_003/forge.patch</code>,经 <code>_deploy.patch</code> 落到 <code>/usr/local/lib/python3.12/dist-packages/vllm/...</code>,并在 <code>patches/k001/backup/</code> 留有可回滚快照。</div>
+
+<h3>STEP 5 展开 · 微基准 → 端到端的两道门</h3>
+<div class="gate">
+  <div class="gcard">
+    <div class="gh">MICRO(Forge 内部)</div>
+    <div class="gv" style="color:var(--kernel)">1.1868x</div>
+    <div class="sd" style="font-size:11.5px;color:var(--muted)">1.9259 → 1.6183 ms · 全套验证 PASS · SNR 52.97 dB · 2 个真实服务形状 case</div>
+  </div>
+  <div class="gcard rev">
+    <div class="gh">E2E 第 1 次 · Aug12 01:35 · KERNEL_AGENT</div>
+    <div class="gv" style="color:var(--warn)">NEEDS_REVIEW</div>
+    <div class="sd" style="font-size:11.5px;color:var(--muted)">吞吐 <b>908.3</b> tok/s(+7.78%)已达标,但 <code>decision_reason = accuracy_evidence_missing</code> —— 缺精度证据不予接受</div>
+  </div>
+  <div class="gcard ok">
+    <div class="gh">E2E 第 2 次 · Aug12 02:29 · SWEEP</div>
+    <div class="gv" style="color:var(--good)">KEEP</div>
+    <div class="sd" style="font-size:11.5px;color:var(--muted)">补跑 accuracy_round:吞吐 <b>906.5</b>(+7.56%)· gsm8k <b>0.9765</b> pass · 进 optimization_stack</div>
+  </div>
+</div>
+<div class="footnote">这正是 SKILL 里"Kernel E2E Retry Discipline"的实际运转:<code>NEEDS_REVIEW</code> 最多允许 3 次 E2E 复测,本例第 2 次即通过。两次吞吐 908.3 / 906.5 相差 0.2%,落在 benchmark 噪声内,交叉印证了增益的真实性。<br>
+<b>一个诚实的偏差:</b>按 GPU 占比做朴素 Amdahl 估算,24.41% 的核提速 1.187x 只应带来 +4.0% 端到端,实测 +7.56% 约为其 1.9 倍。最可能的两个原因(<b>本次未验证</b>):手法 ⑤ 的 LPT 派发改善的是尾部拖尾/负载不均,这在"每核平均耗时"里看不出来;以及 profile 为 eager 模式采集(禁了 HIP graph),其单核占比与实际图回放服务路径存在系统性差异。</div>
+
+<h2>④ 累计吞吐瀑布图 (TP=2 · CONC=64 · ISL=8192)</h2>
+<div class="wf">
+  <svg id="wf" viewBox="0 0 920 360" width="100%" height="360" font-family="inherit"></svg>
+  <div class="legend">
+    <span><i style="background:var(--muted)"></i>baseline</span>
+    <span><i style="background:var(--explore)"></i>EXPLORE 参数栈</span>
+    <span><i style="background:var(--kernel)"></i>KERNEL 内核重写</span>
+    <span><i style="background:var(--good)"></i>最终 best</span>
+  </div>
+</div>
+
+<h2>⑤ 优化点明细 (来源 → 机制 → 效果)</h2>
+<table>
+  <thead><tr><th>#</th><th>阶段</th><th>优化点</th><th>获取机制 / 来源</th><th>改动</th><th>效果</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td><span class="tag" style="background:rgba(151,160,192,.18);color:var(--muted)">—</span></td><td>baseline</td><td>实测(双轮冷启动保护,warmup 丢弃)</td><td><code>(无额外参数)</code></td><td>716.3 tok/s</td></tr>
+    <tr><td>1</td><td><span class="tag" style="background:rgba(34,197,94,.18);color:var(--explore)">EXPLORE</span></td><td>⭐ 调度器参数栈</td><td><code>specialist:research_scout_specialist</code>(24 个 PR → 8 hints)</td><td><code>--async-scheduling --max-num-batched-tokens 16384 --max-num-seqs 64 --gpu-memory-utilization 0.92</code></td><td style="color:var(--good)">→ 842.8 · +17.7%</td></tr>
+    <tr><td>2</td><td><span class="tag" style="background:rgba(34,197,94,.18);color:var(--explore)">EXPLORE</span></td><td>aiter 统一注意力后端</td><td>specialist 变体,随参数栈叠加</td><td><code>VLLM_ROCM_USE_AITER=1 · VLLM_ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN</code></td><td style="color:var(--muted)">单测在噪声内</td></tr>
+    <tr class="hi"><td>3</td><td><span class="tag" style="background:rgba(245,158,11,.18);color:var(--kernel)">KERNEL</span></td><td>⭐ prefill attention 内核重写 (k001)</td><td>TraceLens 定位 → KernelForge / claude-opus-5 · 3 轮迭代 · micro 1.187x</td><td><code>prefix_prefill.py</code>:constexpr stride · exp2 softmax · block-table 软流水 · 免掩码快路 · LPT 派发 (+172/−47)</td><td style="color:var(--good)"><b>→ 906.5 · +7.56%</b></td></tr>
+    <tr><td>4</td><td><span class="tag" style="background:rgba(245,158,11,.18);color:var(--kernel)">KERNEL</span></td><td>FP8 block-scale GEMM 重写 (k002)</td><td>forge-loop 退出码 1,333s 无产物</td><td><code>gemm_a8w8_blockscale.cu</code></td><td style="color:var(--bad)">0% · REVERT</td></tr>
+    <tr><td>5</td><td><span class="tag" style="background:rgba(139,92,246,.18);color:var(--framework)">FRAMEWORK</span></td><td>250 个 ROCm/vllm PR 候选</td><td>framework-agent 发现 + ledger 先验排序</td><td><code>Critic 误判 score/rank → 连续 6 否 → plateau</code></td><td style="color:var(--bad)">0%(已修复,见 ⑦)</td></tr>
+    <tr><td>6</td><td><span class="tag" style="background:rgba(6,182,212,.18);color:var(--sweep)">SWEEP</span></td><td>conc_sweep 并发前沿</td><td>optimized 2→128 · baseline 128/256</td><td><code>--conc 阶梯</code></td><td style="color:var(--warn)">验证用 · 暴露 CONC≥128 反向</td></tr>
+  </tbody>
+</table>
+<div class="footnote">单项增益为「该项相对当轮 base」的测量,因 benchmark 噪声<b>不线性相加</b>;最终累计以全栈 stack-rebench 为准 = <b>+26.55% (906.5 tok/s/gpu)</b>,validated_at_stack_len=2。</div>
+
+<h2>⑥ 内核候选全景 — 为什么只动了 2 个</h2>
+<div class="sub">TraceLens 给出 15 个 top 候选,其中 <b>2 个尝试(1 KEEP / 1 REVERT)、13 个未尝试</b>。未尝试的原因是结构性的,不是遗漏。</div>
+<table>
+  <thead><tr><th>kernel</th><th>类别</th><th>GPU%</th><th>roofline 效率</th><th>结论</th><th>原因 / 判据</th></tr></thead>
+  <tbody>
+    <tr class="hi"><td><code>vllm::unified_attention_with_output</code></td><td>SDPA</td><td><b>24.41%</b></td><td style="color:var(--bad)"><b>6.96%</b></td><td><span class="tag" style="background:rgba(52,211,153,.18);color:var(--good)">INTEGRATED</span></td><td>可重用原生核 + 源文件可定位(Triton)→ forge 重写 1.187x → E2E KEEP</td></tr>
+    <tr><td><code>aiter::gemm_a8w8_blockscale_ck</code></td><td>GEMM</td><td>12.55%</td><td style="color:var(--warn)">21.19%</td><td><span class="tag" style="background:rgba(251,113,133,.18);color:var(--bad)">REJECTED</span></td><td>forge-loop rc=1(agent_error),333s 无可用补丁 → REVERT。<b>本次最大遗憾</b></td></tr>
+    <tr><td><code>aiter::fmoe_fp8_blockscale_g1u1</code></td><td>MoE</td><td>10.14%</td><td>42.29%</td><td><span class="tag" style="background:rgba(151,160,192,.18);color:var(--muted)">未尝试</span></td><td>not_reusable_native_kernel(手写汇编 <code>asm_fmoe.cu</code>)</td></tr>
+    <tr><td><code>aiter::gemm_a8w8_blockscale_ck</code> ×4</td><td>GEMM</td><td>6.62 / 3.51 / 1.48 / 1.06%</td><td>16.8–23.9%</td><td><span class="tag" style="background:rgba(151,160,192,.18);color:var(--muted)">未尝试</span></td><td>below_priority_cutoff(同一源文件的其他 shape,k002 已代表)</td></tr>
+    <tr><td><code>chunk_gated_delta_rule_fwd_*</code> ×2</td><td>线性注意力</td><td>2.09 / 1.91%</td><td>—</td><td><span class="tag" style="background:rgba(151,160,192,.18);color:var(--muted)">未尝试</span></td><td>no_source_file(合成算子,trace 里无法回溯到源)</td></tr>
+    <tr><td><code>aten::copy_/add/mul/pow</code> ×6</td><td>Elementwise</td><td>0.72–1.26%</td><td style="color:var(--good)">80.9–93.8%</td><td><span class="tag" style="background:rgba(151,160,192,.18);color:var(--muted)">未尝试</span></td><td>not_reusable_native_kernel,且<b>已贴近 roofline 上限,无改写空间</b></td></tr>
+  </tbody>
+</table>
+<div class="footnote">Hyperloom 自己给出的 takeaway:<i>"Highest-impact missed opportunity: aiter::gemm_a8w8_blockscale_ck at 12.5% GPU time, 21.2% efficiency — substantial headroom remains."</i> 值得注意的是<b>上一次归档会话里同一个核曾拿到 3.05x 微基准加速,却在 E2E 阶段没能转化</b>;本次则连 forge 循环都没跑完。这个 GEMM 是下一轮最明确的目标。</div>
+
+<h2>⑦ 关键观察</h2>
+<div class="two">
+  <div class="box">
+    <div class="sub">叠加后的全栈 (current_best)</div>
+    <table>
+      <thead><tr><th>层</th><th>来源</th><th>tok/s</th></tr></thead>
+      <tbody>
+        <tr><td>baseline</td><td>实测(gsm8k 0.9742)</td><td>716.3</td></tr>
+        <tr><td>+ 调度器参数栈</td><td>EXPLORE · research_scout_specialist</td><td>842.8</td></tr>
+        <tr><td>⭐ + k001 内核重写</td><td>KERNEL · forge / claude-opus-5</td><td style="color:var(--good)"><b>906.5</b></td></tr>
+        <tr><td><b>累计验证增益</b></td><td>stack rebench (len=2)</td><td style="color:var(--good)"><b>+26.55%</b></td></tr>
+      </tbody>
+    </table>
+    <div class="footnote">精度全程无回退:0.9742(基线)→ 0.9765(最终)。</div>
+  </div>
+  <div class="box">
+    <div class="sub">关键观察</div>
+    <ul style="margin:6px 0 0;padding-left:18px;color:var(--ink);font-size:13px">
+      <li><b>ISL=8K 的长 prefill 让 attention 成为压倒性瓶颈</b>:单核占 24.41% GPU 时间而效率仅 6.96%,是全部 15 个候选里唯一"占比高 + 效率低 + 源码可改"三者同时成立的,因此内核阶段的靶心毫无悬念。</li>
+      <li><b>内核收益来自编译器/调度层面的洞察,而非算法替换</b>:五类手法里最关键的两个 —— stride 特化修复访存合并(ISA 里 63 条 2 字节标量加载 vs 64 条 MFMA)、LPT 反转派发压紧尾部 —— 都是"读懂后端行为"的产物,单看 Triton 源码是看不出来的。</li>
+      <li><b>微基准与 E2E 必须都过</b>:k001 微基准 1.187x 之后仍被判过一次 <code>NEEDS_REVIEW</code>(缺精度证据),第 2 次补 accuracy_round 才 KEEP;而上一次会话的 k002 反例是微基准 3.05x 却 E2E 不达标。两个方向的例子都说明只信微基准会误判。</li>
+      <li class="bad-note"><b>FRAMEWORK 阶段被一个 Critic 误判清零</b>:250 个 PR 候选中的前 6 个被以同一理由 <code>specialist_quantitative_claim_violation</code> 否决 —— Critic 把 <code>phase-discover</code> 确定性算出的 <code>score/prior_score/prior_rank</code> 当成了 specialist 编造的量化承诺。连续 6 否触发 plateau,245 个候选未处理。已在 <code>orchestrator/phases/framework.py</code> 中于送审前剥离这些排序字段(不放宽守卫本身),修复后该违规<b>再未出现</b>。</li>
+      <li class="bad-note"><b>最优配置只在 CONC≈64 成立</b>:conc_sweep 显示 CONC=128 时 baseline 1138.6 反而<b>高于</b> optimized 895.9,原因是 <code>--max-num-seqs 64</code> 把在途序列数钉死了。且 baseline 的 CONC 2–64 因 sweep 总预算耗尽被跳过、optimized 的 CONC=256 撞上 Magpie 1800s 超时,该曲线并不完整。另外 baseline 在 CONC=256 达 1323.7 tok/s,说明<b>该模型在 TP=2 上远未在 CONC=64 处饱和,提高并发本身是独立于本次优化的更大杠杆</b>。</li>
+      <li><b>收敛而非超时退出</b>:4 个宏周期后以 <code>global_converged</code> 结束,未用满 48h。Loop 2–4 各阶段都以 <code>force_exit_low_budget</code> 快速穿过 —— 真实原因是 Loop 1 里 PRELUDE roofline(2h08m)+ KERNEL roofline(2h24m)+ 第二次 roofline(2h18m)三次 TraceLens 分析吃掉了约 7 小时预算。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="footnote" style="margin-top:18px">数据来源:session <code>20260811T060518Z</code> 的 <code>state.json</code>(<code>optimization_stack</code> / <code>kernel_integrate_attempts</code> / <code>kernel_opt_attempts</code> / <code>lifecycle</code> / <code>phase_history</code>)、<code>reports/kernel_optimization_summary.json</code>、<code>reports/conc_sweep_raw.csv</code>、KernelForge 产物 <code>forge-a7530b12/</code>(<code>optimization_history.md</code> / <code>forge.patch</code> / <code>invocation_spec_*.json</code>)、部署补丁 <code>forge-a7530b12_deploy.patch</code>,以及运行日志 <code>run_qwen35122b_20260811_140200.log</code> / <code>run_resume-qwen35122b_20260811_175000.log</code>。</div>
+
+<script>
+function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()||'#888';}
+const steps=[
+  {label:"baseline\n716.3",val:716.31,color:getCSS('--muted')},
+  {label:"+调度器参数栈\nL1·EXPLORE +17.7%",val:842.76,color:getCSS('--explore')},
+  {label:"+k001 内核重写\nL1·KERNEL +7.56%",val:906.50,color:getCSS('--kernel')},
+  {label:"最终 best\n+26.55%",val:906.50,color:getCSS('--good')},
+];
+(function draw(){
+  const svg=document.getElementById('wf');
+  const W=920,H=360,padL=64,padR=20,padB=70,padT=24;
+  const plotH=H-padB-padT, plotW=W-padL-padR;
+  const max=950, min=650;
+  const n=steps.length, gap=26, bw=(plotW-gap*(n-1))/n;
+  const y=v=>padT+plotH*(1-(v-min)/(max-min));
+  let html='';
+  for(let g=650;g<=950;g+=50){
+    const yy=y(g);
+    html+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="${getCSS('--line')}" stroke-width="1"/>`;
+    html+=`<text x="${padL-8}" y="${yy+4}" fill="${getCSS('--muted')}" font-size="11" text-anchor="end">${g}</text>`;
+  }
+  let prevTop=null;
+  steps.forEach((s,i)=>{
+    const x=padL+i*(bw+gap);
+    const top=y(s.val);
+    let barTop, barH;
+    if(i===0||i===n-1){ barTop=top; barH=y(min)-top; }
+    else { barTop=Math.min(top,prevTop); barH=Math.abs(top-prevTop); if(barH<2)barH=2; }
+    if(prevTop!==null){
+      html+=`<line x1="${x-gap}" y1="${prevTop}" x2="${x}" y2="${prevTop}" stroke="${getCSS('--muted')}" stroke-dasharray="3 3" stroke-width="1"/>`;
+    }
+    html+=`<rect x="${x}" y="${barTop}" width="${bw}" height="${barH}" rx="5" fill="${s.color}" opacity="${(i===0||i===n-1)?0.95:0.85}"/>`;
+    html+=`<text x="${x+bw/2}" y="${top-8}" fill="${getCSS('--ink')}" font-size="12" font-weight="700" text-anchor="middle">${s.val.toFixed(1)}</text>`;
+    s.label.split("\n").forEach((ln,k)=>{
+      html+=`<text x="${x+bw/2}" y="${H-padB+18+k*14}" fill="${getCSS('--muted')}" font-size="11" text-anchor="middle">${ln}</text>`;
+    });
+    prevTop=top;
+  });
+  svg.innerHTML=html;
+})();
+</script>
+</body>
+</html>

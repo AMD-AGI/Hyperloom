@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors import (
     collect_attribution,
@@ -1248,3 +1250,125 @@ def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
     # A name measured once is numbered too, rather than left to be guessed at.
     assert numbered[4744.6]["occurrence"] == 0
     assert numbered[4744.6]["occurrences_of_name"] == 1
+
+
+def _ledger_with_baseline(tmp_path, baseline_tput: float):
+    """Assemble the recorded parts plus the baseline reading gains are measured against."""
+    parts = assemble_parts(tmp_path)
+    operations = list(parts.get("operations") or [])
+    measurements = list(parts.get("measurements") or [])
+    operations.append({"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]})
+    measurements.append({"measurement_id": "m-base", "name": "throughput", "value": baseline_tput})
+    return collect_recorded_optimizations(
+        "s1",
+        operations,
+        measurements,
+        list(parts.get("adoptions") or []),
+        list(parts.get("artifacts") or []),
+        [],
+        [],
+        [],
+    )
+
+
+def test_a_reproduced_warm_replay_is_an_adopted_step_in_the_ledger(tmp_path):
+    """A replay the run promoted has to reach the ledger as an adopted step.
+
+    The keep decision belongs to the promote path, not to the replay executor,
+    which settles on ``succeeded`` either way. Mirroring the action before that
+    ruling recorded every replay as discarded, so a reproduced one was pushed
+    onto the stack and moved ``cumulative_gain_validated`` while the canonical
+    streams held no adoption for it: ``entries`` came back empty on a session
+    that had measurably gained, and its whole gain read as unattributed.
+    """
+    instrument.record_action_operation(
+        tmp_path,
+        action="replay_warm_recipe",
+        task_id="warm-1",
+        status="kept",
+        decision="promoted",
+        result={
+            "status": "kept",
+            "base_tput": 638.08,
+            "output_throughput": 1907.49,
+            "delta_pct": 198.94,
+            "attribution_eligible": True,
+            "provenance": "warm_replay",
+            "validated": True,
+        },
+        phase="PRELUDE",
+    )
+
+    result = _ledger_with_baseline(tmp_path, 638.08)
+
+    entry = result["entries"][0]
+    assert entry["optimization_kind"] == "replay_warm_recipe"
+    assert entry["source"] == "warm_replay"
+    assert entry["gain_method"] == "baseline_chain"
+    assert entry["gain_pct"] == pytest.approx(198.94, abs=0.01)
+    # The ledger and the gain the run promoted are the same number, so the
+    # session reports no reconciliation gap.
+    assert result["validation"]["ledger_total_gain_pct"] == pytest.approx(198.94, abs=0.01)
+    assert result["validation"]["unattributed_gain_pct"] == 0.0
+    assert result["validation"]["keep_count"] == 1
+
+
+def test_a_replay_that_did_not_reproduce_stays_out_of_the_ledger(tmp_path):
+    """Drift is a measured non-result, and must not be credited as a keep.
+
+    The fix for the discarded-reproduced replay must not reach the other way
+    and let a replay that missed the bar claim gain it never earned.
+    """
+    instrument.record_action_operation(
+        tmp_path,
+        action="replay_warm_recipe",
+        task_id="warm-2",
+        status="succeeded",
+        decision="discarded",
+        result={
+            "status": "succeeded",
+            "base_tput": 638.08,
+            "output_throughput": 600.0,
+            "delta_pct": -5.9,
+        },
+        phase="PRELUDE",
+    )
+
+    result = _ledger_with_baseline(tmp_path, 638.08)
+
+    assert result["entries"] == []
+    assert result["validation"]["ledger_total_gain_pct"] == 0.0
+    # The attempt is still on the record; only the credit is withheld.
+    assert result["attempts"][0]["decision"] == "DISCARDED"
+    assert result["attempts"][0]["adopted"] is False
+
+
+def test_a_replay_promoted_without_an_accuracy_verdict_says_so(tmp_path):
+    """Adopting on a keep verdict alone is a different record from passing a gate.
+
+    A replay is admitted when its eval could not be scored, so the ledger has to
+    carry that it was never checked rather than report it as validated.
+    """
+    instrument.record_action_operation(
+        tmp_path,
+        action="replay_warm_recipe",
+        task_id="warm-3",
+        status="kept",
+        decision="promoted",
+        result={
+            "status": "kept",
+            "base_tput": 100.0,
+            "output_throughput": 130.0,
+            "delta_pct": 30.0,
+            "attribution_eligible": True,
+            # No accuracy verdict: the eval never produced a score.
+            "validated": None,
+        },
+        phase="PRELUDE",
+    )
+
+    result = _ledger_with_baseline(tmp_path, 100.0)
+
+    assert result["entries"][0]["gain_pct"] == pytest.approx(30.0, abs=0.01)
+    assert result["attempts"][0]["validation_basis"] == "keep_verdict_unscored"
+    assert result["validation"]["unscored_keep_count"] == 1

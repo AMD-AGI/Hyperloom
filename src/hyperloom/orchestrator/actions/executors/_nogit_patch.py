@@ -429,6 +429,7 @@ def _apply_patch_no_git(
         seq = seq_offset + len(backups)
         bak = backup_root / _bak_name(patch_stem, rel, seq)
         try:
+            mode = abs_path.stat().st_mode & 0o7777
             shutil.copy2(abs_path, bak)
         except OSError as exc:
             return None, f"backup of {abs_path} failed: {exc}"
@@ -437,6 +438,7 @@ def _apply_patch_no_git(
             "existed": True,
             "backup_path": str(bak),
             "revert_action": action,
+            "mode": mode,
         }, ""
 
     for old_raw, new_raw in patch_file_targets(patch_text):
@@ -610,39 +612,52 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
     return "\n\n".join(parts)
 
 
-def _revert_patches_no_git(backups: list[dict[str, Any]]) -> None:
+def _revert_patches_no_git(
+    backups: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
     """Restore or remove files recorded in ``backups`` (reverse of :func:`_apply_patch_no_git`).
 
     Iterates in reverse so multi-file patches unwind in the correct order.
     Dispatches on the ``revert_action`` field when present; falls back to the
     legacy heuristic (``backup_path`` present → restore, absent → delete) for
-    records produced by older code.  Errors are logged but never raised —
-    best-effort, matching :meth:`_revert_artifacts`.
+    records produced by older code. Every path is re-read after the restore, so
+    a partial restore is reported rather than mistaken for success.
 
     Args:
         backups: The per-file backup records produced by :func:`_apply_patch_no_git`.
+
+    Returns:
+        A ``(ok, errors)`` tuple; ``ok`` is ``True`` only when every record
+        restored and verified, and ``errors`` carries one entry per failure.
     """
+    errors: list[str] = []
     for record in reversed(backups):
         target = Path(record["target"])
         bak = record.get("backup_path")
         action = record.get("revert_action")
+        mode = record.get("mode")
         try:
-            if action == "restore" or (action is None and bak):
-                # Modified / deleted file: restore from backup.
+            if action in ("restore", "restore_old") or (action is None and bak):
+                # Modified / deleted / rename-source file: restore from backup.
                 if bak:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(bak, target)
-            elif action == "restore_old":
-                # Rename source: restore the original file at its old path.
-                if bak:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(bak, target)
+                    if mode is not None:
+                        target.chmod(mode)
+                    if not target.is_file():
+                        errors.append(f"restore: {target} missing after copy")
+                    elif target.read_bytes() != Path(bak).read_bytes():
+                        errors.append(f"restore: {target} content mismatch after copy")
             elif action == "delete" or (action is None and not bak):
                 # New / rename-destination file: remove it.
                 if target.exists():
                     target.unlink()
+                if target.exists() or target.is_symlink():
+                    errors.append(f"delete: {target} still exists after unlink")
         except OSError as exc:
-            log.warning("integrate_patch: no-git revert failed for %s: %s", target, exc)
+            errors.append(f"{target}: {exc}")
+            log.warning("nogit revert failed for %s: %s", target, exc)
+    return not errors, errors
 
 
 __all__ = [

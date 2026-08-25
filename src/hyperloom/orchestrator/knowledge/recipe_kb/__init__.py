@@ -36,7 +36,6 @@ from .canonical_id import (
     recipe_canonical_id,
 )
 from .dispatcher import RecipeKB
-from .local_graph_store import LocalGraphStore, LocalGraphStoreError
 from .local_store import (
     ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
@@ -63,8 +62,6 @@ __all__ = [
     "LOCK_FILENAME",
     "LocalRecipeStore",
     "LocalRecipeStoreError",
-    "LocalGraphStore",
-    "LocalGraphStoreError",
     "RECIPE_FILENAME",
     "Recipe",
     "RecipeKB",

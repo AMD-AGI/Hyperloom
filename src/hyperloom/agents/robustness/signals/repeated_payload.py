@@ -18,8 +18,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..role.prompt_inputs import InboxItem, ReactorContext
+from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+from .event_view import EventRow, build_event_view, family_of
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -119,7 +120,8 @@ def evaluate_repeated_payload_signals(
             possibly empty.
     """
     cfg = config or RepeatedPayloadConfig()
-    events = _gather_events(ctx.inbox, data.coordinator_events, cfg)
+    view = build_event_view(ctx.inbox, data.coordinator_events)
+    events = _gather_events(view, cfg)
     if not events:
         return []
     out: list[Symptom] = []
@@ -153,7 +155,7 @@ def _walk_streaks(
     by_family: dict[str, list[dict[str, Any]]] = {}
     current_hash: dict[str, str | None] = {}
     for ev in events:
-        family = _family_of(ev)
+        family = family_of(ev)
         if not family:
             continue
         state = str(ev.get("state") or "")
@@ -178,52 +180,23 @@ def _walk_streaks(
 
 
 def _gather_events(
-    inbox: list[InboxItem],
-    coord_events: list[dict[str, Any]],
+    view: list[EventRow],
     cfg: RepeatedPayloadConfig,
 ) -> list[dict[str, Any]]:
-    """Build a time-ordered list of ``delegated_result`` rows.
-
-    Unions inbox items and coordinator events, trimmed to
-    ``lookback_events``.
+    """Project the view's ``delegated_result`` rows into streak-walker shape.
 
     Args:
-        inbox: Reactor inbox items.
-        coord_events: Coordinator event dicts.
+        view: Shared event view for this tick.
         cfg: Repeated-payload configuration (lookback window).
 
     Returns:
-        The merged, trimmed list of ``delegated_result`` rows.
+        The projected rows, oldest first, trimmed to ``lookback_events``.
     """
-    inbox_rows = [
-        {
-            "topic": item.topic,
-            "agent": item.from_agent,
-            "payload": item.payload,
-        }
-        for item in inbox
-        if item.topic == "delegated_result" and isinstance(item.payload, dict)
-    ]
-    coord_rows: list[dict[str, Any]] = []
-    for ev in coord_events:
-        if ev.get("topic") != "delegated_result":
-            continue
-        payload = ev.get("payload") or {}
-        if not isinstance(payload, dict):
-            continue
-        coord_rows.append(
-            {
-                "topic": "delegated_result",
-                "agent": ev.get("agent", ""),
-                "payload": payload,
-            }
-        )
-
     combined: list[dict[str, Any]] = []
-    for row in coord_rows + inbox_rows:
-        payload = row.get("payload") or {}
-        if not isinstance(payload, dict):
+    for ev in view:
+        if ev.topic != "delegated_result":
             continue
+        payload = ev.payload
         combined.append(
             {
                 "kind": payload.get("kind") or payload.get("action_name") or "",
@@ -238,23 +211,6 @@ def _gather_events(
     if cfg.lookback_events > 0:
         combined = combined[-cfg.lookback_events :]
     return combined
-
-
-def _family_of(event: dict[str, Any]) -> str:
-    """Resolve the action family for an event, falling back to ``kind``.
-
-    Args:
-        event (dict[str, Any]): A normalised event row.
-
-    Returns:
-        str: The action family, or an empty string when neither ``family`` nor
-            ``kind`` is set.
-    """
-    family = str(event.get("family") or "").strip()
-    if family:
-        return family
-    kind = str(event.get("kind") or "").strip()
-    return kind
 
 
 # ---------------------------------------------------------------------------

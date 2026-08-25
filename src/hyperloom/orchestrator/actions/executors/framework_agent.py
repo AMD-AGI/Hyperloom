@@ -10,9 +10,11 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.url_safety import require_http_url
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._accuracy_gate import (
     accuracy_keep_block,
@@ -52,6 +54,12 @@ from ._nogit_patch import (
     _is_git_tree,
     _revert_patches_no_git,
 )
+from ._patch_snapshot import (
+    _create_patch_snapshot,
+    _git_commit_kept,
+    _patch_touched_paths,
+    _restore_patch_snapshot,
+)
 from ...knowledge.kb_writeback import (
     OUTCOME_INTEGRATED,
     OUTCOME_REVERTED_SMOKE_FAIL,
@@ -66,8 +74,6 @@ log = logging.getLogger(__name__)
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 
 
-# Git checkpoint helpers: every KEEP is committed; every REJECT/failure resets
-# HEAD to the pre-apply sha so a failed REJECT can't clobber prior KEEPs.
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
     sha None on failure.
@@ -85,80 +91,6 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     if cp.returncode != 0:
         return None, cp.stderr.strip()
     return cp.stdout.strip() or None, ""
-
-
-def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
-    """Revert ``framework_root`` to ``sha``: ``git reset --hard`` +
-    ``git clean -fd`` (discards untracked files the candidate added) so a
-    failed candidate can't leak state into the next candidate's baseline.
-
-    Purely destructive; user-change preservation (stash) must happen before
-    candidate apply, not here.
-
-    Args:
-        framework_root: The git checkout to reset.
-        sha: The commit sha to reset ``--hard`` to.
-
-    Returns:
-        A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
-        text in ``stderr``.
-    """
-    cp = _run_git_cp(["-C", str(framework_root), "reset", "--hard", sha], timeout=60.0)
-    if cp is None:
-        return False, "git reset --hard spawn failed"
-    if cp.returncode != 0:
-        return False, cp.stderr.strip()
-    cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd"], timeout=60.0)
-    if cp2 is None:
-        return False, "git clean -fd spawn failed"
-    if cp2.returncode != 0:
-        return False, (cp2.stderr or "").strip()
-    return True, ""
-
-
-def _git_commit_keep(
-    framework_root: Path,
-    message: str,
-) -> tuple[str | None, str]:
-    """``git add -A && git commit`` with a forced hyperloom identity (``-c``,
-    Magpie clones may lack user.email), returning the new HEAD sha. ``add -A``
-    (not ``commit -am``) so add-only PRs' new files land in the KEEP commit.
-
-    Args:
-        framework_root: The git checkout to commit into.
-        message: The commit message for the KEEP commit.
-
-    Returns:
-        A ``(new_sha, stderr)`` tuple; ``new_sha`` is ``None`` on failure with
-        the error text in ``stderr``.
-    """
-    cp_add = _run_git_cp(["-C", str(framework_root), "add", "-A"], timeout=60.0)
-    if cp_add is None:
-        return None, "git add -A spawn failed"
-    if cp_add.returncode != 0:
-        return None, cp_add.stderr.strip()
-    cp = _run_git_cp(
-        [
-            "-c",
-            "user.email=framework@hyperloom.local",
-            "-c",
-            "user.name=hyperloom framework",
-            "-C",
-            str(framework_root),
-            "commit",
-            "-m",
-            message,
-        ],
-        timeout=60.0,
-    )
-    if cp is None:
-        return None, "git commit spawn failed"
-    if cp.returncode != 0:
-        return None, cp.stderr.strip()
-    new_sha, err = _git_head_sha(framework_root)
-    if new_sha is None:
-        return None, err or "commit succeeded but HEAD unreadable"
-    return new_sha, ""
 
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
@@ -190,7 +122,8 @@ def _fetch_diff_to_path(
 ) -> tuple[bool, str]:
     """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``.
     Uses curl for consistent HTTPS_PROXY behaviour in restricted-network
-    sessions.
+    sessions. The scheme is restricted to http/https; the host is logged but
+    not restricted.
 
     Args:
         diff_url: The unified-diff URL to download.
@@ -201,6 +134,11 @@ def _fetch_diff_to_path(
         A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
         text in ``stderr``.
     """
+    try:
+        require_http_url(diff_url, context="diff_url")
+    except ValueError as exc:
+        return False, str(exc)
+    log.info("framework: fetching diff from host=%s", urlparse(diff_url).hostname or "unknown")
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "curl",
@@ -683,29 +621,7 @@ class FrameworkAgentExecutor:
 
         git_tree = _is_git_tree(framework_root)
         self._nogit_patch_backups: list[dict] = []
-
-        # Capture HEAD before apply so REVERT/REJECT can reset cleanly; prior
-        # KEEPs are committed past this sha and survive a reset. Non-git trees
-        # revert via backup-based _revert_patches_no_git instead of git reset.
-        pre_apply_sha: str | None = None
-        if git_tree:
-            pre_apply_sha, sha_err = _git_head_sha(framework_root)
-            if pre_apply_sha is None:
-                return _with_stash_restore(
-                    framework_root,
-                    stash_state,
-                    stash_note,
-                    {
-                        "status": "apply_failed",
-                        "error_class": "no_pre_apply_sha",
-                        "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
-                        "candidate": candidate,
-                        "batch_id": batch_id,
-                        "patches_applied": [],
-                        "patches_reverted": [],
-                        "workspace": str(output_root),
-                    },
-                )
+        self._git_snapshot_manifest: dict | None = None
 
         # Stage 1: apply patches (with -3 fallback for git trees;
         # backup-based apply for non-git roots like pip wheel installs).
@@ -730,8 +646,34 @@ class FrameworkAgentExecutor:
             record. Every step is synchronous, so no second cancel can be
             delivered part-way through the undo.
             """
-            self._revert_patches(framework_root, applied, pre_apply_sha=pre_apply_sha)
+            self._revert_patches(framework_root, applied)
             _restore_stash_logged(framework_root, stash_state, stash_note)
+
+        # Snapshot the patch-touched paths before any mutation so REVERT/REJECT
+        # restores exactly those paths and leaves unrelated work in place.
+        if git_tree:
+            try:
+                self._git_snapshot_manifest = _create_patch_snapshot(
+                    str(framework_root),
+                    [Path(p).read_text(encoding="utf-8", errors="replace") for p in patch_paths],
+                    output_root,
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "apply_failed",
+                        "error_class": "snapshot_failed",
+                        "error": f"could not snapshot patch targets in {framework_root}: {exc}",
+                        "candidate": candidate,
+                        "batch_id": batch_id,
+                        "patches_applied": [],
+                        "patches_reverted": [],
+                        "workspace": str(output_root),
+                    },
+                )
 
         # Structural safety gate on the (remote / untrusted) diff before it is
         # applied to the live framework tree: reject non-diff blobs and any
@@ -776,11 +718,7 @@ class FrameworkAgentExecutor:
                     break
             applied.append(patch)
         if apply_errors:
-            reverted = self._revert_patches(
-                framework_root,
-                applied,
-                pre_apply_sha=pre_apply_sha,
-            )
+            reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(
                 framework_root,
                 stash_state,
@@ -837,11 +775,7 @@ class FrameworkAgentExecutor:
                 state_model_path=str(getattr(extra.get("shared_state") or extra.get("state"), "model_path", "") or ""),
             )
         except FrameworkScriptMismatchError as exc:
-            reverted = self._revert_patches(
-                framework_root,
-                applied,
-                pre_apply_sha=pre_apply_sha,
-            )
+            reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(
                 framework_root,
                 stash_state,
@@ -859,11 +793,7 @@ class FrameworkAgentExecutor:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            reverted = self._revert_patches(
-                framework_root,
-                applied,
-                pre_apply_sha=pre_apply_sha,
-            )
+            reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(
                 framework_root,
                 stash_state,
@@ -949,11 +879,7 @@ class FrameworkAgentExecutor:
                 raise
 
         if not gate_pass:
-            reverted = self._revert_patches(
-                framework_root,
-                applied,
-                pre_apply_sha=pre_apply_sha,
-            )
+            reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
             if delta_pct is None:
                 reasons.append("no measurable throughput")
@@ -989,20 +915,17 @@ class FrameworkAgentExecutor:
                 },
             )
 
-        # KEEP: commit the patches so they survive the next candidate's REJECT.
-        # Non-git trees keep the patches in-place as working-tree edits.
+        # KEEP: commit the patch-touched paths so they survive the next
+        # candidate's REJECT. Non-git trees keep them as working-tree edits.
         keep_message = f"framework KEEP {slug}"
         keep_sha: str | None = None
         if git_tree:
-            keep_sha, commit_err = _git_commit_keep(framework_root, keep_message)
-            if keep_sha is None:
-                # Commit failed — reset to pre_apply_sha so the next candidate
-                # doesn't see a dirty baseline.
-                reverted = self._revert_patches(
-                    framework_root,
-                    applied,
-                    pre_apply_sha=pre_apply_sha,
-                )
+            touched_paths = _patch_touched_paths(framework_root, list(applied))
+            commit_ok, commit_err = _git_commit_kept(framework_root, keep_message, touched_paths)
+            if commit_ok:
+                keep_sha, _ = _git_head_sha(framework_root)
+            else:
+                reverted = self._revert_patches(framework_root, applied)
                 return _with_stash_restore(
                     framework_root,
                     stash_state,
@@ -1010,7 +933,7 @@ class FrameworkAgentExecutor:
                     {
                         "status": "apply_failed",
                         "error_class": "keep_commit_failed",
-                        "error": commit_err or "git commit returned no sha",
+                        "error": commit_err or "git commit failed",
                         "candidate": candidate,
                         "batch_id": batch_id,
                         "patches_applied": [],
@@ -1128,49 +1051,39 @@ class FrameworkAgentExecutor:
         self,
         framework_root: Path | None,
         applied: list[Path],
-        *,
-        pre_apply_sha: str | None,
     ) -> list[Path]:
-        """Roll back this candidate's changes.
+        """Roll back this candidate's changes from the undo ledger.
 
-        For git trees: ``git reset --hard <pre_apply_sha>`` (prior KEEPs are
-        committed past that sha, so they survive).
-        For non-git trees: backup-based restore via
-        :func:`_revert_patches_no_git`.
-
-        Returns the patches reverted (full ``applied`` on success, empty on
-        failure) for telemetry / schema compat.
+        Git trees restore the pre-apply snapshot; non-git trees restore the
+        per-file backups. Which ledger holds entries — not ``applied`` — decides
+        whether a restore is owed: a patch set that fails part-way through its
+        first patch has already mutated the tree while ``applied`` is still empty.
 
         Args:
             framework_root: The source root to revert, or ``None`` (no-op).
-            applied: The patches applied this candidate.
-            pre_apply_sha: The HEAD sha captured before this candidate applied
-                (``None`` for non-git trees — backup revert is used instead).
+            applied: The patches recorded as fully applied; reported back, never
+                consulted to decide whether to restore.
 
         Returns:
             The reverted patches (full ``applied`` on success, ``[]`` on
             failure or no-op).
         """
-        if framework_root is None or not applied:
+        if framework_root is None:
             return []
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
         if nogit_backups is not None and not _is_git_tree(framework_root):
-            _revert_patches_no_git(nogit_backups)
+            if nogit_backups:
+                ok, errors = _revert_patches_no_git(nogit_backups)
+                if not ok:
+                    log.error("framework: non-git revert incomplete in %s: %s", framework_root, errors)
+                    return []
             return list(applied)
-        if not pre_apply_sha:
-            log.error(
-                "framework: cannot revert in %s: no pre_apply_sha and not a non-git tree",
-                framework_root,
-            )
+        snapshot = getattr(self, "_git_snapshot_manifest", None)
+        if not snapshot:
             return []
-        ok, err = _git_reset_hard(framework_root, pre_apply_sha)
-        if not ok:
-            log.error(
-                "framework: git reset --hard %s failed in %s: %s",
-                pre_apply_sha,
-                framework_root,
-                err,
-            )
+        result = _restore_patch_snapshot(snapshot)
+        if not result["ok"]:
+            log.error("framework: snapshot restore incomplete in %s: %s", framework_root, result["errors"])
             return []
         return list(applied)
 

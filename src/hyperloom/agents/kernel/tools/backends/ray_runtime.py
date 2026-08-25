@@ -91,11 +91,13 @@ def _isolated_head_port_args() -> Tuple[int, list[str]]:
     """Return ``(gcs_port, extra_start_args)`` bound to FREE probed ports.
 
     Isolates the GCS / dashboard / Ray-client ports so co-located sessions never
-    share Ray's fixed defaults. ``HL_RAY_HEAD_PORT`` pins the GCS port (dashboard
-    and client are still probed to avoid their own collisions).
+    share Ray's fixed defaults. ``HL_RAY_HEAD_PORT`` pins the GCS port when it is
+    a valid TCP port; dashboard and client are still probed to avoid their own
+    collisions.
     """
-    port_override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
-    gcs_port = int(port_override) if port_override.isdigit() else _free_tcp_port()
+    override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
+    port = int(override) if override.isdigit() else 0
+    gcs_port = port if 1 <= port <= 65535 else _free_tcp_port()
     return gcs_port, [
         f"--dashboard-port={_free_tcp_port()}",
         f"--ray-client-server-port={_free_tcp_port()}",
@@ -228,11 +230,7 @@ def ray_status_ok() -> bool:
 
 
 def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> None:
-    """Best-effort ``ray stop --force`` with a bounded timeout.
-
-    Used before starting a fresh local head when auto-discovery points at a
-    stale or unreachable GCS. Never raises.
-    """
+    """Run ``ray stop --force`` with a bounded timeout; never raises."""
     cmd = ["ray", "stop", "--force"]
     timeout = _ray_stop_timeout_sec()
     try:
@@ -245,51 +243,31 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
                 subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=timeout)
         else:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        if log_path is not None:
-            try:
-                with log_path.open("a", encoding="utf-8") as log:
-                    log.write(f"[ray_stop_timeout] exceeded {timeout}s\n")
-            except OSError:
-                pass
-    except OSError:
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
 
-def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
+def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
     """Ensure a Ray cluster is reachable, starting a head node if needed.
 
     Args:
         num_gpus: Optional GPU count to pass to ``ray start --head``.
         log_path: Optional path to append ``ray start`` output.
 
-    Returns:
-        ``True`` if this call started Ray, ``False`` if it was already running.
-
     Raises:
         RuntimeError: If starting the Ray head node fails.
     """
-    # ``ray status`` reads the container-private /tmp/ray/ray_current_cluster,
-    # so a head already started by this session (kernel agent or serving lease)
-    # is reused regardless of which free port it bound.
     if ray_status_ok():
-        return False
-    _stop_ray_force(
-        log_path=log_path,
-        reason="Clearing stale Ray discovery state before starting a local head",
-    )
-    # Raise the open-files limit before the raylet starts.
+        return
+    _stop_ray_force(log_path=log_path, reason="Clearing stale Ray discovery state before starting a local head")
     ensure_fd_limit(log_path=log_path)
-    # Bind the dashboard/jobs API to loopback (avoids exposing the
-    # unauthenticated Ray Jobs RCE surface).
     gcs_port, iso_args = _isolated_head_port_args()
+    # Dashboard bound to loopback: keeps the unauthenticated Ray Jobs endpoint off the pod network.
     cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
-    # Free, probed GCS/dashboard/client ports so co-located host-network sessions
-    # never collide on Ray's fixed defaults (6379/8265/10001).
     cmd.extend(iso_args)
-    # Declare the ``serving_slot`` custom resource (authoritative mutex).
+    # serving_slot: whole-machine mutex so serving-family tasks serialise GPU access.
     cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,29 +279,8 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
         proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray; see {log_path}")
-    return True
-
-
-def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
-    """Stop Ray only if this process started it.
-
-    A no-op when ``started`` is False, so callers can pair this with
-    :func:`ensure_ray_cluster` without tracking ownership themselves.
-
-    Args:
-        started (bool): The return value from :func:`ensure_ray_cluster`;
-            True means this process owns the cluster and should stop it.
-        log_path (Optional[Path]): When set, ``ray stop --force`` output
-            is appended here.
-    """
-    if not started:
-        return
-    if log_path is not None:
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write("Stopping Ray started by kernel-agent\n")
-            subprocess.run(["ray", "stop", "--force"], stdout=log, stderr=subprocess.STDOUT, text=True)
-    else:
-        subprocess.run(["ray", "stop", "--force"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+    if not ray_status_ok():
+        raise RuntimeError(f"ray start exited 0 but cluster is not reachable; see {log_path}")
 
 
 def _is_ray_version_mismatch(text: str) -> bool:
@@ -355,28 +312,21 @@ def force_restart_local_cluster(
     Raises:
         RuntimeError: If the fresh head node fails to start.
     """
-    # Raise the open-files limit before the fresh raylet starts.
     ensure_fd_limit(log_path=log_path)
-    stop_cmd = ["ray", "stop", "--force"]
-    # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster).
+    _stop_ray_force(log_path=log_path, reason="Stopping foreign cluster before version-mismatch recovery")
     gcs_port, iso_args = _isolated_head_port_args()
     start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         start_cmd.append(f"--num-gpus={num_gpus}")
-    # Free, probed GCS/dashboard/client ports (see ensure_ray_cluster).
     start_cmd.extend(iso_args)
-    # Re-declare the ``serving_slot`` custom resource after a fresh head.
     start_cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"$ {' '.join(stop_cmd)}  # issue #432 version-mismatch recovery\n")
-            subprocess.run(stop_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"$ {' '.join(start_cmd)}\n")
             proc = subprocess.run(start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"\n[ray_restart_exit_code] {proc.returncode}\n")
     else:
-        subprocess.run(stop_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
         proc = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
@@ -480,7 +430,8 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     On a "Version mismatch" RuntimeError (foreign cluster under a different
     Python/Ray), tear the foreign cluster down, bring up a fresh local head
-    under this interpreter, and retry ``ray.init`` once.
+    under this interpreter, and retry once against that head — ``RAY_ADDRESS``
+    still names the foreign cluster and would reproduce the mismatch.
 
     Args:
         num_gpus: Optional GPU count forwarded to a restart, if needed.
@@ -492,12 +443,12 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     runtime_env = safe_runtime_env()
 
-    def _init() -> None:
+    def _init(address: str) -> None:
         """Call ``ray.init`` with stdout suppressed and standard options."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             ray.init(
-                address=os.environ.get("RAY_ADDRESS", "auto"),
+                address=address,
                 ignore_reinit_error=True,
                 log_to_driver=False,
                 logging_level="error",
@@ -505,7 +456,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             )
 
     try:
-        _init()
+        _init(os.environ.get("RAY_ADDRESS", "auto"))
     except Exception as exc:  # noqa: BLE001
         if not _is_ray_version_mismatch(str(exc)):
             raise
@@ -515,5 +466,5 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         except Exception:  # noqa: BLE001
             pass
         force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
-        _init()
+        _init("auto")
     return runtime_env

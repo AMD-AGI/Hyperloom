@@ -172,6 +172,25 @@ def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
     assert out["rejection_breakdown"]["revert_decision"] == 1
 
 
+def test_ledger_only_rejection_reaches_the_breakdown(tmp_path: Path) -> None:
+    """A rejected kernel that never made top15 must be in both the total and the
+    per-reason split, or ``totals.rejected`` and ``rejection_breakdown`` disagree."""
+    state = _make_state(
+        top15=[_top15_entry("k001")],
+        attempts={
+            "k001": _attempt_entry(decision="REVERT", rejected_reason="revert_decision"),
+            # Never surfaced in top15: only the ledger knows about it.
+            "k002": _attempt_entry(decision="REVERT", rejected_reason="max_failures_3"),
+        },
+        rejected_ids=["k001", "k002"],
+    )
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["rejected"] == 2
+    assert sum(out["rejection_breakdown"].values()) == out["totals"]["rejected"]
+    assert out["rejection_breakdown"]["revert_decision"] == 1
+    assert out["rejection_breakdown"]["max_failures_without_keep"] == 1
+
+
 def test_integrated_kernel_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],

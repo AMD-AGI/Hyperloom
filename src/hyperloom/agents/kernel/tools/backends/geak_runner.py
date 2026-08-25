@@ -88,7 +88,8 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to
     # self-stop before the outer subprocess kill. Split the inner SOFT deadline
     # from the outer HARD kill so run_e2e can flush result.json before SIGKILL.
-    flush_grace = int(os.environ.get("GEAK_FLUSH_GRACE_S", "180"))
+    grace_raw = os.environ.get("GEAK_FLUSH_GRACE_S", "").strip()
+    flush_grace = int(grace_raw) if grace_raw.isdigit() and int(grace_raw) > 0 else 180
     inner_timeout = max(60, timeout_s - flush_grace)
     env["GEAK_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
 
@@ -130,9 +131,11 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     result: dict = {}
     if result_path.is_file():
         try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+            _parsed = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(_parsed, dict):
+                result = _parsed
         except json.JSONDecodeError:
-            result = {}
+            pass
     if not result:
         result = {
             "status": "error",

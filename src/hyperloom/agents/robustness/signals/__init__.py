@@ -28,6 +28,7 @@ from .decision_audit import (
     evaluate_decision_audit_signals,
 )
 from .event import evaluate_event_signals
+from .event_view import EventRow, build_event_view, family_of
 from .external_deps import (
     ExternalDepsConfig,
     TraceLensCliFiredOnce,
@@ -94,7 +95,10 @@ __all__ = [
     "Symptom",
     "SymptomSeverity",
     "TraceLensCliFiredOnce",
+    "EventRow",
+    "build_event_view",
     "evaluate_budget_signals",
+    "family_of",
     "evaluate_cold_start_signals",
     "evaluate_conversation_progress_signals",
     "evaluate_crash_signals",

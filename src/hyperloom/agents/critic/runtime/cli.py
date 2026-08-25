@@ -161,7 +161,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
         limit=args.limit,
         ctx=WriteContext(session_id=args.session or "cli", review_id="cli"),
     )
-    priors["scope_cache_key"] = scope_cache_key(scope_filter, topic=args.topic)
+    priors["scope_cache_key"] = scope_cache_key(scope_filter, topic=args.topic, kind=args.kind, limit=args.limit)
     emit_json(priors, args.out)
 
 

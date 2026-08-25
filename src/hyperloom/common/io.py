@@ -40,6 +40,28 @@ def _best_effort_fsync(fh: Any) -> None:
         os.fsync(fh.fileno())
 
 
+def _best_effort_fsync_dir(directory: Path) -> None:
+    """``os.fsync`` a directory so a rename survives a crash.
+
+    Fsyncing the temp file only guarantees its *contents*; the directory entry
+    the ``os.replace`` created is a separate write, so a caller that needs the
+    replacement itself to survive power loss has to sync the parent too. A
+    best-effort no-op where the platform has no directory fd (Windows) or the
+    filesystem rejects the syscall.
+
+    Args:
+        directory: The directory whose entries must be durable.
+    """
+    if not hasattr(os, "O_DIRECTORY"):  # Windows has no directory fds
+        return
+    with suppress(OSError):
+        fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def atomic_write_bytes(
     path: Path,
     data: bytes,
@@ -92,6 +114,7 @@ def atomic_write_text(
     encoding: str = "utf-8",
     make_parents: bool = False,
     fsync: bool = False,
+    fsync_dir: bool = False,
     mode: int | None = None,
 ) -> None:
     """Atomically write ``text`` to ``path`` (temp file in same dir + ``os.replace``).
@@ -103,6 +126,10 @@ def atomic_write_text(
         make_parents: When ``True``, create ``path.parent`` before writing.
         fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
             rename (OSError swallowed on mounts that reject the syscall).
+        fsync_dir: When ``True``, also best-effort fsync ``path.parent`` after
+            the rename. ``fsync`` alone makes the *contents* durable; only this
+            makes the replacement itself survive power loss. No-op on platforms
+            without directory fds.
         mode: Optional file mode for the temp file before rename. Masked with
             ``& 0o700``, so group/other bits are always stripped.
 
@@ -124,6 +151,8 @@ def atomic_write_text(
             # Strip group/other bits: never expose written payloads beyond owner.
             os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
+        if fsync_dir:
+            _best_effort_fsync_dir(path.parent)
     except Exception:
         with suppress(OSError):
             tmp.unlink()
@@ -140,6 +169,7 @@ def atomic_write_json(
     trailing_newline: bool = False,
     make_parents: bool = True,
     fsync: bool = False,
+    fsync_dir: bool = False,
     mode: int | None = None,
 ) -> None:
     """Atomically write ``data`` as JSON to ``path``.
@@ -153,13 +183,22 @@ def atomic_write_json(
         trailing_newline: Append a final ``"\\n"`` after the JSON body.
         make_parents: When ``True`` (default), create ``path.parent`` first.
         fsync: When ``True``, best-effort ``os.fsync`` before the rename.
+        fsync_dir: When ``True``, also fsync the parent directory after the
+            rename; see :func:`atomic_write_text`.
         mode: Optional file mode; see :func:`atomic_write_text` (masked with
             ``& 0o700``).
     """
     text = _json.dumps(data, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
     if trailing_newline:
         text += "\n"
-    atomic_write_text(path, text, make_parents=make_parents, fsync=fsync, mode=mode)
+    atomic_write_text(
+        path,
+        text,
+        make_parents=make_parents,
+        fsync=fsync,
+        fsync_dir=fsync_dir,
+        mode=mode,
+    )
 
 
 def append_jsonl(

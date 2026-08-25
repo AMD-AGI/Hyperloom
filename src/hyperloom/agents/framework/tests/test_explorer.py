@@ -127,14 +127,19 @@ def test_passes_filter_include_paths_hit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _metric_float
+# metric extraction via first_float
 # ---------------------------------------------------------------------------
 
 
-def test_metric_float_returns_first_numeric_key() -> None:
-    """_metric_float returns the first numeric value found among keys."""
-    assert ex._metric_float({"a": "no", "b": 12}, ("a", "b")) == 12.0
-    assert ex._metric_float({"a": "no"}, ("a", "missing")) is None
+def test_first_float_returns_first_finite_key() -> None:
+    """first_float returns the first finite numeric value and rejects non-finite."""
+    from hyperloom.common.coerce import first_float
+
+    assert first_float(None, "no", 12) == 12.0
+    assert first_float(None, "no") is None
+    assert first_float(float("nan"), float("inf"), 5.0) == 5.0
+    assert first_float(float("inf")) is None
+    assert first_float(True, 3.0) == 3.0
 
 
 # ---------------------------------------------------------------------------

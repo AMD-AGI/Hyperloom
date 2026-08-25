@@ -23,6 +23,8 @@ See [Hyperloom authentication and credentials](authentication.md).
 ## Credentials
 
 These variables configure LLM gateway access and optional backend credentials.
+See [Authentication and credentials](authentication.md) for the accepted
+provider-side combinations and what each one enables.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -31,6 +33,11 @@ These variables configure LLM gateway access and optional backend credentials.
 | `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the Ray / e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
 | `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
 | `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
+| `OPENAI_BASE_URL`      | Conditional | —    | OpenAI-side endpoint. Required together with `OPENAI_API_KEY` to enable Codex. An OpenAI-only configuration drives Orchestration through the Codex backend; Claude and GEAK stay disabled.                                                                        |
+| `OPENAI_API_KEY`       | Conditional | —    | OpenAI-side key. Pairs with `OPENAI_BASE_URL`. Never borrowed from the Anthropic side.                                                                                                                               |
+| `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
+| `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` and `FORGE_CLAUDE_MODEL` inherit from it.                                                                    |
+| `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend. `FORGE_CODEX_MODEL` inherits from it. Model settings are never borrowed across providers.                                                                    |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
@@ -52,7 +59,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
-| `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom`                                             | Session directory root (logs, runs, mirrors, breakdown). Replaces the retired `INFERENCE_OPTIMIZER_SESSION_DIR` and `WORKSPACE_PATH`.                                                |
+| `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Session directory root (logs, runs, mirrors, breakdown). Container images ship a writable `/workspace`; a bare-metal host that has neither falls back to the second form and the CLI logs which root it took.                                                |
 | `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
@@ -61,8 +68,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `FORGE_PATH`                               | Conditional          | Unset                                                              | KernelForge checkout root, and the single canonical variable for it. Required whenever the forge kernel backend is enabled (`KERNEL_OPT_BACKEND_ORDER=forge`): `forge_submit.py` prepends it to `sys.path` to import `kernel_agents`, and resolves the vendor-playbook task bundles beneath it. Unset with `kernel_agents` already installed still imports, but the playbook bundles are then unresolvable. |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
-| `WORKSPACE_PATH` *(legacy)*               | No                   | Unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [Upgrade Hyperloom version](upgrade.md).                            |
-| `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` *(deprecated)* | No            | Unset                                                              | **Retired** — replaced by `USER_DATA_PATH`. No longer read.                                                                                                                       |
+| `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (monitor / multi-node) | Unset                                                   | Explicit session directory for the Robustness Monitor (`tools/robustness_`<br>`monitor.sh.example`), which prefers it over `.session_dir` in the launch-info JSON. Multi-node crash-log collection reads it as a last-resort session root. Point it at one session dir, never at `$USER_DATA_PATH`. |
 
 ---
 
@@ -582,8 +588,8 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where out-of-process agents stage their section knowledge and files. Hyperloom creates and exports it; operators must not set it. The facade is inactive when it is absent. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
-| `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
-| `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
+| `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
+| `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `CRITIC_AGENT_`<br>`MAX_COMPLETION_TOKENS` | `32000`           | Output-token cap for one critic review call. A reply cut off at the cap is retried once at twice this value and then fails the turn, so the cap is a ceiling rather than a budget: unused headroom is never billed, while a truncated reply bills the whole call and yields nothing. Lower it for a model whose own output limit is smaller. A non-positive or unparseable value logs a warning and falls back to the default. |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
@@ -638,12 +644,39 @@ Primary switch (default **off**) for live Langfuse trace push.
   live run re-emits the out-of-process children onto the same trace and can
   duplicate observations. Use one path per session, or treat backfill as a
   recovery tool only when live push did not run.
-* **`flush_session` is idempotent**: A second flush only re-writes the receipt
-  (no re-emit), so a duplicated CLOSE step won't double-push.
-* **Package truncation**: The bundle caps at 5000 files / 256 MB. On a very
-  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
-  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
-  a truncated package as complete.
+* **`flush_session` is idempotent, and retries only what failed**: the
+  session-end reconcile runs as named steps (leftover halves, `ext/` shards,
+  recipe-KB audit, specialist intel, forge steps, GEMM tuning, decision scores,
+  span close, final SDK flush). Each step runs at most once **per process**, so
+  a duplicated CLOSE step won't double-push; a step that raised is retried by
+  the next call. The receipt reports `flush_steps_done` (the steps that
+  succeeded, for this process) and `counts_final`, which is `true` only once
+  *every* step has completed — a `false` there means the push is still
+  incomplete, not that the session was short-lived. Across processes (a crash
+  plus a `--resume`, or two shutdown paths racing), the durable unit is finer
+  than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
+  drained so its rows are never re-pushed while later ones still are, and the
+  one-shot `session_start` / `session_breakdown` pushes are claimed through an
+  exclusive marker file (`reports/trace/.session_start.claim`) rather than
+  through the receipt read. The audit backfills (recipe-KB, specialist intel,
+  forge steps, GEMM tuning, decision scores) are *not* cursor-tracked: a second
+  process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
+  receipt whose hash does not match is ignored on read, so a torn file cannot
+  suppress or replay the one-shot `session_start` / breakdown pushes.
+* **Package completeness**: `PACKAGE_MANIFEST` describes what was actually
+  written, and `included_files` never names a file the package lacks. Check
+  `complete` before treating a package as the whole selection; it is `false`
+  whenever anything selected is absent, and the reason is itemized in
+  `dropped_files` (the bundle caps at 5000 files / 256 MB and a very long
+  session can stop it short, alongside `truncated: true`), `failed_files`
+  (the write failed) or `refused_files` (the entry was not a regular file
+  inside the session — see below). The zip and the loose tree are written
+  independently and each carries a manifest describing its own contents.
+* **Session boundary**: a session directory is shared-filesystem state that
+  agents write into, so the packager only bundles entries that resolve
+  inside the session. A symlink pointing out of the session is refused
+  rather than followed, which keeps unrelated file content from being
+  copied to the dest root and synced onward.
 * **Generation duration is ~0**: Both live and backfill stamp a single
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.
@@ -656,9 +689,14 @@ discoverable rollup of LLM token spend derived from the per-call ledger
 `decision_trace.token_rollup`, so it always reconciles with that section. No
 env var controls it; it is always present (zeroed on pre-trace sessions).
 
-* `session_total`: whole-session total across every call, with two
-  convenience figures: `total_in_out` (prompt + completion only) and
-  `grand_total` (in + out + all cache-creation + cache-read tokens).
+* `session_total`: whole-session total across every call. Three counter
+  families are kept apart because they are billed and interpreted differently:
+  visible tokens (`total_in` / `total_out`), cache tokens
+  (`total_cache_creation` / `total_cache_read`), and hidden reasoning output
+  (`total_reasoning_out` — reported by reasoning models, absent from the reply
+  text and therefore *not* part of `total_out`). Two convenience figures sit on
+  top: `total_in_out` (visible prompt + completion only) and `grand_total`
+  (visible + all cache tokens + reasoning output — the all-in figure).
 * `by_component`: per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
@@ -674,8 +712,10 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
   (rather than a zero bucket) to make the sparsity explicit.
 
 To get the single "total tokens for this run" number, read
-`token_usage.session_total.grand_total` (all-in) or `.total_in_out`
-(prompt+completion only).
+`token_usage.session_total.grand_total` (all-in: visible + cache + reasoning)
+or `.total_in_out` (visible prompt+completion only). Read
+`.total_reasoning_out` on its own when comparing a reasoning model against a
+non-reasoning one — the latter reports `0` there.
 
 ---
 

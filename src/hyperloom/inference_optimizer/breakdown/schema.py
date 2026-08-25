@@ -1632,8 +1632,10 @@ class RooflineSnapshot(TypedDict, total=False):
     ts: str
     achieved_tok_per_sec: float
     theoretical_peak_tok_per_sec: float  # ceiling, vendor peak (unreachable)
-    within_roofline_pct: float  # achieved / peak * 100
+    within_roofline_pct: float  # achieved / peak * 100, capped at 100
     gap_to_roofline_pct: float
+    within_roofline_pct_uncapped: float | None  # uncapped ratio; >100 = wrong ceiling
+    roofline_ceiling_exceeded: bool
     compute_pct: float
     idle_pct: float
     comm_pct: float
@@ -2223,14 +2225,17 @@ class TokenBucket(TypedDict, total=False):
     """Aggregated token counters for one grouping (phase / component / total).
 
     ``total_cache`` (in the per-decision view) is the sum of cache-creation
-    and cache-read tokens; the rollup view keeps them split. ``calls`` is
-    the number of LLM calls folded into this bucket.
+    and cache-read tokens; the rollup view keeps them split.
+    ``total_reasoning_out`` is hidden reasoning output, billed but absent from
+    ``total_out`` (which counts the visible reply). ``calls`` is the number of
+    LLM calls folded into this bucket.
     """
 
     total_in: int
     total_out: int
     total_cache_creation: int
     total_cache_read: int
+    total_reasoning_out: int
     calls: int
 
 
@@ -2239,6 +2244,7 @@ class DecisionTokens(TypedDict, total=False):
     total_in: int
     total_out: int
     total_cache: int  # cache_creation + cache_read
+    total_reasoning_out: int  # hidden reasoning output, not part of total_out
     calls: int
 
 
@@ -2293,10 +2299,11 @@ class TokenUsageBucket(TypedDict, total=False):
     them split). Adds:
 
     Attributes:
-        total_in_out (int): ``total_in + total_out`` — the non-cache prompt +
-            completion tokens (what most "how many tokens" questions mean).
+        total_in_out (int): ``total_in + total_out`` — the visible, non-cache
+            prompt + completion tokens (what most "how many tokens" questions
+            mean).
         grand_total (int): ``total_in + total_out`` + all cache tokens
-            (creation + read) — the all-in figure.
+            (creation + read) + ``total_reasoning_out`` — the all-in figure.
     """
 
     total_in: int
@@ -2304,6 +2311,7 @@ class TokenUsageBucket(TypedDict, total=False):
     total_cache_creation: int
     total_cache_read: int
     total_cache: int
+    total_reasoning_out: int
     calls: int
     total_in_out: int
     grand_total: int
@@ -2528,12 +2536,12 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
         ref: Git ref / tag used for the build.
         gpu_arch: Explicit target arch (``gfx942`` / ``gfx950`` / ...).
         max_jobs: Parallelism cap passed to the compile.
-        ok: Whether the build + verify passed.
+        ok: Whether the build probe and install succeeded.
         failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
         failure_summary: Human-readable reason (agent decision input).
         installed_versions: torch/ref/sha/arch recorded after a successful build;
             includes ``source_pr_url`` when a discovered PR ref drove the build.
-        built_artifacts: Verified artifact paths (up to 8).
+        build_probes: Post-build probe descriptors (e.g. ``"import aiter: ok"``).
         build_log_path: Path to the compile log inside the attempt dir.
         attempt_root: Attempt directory anchoring the build.
     """
@@ -2546,7 +2554,7 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
     failure_class: str
     failure_summary: str
     installed_versions: dict[str, str]
-    built_artifacts: list[str]
+    build_probes: list[str]
     build_log_path: str
     attempt_root: str
 

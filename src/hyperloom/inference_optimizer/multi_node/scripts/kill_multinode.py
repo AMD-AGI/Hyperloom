@@ -169,6 +169,10 @@ def _gpu_vram_used_mb() -> list[float] | None:
     visibility (the kill actor runs with num_gpus=0). Best-effort: any parse or
     exec failure returns None so the caller skips the GPU-free wait.
 
+    This duplicates ``hyperloom.common.rocm_smi`` on purpose: the pod copy of
+    this script is heredoc'd in and run by a bare ``python3``, so hyperloom is
+    not importable there.
+
     Returns:
         list[float] | None: Used VRAM per GPU in MiB, or None when rocm-smi is
         missing / unparseable.

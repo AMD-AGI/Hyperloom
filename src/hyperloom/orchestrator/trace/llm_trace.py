@@ -12,11 +12,16 @@ Design contract:
   required one — fails fast (:class:`LLMTraceRowError`).
 * **Best-effort I/O**: disk failures while appending are logged and
   swallowed; trace writes must never break the optimization loop.
-* **Token shape**: the four counters mirror the keys both
+* **Token shape**: the counters mirror the keys both
   :class:`ClaudeBackend` and :class:`CodexBackend` put on
   ``BackendTurnResult.metadata``. Backends without a prompt-cache split
   (OpenAI / GEAK) report ``None`` for the two ``cache_*`` counters so the
-  collector can tell "no cache concept" from "zero cache hits".
+  collector can tell "no cache concept" from "zero cache hits";
+  ``reasoning_output_tokens`` is the same story for reasoning models, and is
+  kept out of ``output_tokens`` because that counts the visible reply only.
+* **Pairing**: ``call_id`` is the join key against the conversation ledger's
+  row for the same call. Both halves carry it when the producing backend
+  stamped one; otherwise the emitter falls back to its identity+second key.
 * **Success and failure**: a row carries a terminal ``status``. Only
   ``status="ok"`` rows have token accounting; ``status="error"`` rows record a
   call that never produced a usable response (built via
@@ -33,6 +38,7 @@ and a single :meth:`to_row` serialization path; the closed-schema check in
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -86,6 +92,7 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "session_id",
         "ts",
         "component",
+        "call_id",
         "role",
         "task_id",
         "dyn_id",
@@ -97,6 +104,7 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "output_tokens",
         "cache_creation_input_tokens",
         "cache_read_input_tokens",
+        "reasoning_output_tokens",
         "latency_ms",
         "reviewed_msg_ids",
         "status",
@@ -108,6 +116,19 @@ _ROW_FIELDS: frozenset[str] = frozenset(
 
 class LLMTraceRowError(ValueError):
     """Raised when an LLM-call row violates the closed schema."""
+
+
+def new_call_id() -> str:
+    """Mint a per-call id for the two halves of one LLM call to share.
+
+    Stamped by the backend that produced the turn (the only place that knows
+    the two halves describe the same call) and carried on
+    ``BackendTurnResult.metadata`` so both writers pick it up.
+
+    Returns:
+        A fresh hex id.
+    """
+    return uuid.uuid4().hex
 
 
 # Canonical timestamp helper; kept importable for callers.
@@ -152,6 +173,11 @@ class LLMCallRecord:
 
     session_id: str
     component: str
+    # Per-call identity shared with the conversation half of the same call, so
+    # the two streams pair on the call itself instead of on a ts-second bucket
+    # (which splits a call across a second boundary and marries two calls made
+    # inside one second). ``None`` when the call site has no id to thread.
+    call_id: str | None = None
     role: str | None = None
     task_id: str | None = None
     dyn_id: str | None = None
@@ -163,6 +189,10 @@ class LLMCallRecord:
     output_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    # Reasoning models bill hidden reasoning output separately; kept next to the
+    # canonical four rather than folded into ``output_tokens``, which counts only
+    # the visible reply. ``None`` for backends with no reasoning split.
+    reasoning_output_tokens: int | None = None
     # Wall-clock latency of the model call in ms, measured at the call site
     # (None = not measured); the Langfuse generation is placed at
     # ``[ts - latency_ms, ts]``.
@@ -190,6 +220,7 @@ class LLMCallRecord:
             "session_id": str(self.session_id),
             "ts": _now_iso(),
             "component": str(self.component),
+            "call_id": _coerce_optional_str(self.call_id),
             "role": _coerce_optional_str(self.role),
             "task_id": _coerce_optional_str(self.task_id),
             "dyn_id": _coerce_optional_str(self.dyn_id),
@@ -201,6 +232,7 @@ class LLMCallRecord:
             "output_tokens": _coerce_optional_int(self.output_tokens),
             "cache_creation_input_tokens": _coerce_optional_int(self.cache_creation_input_tokens),
             "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
+            "reasoning_output_tokens": _coerce_optional_int(self.reasoning_output_tokens),
             "latency_ms": _coerce_optional_int(self.latency_ms),
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
             "status": str(self.status),
@@ -225,10 +257,10 @@ class LLMCallRecord:
     ) -> "LLMCallRecord":
         """Build a record from a ``BackendTurnResult.metadata`` dict.
 
-        Both :class:`ClaudeBackend` and :class:`CodexBackend` put ``model`` and
-        the four token counters on ``metadata`` under identical keys, so this
-        one constructor covers every in-process backend call site. Missing token
-        keys degrade to ``None`` rather than ``0``.
+        Both :class:`ClaudeBackend` and :class:`CodexBackend` put ``model``,
+        ``call_id`` and the token counters on ``metadata`` under identical keys,
+        so this one constructor covers every in-process backend call site.
+        Missing token keys degrade to ``None`` rather than ``0``.
 
         Args:
             session_id: Cross-process aggregation primary key.
@@ -250,6 +282,9 @@ class LLMCallRecord:
         return cls(
             session_id=session_id,
             component=component,
+            # Stamped by the backend that produced the metadata, so the
+            # conversation half of the same call reads the same id.
+            call_id=md.get("call_id"),
             role=role,
             task_id=task_id,
             dyn_id=dyn_id,
@@ -261,6 +296,7 @@ class LLMCallRecord:
             output_tokens=md.get("output_tokens"),
             cache_creation_input_tokens=md.get("cache_creation_input_tokens"),
             cache_read_input_tokens=md.get("cache_read_input_tokens"),
+            reasoning_output_tokens=md.get("reasoning_output_tokens"),
             latency_ms=latency_ms if latency_ms is not None else md.get("latency_ms"),
         )
 
@@ -272,6 +308,7 @@ class LLMCallRecord:
         component: str,
         error: BaseException | str,
         model: str | None = None,
+        call_id: str | None = None,
         role: str | None = None,
         task_id: str | None = None,
         dyn_id: str | None = None,
@@ -292,6 +329,7 @@ class LLMCallRecord:
             component: Producer label; must be in :data:`VALID_COMPONENTS`.
             error: The raised exception, or a pre-formatted message.
             model: Backend model id, when the call site knows it.
+            call_id: Per-call id, when the call site minted one.
             role: Reactor role name, when known.
             task_id: Decision-association task id, when known.
             dyn_id: Dynamic-action id, when known.
@@ -306,6 +344,7 @@ class LLMCallRecord:
         return cls(
             session_id=session_id,
             component=component,
+            call_id=call_id,
             role=role,
             task_id=task_id,
             dyn_id=dyn_id,
@@ -414,4 +453,5 @@ __all__ = [
     "VALID_COMPONENTS",
     "VALID_STATUSES",
     "append_llm_call",
+    "new_call_id",
 ]

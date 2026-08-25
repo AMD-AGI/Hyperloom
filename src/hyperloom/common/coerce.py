@@ -11,6 +11,9 @@ Standardised semantics (one clean contract, no per-call flags):
 * ``bool`` is always treated as dirty input and coerced to *default* -- never
   ``float(True) == 1.0``, since a stray boolean becoming ``1.0`` / ``0`` is
   almost always a latent bug.
+* Non-finite values (``nan``, ``inf``, ``-inf``) are treated as dirty input
+  and coerced to *default* -- a non-finite number silently treated as a real
+  measurement produces wrong comparisons and gate decisions downstream.
 * ``None`` and any non-convertible value coerce to *default* (default ``None``).
 * String inputs are ``str(...).strip()``-normalised before parsing.
 
@@ -20,6 +23,7 @@ creating an import cycle.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
@@ -27,43 +31,46 @@ _T = TypeVar("_T")
 
 
 def to_float(value: Any, default: _T | None = None) -> float | _T | None:
-    """Coerce *value* to ``float``, rejecting ``bool`` and ``None``.
+    """Coerce *value* to a finite ``float``, rejecting ``bool``, ``None``, and
+    non-finite values (``nan`` / ``inf``).
 
     Args:
         value: The value to coerce.
-        default: Returned when *value* is a ``bool``, ``None``, or not
-            convertible to ``float`` (default ``None``).
+        default: Returned when *value* is a ``bool``, ``None``, non-finite, or
+            not convertible to ``float`` (default ``None``).
 
     Returns:
-        The parsed ``float``, or *default*.
+        The parsed finite ``float``, or *default*.
     """
     if value is None or isinstance(value, bool):
         return default
     try:
-        return float(str(value).strip() if isinstance(value, str) else value)
+        result = float(str(value).strip() if isinstance(value, str) else value)
     except (TypeError, ValueError):
         return default
+    return result if math.isfinite(result) else default
 
 
 def to_int(value: Any, default: _T | None = None) -> int | _T | None:
-    """Coerce *value* to ``int``, rejecting ``bool`` and ``None``.
+    """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite floats.
 
-    String inputs are stripped before parsing; a numeric string is parsed with
-    ``int(str(value).strip())`` (base-10, no float truncation).
+    String inputs are stripped before parsing (base-10, no float truncation).
 
     Args:
         value: The value to coerce.
-        default: Returned when *value* is a ``bool``, ``None``, or not
-            convertible to ``int`` (default ``None``).
+        default: Returned when *value* is a ``bool``, ``None``, non-finite, or
+            not convertible to ``int`` (default ``None``).
 
     Returns:
         The parsed ``int``, or *default*.
     """
     if value is None or isinstance(value, bool):
         return default
+    if isinstance(value, float) and not math.isfinite(value):
+        return default
     try:
         return int(str(value).strip() if isinstance(value, str) else value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

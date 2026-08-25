@@ -201,6 +201,27 @@ def within_roofline_pct(*, peak: float, achieved: float) -> float | None:
     return round(achieved / peak * 100.0, 2)
 
 
+def _clamp_within(raw: float | None) -> tuple[float | None, float | None]:
+    """Split a raw within-roofline ratio into the reported and overshoot values.
+
+    A measured throughput above the modelled ceiling means the ceiling is wrong
+    (stale dtype / quantization assumption), not that the run beat physics. The
+    reported ``within`` is capped at 100 so ``gap`` never goes negative, and the
+    uncapped value is kept so an overshoot stays visible instead of being
+    silently rounded away.
+
+    Args:
+        raw: The uncapped ``achieved / peak * 100`` ratio, or ``None``.
+
+    Returns:
+        A ``(within, gap)`` tuple, both ``None`` when ``raw`` is ``None``.
+    """
+    if raw is None:
+        return None, None
+    within = min(float(raw), 100.0)
+    return within, round(100.0 - within, 2)
+
+
 def _compute_within_and_gap(
     *,
     peak: float,
@@ -214,12 +235,9 @@ def _compute_within_and_gap(
 
     Returns:
         A ``(within_roofline_pct, gap_to_roofline_pct)`` tuple, both ``None``
-        when either input is non-positive.
+        when either input is non-positive. ``within`` is capped at 100.
     """
-    within = within_roofline_pct(peak=peak, achieved=achieved)
-    if within is None:
-        return None, None
-    return within, round(100.0 - within, 2)
+    return _clamp_within(within_roofline_pct(peak=peak, achieved=achieved))
 
 
 def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
@@ -346,15 +364,15 @@ def build_roofline_snapshot(
         within/gap percentages, and workload/top-kernel fields parsed from the
         analysis.md when available.
     """
-    within, gap = _compute_within_and_gap(
+    within_raw = within_roofline_pct(
         peak=theoretical_peak_tok_per_sec,
         achieved=achieved_tok_per_sec,
     )
     # Unit-agnostic fallback: with no tok/s ceiling, derive within/gap from the
     # ms pair as within = ideal / measured.
-    if within is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
-        within = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
-        gap = round(100.0 - within, 2)
+    if within_raw is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
+        within_raw = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
+    within, gap = _clamp_within(within_raw)
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
         "ts": ts or "",
@@ -382,6 +400,10 @@ def build_roofline_snapshot(
         "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),
         "within_roofline_pct": within,
         "gap_to_roofline_pct": gap,
+        # Uncapped ratio + the flag derived from it: an achieved throughput above
+        # the modelled ceiling is a ceiling-model problem the report must show.
+        "within_roofline_pct_uncapped": within_raw,
+        "roofline_ceiling_exceeded": bool(within_raw is not None and within_raw > 100.0),
     }
     if not analysis_md_path:
         return snap
@@ -417,6 +439,58 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
     return round(latest - baseline, 2)
 
 
+#: Relative tolerance for treating two modelled ceilings as the same ceiling.
+_CEILING_REL_TOL: float = 0.01
+
+
+def _ceiling_of(snapshot: dict[str, Any]) -> tuple[str, float] | None:
+    """Return one snapshot's ceiling as ``(unit, value)``, or ``None``.
+
+    Args:
+        snapshot: A roofline snapshot dict.
+
+    Returns:
+        ``("tok/s", peak)`` for serving snapshots, ``("ms", ideal)`` for
+        scriptable/diffusion ones, or ``None`` when neither ceiling is set.
+    """
+    peak = snapshot.get("theoretical_peak_tok_per_sec")
+    if isinstance(peak, (int, float)) and peak > 0:
+        return "tok/s", float(peak)
+    ideal = snapshot.get("roofline_ideal_ms")
+    if isinstance(ideal, (int, float)) and ideal > 0:
+        return "ms", float(ideal)
+    return None
+
+
+def ceilings_comparable(
+    baseline: dict[str, Any] | None,
+    latest: dict[str, Any] | None,
+) -> bool:
+    """Whether both snapshots were measured against the same modelled ceiling.
+
+    A quantization / dtype change moves the theoretical ceiling, so the two
+    sides' ``within_roofline_pct`` have different denominators and their
+    difference is not a change in saturation. A snapshot with no ceiling at all
+    counts as comparable: nothing was derived from it.
+
+    Args:
+        baseline: The baseline snapshot, or ``None``.
+        latest: The latest snapshot, or ``None``.
+
+    Returns:
+        ``True`` when the ceilings share a unit and agree within
+        :data:`_CEILING_REL_TOL`, or when either side has no ceiling.
+    """
+    base_ceiling = _ceiling_of(baseline or {})
+    latest_ceiling = _ceiling_of(latest or {})
+    if base_ceiling is None or latest_ceiling is None:
+        return True
+    if base_ceiling[0] != latest_ceiling[0]:
+        return False
+    largest = max(base_ceiling[1], latest_ceiling[1])
+    return abs(base_ceiling[1] - latest_ceiling[1]) <= largest * _CEILING_REL_TOL
+
+
 def build_roofline_comparison_from_history(
     snapshots: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
@@ -450,6 +524,8 @@ def build_roofline_comparison_from_history(
     if mode == "before_after":
         base_eff = (baseline.get("top_kernel") or {}).get("efficiency_pct")
         lat_eff = (latest.get("top_kernel") or {}).get("efficiency_pct")
+        comparable = ceilings_comparable(baseline, latest)
+        out["ceilings_comparable"] = comparable
         out["delta"] = {
             "compute_pct": _num_delta(
                 latest.get("compute_pct"),
@@ -464,13 +540,24 @@ def build_roofline_comparison_from_history(
                 baseline.get("comm_pct"),
             ),
             "top_kernel_efficiency_pct": _num_delta(lat_eff, base_eff),
-            "within_roofline_pct": _num_delta(
-                latest.get("within_roofline_pct"),
-                baseline.get("within_roofline_pct"),
+            # Saturation deltas are only meaningful against one shared ceiling;
+            # across a moved ceiling they would report a denominator change as a
+            # saturation change.
+            "within_roofline_pct": (
+                _num_delta(
+                    latest.get("within_roofline_pct"),
+                    baseline.get("within_roofline_pct"),
+                )
+                if comparable
+                else None
             ),
-            "gap_to_roofline_pct": _num_delta(
-                latest.get("gap_to_roofline_pct"),
-                baseline.get("gap_to_roofline_pct"),
+            "gap_to_roofline_pct": (
+                _num_delta(
+                    latest.get("gap_to_roofline_pct"),
+                    baseline.get("gap_to_roofline_pct"),
+                )
+                if comparable
+                else None
             ),
         }
     return out
@@ -529,6 +616,147 @@ def _fmt_pct_cell(v: float | None) -> str:
     return f"{float(v):.1f}%"
 
 
+#: Ceiling unit -> the label the report uses for it.
+_CEILING_LABELS: dict[str, str] = {
+    "tok/s": "Theoretical peak (decode memory-roofline ceiling)",
+    "ms": "Compute-roofline ideal (per-image latency floor)",
+}
+
+
+def _single_ceiling(baseline: dict[str, Any], latest: dict[str, Any]) -> tuple[str, float] | None:
+    """Pick the one ceiling to render when both sides share it.
+
+    Prefers a tok/s ceiling from either side (serving), then the ms ceiling
+    (scriptable/diffusion), matching the order the report has always used.
+
+    Args:
+        baseline: The baseline snapshot.
+        latest: The latest snapshot.
+
+    Returns:
+        The ``(unit, value)`` ceiling to render, or ``None`` when neither side
+        has one.
+    """
+    for snap in (baseline, latest):
+        peak = snap.get("theoretical_peak_tok_per_sec")
+        if isinstance(peak, (int, float)) and peak > 0:
+            return "tok/s", float(peak)
+    for snap in (baseline, latest):
+        ideal = snap.get("roofline_ideal_ms")
+        if isinstance(ideal, (int, float)) and ideal > 0:
+            return "ms", float(ideal)
+    return None
+
+
+def _ceiling_lines(
+    baseline: dict[str, Any],
+    latest: dict[str, Any],
+    *,
+    mode: str,
+) -> list[str]:
+    """Render the ceiling header above the metrics table.
+
+    One line when both sides were measured against the same ceiling; one line
+    per side plus a caveat when they were not, because then each side's
+    ``within %`` has its own denominator.
+
+    Args:
+        baseline: The baseline snapshot.
+        latest: The latest snapshot.
+        mode: ``single_snapshot`` or ``before_after``.
+
+    Returns:
+        The markdown lines (empty when no ceiling is available).
+    """
+    base_ceiling = _ceiling_of(baseline)
+    latest_ceiling = _ceiling_of(latest)
+    if mode == "before_after" and base_ceiling is not None and latest_ceiling is not None:
+        if not ceilings_comparable(baseline, latest):
+            base_unit, base_val = base_ceiling
+            latest_unit, latest_val = latest_ceiling
+            return [
+                f"**{_CEILING_LABELS[base_unit]} (Base):** {base_val:.1f} {base_unit}",
+                f"**{_CEILING_LABELS[latest_unit]} (Opt):** {latest_val:.1f} {latest_unit}",
+                "_Ceilings differ (runtime dtype / quantization changed): each side's "
+                "within % and gap % are measured against its own ceiling, so the Δ "
+                "column is withheld._",
+                "",
+            ]
+    chosen = _single_ceiling(baseline, latest)
+    if chosen is None:
+        return []
+    unit, value = chosen
+    return [
+        f"**{_CEILING_LABELS[unit]}:** "
+        f"{value:.1f} {unit}  "
+        f"_(single-source ceiling; baseline / latest compared against it)_",
+        "",
+    ]
+
+
+#: Snapshot key holding the uncapped achieved/ceiling ratio.
+_UNCAPPED_KEY = "within_roofline_pct_uncapped"
+
+
+def _ceiling_exceeded(snapshot: dict[str, Any]) -> bool:
+    """Whether a snapshot measured above its own modelled ceiling.
+
+    Reads the persisted flag and falls back to the uncapped ratio, so a snapshot
+    written before the flag existed still reports its overshoot.
+
+    Args:
+        snapshot: A roofline snapshot dict.
+
+    Returns:
+        ``True`` when the measured throughput exceeded the ceiling.
+    """
+    if snapshot.get("roofline_ceiling_exceeded"):
+        return True
+    uncapped = snapshot.get(_UNCAPPED_KEY)
+    return isinstance(uncapped, (int, float)) and float(uncapped) > 100.0
+
+
+def _ceiling_exceeded_lines(
+    baseline: dict[str, Any],
+    latest: dict[str, Any],
+    *,
+    mode: str,
+) -> list[str]:
+    """Render the warning for a snapshot that measured above its ceiling.
+
+    Capping ``within`` at 100 keeps the gap from going negative, but on its own
+    it hides the reason: the modelled ceiling is understated (a stale dtype /
+    quantization / GPU-spec input), which makes every saturation number on that
+    side unusable. That has to be said in the report, not only in the snapshot.
+
+    Args:
+        baseline: The baseline snapshot.
+        latest: The latest snapshot (``{}`` in single-snapshot mode).
+        mode: ``single_snapshot`` or ``before_after``.
+
+    Returns:
+        The markdown lines, or ``[]`` when neither side overshot.
+    """
+    sides: list[str] = []
+    if _ceiling_exceeded(baseline):
+        sides.append("Base" if mode == "before_after" else "this snapshot")
+    if _ceiling_exceeded(latest):
+        sides.append("Opt")
+    if not sides:
+        return []
+    ratios = " / ".join(
+        _fmt_pct_cell(snap.get(_UNCAPPED_KEY)) for snap in (baseline, latest) if _ceiling_exceeded(snap)
+    )
+    return [
+        f"> **Ceiling model exceeded ({', '.join(sides)}):** measured throughput reached "
+        f"{ratios} of the modelled ceiling, so **Within roofline %** is capped at 100% and "
+        f"**Gap to roofline %** at 0%. The theoretical peak is understated — check the "
+        f"runtime dtype / quantization / GPU spec behind it before reading the saturation "
+        f"numbers.",
+        "",
+    ]
+
+
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns).
 
@@ -557,31 +785,11 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     delta = cmp.get("delta") or {}
     mode = cmp.get("mode") or "single_snapshot"
 
-    # Ceiling is session-constant; surface once before the Base/Opt table.
-    peak = baseline.get("theoretical_peak_tok_per_sec")
-    if not isinstance(peak, (int, float)) or peak <= 0:
-        peak = latest.get("theoretical_peak_tok_per_sec")
-    ceiling_lines: list[str] = []
-    if isinstance(peak, (int, float)) and peak > 0:
-        ceiling_lines.append(
-            f"**Theoretical peak (decode memory-roofline ceiling):** "
-            f"{float(peak):.1f} tok/s  "
-            f"_(single-source ceiling; baseline / latest compared against it)_"
-        )
-        ceiling_lines.append("")
-    else:
-        # Scriptable/diffusion has no tok/s ceiling; surface the compute-roofline
-        # ideal per-image latency floor instead.
-        ideal_ms = baseline.get("roofline_ideal_ms")
-        if not isinstance(ideal_ms, (int, float)) or ideal_ms <= 0:
-            ideal_ms = latest.get("roofline_ideal_ms")
-        if isinstance(ideal_ms, (int, float)) and ideal_ms > 0:
-            ceiling_lines.append(
-                f"**Compute-roofline ideal (per-image latency floor):** "
-                f"{float(ideal_ms):.1f} ms  "
-                f"_(single-source ceiling; baseline / latest compared against it)_"
-            )
-            ceiling_lines.append("")
+    # The ceiling is usually session-constant, so surface it once above the
+    # table; when the two sides model different ceilings (a dtype /
+    # quantization change) both are reported and the within/gap columns are
+    # flagged as not directly comparable.
+    ceiling_lines: list[str] = _ceiling_lines(baseline, latest, mode=mode)
 
     lines: list[str] = list(ceiling_lines)
     if mode == "single_snapshot":
@@ -605,7 +813,10 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         )
         lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
         lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
+        if _ceiling_exceeded(snap):
+            lines.append(f"| Within roofline % (uncapped) | {_fmt_pct_cell(snap.get(_UNCAPPED_KEY))} |")
         lines.append("")
+        lines.extend(_ceiling_exceeded_lines(snap, {}, mode=mode))
         return lines
 
     lines.extend(
@@ -650,7 +861,14 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
         f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | "
         f"{_fmt_delta(delta.get('gap_to_roofline_pct'))} |"
     )
+    if _ceiling_exceeded(baseline) or _ceiling_exceeded(latest):
+        lines.append(
+            f"| Within roofline % (uncapped) | "
+            f"{_fmt_pct_cell(baseline.get(_UNCAPPED_KEY))} | "
+            f"{_fmt_pct_cell(latest.get(_UNCAPPED_KEY))} | — |"
+        )
     lines.append("")
+    lines.extend(_ceiling_exceeded_lines(baseline, latest, mode=mode))
     return lines
 
 

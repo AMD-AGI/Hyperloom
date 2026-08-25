@@ -28,11 +28,11 @@ import logging
 import os
 import socket
 import ssl
-import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
+from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
 log = logging.getLogger(__name__)
 
@@ -42,17 +42,15 @@ DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_MAX_ATTEMPTS = 2
 
 
-def _require_http_url(url: str) -> None:
-    scheme = urllib.parse.urlparse(url).scheme
-    if scheme not in {"http", "https"}:
-        raise InferenceXFetchError(f"unsupported URL scheme: {scheme!r}")
-
-
 class InferenceXFetchError(Exception):
     """Raised on any InferenceX fetch failure (unsupported URL scheme,
     non-200 status, network or transport error)."""
 
     pass
+
+
+def _require_http_url(url: str) -> None:
+    _base_require_http_url(url, error=InferenceXFetchError)
 
 
 def _base_url() -> str:

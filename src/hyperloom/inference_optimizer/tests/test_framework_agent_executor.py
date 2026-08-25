@@ -17,6 +17,7 @@ import pytest
 
 from .conftest import init_git_repo, patch_integrate_patch_allowlist
 
+from hyperloom.orchestrator.actions.executors import framework_agent as fa_mod
 from hyperloom.orchestrator.actions.executors.framework_agent import (
     FrameworkAgentExecutor,
     _candidate_slug,
@@ -105,24 +106,22 @@ def test_candidate_slug_handles_missing_fields():
     assert _candidate_slug({}) == "candidate"
 
 
-def test_fetch_diff_to_path_succeeds_via_file_url(tmp_path: Path):
-    src = tmp_path / "src.patch"
+def test_fetch_diff_to_path_rejects_file_url(tmp_path: Path):
+    """A ``file://`` diff_url must not be fetched: the URL reaches us from a
+    remote KB/API response, so honouring it would read the local filesystem."""
+    src = tmp_path / "secret.patch"
     src.write_text(_VALID_PATCH, encoding="utf-8")
     dest = tmp_path / "out" / "got.patch"
-    ok, err = _fetch_diff_to_path(
-        f"file://{src}",
-        dest,
-        timeout_sec=5.0,
-    )
-    assert ok, err
-    assert dest.exists()
-    assert dest.read_text() == _VALID_PATCH
+    ok, err = _fetch_diff_to_path(f"file://{src}", dest, timeout_sec=5.0)
+    assert not ok
+    assert "unsupported URL scheme" in err
+    assert not dest.exists()
 
 
-def test_fetch_diff_to_path_fails_on_bad_url(tmp_path: Path):
+def test_fetch_diff_to_path_fails_on_unreachable_url(tmp_path: Path):
     dest = tmp_path / "missing.patch"
     ok, err = _fetch_diff_to_path(
-        f"file://{tmp_path / 'does-not-exist.patch'}",
+        "http://127.0.0.1:1/does-not-exist.patch",
         dest,
         timeout_sec=2.0,
     )
@@ -294,7 +293,7 @@ async def test_executor_fetch_failure_returns_fetch_failed(tmp_path: Path):
     init_git_repo(repo)
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = _make_candidate(
-        diff_url=f"file://{tmp_path / 'missing-diff.patch'}",
+        diff_url="http://127.0.0.1:1/missing-diff.patch",
     )
     ctx = _make_ctx(
         "t-fp-6",
@@ -1149,7 +1148,7 @@ async def test_executor_keep_adds_new_file_pr(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
+async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path, monkeypatch):
     """A cross-repo candidate must fall back to diff_url, not checkout-head."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -1160,8 +1159,13 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
         check=True,
         capture_output=True,
     )
-    diff_file = tmp_path / "served.patch"
-    diff_file.write_text(_VALID_PATCH, encoding="utf-8")
+
+    def _serve_diff(diff_url, dest, *, timeout_sec):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(_VALID_PATCH, encoding="utf-8")
+        return True, ""
+
+    monkeypatch.setattr(fa_mod, "_fetch_diff_to_path", _serve_diff)
 
     executor = FrameworkAgentExecutor(session_dir=session_dir)
     cand = {
@@ -1169,7 +1173,7 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
         "pr_number": 42,
         "ref": "pr-head",
         "title": "cross-repo PR",
-        "diff_url": f"file://{diff_file}",
+        "diff_url": "https://github.com/ROCm/vllm/pull/42.diff",
         "apply_mode": "checkout_head",
     }
     ctx = _make_ctx(

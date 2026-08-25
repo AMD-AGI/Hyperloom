@@ -203,7 +203,6 @@ class KBWriter:
         scope: dict[str, Any],
         kind: str | None = None,
         topic: str | None = None,
-        metadata_filter: dict[str, Any] | None = None,
         limit: int = 10,
         ctx: WriteContext | None = None,
     ) -> dict[str, Any]:
@@ -219,7 +218,6 @@ class KBWriter:
             scope (dict[str, Any]): Scope filter for the KB query.
             kind (str | None): Optional row-kind filter.
             topic (str | None): Optional topic, folded into the cache key.
-            metadata_filter (dict[str, Any] | None): Optional metadata match.
             limit (int): Maximum number of priors to request.
             ctx (WriteContext | None): When set, enables the per-session prior
                 cache keyed by ``ctx.session_id``.
@@ -232,7 +230,7 @@ class KBWriter:
         if not self.read_enabled:
             return {"priors": [], "cache": "disabled", "cache_key": ""}
 
-        cache_key = scope_cache_key(scope, topic=topic)
+        cache_key = scope_cache_key(scope, topic=topic, kind=kind, limit=limit)
 
         # Cache wins regardless of breaker state.
         if ctx is not None:
@@ -256,7 +254,6 @@ class KBWriter:
             response = self.client.list(
                 scope_filter=scope,
                 kind=kind,
-                metadata_filter=metadata_filter,
                 limit=limit,
             )
         except KBTransportError as exc:

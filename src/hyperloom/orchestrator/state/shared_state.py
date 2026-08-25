@@ -63,6 +63,7 @@ from typing import Any
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
 from . import kernel_decision_settings as _kernel_decision_settings
@@ -1339,14 +1340,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         Returns:
             SharedState: The loaded-and-migrated state, or a fresh default
                 instance when no ``state.json`` exists yet.
+
+        Raises:
+            ValueError: If ``state.json`` exists but is not a JSON object.
         """
         path = cls.state_path(session_dir)
         if not path.exists():
             inst = cls()
         else:
-            with path.open(encoding="utf-8") as f:
-                raw = json.load(f)
-            inst = cls.from_dict(raw)
+            inst = cls.from_dict(read_json(path, require_dict=True, strict=True))
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
