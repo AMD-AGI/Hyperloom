@@ -1690,6 +1690,115 @@ def test_lift_at_or_below_anchor_does_not_modify_stack(session_dir):
     assert len(s.optimization_stack) == 1
 
 
+@pytest.mark.asyncio
+async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir):
+    """Every winner applied in a round must get its own optimization_stack entry."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    # Winner A: gains 10 %, measured tput 1100.  Winner B is applied on top:
+    # gains another 10 % over the new 1100 base, measured tput 1210.
+    winner_a = {
+        "name": "w-a",
+        "fingerprint": "fp_a",
+        "tput": 1100.0,
+        "candidate_extra_server_args": "--flag-a 1",
+        "extra_server_args": "--flag-a 1",
+        "extra_envs": {},
+        "gain_pct": 10.0,
+    }
+    winner_b = {
+        "name": "w-b",
+        "fingerprint": "fp_b",
+        "tput": 1210.0,
+        "candidate_extra_server_args": "--flag-b 2",
+        "extra_server_args": "--flag-a 1 --flag-b 2",
+        "extra_envs": {},
+        "gain_pct": 10.0,
+    }
+
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {},
+            "winners": [winner_a, winner_b],
+            "round_id": "r1",
+            "best_variant": winner_a,
+            "output_throughput": 1210.0,
+            "best_gain_pct": 10.0,
+        },
+        task=_task("explore", params={"gap_canonical_id": "g1"}),
+    )
+
+    assert len(s.optimization_stack) == 2
+    assert s.optimization_stack[0]["variant_name"] == "w-a"
+    assert s.optimization_stack[0]["tput"] == 1100.0
+    assert s.optimization_stack[1]["variant_name"] == "w-b"
+    assert s.optimization_stack[1]["tput"] == 1210.0
+    assert s.current_best["tput"] == 1210.0
+    # gain_per_stack_entry must be index-aligned with optimization_stack.
+    assert len(s.gain_per_stack_entry) == 2
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_multi_winner_dedup_skips_already_stacked(session_dir):
+    """A winner whose fingerprint is already in the stack must not add a duplicate."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    existing_fp = "fp_existing"
+    s.optimization_stack = [
+        {
+            "action": "explore",
+            "variant_name": "prior",
+            "fingerprint": existing_fp,
+            "tput": 1100.0,
+            "extra_server_args": "--flag-a 1",
+            "candidate_extra_server_args": "--flag-a 1",
+            "extra_envs": {},
+        }
+    ]
+    s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--flag-a 1", "extra_envs": {}}
+
+    winner_new = {
+        "name": "w-new",
+        "fingerprint": "fp_new",
+        "tput": 1210.0,
+        "candidate_extra_server_args": "--flag-b 2",
+        "extra_server_args": "--flag-a 1 --flag-b 2",
+        "extra_envs": {},
+        "gain_pct": 10.0,
+    }
+    winner_dup = {
+        "name": "prior-renamed",
+        "fingerprint": existing_fp,
+        "tput": 1300.0,
+        "candidate_extra_server_args": "--flag-a 1",
+        "extra_server_args": "--flag-a 1",
+        "extra_envs": {},
+        "gain_pct": 5.0,
+    }
+
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {},
+            "winners": [winner_new, winner_dup],
+            "round_id": "r2",
+            "best_variant": winner_new,
+            "output_throughput": 1300.0,
+            "best_gain_pct": 10.0,
+        },
+        task=_task("explore", task_id="t2", params={"gap_canonical_id": "g1"}),
+    )
+
+    # Only the new winner's entry is appended; the duplicate fingerprint is skipped.
+    assert len(s.optimization_stack) == 2
+    assert s.optimization_stack[1]["variant_name"] == "w-new"
+
+
 async def test_integrate_keep_carries_the_stack_env_layer(session_dir):
     """A kernel integrate publishes args and envs from the same config.
 

@@ -1091,12 +1091,14 @@ async def test_promote_explore_records_success_attempt(session_dir):
                     "name": "v1",
                     "extra_server_args": "--foo",
                     "extra_envs": {"K": "1"},
+                    "tput": 900.0,
                 }
             ],
             "best_variant": {
                 "name": "v1",
                 "extra_server_args": "--foo",
                 "extra_envs": {"K": "1"},
+                "tput": 900.0,
             },
             "output_throughput": 900.0,
             "best_gain_pct": 12.5,
@@ -1148,12 +1150,14 @@ async def test_promote_explore_updates_validated_gain(session_dir):
                     "name": "kv_fp8",
                     "extra_server_args": "--kv-cache-fp8",
                     "extra_envs": {},
+                    "tput": 1100.0,
                 }
             ],
             "best_variant": {
                 "name": "kv_fp8",
                 "extra_server_args": "--kv-cache-fp8",
                 "extra_envs": {},
+                "tput": 1100.0,
             },
             "output_throughput": 1100.0,
             "best_gain_pct": 10.0,
@@ -1162,6 +1166,33 @@ async def test_promote_explore_updates_validated_gain(session_dir):
         await c._promote_to_shared_state("explore", result, task=task)
         assert c.shared_state.cumulative_gain_validated == pytest.approx(10.0)
         assert c.shared_state.cumulative_gain_validated_stack_len == len(c.shared_state.optimization_stack)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_multi_winner_watermark_stays_in_sync(session_dir):
+    """cumulative_gain_validated_stack_len must equal len(optimization_stack) after N winners."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1000.0
+        task = _mk_task("explore", "t-multi-win")
+        winner_a = {"name": "w-a", "fingerprint": "fp_a", "tput": 1100.0, "extra_server_args": "--a 1", "extra_envs": {}}
+        winner_b = {"name": "w-b", "fingerprint": "fp_b", "tput": 1210.0, "extra_server_args": "--a 1 --b 2", "extra_envs": {}}
+        result = {
+            "status": "succeeded",
+            "winners": [winner_a, winner_b],
+            "best_variant": winner_a,
+            "output_throughput": 1210.0,
+            "best_gain_pct": 10.0,
+            "round_id": "round-multi",
+        }
+        await c._promote_to_shared_state("explore", result, task=task)
+        s = c.shared_state
+        assert len(s.optimization_stack) == 2
+        assert s.cumulative_gain_validated_stack_len == len(s.optimization_stack)
+        assert not s.optimization_stack_has_unvalidated_keeps()
     finally:
         await c.stop()
 
