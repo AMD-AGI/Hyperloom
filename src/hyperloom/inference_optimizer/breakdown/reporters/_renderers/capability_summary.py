@@ -15,6 +15,7 @@ _CAPABILITY_ORDER = (
     "backends",
     "params",
     "sweep",
+    "compute_partition",
     "geak",
     "validate_stack",
 )
@@ -80,6 +81,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             extras.append(f"keep_unstable={v['keep_unstable_count']}")
         if "winners_history" in v and v["winners_history"]:
             extras.append(f"history={v['winners_history']}")
+        # Last, and unlabelled: it is prose rather than a metric. Part of the
+        # documented contract but rendered nowhere until now, which left a row
+        # able to explain itself with no way to say it.
+        if v.get("reason"):
+            extras.append(str(v["reason"]))
         extras_str = " · ".join(extras) if extras else ""
 
         rows.append([name, status, attempts, keeps, extras_str])

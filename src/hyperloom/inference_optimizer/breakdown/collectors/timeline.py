@@ -536,7 +536,7 @@ def collect_capability_summary(
 
     # Specialist row derived from ``specialist_rounds``.
     specialist_row = _specialist_capability_row(state)
-    return {
+    summary: dict[str, Any] = {
         "geak": geak_cap,
         "forge": forge_cap,
         # Primary post-merge row; backends/params/validate_stack are compat rows.
@@ -546,6 +546,72 @@ def collect_capability_summary(
         "sweep": sweep_cap,
         "validate_stack": validate,
         "specialist": specialist_row,
+    }
+    # Omitted rather than reported not_attempted where it could not have run;
+    # see :func:`_compute_partition_capability_row`.
+    partition_row = _compute_partition_capability_row(state)
+    if partition_row is not None:
+        summary["compute_partition"] = partition_row
+    return summary
+
+
+def _compute_partition_capability_row(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Derive ``capability_summary.compute_partition`` from the session lever.
+
+    Unlike every other capability here, this one cannot be reached by the
+    optimizer on its own: it is off unless ``--compute-partition-modes`` names
+    the modes. So ``not_attempted`` on this row means something the other rows
+    never mean -- not "the search declined to go there" but "nobody offered it"
+    -- and it is worth surfacing precisely because an operator who has not heard
+    of the lever has no way to discover it from results that never mention it.
+    The ``reason`` carries the flag, so the row is actionable and not merely a
+    reproach.
+
+    Returns ``None`` on a framework that cannot apply the lever, which omits the
+    row entirely. Listing it as ``not_attempted`` there would be false in the
+    way that matters: it would read as a missed opportunity, when the launch
+    would in fact have been refused.
+
+    Args:
+        state: Parsed ``state.json``.
+
+    Returns:
+        The capability row, or ``None`` when the lever could not have applied.
+    """
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+    from hyperloom.orchestrator.actions.executors._partition_lever import PARTITION_MODE_ENV
+
+    if not is_scriptable(state.get("framework")):
+        return None
+    modes = [str(m).strip().upper() for m in (state.get("compute_partition_modes") or []) if str(m).strip()]
+    if not modes:
+        return {
+            "status": "not_attempted",
+            "attempts": 0,
+            "keeps": 0,
+            "reason": (
+                "never offered — enable with `--compute-partition-modes spx,dpx,qpx,cpx`; "
+                "needs a privileged amd-smi, and pair it with `--max-latency-ms` because "
+                "partitioning always costs single-stream latency"
+            ),
+        }
+
+    current_best = state.get("current_best") or {}
+    envs = current_best.get("extra_envs") if isinstance(current_best, dict) else None
+    kept_mode = str((envs or {}).get(PARTITION_MODE_ENV) or "").strip().upper()
+    return {
+        # A mode that lost is evidence, not absence: the modes were measured and
+        # the unpartitioned card won, which is the expected result below the
+        # concurrency where partitioning pays.
+        "status": "kept" if kept_mode else "tried",
+        "attempts": len(modes),
+        "keeps": 1 if kept_mode else 0,
+        "tested": len(modes),
+        "reason": (
+            f"{kept_mode} in the best configuration"
+            if kept_mode
+            else f"offered {', '.join(modes)}; none beat the unpartitioned card"
+        ),
     }
 
 

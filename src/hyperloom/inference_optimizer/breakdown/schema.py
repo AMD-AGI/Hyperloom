@@ -441,6 +441,12 @@ class CapabilitySummary(TypedDict, total=False):
         specialist (CapabilityEntry): Specialist sub-agent capability; ``tested`` =
             total proposals across rounds, ``keeps`` = proposals kept,
             ``attempts`` = number of dispatch rounds.
+        compute_partition (CapabilityEntry): AMD compute-partition lever
+            (SPX/DPX/QPX/CPX); ``tested`` = modes offered, ``keeps`` = 1 when a
+            mode is in the final configuration. **Absent** on frameworks that
+            cannot apply the lever, so a present ``not_attempted`` row means an
+            operator could have used it and did not -- unlike the other rows,
+            this one is unreachable unless a flag names the modes.
     """
 
     geak: CapabilityEntry
@@ -452,6 +458,7 @@ class CapabilitySummary(TypedDict, total=False):
     sweep: CapabilityEntry
     validate_stack: CapabilityEntry
     specialist: CapabilityEntry
+    compute_partition: CapabilityEntry
 
 
 # Kernel backend invocations

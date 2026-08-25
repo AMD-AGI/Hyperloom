@@ -467,6 +467,12 @@ For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
 The `specialist` row uses `keeps` / `attempts` differently: see
 `CapabilitySummary` in `schema.py`.
 
+`compute_partition` (the AMD SPX/DPX/QPX/CPX lever) is present only on
+frameworks that can apply it, and is the one row whose `not_attempted`
+means *nobody offered it* rather than *the search declined it* — the
+lever is off unless `--compute-partition-modes` names the modes. Its
+`reason` carries the flag needed to turn it on.
+
 ---
 
 ## `kernel_lifecycle` — `KernelLifecycle`

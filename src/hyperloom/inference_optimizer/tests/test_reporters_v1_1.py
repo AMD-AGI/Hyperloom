@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hyperloom.inference_optimizer.breakdown.collectors import collect_capability_summary
 from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
+from hyperloom.inference_optimizer.breakdown.reporters._renderers.capability_summary import (
+    render as render_capability_summary,
+)
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.decision_journal import render as render_dj
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations import render_forge, render_geak
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_profiling import render as render_kp
@@ -250,3 +254,96 @@ def test_compose_includes_v1_1_sections_in_report() -> None:
     assert "### Kernel Profiling" in md
     assert "single_shot" in md
     assert "magpie_torch_profiler" in md
+
+
+# ---- capability_summary.compute_partition ----
+def test_an_unused_partition_lever_is_reported_as_never_offered() -> None:
+    """The row exists to be discoverable: the operator could have used it and did not."""
+    cap = collect_capability_summary({"framework": "xdit", "compute_partition_modes": []}, [], [])
+    row = cap["compute_partition"]
+    assert row["status"] == "not_attempted"
+    assert row["attempts"] == 0 and row["keeps"] == 0
+    # No tested=0 next to attempts=0; the row should not pad itself with zeroes.
+    assert "tested" not in row
+    # The flag has to travel with the verdict, or the row only says "no".
+    assert "--compute-partition-modes spx,dpx,qpx,cpx" in row["reason"]
+    assert "--max-latency-ms" in row["reason"]
+
+
+def test_a_framework_that_cannot_partition_gets_no_row_at_all() -> None:
+    """Absent, not not_attempted.
+
+    ``not_attempted`` reads as a missed opportunity, and it flows into
+    "Capabilities not attempted" in the report. On a serving framework the
+    launch would have been refused, so that would send an operator to a flag
+    that exits 2.
+    """
+    for framework in ("sglang", "vllm", "atom", ""):
+        cap = collect_capability_summary({"framework": framework, "compute_partition_modes": ["DPX"]}, [], [])
+        assert "compute_partition" not in cap
+    # The empty-state callers every other collector test uses must stay unaffected.
+    assert "compute_partition" not in collect_capability_summary({}, [], [])
+
+
+def test_a_kept_mode_is_credited_to_the_lever() -> None:
+    cap = collect_capability_summary(
+        {
+            "framework": "custom",
+            "compute_partition_modes": ["SPX", "DPX"],
+            "current_best": {"action": "explore", "extra_envs": {"HYPERLOOM_PARTITION_MODE": "DPX"}},
+        },
+        [],
+        [],
+    )
+    row = cap["compute_partition"]
+    assert row["status"] == "kept"
+    assert (row["attempts"], row["keeps"], row["tested"]) == (2, 1, 2)
+    assert "DPX" in row["reason"]
+
+
+def test_modes_that_all_lost_read_as_tried_not_untried() -> None:
+    # A measured loss is evidence. Reporting it as not_attempted would put the
+    # lever in "Capabilities not attempted" after it had actually run.
+    cap = collect_capability_summary(
+        {
+            "framework": "custom",
+            "compute_partition_modes": ["CPX"],
+            "current_best": {"action": "baseline", "tput": 100.0},
+        },
+        [],
+        [],
+    )
+    row = cap["compute_partition"]
+    assert row["status"] == "tried"
+    assert row["keeps"] == 0
+    assert "none beat the unpartitioned card" in row["reason"]
+
+
+def test_the_capability_table_shows_the_reason() -> None:
+    """``reason`` is in the documented contract but was rendered nowhere."""
+    sec = render_capability_summary(
+        {"capability_summary": {"compute_partition": {"status": "not_attempted", "reason": "never offered — enable X"}}}
+    )
+    assert "never offered — enable X" in sec.markdown_block
+
+
+def test_an_unused_lever_lands_in_capabilities_not_attempted() -> None:
+    """End to end: the section group an operator actually reads."""
+    bd = _base_breakdown(
+        session={"session_id": "cp", "session_dir": "/tmp/s"},
+        workload={"model_name": "m", "framework_name": "xdit"},
+        capability_summary={
+            "compute_partition": {
+                "status": "not_attempted",
+                "attempts": 0,
+                "keeps": 0,
+                "reason": "never offered — enable with `--compute-partition-modes spx,dpx,qpx,cpx`",
+            }
+        },
+        attribution={"method": "missing"},
+        source_files={},
+    )
+    md = render_session_report(bd).markdown
+    assert "**Capabilities not attempted**: `compute_partition`" in md
+    assert "Capabilities never invoked: `compute_partition`" in md
+    assert "--compute-partition-modes spx,dpx,qpx,cpx" in md
