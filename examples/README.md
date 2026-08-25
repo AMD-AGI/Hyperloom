@@ -25,7 +25,8 @@ Code before running the install command.
 
 ### Prerequisites
 
-- Python 3.10+ and `pip`.
+- Python 3.10+ and `pip`. Bare-metal installs that select vLLM require exactly
+  Python 3.12, because the vLLM ROCm wheels are built only for that version.
 - Access to the Anthropic LLM provider.
 - A dedicated workspace directory opened in the user's agent.
 
