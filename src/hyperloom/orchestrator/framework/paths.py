@@ -718,10 +718,8 @@ def _resolve_warm_replay_patch_root(
         explicit_root=Path(explicit_root.rstrip("/")) if explicit_root else None,
         candidate_roots=candidate_roots,
     )
-    # The declared root is preferred, not mandatory: a session pointed at sglang
-    # can still hold a replayable vllm patch. An explicit root that simply lacks
-    # the targets therefore falls back to the allowlist instead of ending the
-    # replay, which is what "env first, then allowlist" promises.
+    # The declared root is preferred, not mandatory: a session pointed at one
+    # framework can still hold a replayable patch for a sibling tree.
     if resolution.root is None and resolution.reason == "explicit_root_target_mismatch":
         from_env = False
         resolution = resolve_patch_apply_root(
@@ -738,9 +736,9 @@ def _resolve_warm_replay_patch_root(
         )
     reason = {
         "patch_content_missing": missing_patch_reason,
-        # Only these describe the allowlist itself: nothing was offered, nothing
-        # matched, or several matched. Every other reason names a different
-        # fault and keeps its own wording so the operator is pointed at it.
+        # Only these two are about the allowlist: nothing offered, nothing
+        # matched. Any other reason keeps its own wording, which names a fault
+        # the allowlist message would misdirect from.
         "no_candidate_roots": missing_allowlist_reason,
         "no_matching_root": missing_allowlist_reason,
     }.get(resolution.reason, resolution.reason)

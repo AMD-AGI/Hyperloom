@@ -2318,8 +2318,6 @@ class IntegratePatchExecutor:
             grounding_drops = (done_payload or {}).get("patches_dropped_by_grounding")
             if isinstance(grounding_drops, list) and grounding_drops:
                 _no_patches["patches_dropped_by_grounding"] = grounding_drops
-            if (done_payload or {}).get("patches_span_multiple_roots"):
-                _no_patches["patches_span_multiple_roots"] = True
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
@@ -2379,6 +2377,10 @@ class IntegratePatchExecutor:
                     f"{explicit_framework_root}; author patches only against files "
                     "that exist in the installed framework tree."
                 )
+            # A set spanning two trees is exactly what fails root resolution here,
+            # so this is the result that has to carry the reason onward.
+            if (done_payload or {}).get("patches_span_multiple_roots"):
+                _early["patches_span_multiple_roots"] = True
             if params.get("enablement"):
                 _early["enablement"] = True
             return _early
@@ -3963,9 +3965,15 @@ class IntegratePatchExecutor:
         if framework_root is None or (not applied and not self._ip_base_artifact_replayed):
             return reverted
         if not applied:
-            # The base-artifact replay wrote into the tree after the stash, so it
-            # has to be cleaned or the pop collides with it.
-            _git_checkout_clean(framework_root)
+            # Only the base-artifact replay dirtied the tree; it still has to go
+            # or the stash pop collides with it.
+            ok, err = _git_checkout_clean(framework_root)
+            if not ok:
+                log.error(
+                    "integrate_patch: could not clean base-artifact replay from %s (%s)",
+                    framework_root,
+                    err,
+                )
             return reverted
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
         if nogit_backups is not None and not _is_git_tree(framework_root):
@@ -4018,10 +4026,9 @@ class IntegratePatchExecutor:
         - ``source`` must resolve inside the session directory.
 
         An entry failing either check is skipped with a warning. The install
-        itself is deliberately unguarded: a base artifact is part of the accepted
-        stack, so a round that cannot restore it would be measuring a tree that
-        no round asked for. The ``OSError`` propagates and ``__call__``'s
-        ``except BaseException`` unwinds the candidate and restores the stash.
+        itself is unguarded on purpose: a base artifact belongs to the accepted
+        stack, so a round that cannot restore it would benchmark a tree no round
+        asked for. The ``OSError`` propagates and ``__call__`` unwinds it.
         """
         if not bool(params.get("enablement")):
             return
@@ -4058,9 +4065,7 @@ class IntegratePatchExecutor:
                 )
                 continue
             target, _ = resolved
-            # Set before the write: a partial install still dirtied the tree, and
-            # the revert needs to know that even when the first copy is the one
-            # that raised.
+            # Set before the write so a copy that raises still counts as dirtying.
             self._ip_base_artifact_replayed = True
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)

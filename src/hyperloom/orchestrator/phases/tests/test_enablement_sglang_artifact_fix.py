@@ -214,6 +214,32 @@ def test_vet_patches_keeps_a_set_split_across_roots_and_reports_it(tmp_path):
     assert spans_roots
 
 
+def test_cross_tree_set_reaches_root_resolution_as_a_miss(tmp_path):
+    """The kept cross-tree set is what fails whole-set resolution, so the signal must ride that result."""
+    first = _checkout(tmp_path / "first", "first.py")
+    second = _checkout(tmp_path / "second", "second.py")
+    patches = []
+    for name in ("first.py", "second.py"):
+        patch = tmp_path / f"{name}.patch"
+        patch.write_text(_diff(name), encoding="utf-8")
+        patches.append(str(patch))
+
+    kept, _dropped, _grounding, spans_roots = _ps.vet_patches(
+        patches,
+        base_checkout=first,
+        candidate_roots=(second,),
+    )
+    assert spans_roots and len(kept) == 2
+
+    whole_set = _ps.resolve_patch_apply_root(
+        tuple(Path(p).read_text(encoding="utf-8") for p in kept),
+        explicit_root=None,
+        candidate_roots=(first, second),
+    )
+    assert whole_set.root is None
+    assert whole_set.reason == "no_matching_root"
+
+
 def test_vet_patches_absent_from_every_root_is_dropped(tmp_path):
     """A patch whose target exists in no root is still dropped."""
     first = _checkout(tmp_path / "first", "first.py")

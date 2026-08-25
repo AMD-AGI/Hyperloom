@@ -133,11 +133,9 @@ PATCH_ROOT_FAIL_REASONS: tuple[str, ...] = (
     "ambiguous_root",  # more than one candidate holds every pre-image
 )
 
-# The subset of the above that reports an absent tree rather than a fact about
-# the patch. Vetting cannot conclude anything from these: with no pre-image to
-# match, or nothing to match it against, there is no hallucinated target to
-# catch, so the patch survives as GROUND_UNCHECKED and the applying caller --
-# which resolves its own root -- decides.
+# Reasons that report an absent tree rather than a fact about the patch: with no
+# pre-image, or nothing to match it against, there is no hallucinated target to
+# catch, so vetting defers to the applying caller.
 _GROUNDING_UNDECIDABLE_REASONS: frozenset[str] = frozenset(
     {
         "no_candidate_roots",
