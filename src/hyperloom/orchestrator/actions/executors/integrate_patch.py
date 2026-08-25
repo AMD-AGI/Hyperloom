@@ -311,7 +311,10 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def trusted_explicit_root(explicit: str) -> Path | None:
+def trusted_explicit_root(
+    explicit: str,
+    allowlist: tuple[str, ...] | None = None,
+) -> Path | None:
     """Resolve a declared framework root, or ``None`` when it is not trusted.
 
     A root outside the allowlisted source scope is refused whatever its tree
@@ -320,6 +323,9 @@ def trusted_explicit_root(explicit: str) -> Path | None:
 
     Args:
         explicit: The declared ``framework_source_root``.
+        allowlist: Pre-resolved allowlist, computed once by the caller when
+            available, to avoid a redundant ``resolve_source_file_allowlist()``
+            call.
 
     Returns:
         The resolved directory, or ``None`` when it is unreadable, absent, or
@@ -339,7 +345,8 @@ def trusted_explicit_root(explicit: str) -> Path | None:
             explicit,
         )
         return None
-    if any(resolved_within(explicit, root) for root in resolve_source_file_allowlist()):
+    effective_allowlist = allowlist if allowlist is not None else resolve_source_file_allowlist()
+    if any(resolved_within(explicit, root) for root in effective_allowlist):
         return resolved
     log.warning(
         "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
@@ -370,10 +377,11 @@ def _resolve_framework_root(
     Returns:
         The resolved root, or ``None`` when the patches name no single tree.
     """
-    roots = [Path(root) for root in resolve_source_file_allowlist()]
+    allowlist = resolve_source_file_allowlist()
+    roots = [Path(root) for root in allowlist]
     explicit_path: Path | None = None
     if explicit:
-        explicit_path = trusted_explicit_root(explicit)
+        explicit_path = trusted_explicit_root(explicit, allowlist=allowlist)
         if explicit_path is None:
             return None
 
@@ -2306,12 +2314,22 @@ class IntegratePatchExecutor:
                 # An untrusted root is refused on that ground alone; only a
                 # trusted one that simply lacks the files is the patches' fault.
                 trusted_root = trusted_explicit_root(explicit_framework_root)
-                missing_records = (
-                    _preflight_missing_targets(trusted_root, patch_paths) if trusted_root is not None else []
-                )
-                if missing_records:
-                    _error_class = "patch_target_missing"
-                    _error = missing_records
+                if trusted_root is not None:
+                    readable_count = sum(1 for p in patch_paths if p.is_file())
+                    if readable_count == 0:
+                        _error_class = "patch_unreadable"
+                        _error = "all patch files are missing or unreadable; verify paths and permissions"
+                    else:
+                        missing_records = _preflight_missing_targets(trusted_root, patch_paths)
+                        if missing_records:
+                            _error_class = "patch_target_missing"
+                            _error = missing_records
+                        else:
+                            _error_class = "framework_source_root_rejected"
+                            _error = (
+                                f"framework_source_root {explicit_framework_root!r} could not "
+                                "be unambiguously matched to the patch targets"
+                            )
                 else:
                     _error_class = "framework_source_root_rejected"
                     _error = (

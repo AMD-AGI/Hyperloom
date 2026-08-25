@@ -687,10 +687,15 @@ def _patch_source_diff(source: WarmReplayPatchSource) -> str:
 
     An entry may carry its diff inline instead of on disk, so a ``patch_*`` ref
     that names no local file is not by itself evidence against a root.
+    Falls back to the inline content on any I/O error so a deleted previous-session
+    patch does not abort the caller (consistent with the is_file() fallback above).
     """
     if source.path is None or not source.path.is_file():
         return source.content
-    return source.path.read_text(encoding="utf-8", errors="replace")
+    try:
+        return source.path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return source.content
 
 
 def _resolve_warm_replay_patch_root(
@@ -720,10 +725,16 @@ def _resolve_warm_replay_patch_root(
         )
     reason = {
         "patch_content_missing": missing_patch_reason,
-        # Warm replay writes into the tree, so "no tree offered" is as fatal as
-        # "no tree matched" -- both mean there is nowhere safe to replay.
+        # All of the following mean "no tree we can safely write to" — map them
+        # to the caller's allowlist reason so the operator sees a consistent
+        # message instead of a raw internal code.
         "no_candidate_roots": missing_allowlist_reason,
         "no_matching_root": missing_allowlist_reason,
+        "ambiguous_root": missing_allowlist_reason,
+        "explicit_root_target_mismatch": missing_allowlist_reason,
+        "explicit_root_invalid": missing_allowlist_reason,
+        "patch_targets_invalid": missing_allowlist_reason,
+        "pure_create_requires_explicit_root": missing_allowlist_reason,
     }.get(resolution.reason, resolution.reason)
     return WarmReplayRootResolution(
         root="",
@@ -752,11 +763,20 @@ def resolve_warm_replay_kernel_root(
     *,
     patch_paths: Sequence[Path] | None = None,
     patch_entries: Iterable[Any] | None = None,
+    precomputed_allowlist: tuple[str, ...] | None = None,
 ) -> WarmReplayRootResolution:
-    """Resolve the kernel patch root from the kernel-specific allowlist."""
+    """Resolve the kernel patch root from the kernel-specific allowlist.
+
+    Args:
+        patch_paths: Patch file paths to resolve.
+        patch_entries: KB plan entry dicts to resolve.
+        precomputed_allowlist: Pre-resolved allowlist tuple, used to avoid
+            re-running the filesystem discovery when the caller iterates many
+            entries. When absent, the allowlist is computed fresh.
+    """
     return _resolve_warm_replay_patch_root(
         patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
-        allowlist=_warm_replay_kernel_patch_roots(),
+        allowlist=precomputed_allowlist if precomputed_allowlist is not None else _warm_replay_kernel_patch_roots(),
         missing_patch_reason="active_kernel_patch_root_missing",
         missing_allowlist_reason="kernel_patch_root_not_in_allowlist",
     )
