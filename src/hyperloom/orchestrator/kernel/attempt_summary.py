@@ -384,6 +384,27 @@ def _entry_integration_status(entry: dict[str, Any]) -> str:
     return str(entry.get("integration_status") or "").strip().lower()
 
 
+def _rejection_bucket(reason: str) -> str:
+    """Map a rejection reason onto a :data:`KNOWN_REJECTION_REASONS` bucket.
+
+    Threshold-encoding reasons (``max_partial_attempts_3``) collapse onto their
+    canonical key; anything unrecognised lands in ``other``.
+
+    Args:
+        reason: The recorded rejection reason.
+
+    Returns:
+        The breakdown key to increment.
+    """
+    if reason in KNOWN_REJECTION_REASONS:
+        return reason
+    if reason.startswith("max_partial_attempts_"):
+        return "max_partial_attempts_without_keep"
+    if reason.startswith("max_failures_"):
+        return "max_failures_without_keep"
+    return "other"
+
+
 def _classify_attempted(
     entry: dict[str, Any],
     *,
@@ -982,16 +1003,7 @@ def build_kernel_optimization_summary(
         )
         counts[_category_count_key(category)] += 1
         if category == CATEGORY_ATTEMPTED_REJECTED:
-            rej_reason = _rejected_reason_of(attempt)
-            bucket = rej_reason if rej_reason in KNOWN_REJECTION_REASONS else None
-            if bucket is None:
-                # Collapse threshold-encoding reason strings onto canonical keys.
-                if rej_reason.startswith("max_partial_attempts_"):
-                    bucket = "max_partial_attempts_without_keep"
-                elif rej_reason.startswith("max_failures_"):
-                    bucket = "max_failures_without_keep"
-                else:
-                    bucket = "other"
+            bucket = _rejection_bucket(_rejected_reason_of(attempt))
             rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
         by_kernel.append(
             _render_attempted_row(
@@ -1016,6 +1028,12 @@ def build_kernel_optimization_summary(
             kernel_id=kid,
         )
         counts[_category_count_key(category)] += 1
+        # Same accounting as the top15 loop above: a rejected kernel that only
+        # has a ledger row must land in the breakdown too, or the totals and the
+        # per-reason split disagree.
+        if category == CATEGORY_ATTEMPTED_REJECTED:
+            bucket = _rejection_bucket(_rejected_reason_of(attempt))
+            rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
         by_kernel.append(
             _render_attempted_row(
                 {"kernel_id": kid},

@@ -641,12 +641,20 @@ Primary switch (default **off**) for live Langfuse trace push.
 * **`flush_session` is idempotent, and retries only what failed**: the
   session-end reconcile runs as named steps (leftover halves, `ext/` shards,
   recipe-KB audit, specialist intel, forge steps, GEMM tuning, decision scores,
-  span close, final SDK flush). Each step runs at most once, so a duplicated
-  CLOSE step won't double-push; a step that raised is retried by the next call.
-  The receipt reports `flush_steps_done` (the steps that succeeded) and
-  `counts_final`, which is `true` only once *every* step has completed — a
-  `false` there means the push is still incomplete, not that the session was
-  short-lived. The receipt also carries `payload_sha256` over its own body; a
+  span close, final SDK flush). Each step runs at most once **per process**, so
+  a duplicated CLOSE step won't double-push; a step that raised is retried by
+  the next call. The receipt reports `flush_steps_done` (the steps that
+  succeeded, for this process) and `counts_final`, which is `true` only once
+  *every* step has completed — a `false` there means the push is still
+  incomplete, not that the session was short-lived. Across processes (a crash
+  plus a `--resume`, or two shutdown paths racing), the durable unit is finer
+  than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
+  drained so its rows are never re-pushed while later ones still are, and the
+  one-shot `session_start` / `session_breakdown` pushes are claimed through an
+  exclusive marker file (`reports/trace/.session_start.claim`) rather than
+  through the receipt read. The audit backfills (recipe-KB, specialist intel,
+  forge steps, GEMM tuning, decision scores) are *not* cursor-tracked: a second
+  process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
   receipt whose hash does not match is ignored on read, so a torn file cannot
   suppress or replay the one-shot `session_start` / breakdown pushes.
 * **Package truncation**: The bundle caps at 5000 files / 256 MB. On a very

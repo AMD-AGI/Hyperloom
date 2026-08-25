@@ -26,6 +26,7 @@ calls (tokens, text) a few ms apart; the emitter buffers by
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,43 @@ def _manifest_path(session_dir: Path) -> Path:
         The manifest file path.
     """
     return session_dir / "manifest.json"
+
+
+#: Session-end reconcile steps, in run order. The names are persisted in the
+#: receipt (``flush_steps_done``), so a restart resumes instead of replaying.
+_FLUSH_STEP_NAMES: tuple[str, ...] = (
+    "pending_halves",
+    "ext_shards",
+    "recipe_kb_audit",
+    "specialist_intel",
+    "forge_steps",
+    "gemm_tuning",
+    "decision_scores",
+    "close_spans",
+    "client_flush",
+)
+
+
+def _persisted_ext_cursors(session_dir: Path) -> dict[str, int]:
+    """Return how far each ext/ shard was drained by a previous process.
+
+    Args:
+        session_dir: Session directory whose receipt is read.
+
+    Returns:
+        A ``{shard filename: rows already sent}`` map; empty when there is no
+        (valid) receipt yet.
+    """
+    persisted = (read_receipt(session_dir) or {}).get("ext_rows_sent")
+    if not isinstance(persisted, dict):
+        return {}
+    cursors: dict[str, int] = {}
+    for name, count in persisted.items():
+        try:
+            cursors[str(name)] = max(0, int(count))
+        except (TypeError, ValueError):
+            continue
+    return cursors
 
 
 def _receipt_path(session_dir: Path) -> Path:
@@ -409,10 +447,18 @@ class LangfuseEmitter:
             "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
             "errors": 0,  # swallowed send failures
         }
-        self._flushed = False
-        # Reconcile steps that already succeeded, so a retry after a partial
-        # flush neither re-emits them nor loses the ones still owed.
+        # Reconcile steps that already succeeded in *this* process, so a retry
+        # after a partial flush neither re-emits them nor loses the ones still
+        # owed. Deliberately not restored from the receipt: ``pending_halves``
+        # drains an in-process buffer, and a resumed session writes new ext
+        # shards, so a step another process finished is not the same work.
         self._flush_steps_done: set[str] = set()
+        self._flushed = False
+        # How many rows of each ext/ shard have been sent, restored from the
+        # receipt. This *is* durable across processes: the rows are on disk, so
+        # re-sending them would duplicate the Generation, while a shard that
+        # grew (or appeared) after the last flush still gets picked up.
+        self._ext_rows_sent: dict[str, int] = _persisted_ext_cursors(self.session_dir)
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a
         # snapshot is sent only on-change or after a slow refresh interval.
         self._last_status_sig: tuple | None = None
@@ -749,31 +795,31 @@ class LangfuseEmitter:
             log.debug("langfuse: flush_session already ran; skipping re-emit")
             self._write_receipt()
             return
-        steps: tuple[tuple[str, Any], ...] = (
-            ("pending_halves", self._flush_pending_halves),
-            ("ext_shards", self._flush_ext_shards),
-            ("recipe_kb_audit", self._flush_recipe_kb_audit),
-            ("specialist_intel", self._flush_specialist_intel),
-            ("forge_steps", self._flush_forge_steps),
-            ("gemm_tuning", self._flush_gemm_tuning),
-            ("decision_scores", self._flush_decision_scores),
-            ("close_spans", self._close_spans),
-            # Last, and a step like any other: everything above only hands
-            # observations to the SDK's buffer, so a failed final flush means
-            # nothing reached Langfuse and has to be retried.
-            ("client_flush", self._flush_client),
-        )
-        for name, step in steps:
+        # ``client_flush`` is last and is a step like any other: everything
+        # before it only hands observations to the SDK's buffer, so a failed
+        # final flush means nothing reached Langfuse and has to be retried.
+        steps: dict[str, Any] = {
+            "pending_halves": self._flush_pending_halves,
+            "ext_shards": self._flush_ext_shards,
+            "recipe_kb_audit": self._flush_recipe_kb_audit,
+            "specialist_intel": self._flush_specialist_intel,
+            "forge_steps": self._flush_forge_steps,
+            "gemm_tuning": self._flush_gemm_tuning,
+            "decision_scores": self._flush_decision_scores,
+            "close_spans": self._close_spans,
+            "client_flush": self._flush_client,
+        }
+        for name in _FLUSH_STEP_NAMES:
             if name in self._flush_steps_done:
                 continue
             try:
-                step()
+                steps[name]()
             except Exception:  # noqa: BLE001 — one failed step must not skip the rest
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
                 continue
             self._flush_steps_done.add(name)
-        self._flushed = len(self._flush_steps_done) == len(steps)
+        self._flushed = self._flush_steps_done.issuperset(_FLUSH_STEP_NAMES)
         self._write_receipt()
 
     def _flush_client(self) -> None:
@@ -801,7 +847,9 @@ class LangfuseEmitter:
         if (persisted.get("counts") or {}).get("session_start_recorded"):
             self._counts["session_start_recorded"] = 1
             return
-        import os
+        if not self._claim_one_shot("session_start"):
+            self._counts["session_start_recorded"] = 1
+            return
 
         payload = lfmap.session_start_payload(
             self._manifest,
@@ -866,6 +914,9 @@ class LangfuseEmitter:
         # Cross-process guard via the persisted receipt (the only shared state).
         persisted = read_receipt(self.session_dir) or {}
         if (persisted.get("counts") or {}).get("breakdown_recorded"):
+            self._counts["breakdown_recorded"] = 1
+            return
+        if not self._claim_one_shot("session_breakdown"):
             self._counts["breakdown_recorded"] = 1
             return
         try:
@@ -1033,14 +1084,33 @@ class LangfuseEmitter:
         Children (geak / forge / robustness / specialist subprocess) never
         connect to Langfuse; their tokens land in ``ext/<component>-<pid>.jsonl``.
         Emitted as text-less Generations so the trace still accounts their spend.
+
+        Progress is a per-shard row cursor persisted in the receipt, so a
+        retry — in this process or a later one — resumes at the row that failed
+        instead of re-emitting the rows that landed, while a shard that grew
+        since the last flush is still picked up. The cursor only advances over
+        contiguous sends, so a failure stops that shard rather than stranding
+        the failed row behind later ones.
+
+        Raises:
+            RuntimeError: When at least one shard row could not be sent.
         """
         ext_dir = trace_ext_dir(self.session_dir)
         if not ext_dir.is_dir():
             return
+        unsent = 0
         for shard in sorted(ext_dir.glob("*.jsonl")):
-            self._counts["ext_shards_read"] += 1
-            for row in _load_jsonl(shard):
-                self._emit_generation(token_row=row, conv_row=None)
+            sent = self._ext_rows_sent.get(shard.name, 0)
+            rows = _load_jsonl(shard)
+            if sent == 0 and rows:
+                self._counts["ext_shards_read"] += 1
+            for index in range(sent, len(rows)):
+                if not self._emit_generation(token_row=rows[index], conv_row=None):
+                    unsent += 1
+                    break
+                self._ext_rows_sent[shard.name] = index + 1
+        if unsent:
+            raise RuntimeError(f"{unsent} ext-shard row(s) could not be sent")
 
     def _flush_recipe_kb_audit(self) -> None:
         """Backfill recipe-KB reads and writes from the audit log.
@@ -1346,8 +1416,49 @@ class LangfuseEmitter:
             "counts_final": self._flushed,
             # Which reconcile steps have completed, so a receipt written after a
             # partial flush says what is still owed instead of reading as final.
+            # Scope: this process. ``ext_rows_sent`` is the cross-process part —
+            # the rows already pushed out of each on-disk shard.
             "flush_steps_done": sorted(self._flush_steps_done),
+            "ext_rows_sent": dict(self._ext_rows_sent),
         }
+
+    def _claim_one_shot(self, marker: str) -> bool:
+        """Take the cross-process claim for a once-per-session push.
+
+        The receipt is a whole-file rewrite, so two processes can both read it
+        before either writes and both emit the same one-shot observation. An
+        exclusive create resolves that in the filesystem instead: exactly one
+        caller creates the marker, every other sees ``EEXIST`` and stands down.
+
+        A claim holder that dies before emitting loses that one observation —
+        the accepted cost, since the alternative is a duplicate on every
+        concurrent shutdown. When the claim itself cannot be written (read-only
+        mount) the caller proceeds on the receipt check alone rather than
+        dropping the push.
+
+        Args:
+            marker: Short name of the one-shot push being claimed.
+
+        Returns:
+            ``True`` when this process owns the push.
+        """
+        path = trace_dir(self.session_dir) / f".{marker}.claim"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            log.debug("langfuse: %s already claimed by another process", marker)
+            return False
+        except OSError:
+            log.debug("langfuse: could not write the %s claim", marker, exc_info=True)
+            return True
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode())
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+        return True
 
     def _write_receipt(self) -> None:
         """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.

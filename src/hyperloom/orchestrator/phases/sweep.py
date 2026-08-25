@@ -13,6 +13,36 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
+#: Slack added to a conc_sweep lease on top of the task's own budget, covering
+#: server teardown and the report flush that happen after the last variant. The
+#: lease must outlive the work or the TTL watchdog fails a task that is still
+#: making progress.
+_CONC_SWEEP_LEASE_GRACE_SEC = 600
+
+
+def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
+    """Return the execution lease for a conc_sweep task, from its real budget.
+
+    The lease has to bound the task that actually runs, which is the *clamped*
+    budget — deriving it from the configured value reclaimed still-valid sweeps
+    whenever the clamp produced something larger (a non-positive configured
+    budget on a long session) or left the budget unbounded.
+
+    Args:
+        clamped_budget: The budget the task was enqueued with; ``None`` when the
+            sweep runs without a budget gate.
+
+    Returns:
+        The lease TTL in seconds, or ``0`` for an unbounded sweep. ``0`` is the
+        registry's "no lease" encoding (``reclaim_expired_running`` skips it):
+        an unbounded sweep has no deadline to expire against, so opting out
+        beats reclaiming it at an arbitrary one.
+    """
+    if clamped_budget is None or clamped_budget <= 0:
+        return 0
+    return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
+
+
 class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -160,10 +190,7 @@ class SweepPhase(PhaseHandler):
                 kind="conc_sweep",
                 params=params,
                 idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                # lease_ttl uses the configured (unclamped) total_budget_sec, an upper
-                # bound on the clamped per-task budget, so a long conc_sweep doesn't
-                # expire mid-flight.
-                lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
+                lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(

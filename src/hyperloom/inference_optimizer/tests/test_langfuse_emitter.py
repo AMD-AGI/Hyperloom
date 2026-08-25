@@ -621,6 +621,101 @@ def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
     assert em._flushed is True
 
 
+def test_ext_shard_send_failure_is_retried_without_duplicates(tmp_path, monkeypatch):
+    """A failed shard row is resumed, and the rows that landed are not re-sent."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    shard = sd / "reports" / "trace" / "ext" / "forge-7.jsonl"
+    shard.write_text(
+        "\n".join(json.dumps(_llm_row(component="forge", role=None, call_id=f"ext-{i}")) for i in range(2)) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+
+    real_emit = em._emit_generation
+    attempts = {"n": 0}
+
+    def _flaky_emit(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 2:  # the second shard row
+            return False
+        return real_emit(**kwargs)
+
+    monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
+    em.flush_session()
+    assert "ext_shards" not in em._flush_steps_done
+    assert len(client.generations) == 1
+
+    monkeypatch.setattr(em, "_emit_generation", real_emit)
+    em.flush_session()
+    assert "ext_shards" in em._flush_steps_done
+    # The row that already landed was not emitted twice.
+    assert len(client.generations) == 2
+    assert em._counts["ext_shards_read"] == 1
+
+
+def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
+    """Across processes the durable unit is the row, not the step.
+
+    A restart must not re-push rows a previous process already sent, but must
+    still pick up rows that shard grew afterwards — which is what a resumed
+    session produces.
+    """
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
+    shard.write_text(
+        json.dumps(_llm_row(component="forge", role=None, call_id="row-0")) + "\n",
+        encoding="utf-8",
+    )
+
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert len(first.generations) == 1
+    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 1}
+
+    # The resumed process appends one more row to the same shard.
+    with shard.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_llm_row(component="forge", role=None, call_id="row-1", output_tokens=777)) + "\n")
+
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    em2 = lfe.LangfuseEmitter(sd)
+    assert em2._ext_rows_sent == {"forge-1.jsonl": 1}
+    em2.flush_session()
+
+    # Only the new row was pushed; the first was not duplicated.
+    assert len(second.generations) == 1
+    assert second.generations[0].kwargs["usage_details"]["output"] == 777
+    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 2}
+
+
+def test_one_shot_push_is_claimed_across_processes(tmp_path, monkeypatch):
+    """Two processes reading the same empty receipt must not both emit."""
+    _enable_env(monkeypatch)
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    sd = _seed_trace_dir(tmp_path)
+    lfe.LangfuseEmitter(sd).record_session_start()
+    assert first.span_named("session_start") is not None
+
+    # Mimic the race: the second process read the receipt before the first wrote
+    # it, so only the claim can stop the duplicate.
+    (sd / "reports" / "trace" / "langfuse_receipt.json").unlink()
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    em2 = lfe.LangfuseEmitter(sd)
+    em2.record_session_start()
+
+    assert second.span_named("session_start") is None
+    assert em2._counts["session_start_recorded"] == 1
+
+
 def test_read_receipt_ignores_a_corrupted_payload(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
