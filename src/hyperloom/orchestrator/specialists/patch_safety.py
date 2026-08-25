@@ -193,18 +193,23 @@ def parse_patch_targets(patch_text: str) -> ParsedPatchTargets:
 def _strip_path_prefix(path: str, level: int) -> str:
     """Strip ``level`` leading path components, mimicking ``git apply -p<level>``.
 
+    Unlike the old basename-floor behaviour, a path shallower than ``level``
+    produces an empty string so the caller treats it as a non-match rather than
+    accidentally matching any tree that holds a top-level file of the same name.
+
     Args:
         path: The diff header path to strip.
         level: Number of leading components to drop (``<= 0`` is a no-op).
 
     Returns:
-        The path with ``level`` leading components removed (basename floor).
+        The path with ``level`` leading components removed, or ``""`` when the
+        path does not have enough components to strip.
     """
     if level <= 0:
         return path
     parts = path.split("/")
     if len(parts) <= level:
-        return parts[-1]
+        return ""
     return "/".join(parts[level:])
 
 
@@ -270,7 +275,17 @@ def patch_targets_missing(
         found = False
         for lvl in strip_levels:
             try:
-                if (root / _strip_path_prefix(old, lvl)).exists():
+                stripped = _strip_path_prefix(old, lvl)
+                if not stripped:
+                    continue
+                # A bare filename (no directory component) is too permissive as a
+                # match criterion: any root holding a same-named file would match,
+                # falsely implicating unrelated repos. Accept basename-only results
+                # only at the lowest strip levels where the original path had very
+                # few components and the match is genuinely unambiguous.
+                if "/" not in stripped and lvl > 1:
+                    continue
+                if (root / stripped).exists():
                     found = True
                     break
             except OSError:
@@ -814,25 +829,33 @@ def vet_patches(
     base_checkout: Path | None,
     candidate_roots: tuple[Path, ...] = (),
     explicit_root: Path | None = None,
-) -> tuple[list[str], list[dict[str, str]], dict[str, str]]:
-    """Ground one Patch set against a single checkout resolved for the set.
+) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
+    """Ground each patch in a Patch set against the candidate checkouts.
 
-    Structural rejects (unreadable / non-diff / path escape) are dropped per
-    patch first, then the survivors resolve one root together: if they do not
-    agree on one, every one of them is dropped, since applying the half that
-    agrees would leave the tree in a state no round asked for. Stale-but-valid
-    patches are kept (integrate_patch + Critic adjudicate) with a note.
+    Structural rejects (unreadable / non-diff / path escape) are dropped
+    first. Each surviving patch then resolves its own root independently:
+    a patch whose targets exist in no candidate tree is dropped as a
+    hallucination; one that cannot be placed without ambiguity is kept as
+    GROUND_UNCHECKED and flagged for the caller to report as multi-root.
+    Stale-but-valid patches are kept (integrate_patch + Critic adjudicate).
+
+    Per-patch grounding means a cross-repo set (some patches for sglang,
+    some for aiter) survives even though no single root holds all targets.
+    The fourth return value signals when kept patches span more than one
+    root, so the caller can report it distinctly from a total miss.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.
         base_checkout: The checkout the specialist worktree was cut from. It
             is offered to root resolution first and is the root a create-only
-            set lands in.
+            patch lands in.
         candidate_roots: Further checkouts offered to root resolution.
         explicit_root: Authoritative target checkout, when declared.
 
     Returns:
-        A ``(kept_paths, dropped_records, grounding_by_path)`` tuple.
+        A ``(kept_paths, dropped_records, grounding_by_path, spans_multiple_roots)``
+        tuple. ``spans_multiple_roots`` is ``True`` when kept patches resolved
+        to more than one distinct checkout.
     """
     kept: list[str] = []
     dropped: list[dict[str, str]] = []
@@ -868,53 +891,41 @@ def vet_patches(
         readable.append((path, text))
 
     if not readable:
-        return kept, dropped, grounding
+        return kept, dropped, grounding, False
+
     candidates = tuple(
         root
         for root in ((base_checkout,) if base_checkout is not None else ()) + tuple(candidate_roots)
         if Path(root).is_dir()
     )
-    resolution = resolve_patch_apply_root(
-        [text for _path, text in readable],
-        explicit_root=explicit_root,
-        candidate_roots=candidates,
-        default_root=base_checkout,
-    )
-    if resolution.reason in _GROUNDING_UNDECIDABLE_REASONS:
-        # No tree was available to ground against, so nothing here is evidence
-        # the patches are wrong. Keep them advisory and let integrate_patch,
-        # which resolves its own root, have the deciding say.
-        for path, _text in readable:
+
+    resolved_roots: set[Path] = set()
+    for path, text in readable:
+        resolution = resolve_patch_apply_root(
+            [text],
+            explicit_root=explicit_root,
+            candidate_roots=candidates,
+            default_root=base_checkout,
+        )
+        if resolution.reason in _GROUNDING_UNDECIDABLE_REASONS:
             grounding[path] = GROUND_UNCHECKED
             kept.append(path)
-        return kept, dropped, grounding
-    if resolution.root is None:
-        detail = resolution.reason
-        if resolution.matches:
-            detail += ": " + ", ".join(str(root) for root in resolution.matches)
-        for path, _text in readable:
+            continue
+        if resolution.root is None:
+            detail = resolution.reason
+            if resolution.matches:
+                detail += ": " + ", ".join(str(r) for r in resolution.matches)
             grounding[path] = GROUND_MISSING_TARGET
-            dropped.append(
-                {
-                    "path": path,
-                    "verdict": GROUND_MISSING_TARGET,
-                    "detail": detail,
-                }
-            )
-        return kept, dropped, grounding
-
-    for path, text in readable:
-        res = ground_patch_text(
-            text,
-            base_checkout=None,
-            explicit_root=resolution.root,
-        )
+            dropped.append({"path": path, "verdict": GROUND_MISSING_TARGET, "detail": detail})
+            continue
+        resolved_roots.add(resolution.root)
+        res = ground_patch_text(text, base_checkout=None, explicit_root=resolution.root)
         grounding[path] = res.verdict
         if res.is_garbage:
             dropped.append({"path": path, "verdict": res.verdict, "detail": res.detail})
             continue
         kept.append(path)
-    return kept, dropped, grounding
+    return kept, dropped, grounding, len(resolved_roots) > 1
 
 
 __all__ = [

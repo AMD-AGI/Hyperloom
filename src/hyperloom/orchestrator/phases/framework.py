@@ -1824,10 +1824,11 @@ class FrameworkPhase(PhaseHandler):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
-        # Set on every round so a drop reason cannot outlive the round it describes.
         state.enablement.last_grounding_drop_reason = [
             str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
         ]
+        if res.get("patches_span_multiple_roots"):
+            state.enablement.patches_span_multiple_roots = True
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:

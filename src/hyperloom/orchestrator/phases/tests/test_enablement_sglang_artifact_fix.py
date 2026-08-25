@@ -71,6 +71,31 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     assert res.is_garbage
 
 
+def test_basename_does_not_create_false_ambiguity(tmp_path):
+    """A deep sglang path must not match an aiter tree that holds only the same basename.
+
+    python/sglang/srt/layers/utils.py stripped at high -p levels reduces to utils.py.
+    That bare filename must not be accepted as a match, because any tree that happens
+    to hold a top-level utils.py would then be considered a candidate, triggering
+    false ambiguous_root and dropping the entire patch set.
+    """
+    sglang = tmp_path / "sglang"
+    sglang.mkdir()
+    _git("init", "-q", str(sglang))
+    sglang.joinpath("python/sglang/srt/layers").mkdir(parents=True)
+    sglang.joinpath("python/sglang/srt/layers/utils.py").write_text("one\n", encoding="utf-8")
+    _git("-C", str(sglang), "add", ".")
+    _git("-C", str(sglang), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "init")
+    aiter = _checkout(tmp_path / "aiter", "utils.py")
+
+    deep_diff = _diff("python/sglang/srt/layers/utils.py")
+    assert _ps.patch_targets_missing(deep_diff, aiter) != [], "bare basename must not match"
+
+    r = _ps.resolve_patch_apply_root((deep_diff,), explicit_root=None, candidate_roots=(sglang, aiter))
+    assert r.root is not None, f"expected sglang, got reason={r.reason!r}"
+    assert r.root.resolve() == sglang.resolve()
+
+
 _CREATE_ONLY_DIFF = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
 
 
@@ -101,7 +126,7 @@ def test_pure_create_lands_in_the_worktree_base(tmp_path):
     patch = tmp_path / "create.patch"
     patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
 
-    kept, dropped, grounding = _ps.vet_patches(
+    kept, dropped, grounding, spans_roots = _ps.vet_patches(
         [str(patch)],
         base_checkout=base,
         candidate_roots=(other,),
@@ -109,6 +134,7 @@ def test_pure_create_lands_in_the_worktree_base(tmp_path):
 
     assert kept == [str(patch)]
     assert dropped == []
+    assert not spans_roots
 
 
 def test_all_preimages_must_share_one_unique_root(tmp_path):
@@ -134,36 +160,39 @@ def test_vet_patches_rescues_a_cross_repo_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("sglang_file.py"), encoding="utf-8")
 
-    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=aiter, candidate_roots=(sglang,))
+    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=aiter, candidate_roots=(sglang,))
     assert kept == [str(patch)]
     assert dropped == []
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
+    assert not spans_roots
 
 
 def test_vet_patches_resolves_the_complete_set_once(tmp_path):
-    complete = _checkout(tmp_path / "complete", "common.py")
-    (complete / "unique.py").write_text("one\n", encoding="utf-8")
+    """A set where all targets exist in a single root is kept with no multi-root signal."""
+    complete = _checkout(tmp_path / "complete", "first_unique.py")
+    (complete / "second_unique.py").write_text("one\n", encoding="utf-8")
     _git("-C", str(complete), "add", ".")
-    _git("-C", str(complete), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "unique")
-    partial = _checkout(tmp_path / "partial", "common.py")
+    _git("-C", str(complete), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "second")
     patches = []
-    for name in ("common.py", "unique.py"):
+    for name in ("first_unique.py", "second_unique.py"):
         patch = tmp_path / f"{name}.patch"
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, dropped, grounding = _ps.vet_patches(
+    kept, dropped, grounding, spans_roots = _ps.vet_patches(
         patches,
-        base_checkout=partial,
-        candidate_roots=(complete,),
+        base_checkout=complete,
+        candidate_roots=(),
     )
 
     assert kept == patches
     assert dropped == []
     assert set(grounding.values()) == {_ps.GROUND_APPLIES}
+    assert not spans_roots
 
 
-def test_vet_patches_rejects_a_set_split_across_roots(tmp_path):
+def test_vet_patches_keeps_a_set_split_across_roots_and_reports_it(tmp_path):
+    """Each patch grounds against its own root; both are kept and spans_roots is True."""
     first = _checkout(tmp_path / "first", "first.py")
     second = _checkout(tmp_path / "second", "second.py")
     patches = []
@@ -172,15 +201,34 @@ def test_vet_patches_rejects_a_set_split_across_roots(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, dropped, grounding = _ps.vet_patches(
+    kept, dropped, grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=first,
         candidate_roots=(second,),
     )
 
+    assert set(kept) == set(patches)
+    assert dropped == []
+    assert spans_roots
+
+
+def test_vet_patches_absent_from_every_root_is_dropped(tmp_path):
+    """A patch whose target exists in no root is still dropped."""
+    first = _checkout(tmp_path / "first", "first.py")
+    second = _checkout(tmp_path / "second", "second.py")
+    ghost = tmp_path / "ghost.patch"
+    ghost.write_text(_diff("ghost.py"), encoding="utf-8")
+
+    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+        [str(ghost)],
+        base_checkout=first,
+        candidate_roots=(second,),
+    )
+
     assert kept == []
-    assert len(dropped) == 2
-    assert set(grounding.values()) == {_ps.GROUND_MISSING_TARGET}
+    assert len(dropped) == 1
+    assert grounding[str(ghost)] == _ps.GROUND_MISSING_TARGET
+    assert not spans_roots
 
 
 def test_sibling_checkouts_excludes_the_base_but_keeps_plain_trees(tmp_path):
@@ -204,10 +252,11 @@ def test_patch_grounds_against_a_non_git_tree(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("installed.py"), encoding="utf-8")
 
-    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=base, candidate_roots=(plain,))
+    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=base, candidate_roots=(plain,))
 
     assert kept == [str(patch)]
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
+    assert not spans_roots
 
 
 def test_no_tree_to_ground_against_keeps_the_patch(tmp_path):
@@ -215,21 +264,23 @@ def test_no_tree_to_ground_against_keeps_the_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("anything.py"), encoding="utf-8")
 
-    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
 
     assert kept == [str(patch)]
     assert dropped == []
     assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
+    assert not spans_roots
 
 
 def test_no_tree_to_ground_against_keeps_a_create_only_patch(tmp_path):
     patch = tmp_path / "create.patch"
     patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
 
-    kept, dropped, grounding = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
 
     assert kept == [str(patch)]
     assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
+    assert not spans_roots
 
 
 def test_no_candidate_roots_is_distinct_from_a_miss(tmp_path):

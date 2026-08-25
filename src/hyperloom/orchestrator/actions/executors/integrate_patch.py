@@ -2291,6 +2291,8 @@ class IntegratePatchExecutor:
             grounding_drops = (done_payload or {}).get("patches_dropped_by_grounding")
             if isinstance(grounding_drops, list) and grounding_drops:
                 _no_patches["patches_dropped_by_grounding"] = grounding_drops
+            if (done_payload or {}).get("patches_span_multiple_roots"):
+                _no_patches["patches_span_multiple_roots"] = True
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
