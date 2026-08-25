@@ -133,7 +133,7 @@ The following inference frameworks are supported:
      - Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency ``e2el_mean_ms`` (ms).
    * - ``custom``
      - Host-defined
-     - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle.
+     - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
 
 Container images
 ----------------
@@ -150,11 +150,11 @@ private registry mirror, set the registry prefix accordingly.
    * - Image
      - GPU
    * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi300x``
-     - MI300X / MI325X
+     - MI300X / MI308X / MI325X
    * - ``rocm/hyperloom:sglang-v0.5.17-rocm7.2.0-mi350x``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.27.1``
-     - MI300X / MI325X / MI355X
+     - MI300X / MI308X / MI325X / MI355X
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.
