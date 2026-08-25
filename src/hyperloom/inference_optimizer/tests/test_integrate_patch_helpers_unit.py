@@ -28,6 +28,33 @@ def test_resolve_framework_root_explicit_dir(tmp_path, monkeypatch):
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
+def test_resolve_framework_root_create_requires_explicit_root(tmp_path, monkeypatch):
+    root = tmp_path / "framework"
+    root.mkdir()
+    create = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(root)])
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+
+    assert ip._resolve_framework_root(None, patch_texts=[create]) is None
+    assert ip._resolve_framework_root(str(root), patch_texts=[create]) == root
+
+
+def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch):
+    roots = [tmp_path / "first", tmp_path / "second"]
+    for root in roots:
+        root.mkdir()
+        (root / "file.py").write_text("old\n", encoding="utf-8")
+    patch = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
+    monkeypatch.setattr(
+        ip,
+        "resolve_source_file_allowlist",
+        lambda: [str(root) for root in roots],
+    )
+    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+
+    assert ip._resolve_framework_root(None, patch_texts=[patch]) is None
+
+
 def test_resolve_framework_root_explicit_outside_allowlist_rejected(tmp_path, monkeypatch):
     """An explicit override outside the source allowlist must not be honoured."""
     allowed = tmp_path / "allowed"
