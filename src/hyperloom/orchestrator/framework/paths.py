@@ -711,30 +711,38 @@ def _resolve_warm_replay_patch_root(
     )
 
     diffs = [diff for diff in (_patch_source_diff(source) for source in patch_sources) if diff.strip()]
+    candidate_roots = tuple(Path(candidate.rstrip("/")) for candidate in allowlist)
+    from_env = bool(explicit_root)
     resolution = resolve_patch_apply_root(
         diffs,
         explicit_root=Path(explicit_root.rstrip("/")) if explicit_root else None,
-        candidate_roots=tuple(Path(candidate.rstrip("/")) for candidate in allowlist),
+        candidate_roots=candidate_roots,
     )
+    # The declared root is preferred, not mandatory: a session pointed at sglang
+    # can still hold a replayable vllm patch. An explicit root that simply lacks
+    # the targets therefore falls back to the allowlist instead of ending the
+    # replay, which is what "env first, then allowlist" promises.
+    if resolution.root is None and resolution.reason == "explicit_root_target_mismatch":
+        from_env = False
+        resolution = resolve_patch_apply_root(
+            diffs,
+            explicit_root=None,
+            candidate_roots=candidate_roots,
+        )
     if resolution.root is not None:
         return WarmReplayRootResolution(
             root=_normalize_root(str(resolution.root)),
-            source="env" if explicit_root else "allowlist",
+            source="env" if from_env else "allowlist",
             reason="",
-            allowlist=() if explicit_root else allowlist,
+            allowlist=() if from_env else allowlist,
         )
     reason = {
         "patch_content_missing": missing_patch_reason,
-        # All of the following mean "no tree we can safely write to" — map them
-        # to the caller's allowlist reason so the operator sees a consistent
-        # message instead of a raw internal code.
+        # Only these describe the allowlist itself: nothing was offered, nothing
+        # matched, or several matched. Every other reason names a different
+        # fault and keeps its own wording so the operator is pointed at it.
         "no_candidate_roots": missing_allowlist_reason,
         "no_matching_root": missing_allowlist_reason,
-        "ambiguous_root": missing_allowlist_reason,
-        "explicit_root_target_mismatch": missing_allowlist_reason,
-        "explicit_root_invalid": missing_allowlist_reason,
-        "patch_targets_invalid": missing_allowlist_reason,
-        "pure_create_requires_explicit_root": missing_allowlist_reason,
     }.get(resolution.reason, resolution.reason)
     return WarmReplayRootResolution(
         root="",

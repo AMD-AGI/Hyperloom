@@ -534,7 +534,7 @@ async def test_current_recipe_patch_skips_without_active_framework_root(
     assert task is None
     assert prepared == 0
     assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
-    assert coord.shared_state.warm_replay_outcome["reason"] == "framework_patch_root_not_in_allowlist"
+    assert coord.shared_state.warm_replay_outcome["reason"] == "patch_targets_invalid"
     assert coord.shared_state.warm_replay_outcome["framework_patch_root_allowlist"]
 
 
@@ -1283,7 +1283,7 @@ def test_create_only_kernel_target_requires_known_kernel_root(tmp_path, monkeypa
 
     entry = {"patch_path": str(patch)}
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
-    assert entry["resolution_reason"] == "kernel_patch_root_not_in_allowlist"
+    assert entry["resolution_reason"] == "pure_create_requires_explicit_root"
     assert "allowlist=" in entry["resolution_error"]
 
 
