@@ -692,11 +692,11 @@ One targeted-build attempt (AITER / sgl-kernel / vLLM-source).
 | `ref`                | string             | Git ref / tag used for the build.                                              |
 | `gpu_arch`           | string             | Explicit target arch (`gfx942` / `gfx950` / …).                                |
 | `max_jobs`           | int                | Parallelism cap passed to the compile.                                         |
-| `ok`                 | bool               | Whether the build + verify passed.                                             |
+| `ok`                 | bool               | Whether the build probe and install succeeded.                                 |
 | `failure_class`      | string             | One of the `FAILURE_CLASSES` values, or `"ok"`.                                |
 | `failure_summary`    | string             | Human-readable reason (agent decision input).                                  |
 | `installed_versions` | object (str → str) | torch/ref/sha/arch recorded after a successful build (see below).              |
-| `built_artifacts`    | string[]           | Verified artifact paths (up to 8).                                             |
+| `build_probes`       | string[]           | Post-build probe descriptors, e.g. `"import aiter: ok"` (up to 8).            |
 | `build_log_path`     | string             | Path to the compile log inside the attempt dir.                                |
 | `attempt_root`       | string             | Attempt directory anchoring the build.                                         |
 

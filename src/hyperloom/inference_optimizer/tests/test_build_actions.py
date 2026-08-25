@@ -30,8 +30,6 @@ def test_targeted_build_action_round_trip():
         ref="v0.1.0",
         gpu_arch="gfx950",
         max_jobs=8,
-        expected_symbols=("fp4_moe_op",),
-        expected_artifacts=("module_aiter_core*.so",),
         build_command=("python", "setup.py", "develop"),
         build_budget_sec=2400,
         envs={"AITER_REBUILD": "1"},
@@ -83,7 +81,7 @@ def test_build_result_ok_round_trip():
         ok=True,
         attempt_root="/a",
         runtime=rt,
-        built_artifacts=("/a/lib.so",),
+        build_probes=("import aiter: ok",),
         installed_versions={"torch": "2.10.0+git8514f05", "arch": "gfx950"},
         build_log_path="/a/build.log",
     )

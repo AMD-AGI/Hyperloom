@@ -180,22 +180,34 @@ def build_scope(
     return scope
 
 
-def scope_cache_key(scope: Mapping[str, Any], *, topic: str | None = None) -> str:
-    """Stable, hashable representation of (scope + optional topic).
+def scope_cache_key(
+    scope: Mapping[str, Any],
+    *,
+    topic: str | None = None,
+    kind: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Stable, hashable representation of a ``list_priors`` query.
 
-    Used by ``session_memory.SessionMemory.get_cached_priors``.
+    Encodes every parameter that changes the result set so that distinct
+    queries never share a cache entry.
 
     Args:
         scope (Mapping[str, Any]): The scope dimensions to encode.
         topic (str | None): Optional topic appended to the key.
+        kind (str | None): Optional row-kind filter.
+        limit (int): Maximum number of priors requested.
 
     Returns:
-        str: A deterministic ``key=value`` join (keys sorted), with an
-        optional ``topic=...`` suffix.
+        str: A deterministic ``key=value`` join (keys sorted), with
+        optional ``topic``, ``kind``, and ``limit`` suffixes.
     """
     parts = [f"{k}={scope[k]}" for k in sorted(scope.keys())]
     if topic:
         parts.append(f"topic={_normalise(topic)}")
+    if kind:
+        parts.append(f"kind={_normalise(kind)}")
+    parts.append(f"limit={limit}")
     return "|".join(parts)
 
 

@@ -33,6 +33,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from hyperloom.common.coerce import to_unix
+
 from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
@@ -224,7 +226,7 @@ class SqliteLeaseBackend:
             for row in rows:
                 lane = row["lane"]
                 row_holder = row["holder_id"]
-                row_expires = datetime.fromisoformat(row["expires_at"]).timestamp()
+                row_expires = to_unix(row["expires_at"], default=0.0)
                 if row_expires > now_ts:
                     holders_per_lane.setdefault(lane, set()).add(row_holder)
                 else:
@@ -441,10 +443,8 @@ class SqliteLeaseBackend:
         """Release leases whose holder process is no longer alive.
 
         Checks each not-yet-expired lease's recorded ``pid`` and deletes rows
-        whose PID is provably gone, emitting one ``lease_dead_holder_reaped``
-        event per deleted row so the dispatcher re-evaluates the freed lane
-        immediately. Rows with a null / non-positive pid are left untouched.
-        Returns the reaped rows as dicts.
+        whose PID is provably gone. Rows with a null / non-positive pid are
+        left untouched. Returns the reaped rows as dicts.
         """
         now_iso_str = _now_iso()
         reaped: list[dict] = []
@@ -465,28 +465,6 @@ class SqliteLeaseBackend:
                 cur.execute(
                     "DELETE FROM leases WHERE lane=? AND holder_id=?",
                     (row["lane"], row["holder_id"]),
-                )
-                cur.execute(
-                    "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                    "in_reply_to, payload, priority, ts) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        uuid.uuid4().hex,
-                        "resource_lock",
-                        "*",
-                        "lease_dead_holder_reaped",
-                        None,
-                        json.dumps(
-                            {
-                                "lane": row["lane"],
-                                "previous_holder": row["holder_id"],
-                                "task_id": row.get("task_id"),
-                                "dead_pid": pid,
-                            }
-                        ),
-                        2,
-                        now_iso_str,
-                    ),
                 )
                 reaped.append(row)
         if reaped:

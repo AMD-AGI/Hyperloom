@@ -23,7 +23,6 @@ Layout under ``CRITIC_SESSION_MEMORY_DIR``::
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -237,11 +236,12 @@ class SessionMemory:
         Returns:
             dict[str, Any]: The stored context, or an empty dict if none has
             been persisted yet.
+
+        Raises:
+            SessionMemoryError: If the file exists but is not a JSON object.
         """
         path = self._context_path(session_id)
-        if not path.exists():
-            return {}
-        return _read_json(path, default={})
+        return _read_object(path, default={})
 
     def save_context(self, session_id: str, context: dict[str, Any]) -> None:
         """Persist ``context`` as the session's full context.
@@ -372,7 +372,7 @@ class SessionMemory:
             list[dict[str, Any]] | None: The cached priors, or ``None`` if the
             entry is absent, malformed, or older than ``prior_cache_ttl``.
         """
-        cache = _read_json(self._priors_cache_path(session_id), default={})
+        cache = _read_object(self._priors_cache_path(session_id), default={})
         entry = cache.get(cache_key)
         if not isinstance(entry, dict):
             return None
@@ -404,7 +404,7 @@ class SessionMemory:
             raise SessionMemoryError("priors must be a list")
         self._ensure_session_dir(session_id)
         path = self._priors_cache_path(session_id)
-        cache = _read_json(path, default={})
+        cache = _read_object(path, default={})
         cache[cache_key] = {"ts": time.time(), "priors": list(priors)}
         _common_atomic_write_json(path, cache, ensure_ascii=False, indent=2, sort_keys=False, make_parents=False)
 
@@ -434,9 +434,7 @@ class SessionMemory:
             raise SessionMemoryError("msg_id and verdict are required")
         self._ensure_session_dir(session_id)
         path = self._reviewed_path(session_id)
-        data = _read_json(path, default={})
-        if not isinstance(data, dict):
-            data = {}
+        data = _read_object(path, default={})
         data[msg_id] = {
             "verdict": verdict,
             "ts": now_iso(timespec="microseconds"),
@@ -459,34 +457,33 @@ class SessionMemory:
             list[str]: The message ids that have no recorded verdict yet,
             preserving input order.
         """
-        data = _read_json(self._reviewed_path(session_id), default={})
-        if not isinstance(data, dict):
-            data = {}
+        data = _read_object(self._reviewed_path(session_id), default={})
         return [m for m in msg_ids if m not in data]
 
 
 # ---------------------------------------------------------------------------
-# Tiny JSON helpers
+# Shared JSON helper
 # ---------------------------------------------------------------------------
-def _read_json(path: Path, *, default: Any) -> Any:
-    """Read and decode a JSON file, returning ``default`` if absent.
+def _read_object(path: Path, *, default: dict[str, Any]) -> dict[str, Any]:
+    """Read a JSON object from ``path``.
 
     Args:
         path (Path): The file to read.
-        default (Any): Value returned when the file does not exist.
+        default (dict[str, Any]): Returned when the file is absent or blank.
 
     Returns:
-        Any: The decoded JSON value, or ``default`` if the file is missing.
+        dict[str, Any]: The decoded object, or ``default``.
 
     Raises:
-        SessionMemoryError: If the file exists but contains invalid JSON.
+        SessionMemoryError: If the file exists but is not a JSON object
+            (corrupt bytes, top-level array, null).
     """
     if not path.exists():
         return default
     try:
-        return _common_read_json(path, strict=True, empty_value=None)
-    except json.JSONDecodeError as exc:
-        raise SessionMemoryError(f"corrupt json at {path}: {exc}") from exc
+        return _common_read_json(path, require_dict=True, strict=True, empty_value=default)
+    except (OSError, ValueError) as exc:
+        raise SessionMemoryError(f"corrupt session memory file at {path}: {exc}") from exc
 
 
 __all__ = [

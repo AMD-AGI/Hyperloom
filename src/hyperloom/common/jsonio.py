@@ -10,9 +10,54 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-# Fenced json block; shared by every model-reply extractor.
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+# Matches a ```json or ``` fenced block, capturing its content as group 1.
+_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
 _EMPTY_UNSET = object()
+
+
+def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
+    """Yield every top-level JSON object in *text* in document order.
+
+    Uses the balanced-bracket scanner from :func:`extract_last_json_with_key`
+    to locate object spans, then decodes each one. String literals containing
+    braces are tracked so they do not produce false span boundaries.
+    """
+    spans: list[tuple[int, int]] = []
+    stack: list[tuple[str, int]] = []
+    in_string = False
+    escaped = False
+    matching = {"}": "{", "]": "["}
+    for idx, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append((char, idx))
+        elif char in "}]":
+            if not stack or stack[-1][0] != matching[char]:
+                continue
+            opener, start = stack.pop()
+            if opener == "{":
+                spans.append((start, idx + 1))
+    for start, end in sorted(spans, key=lambda s: s[0]):
+        try:
+            data = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            yield data
+
+
+def _first_json_object(text: str) -> dict[str, Any] | None:
+    """Return the first JSON object in *text*, or ``None``."""
+    return next(_iter_json_objects(text), None)
 
 
 def read_json(
@@ -139,7 +184,13 @@ def coerce_dict(value: dict[str, Any] | Path | str | None, *, default: dict[str,
     if isinstance(value, dict):
         return value
     path = Path(value) if isinstance(value, (str, Path)) else None
-    if path is None or not path.is_file():
+    if path is None:
+        return fallback
+    try:
+        is_file = path.is_file()
+    except OSError:
+        return fallback
+    if not is_file:
         return fallback
     return read_json(path, default=fallback, require_dict=True)
 
@@ -153,9 +204,10 @@ def extract_first_json_with_key(
 ) -> dict[str, Any] | None:
     """Pull a JSON object out of a model reply.
 
-    Prefers a fenced ```json block, then falls back to the bare top-level
-    object matched by *bare_re*, trimming trailing prose from the right until
-    ``json.loads`` accepts a candidate.
+    Prefers fenced ```json / ``` blocks in document order, scanning each
+    block's content with :func:`json.JSONDecoder.raw_decode` so nested braces
+    and trailing prose inside the fence do not cause false negatives.  Falls
+    back to the bare top-level object matched by *bare_re*.
 
     Args:
         text: Raw model reply that may contain a fenced or bare JSON object.
@@ -176,28 +228,19 @@ def extract_first_json_with_key(
         return isinstance(data, dict) and (required_key is None or required_key in data)
 
     found: dict[str, Any] | None = None
-    for m in _FENCED_JSON_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if _qualifies(data):
-            if not last:
-                return data
-            found = data
+    for m in _FENCED_BLOCK_RE.finditer(text):
+        for data in _iter_json_objects(m.group(1)):
+            if _qualifies(data):
+                if not last:
+                    return data
+                found = data
     if bare_re is not None:
         for m in bare_re.finditer(text):
-            candidate = m.group(1)
-            for end in range(len(candidate), 0, -1):
-                try:
-                    data = json.loads(candidate[:end])
-                except json.JSONDecodeError:
-                    continue
+            for data in _iter_json_objects(m.group(1)):
                 if _qualifies(data):
                     if not last:
                         return data
                     found = data
-                break  # parsed but wrong shape; don't keep shrinking
     return found
 
 
@@ -226,39 +269,15 @@ def extract_last_json_with_key(
     def _qualifies(data: Any) -> bool:
         return isinstance(data, dict) and (required_key is None or required_key in data)
 
-    spans: list[tuple[int, int]] = []
-    stack: list[tuple[str, int]] = []
-    in_string = False
-    escaped = False
-    matching = {"}": "{", "]": "["}
-    for index, char in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char in "{[":
-            stack.append((char, index))
-        elif char in "}]":
-            if not stack or stack[-1][0] != matching[char]:
-                continue
-            opener, start = stack.pop()
-            if opener == "{":
-                spans.append((start, index + 1))
-
-    for start, end in sorted(spans, key=lambda span: span[0], reverse=True):
-        try:
-            data = json.loads(text[start:end])
-        except json.JSONDecodeError:
-            continue
+    found: dict[str, Any] | None = None
+    for m in _FENCED_BLOCK_RE.finditer(text):
+        for data in _iter_json_objects(m.group(1)):
+            if _qualifies(data):
+                found = data
+    for data in _iter_json_objects(text):
         if _qualifies(data):
-            return data
-    return None
+            found = data
+    return found
 
 
 def iter_sse_objects(raw: str) -> Iterator[Any]:
@@ -288,7 +307,6 @@ def iter_sse_objects(raw: str) -> Iterator[Any]:
         try:
             yield json.loads(text)
         except json.JSONDecodeError:
-            # Malformed non-SSE payload: yield nothing.
             return
         return
     for block in re.split(r"\r?\n\r?\n", raw):
@@ -303,7 +321,6 @@ def iter_sse_objects(raw: str) -> Iterator[Any]:
         try:
             yield json.loads(payload)
         except json.JSONDecodeError:
-            # Skip a malformed SSE event block.
             continue
 
 

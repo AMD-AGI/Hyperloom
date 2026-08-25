@@ -913,14 +913,22 @@ async def test_aanthropic_messages_propagates_transport_errors():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", [{}, {"content": "nope"}, ["not", "a", "dict"]])
+@pytest.mark.parametrize("body", [{}, {"content": "nope"}])
 async def test_aanthropic_messages_tolerates_unreadable_reply_shapes(body):
-    """An unreadable reply yields empty text; the caller decides whether that is fatal."""
+    """An unreadable reply (dict with missing/wrong-typed fields) yields empty text."""
     client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=body))
     result = await aanthropic_messages(client, model="claude")
     assert result.text == ""
     assert result.stop_reason is None
     assert result.usage is None
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_raises_on_non_dict_body():
+    """A JSON response whose top-level type is not dict raises RuntimeError."""
+    client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=["not", "a", "dict"]))
+    with pytest.raises(RuntimeError, match="non-object"):
+        await aanthropic_messages(client, model="claude")
 
 
 def test_anthropic_version_is_defined_once_in_llm_config():

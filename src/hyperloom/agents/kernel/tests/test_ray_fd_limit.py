@@ -110,14 +110,19 @@ ensure_fd_limit_for_ray
 
 
 def _install_fake_ray_start(monkeypatch, events):
-    """Make ``ray status`` report 'down' and capture ``ray start``."""
-    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: False)
+    """Make ``ray status`` report 'down' initially, 'up' after ray start."""
+    started = False
+
+    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: started)
 
     def _fake_run(cmd, **kwargs):
+        nonlocal started
         if cmd[:2] == ["ray", "start"]:
             events.append(("ray_start", tuple(cmd)))
+            started = True
         elif cmd[:2] == ["ray", "stop"]:
             events.append(("ray_stop", tuple(cmd)))
+            started = False
         return _Proc()
 
     monkeypatch.setattr(ray_runtime.subprocess, "run", _fake_run)

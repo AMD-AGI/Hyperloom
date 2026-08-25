@@ -288,26 +288,8 @@ async def test_coordinator_wal_bloat_medium_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
-async def test_stale_lease_emits_alert_only():
-    """I3: stale_lease HIGH is strategic; the dispatcher's per-tick reap frees the lease."""
-    ladder = ActionLadder()
-    out = await ladder.decide(
-        [
-            _sym(
-                "stale_lease",
-                SymptomSeverity.HIGH,
-                evidence={"task_id": "tsk-7", "lane": "lane-1", "holder_pid": 9999},
-                subject={"task_id": "tsk-7"},
-            )
-        ],
-        tick_index=0,
-        now_unix=1.0,
-    )
-    assert [i.type for i in out.intents] == [IntentType.ALERT]
-
-
 async def test_inbox_bloat_low_emits_observation_only():
-    """I4 LOW falls to the observe tier (send_message)."""
+    """I3 LOW falls to the observe tier (send_message)."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -327,7 +309,7 @@ async def test_inbox_bloat_low_emits_observation_only():
 
 
 async def test_coordinator_zombie_alert_only():
-    """I5: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped."""
+    """I4: HIGH alert — cannot self-heal (Robustness shares the process tree); escalate auto-emit dropped."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [

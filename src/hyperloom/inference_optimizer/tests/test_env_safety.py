@@ -4,11 +4,11 @@
 """Unit tests for multi-node SSH env key validation.
 
 ``env_safety`` is the last-mile gate on keys that already entered a forward
-dict: it blocks shell/loader injection vectors (``_DENY_KEYS``) and invalid
-key shapes. Credential exclusion (``*_API_KEY``, ``*_BASE_URL``)
-happens upstream in ``infera._collect_forward_env`` (prefix whitelist) and
-the platform's pod env (operator ``--extra-env`` only); those keys are never placed
-into the forward dict, so they are not SSH-forwarded to inference pods.
+dict: it blocks shell/loader injection vectors (``BLOCKED_UNTRUSTED_ENV_NAMES``
+from ``hyperloom.common.env_safety``) and invalid key shapes. Credential
+exclusion happens upstream in ``infera._collect_forward_env`` (prefix whitelist)
+and the platform's pod env (operator ``--extra-env`` only); those keys are never
+placed into the forward dict, so they are not SSH-forwarded to inference pods.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def test_invalid_key_shape_rejected():
 
 
 def test_denylist_keys_rejected():
-    """Only exact _DENY_KEYS entries are blocked (loader/python/PATH/shell vectors)."""
+    """Names in BLOCKED_UNTRUSTED_ENV_NAMES are blocked (loader/python/PATH/shell vectors)."""
     assert not env_safety.is_forward_env_key_allowed("LD_PRELOAD")
     assert not env_safety.is_forward_env_key_allowed("PYTHONPATH")
     assert not env_safety.is_forward_env_key_allowed("PATH")
@@ -40,7 +40,7 @@ def test_denylist_keys_rejected():
 
 
 def test_non_denylist_tuning_keys_pass_shape_gate():
-    """Keys outside _DENY_KEYS pass the low-level forward gate when present."""
+    """Keys outside BLOCKED_UNTRUSTED_ENV_NAMES pass the forward gate when shape is valid."""
     assert env_safety.is_forward_env_key_allowed("NCCL_IB_HCA")
     assert env_safety.is_forward_env_key_allowed("SGLANG_USE_AITER")
 

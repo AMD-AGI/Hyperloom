@@ -18,6 +18,8 @@ from typing import Any, Iterable
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json, read_jsonl
 
+from ...session.paths import is_path_within
+
 
 # Shared helpers
 def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
@@ -239,8 +241,12 @@ def _resolve_under_session(
 
     Tries the raw path as-is, then re-roots each ``anchors`` suffix at
     ``session_dir`` (container paths like ``/workspace/runs/...`` map to the
-    wekafs ``<session_dir>/runs/...`` view). Returns the first existing
-    path, else ``None``.
+    wekafs ``<session_dir>/runs/...`` view).     Returns the first existing
+    candidate that lies inside ``session_dir``, else ``None``.
+
+    A raw path resolving outside the session is treated as a foreign view
+    and re-rooted, so a container path that also exists on this host cannot
+    resolve to another session's artifacts.
 
     Args:
         session_dir (Path): The on-disk session root to re-root under.
@@ -251,8 +257,8 @@ def _resolve_under_session(
             "kernel-agent-workspace")``.
 
     Returns:
-        Path | None: The first existing resolved path, or ``None`` when ``raw``
-        is empty / unusable or nothing resolves.
+        Path | None: An existing path inside ``session_dir``, or ``None`` when
+        ``raw`` is empty / unusable or nothing resolves inside the session.
     """
     if not raw:
         return None
@@ -260,7 +266,7 @@ def _resolve_under_session(
         p = Path(str(raw))
     except (TypeError, ValueError):
         return None
-    if p.exists():
+    if p.exists() and is_path_within(p, session_dir):
         return p
     for anchor in anchors:
         try:
@@ -268,7 +274,7 @@ def _resolve_under_session(
         except ValueError:
             continue
         candidate = session_dir.joinpath(*p.parts[idx:])
-        if candidate.exists():
+        if candidate.exists() and is_path_within(candidate, session_dir):
             return candidate
     return None
 

@@ -121,7 +121,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        return read_json(path, strict=True)
+        return read_json(path, strict=True, require_dict=True)
     except FileNotFoundError:
         # Race: file disappeared between is_file() and open(); treat as missing.
         return None
@@ -306,9 +306,12 @@ class LocalRecipeStore:
 
         Returns:
             Path: ``root`` joined with the cid's 7 path components.
+
+        Raises:
+            InvalidCanonicalIdError: If a segment is unsafe as a path
+                component, which is what keeps the join below ``root``.
         """
-        components = cid_to_path_components(canonical_id)
-        return self.root.joinpath(*components)
+        return self.root.joinpath(*cid_to_path_components(canonical_id))
 
     def _live_path(self, canonical_id: str) -> Path:
         """Return the path to a cid's live ``recipe.json``.

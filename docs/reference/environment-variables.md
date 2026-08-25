@@ -582,8 +582,8 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where out-of-process agents stage their section knowledge and files. Hyperloom creates and exports it; operators must not set it. The facade is inactive when it is absent. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
-| `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
-| `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for non-Recipe KG and Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
+| `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
+| `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `CRITIC_AGENT_`<br>`MAX_COMPLETION_TOKENS` | `32000`           | Output-token cap for one critic review call. A reply cut off at the cap is retried once at twice this value and then fails the turn, so the cap is a ceiling rather than a budget: unused headroom is never billed, while a truncated reply bills the whole call and yields nothing. Lower it for a model whose own output limit is smaller. A non-positive or unparseable value logs a warning and falls back to the default. |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
@@ -657,10 +657,20 @@ Primary switch (default **off**) for live Langfuse trace push.
   process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
   receipt whose hash does not match is ignored on read, so a torn file cannot
   suppress or replay the one-shot `session_start` / breakdown pushes.
-* **Package truncation**: The bundle caps at 5000 files / 256 MB. On a very
-  long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
-  sets `truncated: true` and lists `dropped_files`, so consumers must not treat
-  a truncated package as complete.
+* **Package completeness**: `PACKAGE_MANIFEST` describes what was actually
+  written, and `included_files` never names a file the package lacks. Check
+  `complete` before treating a package as the whole selection; it is `false`
+  whenever anything selected is absent, and the reason is itemized in
+  `dropped_files` (the bundle caps at 5000 files / 256 MB and a very long
+  session can stop it short, alongside `truncated: true`), `failed_files`
+  (the write failed) or `refused_files` (the entry was not a regular file
+  inside the session — see below). The zip and the loose tree are written
+  independently and each carries a manifest describing its own contents.
+* **Session boundary**: a session directory is shared-filesystem state that
+  agents write into, so the packager only bundles entries that resolve
+  inside the session. A symlink pointing out of the session is refused
+  rather than followed, which keeps unrelated file content from being
+  copied to the dest root and synced onward.
 * **Generation duration is ~0**: Both live and backfill stamp a single
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.

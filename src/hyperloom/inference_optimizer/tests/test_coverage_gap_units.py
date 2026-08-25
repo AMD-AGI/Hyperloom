@@ -831,8 +831,11 @@ def test_framework_audit_common_patch_sources(tmp_path: Path, monkeypatch: pytes
     )
     changes = common.parse_unified_diff(diff)
     # Deleted-file sections are filtered as placeholder sections.
-    assert [c.path for c in changes] == ["pkg/a.py"]
+    # The deleted file keeps its own path: ``+++ /dev/null`` names no target, so
+    # the ``---`` side is what the change touched.
+    assert [c.path for c in changes] == ["pkg/a.py", "pkg/old.py"]
     assert changes[0].is_new is True
+    assert changes[1].is_deleted is True
     assert common._symbols(changes[0].added) == ["Added", "run"]
 
     root = tmp_path / "src"

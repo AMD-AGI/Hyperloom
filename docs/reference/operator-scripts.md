@@ -180,9 +180,11 @@ incident response or launch validation:
 * `backfill_langfuse.py`: replay one finished session's `reports/trace/` into
   Langfuse after the fact:
   `python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD> [--dry-run]`.
-* `preflight_optimizer.py`: launcher-side local preflight for stale processes,
-  ROCm visibility, disk, and model path checks:
+* `preflight_optimizer.py`: launcher-side local preflight for stale serving
+  processes, torch/ROCm device visibility, GPU VRAM occupancy (exits non-zero
+  when any card exceeds 1% of its total capacity), and model path existence:
   `python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH`.
+  A non-zero exit must abort the launch.
 * `read_optimizer_state.py`: concise `state.json` / lifecycle summary:
   `python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR`.
 * `robustness_monitor.sh.example`: shell example for polling robustness

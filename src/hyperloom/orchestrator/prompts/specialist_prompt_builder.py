@@ -905,12 +905,6 @@ class SpecialistPromptInputs:
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
-    # KG graph-recommended knobs (cross-recipe IMPROVES candidates via the
-    # architecture family graph). Each entry: ``{knob, expected_gain, confidence, source}``.
-    kg_recommended_knobs: list[dict[str, Any]] = field(default_factory=list)
-    # KG graph-guided config knobs (journal ``KNOB_IMPROVES``) carrying runnable
-    # ``args``/``envs``. Each entry: ``{knob, args, envs, name, expected_gain, confidence, source}``.
-    kg_guided_knobs: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
     # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
@@ -1922,92 +1916,6 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# Section 5d — KG graph-recommended knobs (advisory positive candidates)
-def _section_kg_recommended(inp: SpecialistPromptInputs) -> list[str]:
-    """Render cross-recipe ``IMPROVES`` candidates from the knowledge graph.
-
-    These are advisory priors reached via the architecture family graph
-    (``USES_ARCH`` / ``VARIANT_OF``) — knobs that improved a related
-    architecture on the same hw+fw. The specialist prioritises but never
-    blindly trusts them; the Critic still gates the final answer.
-
-    Args:
-        inp: The specialist prompt inputs (reads ``kg_recommended_knobs``).
-
-    Returns:
-        The rendered graph-recommended-knobs section lines.
-    """
-    rows = ["## 5d. GRAPH-RECOMMENDED KNOBS (cross-recipe IMPROVES — advisory, prioritise but verify)", ""]
-    if not inp.kg_recommended_knobs:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
-    for entry in inp.kg_recommended_knobs:
-        if not isinstance(entry, dict):
-            continue
-        knob = str(entry.get("knob") or "").strip()
-        if not knob:
-            continue
-        meta_bits: list[str] = []
-        gain = entry.get("expected_gain")
-        if isinstance(gain, (int, float)) and gain:
-            meta_bits.append(f"gain={float(gain):+.1f}%")
-        conf = entry.get("confidence")
-        if isinstance(conf, (int, float)) and conf > 0:
-            meta_bits.append(f"conf={float(conf):.2f}")
-        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        rows.append(f"- **{knob}**{meta}")
-    if len(rows) == 2:  # header + blank only; all entries filtered out
-        rows.append(_NONE_PLACEHOLDER)
-    return rows
-
-
-# Section 5e — KG graph-guided config knobs (runnable args/envs)
-def _section_kg_guided_knobs(inp: SpecialistPromptInputs) -> list[str]:
-    """Render journal-derived ``KNOB_IMPROVES`` candidates with runnable config.
-
-    These come from prior sessions' ``optimization_journal`` config knobs that
-    kept a positive gain on the same architecture+precision. Each carries the
-    exact ``args``/``envs`` to apply, so the specialist can try them directly.
-    Advisory: the specialist verifies and the Critic still gates the answer.
-
-    Args:
-        inp: The specialist prompt inputs (reads ``kg_guided_knobs``).
-
-    Returns:
-        The rendered graph-guided-knobs section lines.
-    """
-    rows = ["## 5e. GRAPH-GUIDED CONFIG KNOBS (journal KNOB_IMPROVES — runnable, prioritise but verify)", ""]
-    if not inp.kg_guided_knobs:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
-    for entry in inp.kg_guided_knobs:
-        if not isinstance(entry, dict):
-            continue
-        args = str(entry.get("args") or "").strip()
-        envs = entry.get("envs") if isinstance(entry.get("envs"), dict) else {}
-        if not args and not envs:
-            continue
-        name = str(entry.get("name") or "").strip()
-        meta_bits: list[str] = []
-        gain = entry.get("expected_gain")
-        if isinstance(gain, (int, float)) and gain:
-            meta_bits.append(f"gain={float(gain):+.1f}%")
-        ev = entry.get("evidence_count")
-        if isinstance(ev, (int, float)) and ev:
-            meta_bits.append(f"kept={int(ev)}x")
-        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        label = name or args
-        rows.append(f"- **{label}**{meta}")
-        if args:
-            rows.append(f"  - args: `{args}`")
-        if envs:
-            env_str = " ".join(f"{k}={v}" for k, v in envs.items())
-            rows.append(f"  - envs: `{env_str}`")
-    if len(rows) == 2:  # header + blank only; all entries filtered out
-        rows.append(_NONE_PLACEHOLDER)
-    return rows
-
-
 # Section 6 — PR query capability
 def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 6 (PR query capability) of the specialist prompt.
@@ -2431,7 +2339,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     The system prompt carries the immutable contract (identity, output
     protocol, iron rules) and the user prompt carries the per-task context
     (hardware, optional PD-disaggregation, execution budget, gap, KB,
-    roofline, recipe, lessons, pitfalls, KG knobs, PR feed, source hint and
+    roofline, recipe, lessons, pitfalls, PR feed, source hint and
     orchestration notes). The split lets the LLM backend cache the system
     prompt across specialists.
 
@@ -2449,9 +2357,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     ]
     if inp.domain.key == "enablement_specialist":
         # Pre-baseline enablement: the perf context (roofline / recipe / lessons /
-        # pitfalls / KG knobs / KB subgraph) is noise when the server cannot boot
-        # or the baseline fails its accuracy eval. Carry only the failure, the
-        # tiered playbook, and the tools to discover + navigate a fix.
+        # pitfalls / KB subgraph) is noise when the server cannot boot or the
+        # baseline fails its accuracy eval. Carry only the failure, the tiered
+        # playbook, and the tools to discover + navigate a fix.
         user_sections = [
             _section_mandate(inp),
             _section_hardware(inp),
@@ -2474,8 +2382,6 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),
-            _section_kg_recommended(inp),  # KG graph-recommended knobs
-            _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
             _section_pr_feed(inp),
             _section_source_hint(inp),
         ]

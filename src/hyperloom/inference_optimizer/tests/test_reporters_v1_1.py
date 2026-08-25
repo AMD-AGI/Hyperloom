@@ -16,7 +16,6 @@ from hyperloom.inference_optimizer.breakdown.reporters._renderers.phase_timeline
 
 def _base_breakdown(**overrides):
     base = {
-        "detail_level": "standard",
         "session": {"session_id": "dj-test", "session_dir": "/tmp/session"},
         "decision_journal": [],
         "kernel_profiling": [],
@@ -83,14 +82,9 @@ def test_kernel_profiling_skipped_when_empty() -> None:
 
 
 def test_kernel_profiling_renders_top_kernels(tmp_path: Path) -> None:
-    log_dir = tmp_path / "kernel-agent" / "runs" / "sid-1" / "logs" / "tracelens_analysis"
-    log_dir.mkdir(parents=True)
-    log_file = log_dir / "run-a.log"
-    log_file.write_text("\n".join(f"line-{i}" for i in range(50)), encoding="utf-8")
     rel_log = "kernel-agent/runs/sid-1/logs/tracelens_analysis/run-a.log"
 
     bd = _base_breakdown(
-        detail_level="verbose",
         session={"session_id": "kp-test", "session_dir": str(tmp_path)},
         kernel_profiling=[
             {
@@ -129,29 +123,32 @@ def test_kernel_profiling_renders_top_kernels(tmp_path: Path) -> None:
     assert "tracelens_analysis" in sec.markdown_block
     assert "gemm_kernel" in sec.markdown_block
     assert "3 compute-bound kernels" in sec.markdown_block
-    assert "line-49" in sec.markdown_block
-    assert "line-0" not in sec.markdown_block
-    assert "line-9" not in sec.markdown_block
+    assert rel_log not in sec.markdown_block
 
 
-def test_kernel_profiling_standard_hides_cli_log_tail(tmp_path: Path) -> None:
+def test_kernel_profiling_never_reads_the_logs_it_points_at(tmp_path: Path) -> None:
+    """Artifact locations are data; rendering must not open what they name."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     (log_dir / "run.log").write_text("secret-tail-line\n", encoding="utf-8")
-    bd = _base_breakdown(
-        detail_level="standard",
-        session={"session_id": "kp-test", "session_dir": str(tmp_path)},
-        kernel_profiling=[
-            {
-                "run_id": "run-b",
-                "task_id": "t1",
-                "artifacts": {"tracelens_log": "logs/run.log"},
-                "outputs": {"tool": "tracelens_analysis", "top_kernels": []},
-            }
-        ],
-    )
-    sec = render_kp(bd)
-    assert "secret-tail-line" not in sec.markdown_block
+    outside = tmp_path.parent / "outside-the-session.log"
+    outside.write_text("outside-secret-line\n", encoding="utf-8")
+
+    for pointer in ("logs/run.log", str(outside), "../outside-the-session.log"):
+        bd = _base_breakdown(
+            session={"session_id": "kp-test", "session_dir": str(tmp_path)},
+            kernel_profiling=[
+                {
+                    "run_id": "run-b",
+                    "task_id": "t1",
+                    "artifacts": {"tracelens_log": pointer},
+                    "outputs": {"tool": "tracelens_analysis", "top_kernels": []},
+                }
+            ],
+        )
+        sec = render_kp(bd)
+        assert "secret-tail-line" not in sec.markdown_block
+        assert "outside-secret-line" not in sec.markdown_block
 
 
 def test_invocation_renderer_normalizes_and_caps_attempt_rows() -> None:

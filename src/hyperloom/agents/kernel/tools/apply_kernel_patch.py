@@ -1737,6 +1737,8 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     """
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError(f"manifest is not a JSON object: {manifest_file}")
     # The manifest is untrusted at revert time: confine every copy source to
     # the apply-time backup tree (this manifest's own directory).
     backup_root = manifest_file.resolve().parent
@@ -1900,6 +1902,8 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     """Delete backups after an integrated patch becomes the new baseline."""
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError(f"manifest is not a JSON object: {manifest_file}")
     manifest_status = str(manifest.get("status") or "")
     if manifest_status == "finalized":
         return {

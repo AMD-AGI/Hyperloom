@@ -545,11 +545,20 @@ def build(
     # discovery numeric fields discovery couldn't surface. Best-effort.
     _attach_kernel_roofline(kernel_journey, kernel_roofline)
 
-    source_files = collectors.collect_source_files(
-        sd,
-        baseline.get("benchmark_report_path"),
-        telemetry.get("profile_report_paths") or [],
-        [p.get("benchmark_report_path") for p in (sweep.get("all_variants") or []) if p.get("benchmark_report_path")],
+    source_files = _safe_collect(
+        "source_files",
+        lambda: collectors.collect_source_files(
+            sd,
+            baseline.get("benchmark_report_path"),
+            telemetry.get("profile_report_paths") or [],
+            [
+                p.get("benchmark_report_path")
+                for p in (sweep.get("all_variants") or [])
+                if p.get("benchmark_report_path")
+            ],
+        ),
+        warnings,
+        default={},
     )
 
     breakdown = {
@@ -857,8 +866,8 @@ def write_minimal_final_report(
 ) -> Path:
     """cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1.
 
-    Stays minimal (one SharedState read) so it never raises or blocks
-    shutdown. Idempotent: never overwrites an existing ``reports/final.md``.
+    Stays minimal (one SharedState read) so it does not block shutdown.
+    Idempotent: never overwrites an existing ``reports/final.md``.
 
     Args:
         session_dir: The hyperloom session directory.
@@ -867,6 +876,11 @@ def write_minimal_final_report(
 
     Returns:
         The path of the (existing or newly written) ``final.md`` file.
+
+    Raises:
+        OSError: If the destination cannot be read or written; returning a
+            path to a file that was never written would be worse. The
+            teardown caller logs it rather than masking the stop_reason.
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
     from ..session.session_paths import reports_dir
@@ -1009,8 +1023,8 @@ def write_minimal_final_json(
     compact JSON summary from ``state.json`` so a consumable result always
     exists.
 
-    Stays minimal (one SharedState read) so it never raises or blocks
-    shutdown. Idempotent: never overwrites an existing non-empty
+    Stays minimal (one SharedState read) so it does not block shutdown.
+    Idempotent: never overwrites an existing non-empty
     ``reports/final.json`` (so it can never clobber a full ReportExecutor
     summary).
 
@@ -1021,6 +1035,11 @@ def write_minimal_final_json(
 
     Returns:
         The path of the (existing or newly written) ``final.json`` file.
+
+    Raises:
+        OSError: If the destination cannot be read or written; returning a
+            path to a file that was never written would be worse. The
+            teardown caller logs it rather than masking the stop_reason.
     """
     from datetime import datetime, timezone
 
@@ -1071,8 +1090,8 @@ def write_minimal_final_json(
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most
-        # useful, since nobody was watching. Kept to the same one-shot, never-
-        # raising contract as the rest of this function.
+        # useful, since nobody was watching. One-shot, and non-raising on
+        # every path it probes.
         "platform": _crash_safe_platform(state.gpu_type),
     }
 

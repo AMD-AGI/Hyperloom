@@ -146,6 +146,8 @@ def test_grid_runner_emits_expected_error_class_labels():
         "magpie_nonzero_invalid_measurement",
         "benchmark_report_missing",
         "benchmark_report_invalid_metric",
+        "magpie_nonzero_after_valid_measurement",
+        "killed_overtime",
     }
     missing = [label for label in expected if f'"{label}"' not in src]
     assert not missing, f"missing error_class labels in run_grid: {missing}"

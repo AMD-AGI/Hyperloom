@@ -237,3 +237,46 @@ def test_custom_thresholds_apply():
     names = {s.name for s in out}
     assert "critic_kb_outage" in names
     assert "critic_prune_stuck" in names
+
+
+# critic_unavailable_streak ordering (ids route these through the sort path)
+
+
+def _rv(seq: int, source: str) -> dict:
+    return {
+        "id": seq,
+        "agent": "critic",
+        "topic": "review_verdict",
+        "payload": {"source": source, "target_proposal_msg_id": f"p{seq}"},
+        "ts": None,
+    }
+
+
+def test_streak_fires_when_outage_is_current():
+    coord_events = [
+        _rv(1, "ok"),
+        _rv(2, "critic_unavailable"),
+        _rv(3, "critic_unavailable"),
+        _rv(4, "critic_unavailable"),
+    ]
+    out = evaluate_critic_health_signals(
+        _ctx(),
+        SourceData(coordinator_events=coord_events),
+        config=CriticHealthConfig(min_unavailable_verdicts=3),
+    )
+    assert any(s.name == "critic_unavailable_streak" for s in out)
+
+
+def test_streak_silent_when_outage_already_resolved():
+    coord_events = [
+        _rv(1, "critic_unavailable"),
+        _rv(2, "critic_unavailable"),
+        _rv(3, "critic_unavailable"),
+        _rv(4, "ok"),
+    ]
+    out = evaluate_critic_health_signals(
+        _ctx(),
+        SourceData(coordinator_events=coord_events),
+        config=CriticHealthConfig(min_unavailable_verdicts=3),
+    )
+    assert all(s.name != "critic_unavailable_streak" for s in out)

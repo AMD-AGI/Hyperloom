@@ -10,17 +10,34 @@ narrates ``key_facts``.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "Decision",
     "RenderedSection",
     "RendererFn",
     "REGISTRY",
+    "as_dict",
     "register_renderer",
+    "render_section",
 ]
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """Narrow a breakdown section to a mapping, since no producer is schema-checked.
+
+    Args:
+        value: A breakdown section value.
+
+    Returns:
+        ``value`` when it is a dict, otherwise ``{}``.
+    """
+    return value if isinstance(value, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -95,6 +112,35 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
         return fn
 
     return _wrap
+
+
+def render_section(
+    section_id: str,
+    fn: RendererFn,
+    breakdown: dict[str, Any],
+) -> RenderedSection:
+    """Run one renderer so a failing section costs itself, not the report.
+
+    The failure is reported as a data-quality warning, which the compose
+    layer renders in the section body and the executive summary.
+
+    Args:
+        section_id: Registry id of the renderer, used for the fallback title.
+        fn: The renderer to invoke.
+        breakdown: The parsed ``session_breakdown.json`` dict.
+
+    Returns:
+        The renderer's section, or a placeholder naming the failure.
+    """
+    try:
+        return fn(breakdown)
+    except Exception as exc:  # noqa: BLE001 — one bad section must not lose the report
+        log.exception("report section %s failed to render", section_id)
+        return RenderedSection(
+            section_id=section_id,
+            title=section_id.replace("_", " ").title(),
+            warnings=[f"section could not be rendered: {type(exc).__name__}: {exc}"],
+        )
 
 
 # Small markdown helpers.

@@ -12,7 +12,6 @@ import pytest
 
 from hyperloom.agents.robustness.state_store import (
     DetectorStateStore,
-    DetectorStateView,
 )
 
 
@@ -115,13 +114,6 @@ def test_view_load_save_roundtrip(tmp_path: Path) -> None:
     store.flush_atomic()
     again = DetectorStateStore(session_dir=tmp_path).view("gpu_leak").load()
     assert again == {"consecutive_hits": 3}
-
-
-def test_in_memory_view_is_noop(tmp_path: Path) -> None:
-    view = DetectorStateView(store=None, slot="gpu_leak")
-    assert view.load() == {}
-    view.save({"consecutive_hits": 99})
-    assert view.load() == {}
 
 
 def test_save_slot_rejects_non_dict(tmp_path: Path) -> None:

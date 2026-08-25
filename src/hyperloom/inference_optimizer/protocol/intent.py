@@ -14,6 +14,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from hyperloom.common.coerce import to_int
+
+
+# Mirrors the emit-time frozensets in agents/robustness/role/envelope.py and
+# agents/critic/runtime/intent_envelope.py; duplicated because ``protocol`` may
+# not import ``agents``.
+_ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
+_ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
+
 
 # ---------------------------------------------------------------------------
 class IntentType(str, Enum):
@@ -90,6 +99,9 @@ class IntentValidationError(RuntimeError):
 def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
     """Validate the top-level envelope shape + per-intent payloads.
 
+    Checks both structural constraints (required keys, correct types) and
+    value constraints (enum membership, numeric ranges, non-empty strings).
+
     Args:
         envelope (dict[str, Any]): The decoded envelope, expected to carry
             an ``intents`` list of ``{intent_type, payload}`` items.
@@ -98,8 +110,8 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
         list[Intent]: The validated intents in envelope order.
 
     Raises:
-        IntentValidationError: On any structural issue so the caller can
-            surface a single repair-prompt path.
+        IntentValidationError: On any structural or value issue so the caller
+            can surface a single repair-prompt path.
     """
     if not isinstance(envelope, dict):
         raise IntentValidationError(f"envelope must be object, got {type(envelope).__name__}")
@@ -129,8 +141,55 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
                 )
         if it is IntentType.REVIEW_VERDICT:
             _validate_review_verdict_payload(payload, index=i)
+        elif it is IntentType.ALERT:
+            _validate_alert_payload(payload, index=i)
+        elif it is IntentType.EXTEND_LEASE:
+            _validate_extend_lease_payload(payload, index=i)
         validated.append(Intent(type=it, payload=dict(payload)))
     return validated
+
+
+def _validate_alert_payload(payload: dict[str, Any], *, index: int) -> None:
+    """Enforce ALERT value constraints: severity enum, non-empty summary.
+
+    Args:
+        payload: The ALERT intent payload to validate.
+        index: Position of the intent in the envelope (for error messages).
+
+    Raises:
+        IntentValidationError: If severity is not in :data:`_ALERT_SEVERITIES`
+            or summary is not a non-empty string.
+    """
+    severity = payload.get("severity")
+    if not isinstance(severity, str) or severity not in _ALERT_SEVERITIES:
+        raise IntentValidationError(
+            f"intents[{index}] (type=alert).severity must be one of {sorted(_ALERT_SEVERITIES)!r}, got {severity!r}"
+        )
+    summary = payload.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise IntentValidationError(f"intents[{index}] (type=alert).summary must be a non-empty string")
+
+
+def _validate_extend_lease_payload(payload: dict[str, Any], *, index: int) -> None:
+    """Enforce EXTEND_LEASE value constraints: non-empty task, positive seconds.
+
+    Args:
+        payload: The EXTEND_LEASE intent payload to validate.
+        index: Position of the intent in the envelope (for error messages).
+
+    Raises:
+        IntentValidationError: If task_id is not a non-empty string or
+            extra_sec is not a positive integer.
+    """
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise IntentValidationError(f"intents[{index}] (type=extend_lease).task_id must be a non-empty string")
+    extra_sec = to_int(payload.get("extra_sec"))
+    if extra_sec is None or extra_sec <= 0:
+        raise IntentValidationError(
+            f"intents[{index}] (type=extend_lease).extra_sec must be a positive integer, "
+            f"got {payload.get('extra_sec')!r}"
+        )
 
 
 def _validate_review_verdict_payload(
@@ -138,8 +197,8 @@ def _validate_review_verdict_payload(
     *,
     index: int,
 ) -> None:
-    """Enforce REVIEW_VERDICT structural shape: exactly one of ``verdict``
-    (single) or ``verdict_map`` (per-variant batch) must be present.
+    """Enforce REVIEW_VERDICT shape: exactly one of ``verdict`` (single) or
+    ``verdict_map`` (per-variant batch), each carrying a recognised verdict.
 
     Args:
         payload: The REVIEW_VERDICT intent payload to validate.
@@ -147,7 +206,8 @@ def _validate_review_verdict_payload(
 
     Raises:
         IntentValidationError: If neither or both of ``verdict`` and
-            ``verdict_map`` are present, or ``verdict_map`` is malformed.
+            ``verdict_map`` are present, ``verdict_map`` is malformed, or any
+            verdict is not in :data:`_ALLOWED_VERDICTS`.
     """
     has_single = "verdict" in payload
     has_map = "verdict_map" in payload
@@ -160,6 +220,13 @@ def _validate_review_verdict_payload(
         raise IntentValidationError(
             f"intents[{index}] (type=review_verdict): 'verdict' and 'verdict_map' are mutually exclusive"
         )
+    if has_single:
+        v = payload["verdict"]
+        if not isinstance(v, str) or v not in _ALLOWED_VERDICTS:
+            raise IntentValidationError(
+                f"intents[{index}] (type=review_verdict).verdict must be one of "
+                f"{sorted(_ALLOWED_VERDICTS)!r}, got {v!r}"
+            )
     if has_map:
         vm = payload["verdict_map"]
         if not isinstance(vm, dict) or not vm:
@@ -181,6 +248,12 @@ def _validate_review_verdict_payload(
             if "verdict" not in entry:
                 raise IntentValidationError(
                     f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}] missing required 'verdict' key"
+                )
+            ev = entry["verdict"]
+            if not isinstance(ev, str) or ev not in _ALLOWED_VERDICTS:
+                raise IntentValidationError(
+                    f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}].verdict "
+                    f"must be one of {sorted(_ALLOWED_VERDICTS)!r}, got {ev!r}"
                 )
 
 

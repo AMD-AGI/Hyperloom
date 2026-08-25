@@ -37,7 +37,6 @@ src/hyperloom/agents/robustness/
 │   ├── envelope.py         # IntentType / Intent / build_* helpers (mirror upstream)
 │   ├── prompt_inputs.py    # Coordinator prompt -> ReactorContext
 │   ├── findings.py         # JSONL append sink for Findings
-│   ├── postmortem.py       # session-end postmortem finalizer
 │   └── reactor.py          # Reactor.tick() pipeline driver
 ├── decision/
 │   ├── policy_aware.py     # local PolicyGate-equivalent payload guard
@@ -189,7 +188,6 @@ listed below.
 | `kernel_opt_no_progress` | high | `alert(high)` + `prune_branch(kernel_opt)` | `kernel_pipeline` |
 | `state_json_corrupt` | high | `alert(high)` | `state_integrity` |
 | `coordinator_wal_bloat` (≥ warn / ≥ critical bytes) | medium / high | `alert(medium)` / `alert(high)` | `state_integrity` |
-| `stale_lease` | high | `alert(high)` | `state_integrity` |
 | `inbox_bloat` (≥ warn / ≥ critical bytes) | low / medium | `send_message(observation)` / `alert(medium)` | `state_integrity` |
 | `coordinator_zombie` | high | `alert(high)` | `state_integrity` |
 | `gateway_auth_outage` | high | `alert(high)` | `external_deps` |
@@ -227,18 +225,20 @@ The rest read `SourceData`, collected by:
   * `state.json` / WAL / lease integrity, decision-audit and critic-workdir
     scans, and the external-dependency probes (gateway `/models`, source
     mounts, TraceLens CLI)
-* **Quiet stub** — substituted when `Config.disable_local_probe` is set
+* **Blind stub** — substituted when `Config.disable_local_probe` is set
   (the multi-node default). Returns an empty snapshot without raising, so
   probe-derived rules stay silent instead of false-firing on a single pod.
 
 LocalProbe stays small-scope by design: it only collects what the agent
 itself can see, so on multi-node it sees one pod and is therefore disabled.
 
-`DegradeRouter` keeps the collector behind a silent fallback: after
+`DegradeRouter` wraps that single collector in a backoff: after
 `source_fail_threshold` (default 3) consecutive failures it serves an empty
 snapshot instead, and re-probes every `source_recheck_interval_s` (default
 30s). A tick therefore degrades to "no data" rather than failing outright.
-State transitions emit one WARN log; no spam in steady state.
+Empty snapshots carry `local_processes_known=False` so an absent process is
+not read as evidence that nothing is running. State transitions emit one WARN
+log; no spam in steady state.
 
 ## LLM RCA
 
@@ -274,24 +274,6 @@ Fields: `tick_index`, `timestamp_unix`, `symptom_name`, `severity`,
 
 These records are the hand-off point for a future findings publisher;
 today they remain local-only.
-
-## Session-end postmortem
-
-When the Coordinator sets `state.json::stop_reason` (run wind-down)
-the reactor fires :class:`hyperloom.agents.robustness.role.postmortem.PostmortemFinalizer`
-exactly once. It aggregates the in-session findings + per-task
-`runs/<action>/<task_id>/result.json` into:
-
-```
-{session_dir}/reports/robustness_postmortem.md   # flashpoint + catalogue + per-action summary
-{session_dir}/reports/decision_trace.json        # machine-readable per-task ledger
-{session_dir}/reports/.robustness_finalized      # idempotency marker
-```
-
-Disable via `Config.finalize_enabled=False`. Operators can re-run the
-finalizer post-hoc via
-`hyperloom.agents.robustness.role.postmortem.finalize_session(session_dir, session_id=...)`
-(noop when the marker exists).
 
 ## Critic feedback loop
 

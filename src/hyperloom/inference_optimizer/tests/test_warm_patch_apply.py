@@ -15,6 +15,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _apply_warm_patches,
     _create_patch_snapshot,
     _resolve_recipe_patch_target,
+    _restore_patch_snapshot,
     _revert_patches,
     _revert_warm_patch_state,
 )
@@ -93,7 +94,6 @@ def test_apply_single_patch(fake_repo, output_dir):
                 "repo": "ROCm/vllm",
             }
         ],
-        "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert len(result) == 1
@@ -103,29 +103,9 @@ def test_apply_single_patch(fake_repo, output_dir):
     assert "patched = True" in content
 
 
-def test_blocked_patch_skipped(fake_repo, output_dir):
-    """Patches in blocked_patches should be skipped."""
-    params = {
-        "patches": [
-            {
-                "patch_file": "vllm/fp8.py",
-                "patch_content": VALID_PATCH,
-                "patch_ref": "",
-                "measured_gain_pct": 24.9,
-                "repo": "ROCm/vllm",
-            }
-        ],
-        "blocked_patches": [{"patch_file": "vllm/fp8.py"}],
-    }
-    result = _apply_warm_patches(params, str(fake_repo), output_dir)
-    assert result == []
-    content = (fake_repo / "vllm" / "fp8.py").read_text()
-    assert "patched = True" not in content
-
-
 def test_no_patches_returns_empty(output_dir):
     """No patches -> empty result, no crash."""
-    params = {"patches": [], "blocked_patches": []}
+    params = {"patches": []}
     result = _apply_warm_patches(params, "/some/path", output_dir)
     assert result == []
 
@@ -314,7 +294,6 @@ def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
                 "repo": "ROCm/vllm",
             }
         ],
-        "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
@@ -334,7 +313,6 @@ def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
                 "repo": "ROCm/vllm",
             }
         ],
-        "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
@@ -971,3 +949,75 @@ async def test_required_rollback_failure_is_returned_unchanged():
     assert result["status"] == "required_patch_rollback_failed"
     assert result["warm_replay_rollback"]["ok"] is False
     assert "warm_replay_partial" not in result
+
+
+# ---------------------------------------------------------------------------
+# Snapshot / restore must not depend on guessing the strip level
+# ---------------------------------------------------------------------------
+
+
+# Four components, so only -p2 strips down to the real ``pkg/mod.py``.
+_DEEP_PREFIX_PATCH = """\
+diff --git a/x/pkg/mod.py b/x/pkg/mod.py
+--- a/x/pkg/mod.py
++++ b/x/pkg/mod.py
+@@ -1 +1,2 @@
+ original = True
++patched = True
+"""
+
+
+def _git_repo_with(tmp_path, rel, body):
+    repo = tmp_path / "repo"
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(body, encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+    for cfg in (["user.email", "t@t"], ["user.name", "t"]):
+        subprocess.run(["git", "config", *cfg], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=str(repo), capture_output=True, check=True)
+    return repo
+
+
+def test_snapshot_covers_the_path_a_non_default_strip_level_touches(tmp_path, output_dir):
+    """The header needs -p2 to reach the real file; the snapshot must still cover it.
+
+    Assuming -p1 records ``x/pkg/mod.py``, which the apply never touches, so the
+    restore is a no-op and the candidate's edit survives into the next bench.
+    """
+    repo = _git_repo_with(tmp_path, "pkg/mod.py", "original = True\n")
+    before = (repo / "pkg/mod.py").read_text(encoding="utf-8")
+
+    manifest = _create_patch_snapshot(str(repo), [_DEEP_PREFIX_PATCH], output_dir)
+    assert "pkg/mod.py" in [row["path"] for row in manifest["paths"]]
+
+    patch_file = tmp_path / "deep.patch"
+    patch_file.write_text(_DEEP_PREFIX_PATCH, encoding="utf-8")
+    applied = subprocess.run(
+        ["git", "apply", "-p2", str(patch_file)],
+        cwd=str(repo),
+        capture_output=True,
+    )
+    assert applied.returncode == 0, applied.stderr.decode()
+    assert (repo / "pkg/mod.py").read_text(encoding="utf-8") != before
+
+    result = _restore_patch_snapshot(manifest)
+    assert result["ok"], result["errors"]
+    assert (repo / "pkg/mod.py").read_text(encoding="utf-8") == before
+
+
+def test_snapshot_restores_a_file_the_patch_created(tmp_path, output_dir):
+    """A created file must be removed on restore, not left behind."""
+    repo = _git_repo_with(tmp_path, "pkg/keep.py", "keep = True\n")
+    created = repo / "pkg/new.py"
+
+    manifest = _create_patch_snapshot(
+        str(repo),
+        ["--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1 @@\n+added = True\n"],
+        output_dir,
+    )
+    created.write_text("added = True\n", encoding="utf-8")
+
+    result = _restore_patch_snapshot(manifest)
+    assert result["ok"], result["errors"]
+    assert not created.exists()

@@ -5282,9 +5282,6 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
-    # Only forward --top-k on an explicit override; else the tool applies its own default.
-    if payload.get("top_k") is not None:
-        cmd += ["--top-k", str(payload.get("top_k"))]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:

@@ -23,11 +23,11 @@ from hyperloom.orchestrator.actions.executors._proposal_identity import (
 
 # (label, extra_args, extra_envs, variant controls, base controls, expected fingerprint)
 _GOLDEN = [
-    ("plain", "--max-num-seqs 128", {"A": "1"}, ([], [], "append"), ([], [], ""), "caacd6bf1da76201"),
-    ("variant-only", "--max-num-seqs 128", {"A": "1"}, (["--x"], ["E"], "append"), ([], [], ""), "39cfaf303d04885d"),
-    ("base-only", "--max-num-seqs 128", {"A": "1"}, ([], [], "append"), (["--b"], ["BE"], ""), "e85521a43890c743"),
-    ("both", "--max-num-seqs 128", {"A": "1"}, (["--x"], ["E"], "append"), (["--b"], ["BE"], ""), "1e630973fad523ab"),
-    ("overlap", "--max-num-seqs 128", {}, (["--b"], [], "append"), (["--b"], [], ""), "9cb8463804e7a11c"),
+    ("plain", "--max-num-seqs 128", {"A": "1"}, ([], [], "append"), ([], [], ""), "0ab03ba33fdfbe41"),
+    ("variant-only", "--max-num-seqs 128", {"A": "1"}, (["--x"], ["E"], "append"), ([], [], ""), "057f597995c4b19c"),
+    ("base-only", "--max-num-seqs 128", {"A": "1"}, ([], [], "append"), (["--b"], ["BE"], ""), "4930b4d6a6fe14c9"),
+    ("both", "--max-num-seqs 128", {"A": "1"}, (["--x"], ["E"], "append"), (["--b"], ["BE"], ""), "cf0be9ec6cf0fe3c"),
+    ("overlap", "--max-num-seqs 128", {}, (["--b"], [], "append"), (["--b"], [], ""), "ed71997299911ca9"),
     ("variant-replace", "", {"A": "1"}, ([], [], "replace"), ([], [], ""), "7f4d4d32a84df525"),
     ("base-replace", "", {"A": "1"}, ([], [], "append"), ([], [], "replace"), "7f4d4d32a84df525"),
     ("removal-only", "", {}, (["--enable-prefix-caching"], [], "append"), ([], [], ""), "ca4d2e9e9760543a"),

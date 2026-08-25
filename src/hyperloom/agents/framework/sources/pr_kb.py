@@ -23,15 +23,6 @@ from ..pr_kb_slug import files_slug, normalise_repo, repo_slug, slug_prefix
 _log = get_logger(__name__)
 
 
-def _min_relevance() -> float:
-    """Return the query relevance floor (``PR_KB_MIN_RELEVANCE``, default 0.2)."""
-    raw = os.environ.get("PR_KB_MIN_RELEVANCE", "")
-    try:
-        return float(raw) if raw else 0.2
-    except ValueError:
-        return 0.2
-
-
 def _candidate(repo_url: str, repo_n: str, number: int, *, title: str = "", labels: tuple[str, ...] = ()) -> Candidate:
     """Build a gbrain_pr_kb Candidate from a repo + PR number."""
     return Candidate(
@@ -85,7 +76,6 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
 
     # semantic query — scoped to this repo's meta prefix.
     meta_prefix = f"{slug_prefix()}-meta/{repo_slug(repo_n)}/pr/"
-    floor = _min_relevance()
     try:
         hits = client.query(request.gap_description or " ".join(request.keywords), limit=limit * 3)
     except GbrainPageError as exc:
@@ -94,9 +84,6 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
     for hit in hits:
         slug = str(hit.get("slug") or hit.get("path") or "")
         if not slug.startswith(meta_prefix):
-            continue
-        rel = hit.get("score", hit.get("relevance"))
-        if isinstance(rel, (int, float)) and float(rel) < floor:
             continue
         tail = slug.rsplit("/", 1)[-1]
         if not tail.isdigit():

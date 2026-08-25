@@ -96,7 +96,7 @@ the ordered Explore/Framework overlay timeline, and Kernel GEMM/Fusion/Rewrite
 content. Remote mode does not construct the local Recipe dispatcher or fall
 back to local Recipe data. Runtime amendments are skipped and CLOSE performs
 one best-effort final write. Optional `GBRAIN_*` credentials remain available
-only to non-Recipe KG and Framework PR capabilities.
+for Framework PR capabilities.
 
 Configuration replay requires an exact precision match. A bf16 run does not
 select an fp16 record, or vice versa, during degraded warm-start search. If an
