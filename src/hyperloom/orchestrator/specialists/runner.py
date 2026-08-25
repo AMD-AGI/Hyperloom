@@ -1196,6 +1196,14 @@ class SpecialistRunner:
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
+        if sub_result.worktree_clean_with_patches:
+            notes.append("worktree_clean_with_patches")
+        capture_root: Path | None = None
+        if sub_result.worktree_capture_path:
+            patches_for_finalize = [sub_result.worktree_capture_path]
+            capture_root = prep.worktree_base
+        else:
+            patches_for_finalize = list(sub_result.patches)
         return self._finalize(
             ctx=ctx,
             prep=prep,
@@ -1204,7 +1212,8 @@ class SpecialistRunner:
             tool_violations=[],
             backend_error=backend_error,
             extra_notes=notes,
-            patches_written=list(sub_result.patches),
+            patches_written=patches_for_finalize,
+            capture_root=capture_root,
         )
 
     # Finalize phase (shared)
@@ -1219,6 +1228,7 @@ class SpecialistRunner:
         backend_error: str,
         extra_notes: list[str],
         patches_written: list[str],
+        capture_root: Path | None = None,
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
@@ -1235,6 +1245,9 @@ class SpecialistRunner:
             tool_violations (list[str]): Non-specialist intent types seen.
             backend_error (str): Backend/subprocess error string, if any.
             extra_notes (list[str]): Notes to carry into the result.
+            capture_root (Path | None): When the patch list came from a
+                worktree git-diff capture, this is the tree the diff was
+                taken from and is used as explicit_root for vet_patches.
             patches_written (list[str]): Patch paths discovered by the run.
 
         Returns:
@@ -1362,11 +1375,12 @@ class SpecialistRunner:
             base_checkout,
         )
         explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
+        vet_explicit_root = capture_root or (Path(explicit_value) if explicit_value else None)
         kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
-            explicit_root=Path(explicit_value) if explicit_value else None,
+            explicit_root=vet_explicit_root,
         )
         all_dropped_by_grounding = bool(
             deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
@@ -1390,6 +1404,8 @@ class SpecialistRunner:
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
         if patches_span_multiple_roots:
             done_payload["patches_span_multiple_roots"] = True
+        if "worktree_clean_with_patches" in notes:
+            done_payload["worktree_clean_with_patches"] = True
         if not kept:
             done_payload["empty"] = not bool(done_payload.get("proposal_set"))
         notes.extend(safety.notes())
@@ -1406,6 +1422,8 @@ class SpecialistRunner:
             status = "partial"
         if recovered:
             notes.append("recovered_from_partial")
+        if notes:
+            done_payload["_specialist_notes"] = list(notes)
 
         return SpecialistRunResult(
             task_id=ctx.task.task_id,
