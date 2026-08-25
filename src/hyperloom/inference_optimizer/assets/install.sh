@@ -1727,6 +1727,11 @@ chain_kernel_agent
 # Gated on the KernelForge checkout (not the backend): the default-geak install a
 # later forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
+# ROCm profiler hotfix: overlay rocclr/roctracer and sync them into torch's lib/
+# so torch.profiler records HIP-graph replay kernels (Hyperloom #747).
+# shellcheck source=rocm_profiler_hotfix_lib.sh
+source "${_script_dir}/rocm_profiler_hotfix_lib.sh"
+apply_rocm_profiler_hotfix
 # tree-reform.MD P2.5: framework-agent was promoted into
 # src/hyperloom/agents/framework/ (single hyperloom distribution), so the
 # `fa` CLI is already installed by ensure_inference_optimizer() above; no

@@ -126,7 +126,10 @@ The backend runs `install_baremetal.sh` in five phases:
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
+3. **ROCm hotfix**: downloads the profiler hotfix release asset, overlays
+   `libamdhip64` / `libroctracer64` under `/opt/rocm/lib`, and copies the
+   resolved libraries into PyTorch's bundled `torch/lib/` so `torch.profiler`
+   records HIP-graph replay kernels on stock official images (see #747).
 4. **Credentials**: resolves LLM gateway credentials into `.env`.
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
@@ -166,6 +169,14 @@ HYPERLOOM_DOCKER_TARGET_HOST=<hostname>
 ```
 
 The demo skill reads this value to target the chosen host.
+
+Inside the container, run
+`src/hyperloom/inference_optimizer/assets/install.sh` (or let the demo skill
+chain to it). That installer applies the same ROCm profiler hotfix as bare-metal
+setup: official SGLang/vLLM ROCm images ship stock rocclr/roctracer libraries
+that omit HIP-graph replay kernel events during decode profiling; `install.sh`
+overlays the hotfix libraries and syncs them into `torch/lib/` automatically when
+the ROCm 7.2 stack is eligible.
 
 ### Environment written by setup
 

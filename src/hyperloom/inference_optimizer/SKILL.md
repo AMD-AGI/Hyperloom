@@ -350,6 +350,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | **Magpie** (`pip install "$MAGPIE_PACKAGE_SPEC"`; default spec pins `magpie-eval` to `$MAGPIE_REF`) | `ensure_magpie` |
 | `INFERENCEX_PATH` resolution (honours a pre-existing `$INFERENCEX_PATH`, else clones `$INFERENCEX_REPO` pinned to `$INFERENCEX_REF` into `$INFERENCEX_DEFAULT_DIR` = `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>`, reusing an existing checkout there on re-runs) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
+| ROCm profiler hotfix (`libamdhip64` / `libroctracer64` overlay + torch lib sync) | `apply_rocm_profiler_hotfix` (via `rocm_profiler_hotfix_lib.sh`) |
 
 Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
 of `src/hyperloom/inference_optimizer/assets/install.sh`):
