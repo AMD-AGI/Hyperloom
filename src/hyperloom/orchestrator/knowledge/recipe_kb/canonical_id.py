@@ -21,6 +21,7 @@ Adds two local-store-specific helpers:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from hyperloom.inference_optimizer.recipe_snapshot_constants import (
@@ -36,7 +37,8 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     recipe_canonical_id,
 )
 
-from ._path_safety import SLUG_PART_RE
+# One canonical-id segment: a path component safe to join onto a store root.
+SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 
 
 # Documented prefix for recipe-snapshot v2 ids; bumping it is a compatibility
