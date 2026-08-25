@@ -39,7 +39,7 @@ The CLI starts a Python Coordinator that coordinates:
     probe surfaces as a HIGH false positive that floods the bus. The CLI
     auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
     WARNING; pass `--robustness-mock` explicitly to suppress it. See
-    `src/hyperloom/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
+    `$HYPERLOOM_PKG/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
 State lives under a **session directory** (per optimization run).
 The **workspace root** is ``$USER_DATA_PATH`` (default
@@ -114,7 +114,7 @@ host make "latest" pick the wrong run.
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`; when unset,
-`src/hyperloom/agents/kernel/scripts/install.sh` clones
+`$HYPERLOOM_PKG/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
 an explicit operator override — export `TRACELENS_ROOT=<path>` to opt
@@ -136,7 +136,7 @@ Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:
 `/sgl-workspace/{aiter,sglang,vllm}/` plus any paths in
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` — colon-separated, unioned
-with defaults; auto-probed by `src/hyperloom/inference_optimizer/assets/install.sh`).
+with defaults; auto-probed by `$HYPERLOOM_PKG/inference_optimizer/assets/install.sh`).
 
 Always prefer `manifest.json` / `state.json` / `coordinator.db` under the
 **session dir** over guessing from terminal logs.
@@ -164,8 +164,8 @@ pollution after the fact.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
-Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and
-source the regenerated
+Run `bash "$HYPERLOOM_PKG/inference_optimizer/assets/install.sh"` (Step 1 resolves
+`$HYPERLOOM_PKG` to `hyperloom/` or `src/hyperloom/`) and source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `python -m hyperloom.inference_optimizer.cli optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
@@ -188,7 +188,7 @@ Any failure → treat as fresh launch and re-run `install.sh`.
 `_preflight()` invokes:
 
 ```
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/preflight_kb.sh"
+bash "$HYPERLOOM_PKG/inference_optimizer/assets/preflight_kb.sh"
 ```
 
 Exit codes (soft degrade — IR-3 never aborts launch):
@@ -324,15 +324,19 @@ After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd -P)"   # repo root containing src/hyperloom/ + .env
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+export REPO_ROOT="$(pwd -P)"   # root containing the hyperloom package + .env
+# A pip --target workspace has hyperloom/ at the root, a source checkout has
+# src/hyperloom/. Resolve once; every path below is relative to $HYPERLOOM_PKG.
+export HYPERLOOM_PKG="$REPO_ROOT/hyperloom"
+[ -d "$HYPERLOOM_PKG" ] || export HYPERLOOM_PKG="$REPO_ROOT/src/hyperloom"
+bash "$HYPERLOOM_PKG/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
 
-`src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
+`$HYPERLOOM_PKG/inference_optimizer/assets/install.sh` is the only install entrypoint for
 full inference optimization. It installs the optimizer / Magpie / InferenceX
-first, then chains to `src/hyperloom/agents/kernel/scripts/install.sh` for the kernel
-optimization environment. `src/hyperloom/agents/kernel/scripts/install.sh` remains valid for
+first, then chains to `$HYPERLOOM_PKG/agents/kernel/scripts/install.sh` for the kernel
+optimization environment. `$HYPERLOOM_PKG/agents/kernel/scripts/install.sh` remains valid for
 standalone kernel-agent debugging, but should not be the main entrypoint for a
 full inference optimizer session.
 
@@ -342,7 +346,7 @@ kernel-agent / TraceLens / GEAK; `--no-kernel` only means
 that this `optimize` run skips the kernel optimization phase.
 
 `install.sh` installs everything in one shot (no `--with-*` flags to
-remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`:
+remember). Direct steps in `$HYPERLOOM_PKG/inference_optimizer/assets/install.sh`:
 
 | Component | Provided by |
 |---|---|
@@ -351,8 +355,8 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | `INFERENCEX_PATH` resolution (honours a pre-existing `$INFERENCEX_PATH`, else clones `$INFERENCEX_REPO` pinned to `$INFERENCEX_REF` into `$INFERENCEX_DEFAULT_DIR` = `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>`, reusing an existing checkout there on re-runs) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
-Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
-of `src/hyperloom/inference_optimizer/assets/install.sh`):
+Chained from `$HYPERLOOM_PKG/agents/kernel/scripts/install.sh` (single chain at the end
+of `$HYPERLOOM_PKG/inference_optimizer/assets/install.sh`):
 
 | Component | Provided by |
 |---|---|
@@ -377,9 +381,9 @@ these.
 
 | Prompt field | Env name | Consumer |
 |---|---|---|
-| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
-| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (public) |
-| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/agents/kernel/scripts/install.sh:ensure_tracelens` (internal; only when set) |
+| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `$HYPERLOOM_PKG/inference_optimizer/assets/install.sh:ensure_inferencex` |
+| `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `$HYPERLOOM_PKG/agents/kernel/scripts/install.sh:ensure_tracelens` (public) |
+| `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `$HYPERLOOM_PKG/agents/kernel/scripts/install.sh:ensure_tracelens` (internal; only when set) |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$GEAK_ROOT` /
 `$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` may move or differ across nodes,
@@ -548,7 +552,7 @@ node; do not stop for an extra confirmation. After IR-2, smoke-test the
 CLI:
 
 ```bash
-export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
+export HYPERLOOM_KERNEL_AGENT_ROOT="$HYPERLOOM_PKG/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
@@ -563,7 +567,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+bash "$HYPERLOOM_PKG/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
 "$PYTHON" -m hyperloom.inference_optimizer.cli --help
 ```
@@ -606,8 +610,8 @@ If `_preflight()` itself fails, run install in `--check-only` mode to see
 which piece is missing, then re-run full install:
 
 ```bash
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh" --check-only
-bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
+bash "$HYPERLOOM_PKG/inference_optimizer/assets/install.sh" --check-only
+bash "$HYPERLOOM_PKG/inference_optimizer/assets/install.sh"
 ```
 
 If install repeatedly fails while building GEAK / `mini-swe-agent` with
@@ -671,10 +675,10 @@ PY
 Default configs live here:
 
 ```bash
-src/hyperloom/inference_optimizer/assets/configs/baseline_sglang.yaml
-src/hyperloom/inference_optimizer/assets/configs/baseline_vllm.yaml
-src/hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml
-src/hyperloom/inference_optimizer/assets/configs/profile_vllm.yaml
+$HYPERLOOM_PKG/inference_optimizer/assets/configs/baseline_sglang.yaml
+$HYPERLOOM_PKG/inference_optimizer/assets/configs/baseline_vllm.yaml
+$HYPERLOOM_PKG/inference_optimizer/assets/configs/profile_sglang.yaml
+$HYPERLOOM_PKG/inference_optimizer/assets/configs/profile_vllm.yaml
 ```
 
 Two fields in each YAML are **fallback only** — the optimizer overrides
@@ -790,7 +794,7 @@ so it is kept in one place.
 
 | Var | Purpose | Default |
 |---|---|---|
-| `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
+| `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$HYPERLOOM_PKG/agents/critic/` |
 | `CRITIC_KB_CLIENT_MODE` | `inmemory` keeps KB writes / reads off the wire. `live` requires `KB_BASE_URL`. | `inmemory` |
 | `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. | unset (live mode aborts at start if absent) |
 | `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Forwarded to the runtime; see `src/hyperloom/agents/critic/README.md`. | runtime defaults |
@@ -934,8 +938,8 @@ To override shipped configs without editing them, materialize a per-run asset
 root and `export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"` (env var, not a
 CLI flag; `asset_root()` raises `AssetRootNotFound` if the dir is missing).
 `mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `actions/` from
-`$REPO_ROOT/src/hyperloom/inference_optimizer/` and `orchestrator/` from
-`$REPO_ROOT/src/hyperloom/`, then
+`$HYPERLOOM_PKG/inference_optimizer/` and `orchestrator/` from
+`$HYPERLOOM_PKG`, then
 copy + edit the relevant `baseline_*.yaml` / `profile_*.yaml`. Reach for this
 only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 (e.g. per-yaml `profiler.torch_profiler.enabled`); otherwise `--model` /
@@ -948,7 +952,7 @@ root** (parent of per-session dirs). The CLI creates
 `$USER_DATA_PATH/<model_basename>/<UTC_ts>/` via `make_session_dir`.
 Launcher stdout / PID files go under that session's `optimizer_runs/`.
 For sandboxes that don't persist `export`s across shell calls (Cursor agents),
-copy `src/hyperloom/inference_optimizer/assets/setup_env.sh.example` to a
+copy `$HYPERLOOM_PKG/inference_optimizer/assets/setup_env.sh.example` to a
 **session-scoped** path:
 `$USER_DATA_PATH/optimizer_runs/setup_env_${CLAW_SESSION_ID:-$(date +%s)}.sh`,
 fill in the workload block, and `.` it each call.
@@ -1081,7 +1085,7 @@ mkdir -p "$RUN_DIR"
 # $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
 # launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
-cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
+cp "$HYPERLOOM_PKG/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
 setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
@@ -1119,7 +1123,7 @@ Resolve `$SESSION` the same way the Robustness Monitor does — never from
 
 ```bash
 export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")}"
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
+python3 "$HYPERLOOM_PKG/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
@@ -1129,7 +1133,7 @@ It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_
 Recent action counts from SQLite (last 500 events grouped by category):
 
 ```bash
-python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
+python3 "$HYPERLOOM_PKG/inference_optimizer/tools/event_counts.py" "$SESSION"
 ```
 
 ## Expected Flow
@@ -1268,7 +1272,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 
 | Symptom | Fix |
 |---|---|
-| `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
+| `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=$HYPERLOOM_PKG/agents/critic`, or check the `$HYPERLOOM_PKG/agents/critic/` install. |
 | `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
 | `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
 | All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
