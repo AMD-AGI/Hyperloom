@@ -308,7 +308,8 @@ def _apply_recipe_delta(
     if mode not in {"append", "replace"}:
         raise RemoteRecipeValidationError(f"unsupported recipe args_mode: {mode!r}")
     args = compose_server_args(
-        inherited_args=str(config.get("extra_server_args") or ""),
+        inherited_args="",
+        base_extra_args=str(config.get("extra_server_args") or ""),
         variant_extra_args=str(delta.get("extra_server_args") or ""),
         remove_args=delta.get("remove_args"),
         args_mode=mode,

@@ -89,6 +89,24 @@ class IntentRouter:
         # Attributes not defined on the router resolve onto the coordinator.
         return getattr(object.__getattribute__(self, "_coord"), name)
 
+    def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
+        """Freeze patch ownership when a specialist task is created."""
+        owner = patch_owner_phase(params)
+        if not owner:
+            gap_layer = str(params.get("gap_layer") or "").strip().lower()
+            active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+            if gap_layer == "framework":
+                owner = "FRAMEWORK_AGENT"
+            elif active_phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+                owner = "FRAMEWORK_AGENT"
+            elif active_phase == "EXPLORE":
+                owner = "EXPLORE"
+            elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
+                owner = "EXPLORE"
+        if owner:
+            params["source_phase"] = owner
+        return owner
+
     async def _stamp_integrate_patch_owner(
         self,
         params: dict[str, Any],
@@ -592,10 +610,7 @@ class IntentRouter:
             # Capture proposal ownership at dispatch. Specialist work can finish
             # after the state machine advances, so completion-time phase is not
             # a reliable source for a later integrate_patch KEEP.
-            params.setdefault(
-                "source_phase",
-                str(getattr(self.shared_state, "phase", "") or ""),
-            )
+            self._stamp_specialist_owner(params)
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
