@@ -1757,9 +1757,11 @@ def kernel_search_roots() -> tuple[str, ...]:
     """Resolve the framework trees to grep for kernel source, at runtime.
 
     Prefers the orchestrator's centralised resolver so this tool agrees with
-    PolicyGate and patch application on where framework source lives. When that
-    package is not importable (standalone CLI use) it falls back to locating
-    each known package itself, then to the pinned checkout layouts.
+    PolicyGate and patch application on where framework source lives. Falls back
+    to locating each known package itself, then to the pinned checkout layouts,
+    both when that package is not importable (standalone CLI use) and when it
+    imported but resolved nothing -- an empty answer from the resolver used to
+    end the search, which is the same silent outcome as having no roots at all.
 
     Non-existent roots are dropped: grepping them returns nothing and is
     indistinguishable from a kernel that genuinely has no source here.
@@ -1777,7 +1779,13 @@ def kernel_search_roots() -> tuple[str, ...]:
     discovered: list[str] = []
     if _resolve_kernel_search_roots is not None:
         discovered.extend(_resolve_kernel_search_roots())
-    else:
+    # A chain, not an either/or. The centralised resolver is authoritative and
+    # goes first, but "it imported" is not "it found something": when it returns
+    # nothing, the alternative to probing here is a run that greps no directory
+    # at all and reports every hot kernel as non-routable. Its answer is kept
+    # whole when it has one, so this cannot widen the roots a normal host
+    # searches -- it only decides between local discovery and nothing.
+    if not discovered:
         discovered.extend(
             location
             for location in (_installed_package_dir(package) for package in _KERNEL_SOURCE_PACKAGES)
@@ -1803,12 +1811,21 @@ def kernel_search_roots() -> tuple[str, ...]:
 
 
 def refresh_kernel_search_roots() -> tuple[str, ...]:
-    """Re-run root discovery, dropping the cached answer.
+    """Re-run root discovery, dropping every answer derived from the old roots.
+
+    :func:`_harness_search_bases` is cached for the same run and derived from
+    these roots, so clearing one without the other reproduces the bug this
+    function exists to fix, one step further on: the second analysis in a
+    long-lived orchestrator would grep the freshly installed framework and still
+    resolve its harnesses against the bases discovered when it was absent, so
+    ``benchmark_files`` comes back empty and the invocation spec reaches the
+    backend with no benchmark to run.
 
     Returns:
         tuple[str, ...]: The freshly discovered roots.
     """
     kernel_search_roots.cache_clear()
+    _harness_search_bases.cache_clear()
     return kernel_search_roots()
 
 

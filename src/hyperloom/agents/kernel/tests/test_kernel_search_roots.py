@@ -101,6 +101,44 @@ class TestDiscoverKernelSearchRoots:
         tl.kernel_search_roots.cache_clear()
         assert tl.kernel_search_roots() == (str(checkout),)
 
+    def test_an_empty_central_answer_still_reaches_local_discovery(self, monkeypatch, tmp_path):
+        """ "The resolver imported" is not "the resolver found something".
+
+        The branch used to be an either/or, so a resolver that returned nothing
+        ended the search: the run greps no directory at all and reports every hot
+        kernel as non-routable, which is the failure this module exists to keep
+        out -- reached through the resolver rather than around it.
+        """
+        located = tmp_path / "sgl_kernel"
+        located.mkdir()
+        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: ())
+        monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ("sgl_kernel",))
+        monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", ())
+        monkeypatch.setattr(
+            tl,
+            "_installed_package_dir",
+            lambda package: str(located) if package == "sgl_kernel" else "",
+        )
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(located),)
+
+    def test_a_central_answer_is_not_widened_by_the_fallback(self, monkeypatch, tmp_path):
+        """The resolver stays authoritative whenever it has an answer.
+
+        Otherwise this would quietly re-add the roots the centralised resolver
+        deliberately excludes, and the two would disagree again.
+        """
+        central = tmp_path / "vllm"
+        central.mkdir()
+        local = tmp_path / "aiter"
+        local.mkdir()
+        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: (str(central),))
+        monkeypatch.setattr(tl, "_KERNEL_SOURCE_PACKAGES", ("aiter",))
+        monkeypatch.setattr(tl, "_FALLBACK_SEARCH_ROOTS", (str(local),))
+        monkeypatch.setattr(tl, "_installed_package_dir", lambda _package: str(local))
+        tl.kernel_search_roots.cache_clear()
+        assert tl.kernel_search_roots() == (str(central),)
+
     def test_no_searchable_root_is_reported_loudly(self, monkeypatch, caplog):
         """An unsearchable host must not look like a healthy one."""
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: ("/gone/vllm/",))
@@ -135,8 +173,30 @@ class TestRefreshKernelSearchRoots:
         assert tl.refresh_kernel_search_roots() == (str(appears),)
         assert tl.kernel_search_roots() == (str(appears),)
 
+    def test_everything_derived_from_the_roots_is_dropped_with_them(self, monkeypatch, tmp_path):
+        """A stale derived cache reproduces the bug one step further on.
+
+        ``_harness_search_bases`` is cached for the same run and computed from
+        these roots, so refreshing one alone leaves the second analysis in a
+        long-lived orchestrator grepping the newly installed framework while
+        resolving harnesses against bases discovered when it was absent --
+        ``benchmark_files`` comes back empty and the invocation spec reaches the
+        backend with no benchmark to run.
+        """
+        checkout = tmp_path / "sgl-workspace" / "aiter"
+        monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: (str(checkout),))
+        tl.kernel_search_roots.cache_clear()
+        tl._harness_search_bases.cache_clear()
+        assert tl._harness_search_bases() == ()
+
+        checkout.mkdir(parents=True)
+        tl.refresh_kernel_search_roots()
+
+        assert tl._harness_search_bases() == (str(checkout.parent), str(checkout))
+
     def teardown_method(self):
         tl.kernel_search_roots.cache_clear()
+        tl._harness_search_bases.cache_clear()
 
 
 class TestThePackageListHasOneOwner:
