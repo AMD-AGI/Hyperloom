@@ -4016,8 +4016,11 @@ class IntegratePatchExecutor:
           (via :func:`_resolve_artifact_target`).
         - ``source`` must resolve inside the session directory.
 
-        Entries that fail either check are skipped with a warning rather than
-        aborting the round.
+        An entry failing either check is skipped with a warning. The install
+        itself is deliberately unguarded: a base artifact is part of the accepted
+        stack, so a round that cannot restore it would be measuring a tree that
+        no round asked for. The ``OSError`` propagates and ``__call__``'s
+        ``except BaseException`` unwinds the candidate and restores the stash.
         """
         if not bool(params.get("enablement")):
             return
@@ -4054,9 +4057,12 @@ class IntegratePatchExecutor:
                 )
                 continue
             target, _ = resolved
+            # Set before the write: a partial install still dirtied the tree, and
+            # the revert needs to know that even when the first copy is the one
+            # that raised.
+            self._ip_base_artifact_replayed = True
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            self._ip_base_artifact_replayed = True
             log.info("integrate_patch: re-installed base artifact %s", target)
 
     def _apply_artifacts(
