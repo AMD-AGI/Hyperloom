@@ -1912,6 +1912,31 @@ class IntegratePatchExecutor:
         )
         return None
 
+    @staticmethod
+    def _publish_gate_state(
+        ctx: Any,
+        *,
+        output_root: Path,
+        config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
+        dropped_env_overrides: list[str],
+        setup_result: dict[str, Any],
+    ) -> None:
+        """Publish the values ``_stage_run`` reads back after ``_stage_apply``.
+
+        Every field is required and keyword-only: each of the stage's exits has
+        to name all of them, so an exit that forgets one fails here instead of
+        raising ``AttributeError`` inside the gate. Tree-mutation state is
+        published separately, as the tree takes it.
+        """
+        ctx._ip_output_root = output_root  # type: ignore[attr-defined]
+        ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
+        ctx._ip_dropped_env_overrides = dropped_env_overrides  # type: ignore[attr-defined]
+        ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+
     async def _stage_apply(
         self,
         ctx: Any,
@@ -2112,16 +2137,20 @@ class IntegratePatchExecutor:
             if params.get("enablement_launch_only"):
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
-                ctx._ip_output_root = output_root  # type: ignore[attr-defined]
                 ctx._ip_framework_root = None  # type: ignore[attr-defined]
                 ctx._ip_stash_state = "clean"  # type: ignore[attr-defined]
                 ctx._ip_stash_note = ""  # type: ignore[attr-defined]
                 ctx._ip_applied = []  # type: ignore[attr-defined]
                 ctx._ip_applied_artifacts = []  # type: ignore[attr-defined]
-                ctx._ip_config_changes_applied = {}  # type: ignore[attr-defined]
-                ctx._ip_extra_server_args_applied = ""  # type: ignore[attr-defined]
-                ctx._ip_extra_envs_applied = {}  # type: ignore[attr-defined]
-                ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+                self._publish_gate_state(
+                    ctx,
+                    output_root=output_root,
+                    config_changes_applied={},
+                    extra_server_args_applied="",
+                    extra_envs_applied={},
+                    dropped_env_overrides=[],
+                    setup_result=setup_result,
+                )
                 return None
             _no_patches: dict[str, Any] = {
                 "status": "no_patches",
@@ -2381,12 +2410,15 @@ class IntegratePatchExecutor:
 
         # The tree-mutation values are already published above, as the tree took
         # them; what is left is what only the gate reads.
-        ctx._ip_output_root = output_root  # type: ignore[attr-defined]
-        ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
-        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
-        ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
-        ctx._ip_dropped_env_overrides = dropped_env_overrides  # type: ignore[attr-defined]
-        ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+        self._publish_gate_state(
+            ctx,
+            output_root=output_root,
+            config_changes_applied=config_changes_applied,
+            extra_server_args_applied=extra_server_args_applied,
+            extra_envs_applied=extra_envs_applied,
+            dropped_env_overrides=dropped_env_overrides,
+            setup_result=setup_result,
+        )
         return None
 
     async def _stage_gate(
