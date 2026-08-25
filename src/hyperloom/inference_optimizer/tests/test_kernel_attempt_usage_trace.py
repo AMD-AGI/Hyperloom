@@ -46,6 +46,31 @@ def _attempt(backend: str, log_path: Path, *, write: str | None = None) -> dict:
     }
 
 
+def test_forge_attempt_usage_carries_reasoning_tokens(tmp_path: Path) -> None:
+    """A reasoning model's hidden output reaches this ledger too, not just the
+    in-process backends' rows."""
+    session_dir = tmp_path / "SESSION"
+    session_dir.mkdir()
+    log = tmp_path / "forge-reasoning_stdout.log"
+    stdout = "FORGE_LLM_USAGE " + json.dumps(
+        {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 4096,
+        }
+    )
+    result = {
+        "kernel_id": "k001",
+        "attempts": [_attempt("forge", log, write=stdout)],
+    }
+    _trace_kernel_attempt_usage(result, session_dir=session_dir)
+
+    rows = _read_rows(session_dir)
+    assert len(rows) == 1
+    assert rows[0]["reasoning_output_tokens"] == 4096
+    assert rows[0]["output_tokens"] == 20
+
+
 def test_forge_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     """A forge attempt whose stdout carries the FORGE_LLM_USAGE marker yields a
     forge row (the Kernel-Forge loop aggregates its claude-agent-sdk spend)."""

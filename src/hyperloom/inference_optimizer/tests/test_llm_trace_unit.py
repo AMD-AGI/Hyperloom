@@ -41,6 +41,34 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
     assert row["reviewed_msg_ids"] == ["a", "7"]
 
 
+def test_from_metadata_carries_call_id_and_reasoning_tokens(tmp_path: Path, monkeypatch):
+    """The backend's call_id + reasoning spend reach the unified ledger."""
+    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+
+    record = llm_trace.LLMCallRecord.from_metadata(
+        session_id="s1",
+        component="specialist",
+        metadata={
+            "model": "gpt-5-codex",
+            "call_id": "abc123",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "reasoning_output_tokens": "2048",
+        },
+    )
+    llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+    row = json.loads((tmp_path / "reports" / "trace" / "llm_calls.jsonl").read_text())
+
+    assert row["call_id"] == "abc123"
+    # Reasoning output is reported alongside the visible reply, not folded into it.
+    assert row["reasoning_output_tokens"] == 2048
+    assert row["output_tokens"] == 5
+
+
+def test_new_call_id_is_unique():
+    assert llm_trace.new_call_id() != llm_trace.new_call_id()
+
+
 def test_llm_call_record_rejects_unknown_component(tmp_path: Path):
     with pytest.raises(llm_trace.LLMTraceRowError):
         llm_trace.append_llm_call(

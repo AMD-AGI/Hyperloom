@@ -482,6 +482,273 @@ def test_start_obs_reraises_when_even_minimal_signature_fails():
         lfe._start_obs(_Hostile(), name="gen", as_type="span")
 
 
+def test_call_id_pairs_across_a_second_boundary(tmp_path, monkeypatch):
+    """With a call_id the halves pair even when their ts land in different seconds."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(_llm_row(call_id="c-1", ts="2026-06-09T15:14:54.980000+00:00"))
+    em.record_conversation(_conv_row(call_id="c-1", ts="2026-06-09T15:14:55.020000+00:00"))
+
+    assert len(client.generations) == 1
+    assert em._counts["generations_paired"] == 1
+
+
+def test_distinct_call_ids_in_one_second_do_not_cross_pair(tmp_path, monkeypatch):
+    """Two calls inside one second stay apart when each carries its own call_id."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(_llm_row(call_id="c-1"))
+    em.record_conversation(_conv_row(call_id="c-2", response="OTHER CALL"))
+    # Neither half found its partner yet.
+    assert client.generations == []
+
+    em.record_conversation(_conv_row(call_id="c-1"))
+    assert len(client.generations) == 1
+    assert client.generations[0].kwargs["output"] == "RESPONSE TEXT"
+
+
+def test_reasoning_tokens_reach_usage_details(tmp_path, monkeypatch):
+    """A reasoning model's hidden output tokens are reported, not dropped."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(_llm_row(reasoning_output_tokens=2048))
+    em.flush_session()
+
+    usage = client.generations[0].kwargs["usage_details"]
+    assert usage["reasoning_output"] == 2048
+    assert usage["output"] == 40
+
+
+def test_flush_retries_only_the_step_that_failed(tmp_path, monkeypatch):
+    """A partial reconcile is not marked flushed; the retry re-runs only what failed."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row())  # leftover half, emitted by the first step
+
+    calls = {"scores": 0}
+
+    def _flaky_scores():
+        calls["scores"] += 1
+        if calls["scores"] == 1:
+            raise RuntimeError("decision_trace unreadable")
+
+    monkeypatch.setattr(em, "_flush_decision_scores", _flaky_scores)
+
+    em.flush_session()
+    assert em._flushed is False
+    assert "decision_scores" not in em._flush_steps_done
+    assert len(client.generations) == 1
+
+    em.flush_session()
+    assert calls["scores"] == 2
+    assert em._flushed is True
+    # The step that already succeeded did not re-emit its generation.
+    assert len(client.generations) == 1
+
+
+def test_flush_is_not_final_until_client_flush_succeeds(tmp_path, monkeypatch):
+    """Everything above only fills the SDK buffer, so a failed flush is not done."""
+    _enable_env(monkeypatch)
+
+    class _FlakyFlushClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.flush_attempts = 0
+
+        def flush(self):
+            self.flush_attempts += 1
+            if self.flush_attempts == 1:
+                raise RuntimeError("langfuse ingest unreachable")
+            super().flush()
+
+    client = _FlakyFlushClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+
+    em.flush_session()
+    assert em._flushed is False
+    assert "client_flush" not in em._flush_steps_done
+    assert lfe.read_receipt(sd)["counts_final"] is False
+
+    em.flush_session()
+    assert client.flush_attempts == 2
+    assert em._flushed is True
+    assert lfe.read_receipt(sd)["counts_final"] is True
+
+
+def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
+    """A swallowed send failure must not drop the call out of the trace."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.record_llm_call(_llm_row(call_id="c-1"))
+
+    real_emit = em._emit_generation
+    attempts = {"n": 0}
+
+    def _flaky_emit(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return False  # mirrors a swallowed SDK failure
+        return real_emit(**kwargs)
+
+    monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
+
+    em.flush_session()
+    # The step reported itself unfinished and the row is still buffered.
+    assert em._flushed is False
+    assert "pending_halves" not in em._flush_steps_done
+    assert client.generations == []
+
+    monkeypatch.setattr(em, "_emit_generation", real_emit)
+    em.flush_session()
+    assert len(client.generations) == 1
+    assert em._flushed is True
+
+
+def test_ext_shard_send_failure_is_retried_without_duplicates(tmp_path, monkeypatch):
+    """A failed shard row is resumed, and the rows that landed are not re-sent."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    shard = sd / "reports" / "trace" / "ext" / "forge-7.jsonl"
+    shard.write_text(
+        "\n".join(json.dumps(_llm_row(component="forge", role=None, call_id=f"ext-{i}")) for i in range(2)) + "\n",
+        encoding="utf-8",
+    )
+    em = lfe.LangfuseEmitter(sd)
+
+    real_emit = em._emit_generation
+    attempts = {"n": 0}
+
+    def _flaky_emit(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 2:  # the second shard row
+            return False
+        return real_emit(**kwargs)
+
+    monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
+    em.flush_session()
+    assert "ext_shards" not in em._flush_steps_done
+    assert len(client.generations) == 1
+
+    monkeypatch.setattr(em, "_emit_generation", real_emit)
+    em.flush_session()
+    assert "ext_shards" in em._flush_steps_done
+    # The row that already landed was not emitted twice.
+    assert len(client.generations) == 2
+    assert em._counts["ext_shards_read"] == 1
+
+
+def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
+    """Across processes the durable unit is the row, not the step.
+
+    A restart must not re-push rows a previous process already sent, but must
+    still pick up rows that shard grew afterwards — which is what a resumed
+    session produces.
+    """
+    _enable_env(monkeypatch)
+    sd = _seed_trace_dir(tmp_path)
+    shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
+    shard.write_text(
+        json.dumps(_llm_row(component="forge", role=None, call_id="row-0")) + "\n",
+        encoding="utf-8",
+    )
+
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert len(first.generations) == 1
+    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 1}
+
+    # The resumed process appends one more row to the same shard.
+    with shard.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_llm_row(component="forge", role=None, call_id="row-1", output_tokens=777)) + "\n")
+
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    em2 = lfe.LangfuseEmitter(sd)
+    assert em2._ext_rows_sent == {"forge-1.jsonl": 1}
+    em2.flush_session()
+
+    # Only the new row was pushed; the first was not duplicated.
+    assert len(second.generations) == 1
+    assert second.generations[0].kwargs["usage_details"]["output"] == 777
+    assert lfe.read_receipt(sd)["ext_rows_sent"] == {"forge-1.jsonl": 2}
+
+
+def test_one_shot_push_is_claimed_across_processes(tmp_path, monkeypatch):
+    """Two processes reading the same empty receipt must not both emit."""
+    _enable_env(monkeypatch)
+    first = _FakeClient()
+    _install_fake_sdk(monkeypatch, first)
+    sd = _seed_trace_dir(tmp_path)
+    lfe.LangfuseEmitter(sd).record_session_start()
+    assert first.span_named("session_start") is not None
+
+    # Mimic the race: the second process read the receipt before the first wrote
+    # it, so only the claim can stop the duplicate.
+    (sd / "reports" / "trace" / "langfuse_receipt.json").unlink()
+    second = _FakeClient()
+    _install_fake_sdk(monkeypatch, second)
+    lfe._REGISTRY.clear()
+    em2 = lfe.LangfuseEmitter(sd)
+    em2.record_session_start()
+
+    assert second.span_named("session_start") is None
+    assert em2._counts["session_start_recorded"] == 1
+
+
+def test_read_receipt_ignores_a_corrupted_payload(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    lfe.LangfuseEmitter(sd).flush_session()
+    assert lfe.read_receipt(sd) is not None
+
+    path = sd / "reports" / "trace" / "langfuse_receipt.json"
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["counts"]["generations_sent"] = 999
+    path.write_text(json.dumps(tampered, indent=2, sort_keys=True), encoding="utf-8")
+
+    # The stamped hash no longer matches, so the receipt is not trusted for the
+    # one-shot push decisions that read it.
+    assert lfe.read_receipt(sd) is None
+
+
+def test_receipt_is_written_atomically_with_payload_hash(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts_final"] is True
+    assert len(persisted["payload_sha256"]) == 64
+    # No temp file left behind by the atomic write.
+    assert [p.name for p in (sd / "reports" / "trace").glob("*.tmp")] == []
+
+
 def test_conversation_first_then_token_also_pairs(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

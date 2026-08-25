@@ -57,7 +57,8 @@ DEFAULT_NUM_PROMPTS_FACTOR = 5
 # Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
-# Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``, <=0 disables.
+# Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
+# ``None`` disables the gate; ``<=0`` means no time is left to spend.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
 
 
@@ -395,7 +396,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     json_path: Path,
     csv_path: Path,
     started_at: float,
-    total_budget_sec: int,
+    total_budget_sec: int | None,
     has_budget: bool,
     opt_args: str,
     opt_envs: dict[str, str],
@@ -434,7 +435,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         json_path: Pre-resolved JSON report path.
         csv_path: Pre-resolved CSV report path.
         started_at: Wall-clock start of the overall sweep (for elapsed_sec).
-        total_budget_sec: Configured total budget in seconds.
+        total_budget_sec: Configured total budget in seconds (``None`` when
+            the budget gate is off).
         has_budget: Whether budget tracking is active.
         opt_args: Optimized server args (for payload metadata).
         opt_envs: Optimized server env vars (for payload metadata).
@@ -802,7 +804,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     json_path: Path,
     csv_path: Path,
     started_at: float,
-    total_budget_sec: int,
+    total_budget_sec: int | None,
     has_budget: bool,
     opt_args: str,
     opt_envs: dict[str, str],
@@ -831,7 +833,8 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
         json_path: Pre-resolved JSON report path.
         csv_path: Pre-resolved CSV report path.
         started_at: Wall-clock start of the overall sweep.
-        total_budget_sec: Configured total budget in seconds.
+        total_budget_sec: Configured total budget in seconds (``None`` when
+            the budget gate is off).
         has_budget: Whether budget tracking is active.
         opt_args: Optimized server args.
         opt_envs: Optimized server env vars.
@@ -936,7 +939,7 @@ def _maybe_flush(  # noqa: PLR0913
     opt_envs: dict[str, str],
     workspace: Path,
     started_at: float,
-    total_budget_sec: int,
+    total_budget_sec: int | None,
     has_budget: bool,
     budget_exhausted: bool,
     budget_skip_reason: str,
@@ -960,7 +963,8 @@ def _maybe_flush(  # noqa: PLR0913
         opt_envs: Optimized server env vars.
         workspace: Per-sweep workspace root.
         started_at: Wall-clock start of the sweep.
-        total_budget_sec: Configured total budget in seconds.
+        total_budget_sec: Configured total budget in seconds (``None`` when
+            the budget gate is off).
         has_budget: Whether budget tracking is active.
         budget_exhausted: Whether the budget has been exhausted.
         budget_skip_reason: Reason string when budget was exhausted.
@@ -1042,7 +1046,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
     opt_envs: dict[str, str],
     workspace: Path,
     started_at: float,
-    total_budget_sec: int,
+    total_budget_sec: int | None,
     has_budget: bool,
     budget_exhausted: bool,
     budget_skip_reason: str,
@@ -1164,7 +1168,7 @@ async def run_conc_sweep(
     *,
     concs: list[int] | None = None,
     variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
-    total_budget_sec: int = DEFAULT_TOTAL_BUDGET_SEC,
+    total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     write_reports: bool = True,
 ) -> dict[str, Any]:
@@ -1175,7 +1179,9 @@ async def run_conc_sweep(
         session_dir: Session directory for workspace and report outputs.
         concs: Concurrency ladder to sweep; ``None`` uses the default ladder.
         variant_timeout_sec: Per-variant timeout in seconds.
-        total_budget_sec: Total wall-clock budget in seconds; ``<=0`` disables.
+        total_budget_sec: Total wall-clock budget in seconds. ``None`` runs the
+            ladder unbounded; ``<=0`` means the caller's clamp left no time and
+            the sweep skips immediately rather than running unbounded.
         num_prompts_factor: Multiplier applied to each CONC for NUM_PROMPTS.
         write_reports: When ``True``, write the JSON/CSV reports to disk.
 
@@ -1199,6 +1205,12 @@ async def run_conc_sweep(
         return _skip("no_optimization_to_compare")
     if not concs:
         return _skip("empty_conc_list")
+    # A non-positive budget is "no time left", not "budget gate off": running the
+    # ladder here would spend wall-clock the caller already accounted as gone.
+    # No variant started, so this is a decline (see conc_sweep_declined_to_run)
+    # and must not stamp ``budget_exhausted``.
+    if total_budget_sec is not None and int(total_budget_sec) <= 0:
+        return _skip("no_time_budget_remaining", total_budget_sec=int(total_budget_sec))
 
     # Prefer the materialized baseline config; fall back to the shipped asset.
     base_yaml_raw = str(getattr(state, "baseline_config_path", "") or "").strip() or str(default_baseline_config())
@@ -1240,7 +1252,7 @@ async def run_conc_sweep(
             workspace=str(workspace),
         )
 
-    has_budget = total_budget_sec > 0
+    has_budget = total_budget_sec is not None
     started_at = time.time()
     deadline = started_at + total_budget_sec if has_budget else None
 

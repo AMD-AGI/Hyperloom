@@ -22,6 +22,35 @@ def test_coerce_optional_int():
     assert pu.coerce_optional_int("x") is None
 
 
+# ---- reasoning_output_tokens ----
+
+
+def test_reasoning_output_tokens_reads_every_provider_shape():
+    """One helper, so the same model bills the same on every call path."""
+    # Codex CLI / codex-agent metadata spelling.
+    assert pu.reasoning_output_tokens({"reasoning_output_tokens": "2048"}) == 2048
+    # OpenAI HTTP shape: nested under completion_tokens_details, as a mapping...
+    assert pu.reasoning_output_tokens({"completion_tokens_details": {"reasoning_tokens": 512}}) == 512
+
+    # ...and as an SDK object.
+    class _Details:
+        reasoning_tokens = 96
+
+    class _Usage:
+        completion_tokens = 40
+        completion_tokens_details = _Details()
+
+    assert pu.reasoning_output_tokens(_Usage()) == 96
+
+
+def test_reasoning_output_tokens_absent_is_none():
+    """No reasoning concept must stay None, not become 0."""
+    assert pu.reasoning_output_tokens(None) is None
+    assert pu.reasoning_output_tokens({}) is None
+    assert pu.reasoning_output_tokens({"output_tokens": 10}) is None
+    assert pu.reasoning_output_tokens({"completion_tokens_details": {}}) is None
+
+
 # ---- normalize_usage ----
 
 
