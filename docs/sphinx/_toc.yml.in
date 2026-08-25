@@ -25,15 +25,15 @@ subtrees:
     title: Components
     subtrees:
     - entries:
-      - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
+      - file: components/intellikit.md
         title: IntelliKit
-      - url: https://rocm.docs.amd.com/projects/magpie/en/latest
+      - file: components/magpie.md
         title: Magpie
-      - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
+      - file: components/tracelens.md
         title: TraceLens
-      - url: https://rocm.docs.amd.com/projects/geak/en/latest/
+      - file: components/geak.md
         title: GEAK
-      - url: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
+      - file: components/agentkernelarena.md
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
