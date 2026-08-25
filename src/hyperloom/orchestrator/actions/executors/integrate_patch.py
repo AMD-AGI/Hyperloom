@@ -2288,6 +2288,7 @@ class IntegratePatchExecutor:
 
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
+        self._apply_attempted: bool = False
 
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
@@ -2301,6 +2302,7 @@ class IntegratePatchExecutor:
         ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
         ctx._ip_applied = applied  # type: ignore[attr-defined]
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
+        self._apply_attempted = bool(patch_paths)
         for patch in patch_paths:
             if git_tree:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
@@ -3802,7 +3804,7 @@ class IntegratePatchExecutor:
                     log.error("integrate_patch: non-git revert incomplete in %s: %s", framework_root, errors)
                     return []
             return list(applied)
-        if not applied:
+        if not getattr(self, "_apply_attempted", False) and not applied:
             return reverted
         # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
         # committed, so HEAD is exactly the accepted stack: kept work is in
