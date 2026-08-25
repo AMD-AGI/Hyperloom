@@ -39,6 +39,7 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --pids-limit "${HYPERLOOM_PIDS_LIMIT:--1}" \
   --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
@@ -49,6 +50,21 @@ docker run -d \
 ```
 
 Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
+
+`--pids-limit` is required, not cosmetic: the Ray head this container runs
+starts `--num-cpus` prestarted Python workers on its own, and a TP>1
+framework server adds one heavy process per GPU on top of that, each
+spinning up its own OpenBLAS thread pool. That combination reliably
+exceeds Docker/Podman's default `pids.max` cgroup limit (2048) well
+before the framework server finishes booting. When it does, the failure
+is easy to misdiagnose: the server subprocess can die with cryptic
+`OpenBLAS blas_thread_init: pthread_create failed ... Resource
+temporarily unavailable` errors, or — worse — the orchestrator's own
+subprocess-management thread can itself lose its race for a PID slot and
+the baseline task just goes silent (started in the log, never completes,
+no exception, no crash) rather than failing loudly. `-1` (unlimited) is
+the simplest fix; set `HYPERLOOM_PIDS_LIMIT` to a large finite number
+instead if your container runtime requires one.
 
 Then run the setup backend inside the container:
 

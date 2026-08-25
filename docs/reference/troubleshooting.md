@@ -189,6 +189,136 @@ launched with `--ulimit nofile=...` — fix the launch command.
 
 ---
 
+## Baseline round hangs silently, or the server dies with OpenBLAS `pthread_create failed`
+
+**Symptom**: One of two things, both from the same root cause:
+
+* The `baseline_executor` log line `launching Magpie cmd=[...]` is the last
+  thing ever logged for that task. `state.json`'s `baseline_attempts` stays
+  `[]`, `current_action` stays empty, and `ray status` shows an idle cluster
+  (`0.0/<N> CPU`, `0.0/<N> GPU`) — no exception, no crash, the task just never
+  completes. The optimizer process itself is still alive.
+* Or, the framework server does start but its own log (`server.log`) is full
+  of `OpenBLAS blas_thread_init: pthread_create failed for thread N of 128:
+  Resource temporarily unavailable`, and the server exits with a wrapper error
+  like vLLM's `RuntimeError: Engine core initialization failed. See root
+  cause above.` that doesn't itself explain why.
+
+**Cause**: the container's `pids.max` cgroup limit (Docker/Podman default:
+**2048**) is too low for this workload. The Ray head started inside the
+container prestarts up to `--num-cpus` Python workers on its own (128 on a
+128-CPU host), and a TP>1 framework server adds one heavy process per GPU on
+top of that — each spinning up its own OpenBLAS thread pool (up to 128
+threads per process). On an 8-GPU TP=8 run this reliably exceeds the 2048
+ceiling before the server finishes booting. Depending on exactly which
+thread loses the race for a PID slot, the failure surfaces either as a loud
+`pthread_create` crash in the server, or — if the orchestrator's own
+subprocess-management thread is what loses the race — as complete silence:
+the task is logged as started and then simply never produces a completion,
+failure, or exception anywhere.
+
+**Fix**: launch the container with an explicit `--pids-limit`
+(`-1` = unlimited; use a large finite number, e.g. `65536`, if your runtime
+requires one):
+
+```bash
+docker run --pids-limit -1 ...
+```
+
+Check the current limit and usage from inside a running container to confirm
+this is (or isn't) the cause:
+
+```bash
+cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.current
+```
+
+If `pids.current` is already close to `pids.max` before the framework server
+even starts, this is the issue — recreate the container with `--pids-limit`
+set. All three example SKILL.md docker-mode launch templates
+(`hyperloom-custom-advanced`, `hyperloom-qwen3-8b-3h`,
+`hyperloom-qwen3-14b-fp8-12h`) set this by default via
+`${HYPERLOOM_PIDS_LIMIT:--1}`; override `HYPERLOOM_PIDS_LIMIT` if a shared
+host requires a finite cap.
+
+---
+
+## Enablement self-heal round gets stuck; resuming with `--enablement off` doesn't clear it
+
+**Symptom**: `state.json`'s `enablement.inflight_task_id` stays set across multiple
+`--resume` attempts even with `--enablement off` passed each time. Every
+orchestration tick logs `PolicyGate denied intent: ... rule=enablement_round_in_flight`,
+blocking any retry of the baseline round, and the orchestrator dispatches a
+fresh authoring specialist (`ENABLEMENT: dispatched authoring specialist
+attempt=N`, N incrementing) that gets stuck the same way each time.
+
+**Cause**: killing the optimizer process (e.g. `kill -9` after a hang) does not
+give the enablement lane a chance to clear its own in-flight marker. That
+stale `inflight_task_id` in `state.json` persists across `--resume`, and
+`--enablement off` only prevents *new* authoring rounds from being scheduled —
+it does not reap one that's already marked in-flight from before the flag was
+set. Hyperloom's own robustness logic can eventually detect and reap a
+sufficiently stale marker on its own (denial-streak + no running task for
+several consecutive ticks), but a freshly-dispatched replacement round can get
+stuck the exact same way if the underlying cause (usually the original
+baseline failure that triggered enablement in the first place) hasn't
+actually been fixed.
+
+**Fix**: before resuming, clear the stale marker directly:
+
+```python
+import json
+p = "<SESSION_DIR>/state.json"
+d = json.load(open(p))
+d["enablement"]["inflight_task_id"] = ""
+d["enablement"]["pending"] = False
+d["enablement"]["stall_streak"] = 0
+json.dump(d, open(p, "w"), indent=2)
+```
+
+Then resume with `--enablement off` (and fix the actual cause of the original
+baseline failure via `--server-args`/config, not just the self-heal loop). If
+enablement keeps getting stuck across multiple clean resumes, it usually means
+the real root cause is still present — the self-heal loop is a symptom, not
+the problem to chase.
+
+---
+
+## Baseline succeeds but the run stops with `baseline_accuracy_failed`, or Explore never proposes anything
+
+**Symptom**: the throughput benchmark completes cleanly (`Status: SUCCESS` in
+`summary.txt`, real `output_throughput`/`ttft`/`tpot` numbers, benchmark exit
+code 0) but the session still closes immediately with
+`stop_reason=baseline_accuracy_failed`, logging `baseline_executor: accuracy
+eval not found: no results*.json`. Or: baseline succeeds and gets recorded (`--no-eval`
+used), but every subsequent orchestration tick logs `critic_agent_backend ...
+proposals=0`, phase advances straight to `SWEEP`/`CLOSE`, and `current_best`
+never moves past `action: baseline` — Explore is enabled but never actually
+proposes a variant.
+
+**Cause**: for a very new or custom model type (no entry yet in Magpie's
+accuracy-eval task registry), `RUN_EVAL=true` (the default) causes the
+accuracy-eval step to simply never run — not fail, just never attempt — and
+Hyperloom's accuracy gate then correctly refuses to proceed without a
+validated floor, closing the run rather than exploring against an unvalidated
+baseline. Separately, a very small workload (low `--conc`/`--osl`) combined
+with a reduced flag set (`--no-framework-agent --enablement off`) can leave
+the orchestration agent with too little signal to decide anything is worth
+trying — this reads as "won't propose" rather than a crash, and is worth
+distinguishing from a real stall (check `ray status` / GPU utilization: idle
+means stuck, busy with no attempts growing means legitimately deciding not to
+explore).
+
+**Fix**: pass `--no-eval` when optimizing a model with no accuracy-eval task
+mapping yet — this anchors the baseline (and every candidate) on throughput
+alone instead of halting on the missing accuracy reference (the run is then
+not accuracy-validated; this is a deliberate tradeoff, not a workaround for a
+bug). If Explore still proposes nothing, try a larger, more realistic
+workload shape (higher `--conc`/`--osl`) and/or re-enable `--framework-agent`
+before concluding the model just has nothing worth exploring at the current
+budget.
+
+---
+
 ## VRAM exhaustion or IR-1 error
 
 **Symptom**: Inference server exits with `HSA: out of memory`,
