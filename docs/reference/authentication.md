@@ -13,6 +13,14 @@ environment configuration in Hyperloom. If any other document
 `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
 page, this page wins. Open an issue against the contradicting file.
 
+```{note}
+Shell paths on this page follow the recommended `pip install --target .` layout.
+In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
+```
+
 Hyperloom needs at most two classes of configuration:
 
 - **LLM gateway credentials**: At least one provider side, configured with both
@@ -305,8 +313,7 @@ At preflight, the inference optimizer CLI:
 1. Confirm `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and the matching
    API key are set and current.
 2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
-   `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`
-   (`src/hyperloom/...` in a source checkout).
+   `bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    resolved Anthropic-side upstream gateway.
 

@@ -31,6 +31,14 @@ below are explicit.
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
+
+The `${USER_DATA_PATH:-/workspace/hyperloom}` fallback below is the last resort
+in the chain and only correct where `/workspace` is writable; on a bare-metal
+host the CLI defaults to `session/` under the current directory instead. Prefer
+`KERNEL_AGENT_ENV`, which the installer writes for you.
 ```
 
 ---

@@ -16,6 +16,9 @@ upstream SKILL file for the component you're touching:
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
 ```
 
 ---
@@ -185,8 +188,8 @@ docker run --ulimit nofile=1048576 ...   # minimum: --ulimit nofile=65536
 
 The runtime also runs an fd-limit preflight that raises this process's
 *soft* limit (up to the hard cap) before every `ray start`
-(`src/hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
-`src/hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
+(`hyperloom/agents/kernel/scripts/install.sh` `ensure_fd_limit_for_ray` and
+`hyperloom/agents/kernel/tools/backends/ray_runtime.py` `ensure_fd_limit`), so a
 high hard cap is enough; you do not need to set the soft limit yourself.
 Override the target with `RAY_MIN_NOFILE` if needed. If the preflight
 warns that the **hard** cap is below the target, the container was not
