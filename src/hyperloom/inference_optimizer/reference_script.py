@@ -18,6 +18,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
 
@@ -303,6 +304,7 @@ def render_reference_script(
     framework_root: str | None = None,
     runtime: str | None = None,
     artifacts: list[dict[str, str]] | None = None,
+    rounds: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a runnable ``*.sh`` artifact from a launch recipe.
 
@@ -311,6 +313,14 @@ def render_reference_script(
     ``framework_root``, or ``artifacts`` are supplied, renders an
     ``enablement_setting.sh`` that additionally installs dependencies, applies
     patches, copies whole-file artifacts, and launches the server.
+
+    When ``rounds`` is supplied, it takes precedence over ``patches`` and
+    ``artifacts``. Each entry is ``{"patches": [...], "artifacts": [...]}``
+    and is emitted in order as: that round's patches then that round's
+    artifacts. This matches the runtime order in integrate_patch (base artifacts
+    replay → patches → this round's artifacts) and avoids the context-mismatch
+    under ``set -euo pipefail`` when a round both patches and whole-file-replaces
+    the same file.
 
     Args:
         framework: Framework identifier (``sglang``, ``vllm``, ``atom``, …).
@@ -326,7 +336,8 @@ def render_reference_script(
         setup_commands: Ordered install commands to run before launching.
             Only emit when generating an enablement artifact.
         patches: Ordered patch file paths, relative to the script directory, to
-            apply via ``git apply``.  Requires ``framework_root``.
+            apply via ``git apply``.  Requires ``framework_root``. Ignored when
+            ``rounds`` is supplied.
         framework_root: Framework source tree root where patches are applied.
             Emitted as ``export FRAMEWORK_ROOT=<path>`` and used in the
             ``apply_patch`` helper.
@@ -334,13 +345,17 @@ def render_reference_script(
             round relied on an isolated attempt venv at the given path and the
             script does not reproduce that layer.
         artifacts: Whole-file installs to replay, as ``{archive_path, target}``
-            dicts. ``archive_path`` is relative to the script directory.
+            dicts. ``archive_path`` is relative to the script directory. Ignored
+            when ``rounds`` is supplied.
+        rounds: Per-round ``{patches, artifacts}`` groups emitted in runtime
+            order (round patches then round artifacts). When supplied, ``patches``
+            and ``artifacts`` are ignored.
 
     Returns:
         The script text, always terminated by a newline.
     """
     fw = str(framework or "sglang").strip().lower()
-    has_enablement = bool(setup_commands or patches or framework_root or artifacts)
+    has_enablement = bool(setup_commands or patches or framework_root or artifacts or rounds)
 
     lines: list[str] = ["#!/usr/bin/env bash"]
     if has_enablement:
@@ -390,19 +405,37 @@ def render_reference_script(
         for cmd in setup_commands:
             lines.append(cmd)
 
-    if artifacts:
-        lines.append("")
-        for art in artifacts:
-            # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
-            src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
-            lines.append(f"install -D {src} {shlex.quote(art['target'])}")
+    if rounds:
+        any_patches = any(r.get("patches") for r in rounds)
+        if any_patches:
+            lines.append("")
+            lines.append(_APPLY_PATCH_FUNC)
+        for rnd in rounds:
+            rnd_patches = rnd.get("patches") or []
+            rnd_artifacts = rnd.get("artifacts") or []
+            if rnd_patches:
+                lines.append("")
+                for patch in rnd_patches:
+                    lines.append(f"apply_patch {shlex.quote(str(patch))}")
+            if rnd_artifacts:
+                lines.append("")
+                for art in rnd_artifacts:
+                    src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
+                    lines.append(f"install -D {src} {shlex.quote(art['target'])}")
+    else:
+        if artifacts:
+            lines.append("")
+            for art in artifacts:
+                # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
+                src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
+                lines.append(f"install -D {src} {shlex.quote(art['target'])}")
 
-    if patches:
-        lines.append("")
-        lines.append(_APPLY_PATCH_FUNC)
-        lines.append("")
-        for patch in patches:
-            lines.append(f"apply_patch {shlex.quote(str(patch))}")
+        if patches:
+            lines.append("")
+            lines.append(_APPLY_PATCH_FUNC)
+            lines.append("")
+            for patch in patches:
+                lines.append(f"apply_patch {shlex.quote(str(patch))}")
 
     args = str(server_args or "").strip()
     lines.append("")

@@ -3923,7 +3923,11 @@ class IntegratePatchExecutor:
             when the checkout fallback fires).
         """
         reverted: list[Path] = []
-        if framework_root is None or not applied:
+        base_artifact_replayed = getattr(self, "_ip_base_artifact_replayed", False)
+        if framework_root is None or (not applied and not base_artifact_replayed):
+            return reverted
+        if not applied:
+            _git_checkout_clean(framework_root)
             return reverted
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
         if nogit_backups is not None and not _is_git_tree(framework_root):
@@ -4015,6 +4019,7 @@ class IntegratePatchExecutor:
             target, _ = resolved
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+            self._ip_base_artifact_replayed = True  # type: ignore[attr-defined]
             log.info("integrate_patch: re-installed base artifact %s", target)
 
     def _apply_artifacts(
