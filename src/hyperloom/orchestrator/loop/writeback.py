@@ -2676,10 +2676,10 @@ class WritebackCollaborator:
                             "args_mode": str(recipe_delta.get("args_mode") or "append").strip().lower(),
                         }
                     else:
-                        # candidate_* fields are by definition the increment that
-                        # was measured; reconstruct the delta from them so KB
-                        # writeback is not blocked for rows written before
-                        # recipe_delta was introduced.
+                        # A promoted variant need not carry recipe_delta, but the
+                        # candidate_* fields are the increment that was measured,
+                        # so the delta is reconstructed rather than left absent for
+                        # the publishable-config builder to reject.
                         _delta_args = str(bv.get("candidate_extra_server_args") or "").strip()
                         _delta_envs = dict(bv.get("candidate_extra_envs") or {})
                         _delta_mode = str(bv.get("args_mode") or "append").strip().lower()
