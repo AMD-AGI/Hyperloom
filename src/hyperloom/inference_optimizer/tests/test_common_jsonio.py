@@ -190,3 +190,16 @@ class TestExtractLastJson:
             "meta": "final",
             "scores": {"proposal_0": {"score": 7}},
         }
+
+
+def test_extract_first_keeps_scanning_past_non_qualifying_object_in_fence() -> None:
+    """A fence may contain an example object before the real result.
+
+    extract_first_json_with_key must continue scanning after an object that does
+    not carry the required key, rather than returning None because the first
+    object did not qualify.
+    """
+    text = '```json\n{"example": 1}\n{"scores": [9]}\n```'
+    from hyperloom.common.jsonio import extract_first_json_with_key
+    result = extract_first_json_with_key(text, "scores")
+    assert result == {"scores": [9]}, f"got {result!r}"

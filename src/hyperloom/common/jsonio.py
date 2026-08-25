@@ -15,19 +15,49 @@ _FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
 _EMPTY_UNSET = object()
 
 
+def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
+    """Yield every top-level JSON object in *text* in document order.
+
+    Uses the balanced-bracket scanner from :func:`extract_last_json_with_key`
+    to locate object spans, then decodes each one. String literals containing
+    braces are tracked so they do not produce false span boundaries.
+    """
+    spans: list[tuple[int, int]] = []
+    stack: list[tuple[str, int]] = []
+    in_string = False
+    escaped = False
+    matching = {"}": "{", "]": "["}
+    for idx, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append((char, idx))
+        elif char in "}]":
+            if not stack or stack[-1][0] != matching[char]:
+                continue
+            opener, start = stack.pop()
+            if opener == "{":
+                spans.append((start, idx + 1))
+    for start, end in sorted(spans, key=lambda s: s[0]):
+        try:
+            data = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            yield data
+
+
 def _first_json_object(text: str) -> dict[str, Any] | None:
     """Return the first JSON object in *text*, or ``None``."""
-    decoder = json.JSONDecoder()
-    idx = text.find("{")
-    while idx != -1:
-        try:
-            value, _ = decoder.raw_decode(text, idx)
-            if isinstance(value, dict):
-                return value
-        except json.JSONDecodeError:
-            pass
-        idx = text.find("{", idx + 1)
-    return None
+    return next(_iter_json_objects(text), None)
 
 
 def read_json(
@@ -199,18 +229,18 @@ def extract_first_json_with_key(
 
     found: dict[str, Any] | None = None
     for m in _FENCED_BLOCK_RE.finditer(text):
-        data = _first_json_object(m.group(1))
-        if data is not None and _qualifies(data):
-            if not last:
-                return data
-            found = data
-    if bare_re is not None:
-        for m in bare_re.finditer(text):
-            data = _first_json_object(m.group(1))
-            if data is not None and _qualifies(data):
+        for data in _iter_json_objects(m.group(1)):
+            if _qualifies(data):
                 if not last:
                     return data
                 found = data
+    if bare_re is not None:
+        for m in bare_re.finditer(text):
+            for data in _iter_json_objects(m.group(1)):
+                if _qualifies(data):
+                    if not last:
+                        return data
+                    found = data
     return found
 
 
@@ -239,39 +269,15 @@ def extract_last_json_with_key(
     def _qualifies(data: Any) -> bool:
         return isinstance(data, dict) and (required_key is None or required_key in data)
 
-    spans: list[tuple[int, int]] = []
-    stack: list[tuple[str, int]] = []
-    in_string = False
-    escaped = False
-    matching = {"}": "{", "]": "["}
-    for index, char in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char in "{[":
-            stack.append((char, index))
-        elif char in "}]":
-            if not stack or stack[-1][0] != matching[char]:
-                continue
-            opener, start = stack.pop()
-            if opener == "{":
-                spans.append((start, index + 1))
-
-    for start, end in sorted(spans, key=lambda span: span[0], reverse=True):
-        try:
-            data = json.loads(text[start:end])
-        except json.JSONDecodeError:
-            continue
+    found: dict[str, Any] | None = None
+    for m in _FENCED_BLOCK_RE.finditer(text):
+        for data in _iter_json_objects(m.group(1)):
+            if _qualifies(data):
+                found = data
+    for data in _iter_json_objects(text):
         if _qualifies(data):
-            return data
-    return None
+            found = data
+    return found
 
 
 def iter_sse_objects(raw: str) -> Iterator[Any]:
