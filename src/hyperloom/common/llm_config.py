@@ -238,9 +238,10 @@ def dual_protocol_endpoint_pair(base_url: str) -> tuple[str, str]:
     Matching is case-insensitive because AMD's gateway spells the segment
     ``/Anthropic`` (issue #929).
 
-    A bare known-dual-protocol host gets both segments appended. A bare unknown
-    host is returned as-is on *both* sides. ``assets/install_baremetal.sh``
-    mirrors this branch for branch for the pre-Python bootstrap.
+    A bare known-dual-protocol host gets both segments appended. An unknown host
+    with no recognized suffix gets its Anthropic URL as-is and an OpenAI URL
+    with ``/v1`` appended. ``assets/install_baremetal.sh`` mirrors this for the
+    pre-Python bootstrap.
     """
     base = base_url.strip().rstrip("/")
     if not base:
@@ -252,14 +253,13 @@ def dual_protocol_endpoint_pair(base_url: str) -> tuple[str, str]:
         return base, f"{base.rsplit('/', 1)[0]}/v1"
     if lowered.endswith("/v1"):
         return f"{base.rsplit('/', 1)[0]}/anthropic", base
-    # No recognized protocol suffix.  Only append segments for known-dual-protocol
-    # hosts where both routes are guaranteed to exist; for unknown hosts return
-    # as-is on both sides to avoid fabricating endpoints that may not exist.
+    # No recognized protocol suffix.  Known-dual-protocol hosts get both segments
+    # appended; unknown hosts get /v1 appended to the OpenAI side.
     if _is_dual_protocol_host(base):
         parsed = urlsplit(base)
         if not parsed.path or parsed.path == "/":
             return f"{base}/anthropic", f"{base}/v1"
-    return base, base
+    return base, f"{base}/v1"
 
 
 def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:

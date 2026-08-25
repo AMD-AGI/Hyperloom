@@ -318,9 +318,7 @@ def test_deepseek_compat_env_key_only_fills_both_protocol_sides():
         ("https://gw.example/anthropic", "https://gw.example/anthropic", "https://gw.example/v1"),
         ("https://gw.example/v1", "https://gw.example/anthropic", "https://gw.example/v1"),
         ("https://gw.example/anthropic/", "https://gw.example/anthropic", "https://gw.example/v1"),
-        # A bare unknown host has no recognized protocol suffix; both sides get the
-        # same URL rather than fabricating a /v1 path that may not exist.
-        ("https://gw.example", "https://gw.example", "https://gw.example"),
+        ("https://gw.example", "https://gw.example", "https://gw.example/v1"),
     ],
 )
 def test_deepseek_compat_env_derives_the_sibling_endpoint(legacy_url, anthropic_url, openai_url):
