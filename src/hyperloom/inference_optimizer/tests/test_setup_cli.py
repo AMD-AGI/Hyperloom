@@ -1294,21 +1294,46 @@ _HOTFIX_HIP_SONAME = "libamdhip64.so.7.2.53211-35e8c7bf89"
 _HOTFIX_TRACER_SONAME = "libroctracer64.so.4.1.70202"
 
 
-def _fake_python_for_torch_lib(tmp_path: Path, torch_lib: Path) -> Path:
-    """A python stub answering both the torch.version.hip and torch/lib probes.
+_BACKUP_DIRNAME = ".profiler_hotfix_backup"
 
-    The two probes differ only by heredoc body, so the stub reads stdin instead
-    of matching argv.
+
+def _fake_python_for_torch_lib(
+    dest: Path,
+    torch_lib: Path,
+    *,
+    importable: frozenset[str] = frozenset({"sglang"}),
+    runtime_ok: bool = True,
+) -> Path:
+    """A python stub answering the framework probe, the torch/lib lookup and the
+    post-sync runtime check.
+
+    Only the framework probe is distinguishable by argv; the other two differ
+    just by heredoc body, so the stub reads stdin for those. With runtime_ok
+    False the runtime check fails only while the hotfix bytes are in place,
+    which is how a real incompatible library behaves: broken after the swap,
+    healthy again once the vendor copy is restored.
     """
-    stub = tmp_path / "fake-python-torch"
-    stub.write_text(
+    probe_cases = "\n".join(f"""  *"find_spec('{fw}')"*) exit 0 ;;""" for fw in sorted(importable))
+    runtime_case = '  *torch.version.hip*) printf "7.2.0\\n" ;;'
+    if not runtime_ok:
+        runtime_case = (
+            "  *torch.version.hip*)"
+            f' grep -q hotfix "{torch_lib}/libamdhip64.so" 2>/dev/null && exit 1;'
+            ' printf "7.2.0\\n" ;;'
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(
         "\n".join(
             [
                 "#!/usr/bin/env bash",
-                'case "$*" in *find_spec*) exit 0 ;; esac',
+                'case "$*" in',
+                probe_cases,
+                "  *find_spec*) exit 1 ;;",
+                "esac",
                 'probe="$(cat)"',
                 'case "$probe" in',
                 f'  *__file__*) printf "%s\\n" "{torch_lib}" ;;',
+                runtime_case,
                 '  *) printf "7.2.0\\n" ;;',
                 "esac",
             ]
@@ -1316,8 +1341,18 @@ def _fake_python_for_torch_lib(tmp_path: Path, torch_lib: Path) -> Path:
         + "\n",
         encoding="utf-8",
     )
-    stub.chmod(0o755)
-    return stub
+    dest.chmod(0o755)
+    return dest
+
+
+def _fake_rocm_lib(tmp_path: Path) -> Path:
+    rocm_lib = tmp_path / "rocm" / "lib"
+    rocm_lib.mkdir(parents=True)
+    (rocm_lib / _HOTFIX_HIP_SONAME).write_bytes(b"hotfix-hip-bytes")
+    (rocm_lib / _HOTFIX_TRACER_SONAME).write_bytes(b"hotfix-tracer-bytes")
+    (rocm_lib / "libamdhip64.so").symlink_to(_HOTFIX_HIP_SONAME)
+    (rocm_lib / "libroctracer64.so").symlink_to(_HOTFIX_TRACER_SONAME)
+    return rocm_lib
 
 
 def _drive_torch_lib_sync(
@@ -1326,25 +1361,22 @@ def _drive_torch_lib_sync(
     body: str,
     torch_hip: bytes | None = None,
     torch_tracer: bytes | None = None,
+    runtime_ok: bool = True,
+    extra_lines: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     """Drive the torch-lib helpers against a fake /opt/rocm and a fake torch/lib."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
 
-    rocm_lib = tmp_path / "rocm" / "lib"
+    rocm_lib = _fake_rocm_lib(tmp_path)
     torch_lib = tmp_path / "torch" / "lib"
-    rocm_lib.mkdir(parents=True)
     torch_lib.mkdir(parents=True)
-    (rocm_lib / _HOTFIX_HIP_SONAME).write_bytes(b"hotfix-hip-bytes")
-    (rocm_lib / _HOTFIX_TRACER_SONAME).write_bytes(b"hotfix-tracer-bytes")
-    (rocm_lib / "libamdhip64.so").symlink_to(_HOTFIX_HIP_SONAME)
-    (rocm_lib / "libroctracer64.so").symlink_to(_HOTFIX_TRACER_SONAME)
     if torch_hip is not None:
         (torch_lib / "libamdhip64.so").write_bytes(torch_hip)
     if torch_tracer is not None:
         (torch_lib / "libroctracer64.so").write_bytes(torch_tracer)
 
-    py = _fake_python_for_torch_lib(tmp_path, torch_lib)
+    py = _fake_python_for_torch_lib(tmp_path / "fake-python-torch", torch_lib, runtime_ok=runtime_ok)
     runner = tmp_path / "runner.sh"
     runner.write_text(
         "\n".join(
@@ -1355,6 +1387,7 @@ def _drive_torch_lib_sync(
                 "CHECK_ONLY=0",
                 f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
                 f'resolve_python() {{ printf "%s" "{py}"; }}',
+                *extra_lines,
                 body,
             ]
         )
@@ -1365,12 +1398,18 @@ def _drive_torch_lib_sync(
     return res, rocm_lib, torch_lib
 
 
+_SYNC_BODY = 'sync_rocm_profiler_libs_to_torch_lib "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR"'
+# The installer runs under `set -euo pipefail`, so a non-zero sync would end the
+# script; tests that assert on a failed sync keep the runner alive with `|| true`.
+_SYNC_BODY_SOFT = f"{_SYNC_BODY} || true"
+
+
 def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
     """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is
     invisible to torch.profiler and decode traces stay empty."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
-        body='sync_rocm_profiler_libs_to_torch_lib "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR"',
+        body=_SYNC_BODY,
         torch_hip=b"stock-hip-bytes",
         torch_tracer=b"stock-tracer-bytes",
     )
@@ -1378,9 +1417,190 @@ def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
     assert res.returncode == 0, res.stderr
     assert (torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-bytes"
     assert (torch_lib / "libroctracer64.so").read_bytes() == b"hotfix-tracer-bytes"
-    backups = sorted(torch_lib.glob(".profiler_hotfix_backup_*/libamdhip64.so"))
-    assert backups, "the replaced torch copy must be recoverable"
-    assert backups[0].read_bytes() == b"stock-hip-bytes"
+    backup = torch_lib / _BACKUP_DIRNAME / "libamdhip64.so"
+    assert backup.is_file(), "the replaced torch copy must be recoverable"
+    assert backup.read_bytes() == b"stock-hip-bytes"
+
+
+def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
+    """Re-running used to re-copy unconditionally and stamp a fresh backup dir
+    holding the already-hotfixed copy, piling large .so files into site-packages."""
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=f"{_SYNC_BODY}\n{_SYNC_BODY}",
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "already in sync" in res.stdout
+    backup_dirs = sorted(p.name for p in torch_lib.glob(".profiler_hotfix_backup*"))
+    assert backup_dirs == [_BACKUP_DIRNAME], backup_dirs
+    # The one backup must still hold the vendor bytes, not the first hotfix.
+    assert (torch_lib / _BACKUP_DIRNAME / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
+
+
+def test_hotfix_restore_removes_a_lib_torch_never_shipped(tmp_path: Path):
+    """Restoring must remove an injected lib, not leave it ahead of the system
+    copy on torch's $ORIGIN path."""
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=(f'{_SYNC_BODY}\nrestore_torch_libs "${{TORCH_LIB_DIR}}/.profiler_hotfix_backup" "$TORCH_LIB_DIR"'),
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=None,
+        extra_lines=(f'TORCH_LIB_DIR="{tmp_path}/torch/lib"',),
+    )
+
+    assert res.returncode == 0, res.stderr
+    # torch shipped only libamdhip64.so, so that is all the snapshot holds.
+    assert sorted(p.name for p in (torch_lib / _BACKUP_DIRNAME).iterdir()) == ["libamdhip64.so"]
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
+    assert not (torch_lib / "libroctracer64.so").exists(), "injected lib must be removed"
+
+
+def test_hotfix_torch_lib_sync_aborts_when_the_backup_fails(tmp_path: Path):
+    """Destroying vendor libraries with no recoverable copy is worse than skipping."""
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        # Restore the mode afterwards so the temp tree stays removable.
+        body=f'{_SYNC_BODY_SOFT}\nchmod 0755 "{tmp_path}/torch/lib"',
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+        # A read-only torch/lib makes install -d fail for the backup dir.
+        extra_lines=(f'chmod 0555 "{tmp_path}/torch/lib"',),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "cannot back up" in res.stderr
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
+    assert (torch_lib / "libroctracer64.so").read_bytes() == b"stock-tracer-bytes"
+
+
+def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
+    """cmp only proves the bytes landed; the new libamdhip64 still has to work
+    against the other ROCm libs torch bundles under $ORIGIN."""
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=_SYNC_BODY_SOFT,
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+        runtime_ok=False,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "torch broke after the sync" in res.stderr
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
+    assert (torch_lib / "libroctracer64.so").read_bytes() == b"stock-tracer-bytes"
+
+
+def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
+    """The installer runs under set -e: a bare sync call would end setup instead
+    of degrading to "hotfix not applied"."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+    torch_lib = tmp_path / "torch" / "lib"
+    torch_lib.mkdir(parents=True)
+    (torch_lib / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
+    (torch_lib / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
+    py = _fake_python_for_torch_lib(tmp_path / "fake-python-torch", torch_lib, runtime_ok=False)
+    # apply_rocm_profiler_hotfix deletes the extract dir, so hand it a copy.
+    extract = tmp_path / "extract"
+    extract.mkdir()
+    (extract / _HOTFIX_HIP_SONAME).write_bytes(b"hotfix-hip-bytes")
+    (extract / _HOTFIX_TRACER_SONAME).write_bytes(b"hotfix-tracer-bytes")
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                # Stand in for the /opt/rocm half, which needs a real download.
+                "rocm_profiler_hotfix_compatible() { return 0; }",
+                "rocm_profiler_hotfix_applied() { return 0; }",
+                "verify_rocm_profiler_hotfix() { return 0; }",
+                f'download_rocm_profiler_hotfix_libs() {{ printf "%s" "{extract}"; }}',
+                "apply_rocm_profiler_hotfix",
+                "echo REACHED_NEXT_PHASE",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert "REACHED_NEXT_PHASE" in res.stdout, res.stderr
+    assert "torch lib sync reported issues" in res.stderr
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
+
+
+def test_hotfix_torch_lib_sync_replaces_the_file_atomically(tmp_path: Path):
+    """An in-place O_TRUNC overwrite SIGBUSes any process holding the old .so
+    mmapped, and re-runs happen while a server may still be up."""
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=_SYNC_BODY,
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+    )
+    assert res.returncode == 0, res.stderr
+
+    # mv -f swaps in a new inode; the backup still points at the original one.
+    replaced = (torch_lib / "libamdhip64.so").stat().st_ino
+    original = (torch_lib / _BACKUP_DIRNAME / "libamdhip64.so").stat().st_ino
+    assert replaced != original
+    assert not list(torch_lib.glob(".*hotfix-tmp*")), "temp file must not be left behind"
+
+
+def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
+    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under
+    $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never
+    runs the benchmark and left the profiler unfixed."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+
+    shared_torch_lib = tmp_path / "shared" / "torch" / "lib"
+    venv_torch_lib = tmp_path / "vllm-venv" / "torch" / "lib"
+    for d in (shared_torch_lib, venv_torch_lib):
+        d.mkdir(parents=True)
+        (d / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
+        (d / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
+
+    venv_root = tmp_path / "vllm-venv"
+    shared_py = _fake_python_for_torch_lib(tmp_path / "shared-python", shared_torch_lib, importable=frozenset())
+    _fake_python_for_torch_lib(venv_root / "bin" / "python", venv_torch_lib, importable=frozenset({"vllm"}))
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                "FRAMEWORK_ENV=isolated",
+                f'VLLM_VENV_ROOT="{venv_root}"',
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{shared_py}"; }}',
+                _SYNC_BODY,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert res.returncode == 0, res.stderr
+    assert (venv_torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-bytes"
+    assert (shared_torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes", (
+        "the shared torch has no importable framework and must be left alone"
+    )
 
 
 def test_baremetal_hotfix_torch_lib_verification_rejects_a_stale_torch_copy(tmp_path: Path):

@@ -176,9 +176,17 @@ ROCm images ship stock rocclr/roctracer libraries that omit HIP-graph replay
 kernel events during decode profiling; vLLM ROCm images carry their own kineto
 profiler workaround, so the overlay is skipped for them rather than replacing a
 vendor-validated pair. The gate reads `HYPERLOOM_RUN_MODE` from `.env` and
-probes which engine is importable in the container. On bare metal the hotfix
-stays engine-agnostic and applies to SGLang, vLLM, and atom alike. It is skipped
-unless the ROCm 7.2 stack is eligible, and a failure warns without aborting.
+probes which engine is importable in the container. It is skipped unless the
+ROCm 7.2 stack is eligible, and a failure warns without aborting.
+
+The overlay is copied into `torch/lib` per framework, because torch's own copies
+carry `DT_RPATH=$ORIGIN` and outrank `LD_LIBRARY_PATH`. Bare-metal vLLM defaults
+to `--framework-env isolated` with its own torch under `$VLLM_VENV_ROOT`, so each
+importable framework's interpreter is resolved separately; SGLang and a shared
+vLLM land on the host torch. atom is not covered: it is not a supported demo
+engine. Before replacing anything, the original files are snapshotted to
+`torch/lib/.profiler_hotfix_backup`, the swap is atomic, and torch has to import
+and initialise HIP afterwards or the snapshot is restored.
 
 Selecting `baremetal` as the run mode while actually running setup inside a
 container bypasses this gate: a vLLM image would then get the overlay. Keep
