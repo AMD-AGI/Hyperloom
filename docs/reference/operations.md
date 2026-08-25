@@ -23,6 +23,9 @@ recurring symptoms see [Troubleshooting Hyperloom](troubleshooting.md).
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+The command blocks assume `REPO_ROOT` points at that workspace. No installer
+exports it for you, so run `export REPO_ROOT="$(pwd -P)"` from the workspace
+first — it does not survive a new shell.
 ```
 
 ---

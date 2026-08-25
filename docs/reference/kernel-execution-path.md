@@ -200,22 +200,24 @@ The lane writes three SharedState fields into `state.json`:
 
 ## Toolkit installation
 
-The kernel tool scripts live under
-`src/hyperloom/agents/kernel/tools/` and are resolved at runtime via the
-`HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to `<repo>/src/hyperloom/agents/kernel`
-by the CLI bootstrap). Install everything using:
+Shell paths in this section follow the recommended `pip install --target .` layout.
+In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+
+The kernel tool scripts live under `hyperloom/agents/kernel/tools/` and are
+resolved at runtime via the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
+`<repo>/hyperloom/agents/kernel` by the CLI bootstrap). Install everything using:
 
 ```bash
-export REPO_ROOT="$(pwd)"    # hyperloom repo root
-bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
-source "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh"
+export REPO_ROOT="$(pwd -P)"    # workspace holding the hyperloom package
+# Pin the artifact root so the env file below has a known path. Left unset, the
+# CLI picks /workspace/hyperloom when writable and session/ under $PWD otherwise.
+export USER_DATA_PATH="${USER_DATA_PATH:-$REPO_ROOT/session}"
+bash "$REPO_ROOT/hyperloom/agents/kernel/scripts/install.sh"
+source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 ```
 
 `install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
-env file. Re-run it after a venv rebuild or before each session. The paths above
-assume a source checkout; in a `pip install --target .` workspace the same
-script is at `hyperloom/agents/kernel/scripts/install.sh`, without the `src/`
-prefix.
+env file. Re-run it after a venv rebuild or before each session.
 
 Required env vars:
 
