@@ -126,7 +126,8 @@ The backend runs `install_baremetal.sh` in five phases:
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
+3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible,
+   covering both `/opt/rocm/lib` and PyTorch's bundled `torch/lib/`.
 4. **Credentials**: resolves LLM gateway credentials into `.env`.
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
@@ -166,6 +167,12 @@ HYPERLOOM_DOCKER_TARGET_HOST=<hostname>
 ```
 
 The demo skill reads this value to target the chosen host.
+
+The demo skill runs the setup backend inside the container, so Phase 3 applies
+the ROCm profiler hotfix there too, but only for SGLang images: vLLM ROCm images
+ship their own profiler workaround. Setup reads the run mode from `.env`, so keep
+`HYPERLOOM_RUN_MODE=docker` for container runs even though the backend itself
+runs inside the container.
 
 ### Environment written by setup
 

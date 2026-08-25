@@ -69,6 +69,7 @@ AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
+_VLLM_VENV_ROOT_WAS_SET="${VLLM_VENV_ROOT+x}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
 REQUIRE_FRAMEWORKS=0
 SKIP_BASE_CHECK=0
@@ -148,7 +149,12 @@ while [ "$#" -gt 0 ]; do
         *) echo "[install-baremetal] ERROR: --framework-env must be one of: shared, isolated" >&2; exit 2 ;;
       esac
       ;;
-    --vllm-venv-root)   [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-venv-root requires a value" >&2; exit 2; }; shift; VLLM_VENV_ROOT="${1:-}" ;;
+    --vllm-venv-root)
+      [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-venv-root requires a value" >&2; exit 2; }
+      shift
+      VLLM_VENV_ROOT="${1:-}"
+      _VLLM_VENV_ROOT_WAS_SET="x"
+      ;;
     --require-frameworks) REQUIRE_FRAMEWORKS=1 ;;
     --skip-base-check)  SKIP_BASE_CHECK=1 ;;
     --check-only)       CHECK_ONLY=1 ;;
@@ -186,6 +192,9 @@ resolve_python() {
 # Import-probe a module. `import importlib.util` (not `import importlib`): a bare
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
+
+# Backs up declared run mode when setup runs inside a container.
+running_in_container() { [ -f /.dockerenv ]; }
 
 # The interpreter that owns a given framework. vLLM lives in its own venv under
 # FRAMEWORK_ENV=isolated; every other engine uses the shared interpreter. Every
@@ -928,10 +937,7 @@ PY
     *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
   esac
 
-  # The hotfix swaps the ROCm profiler libraries that torch.profiler loads, so
-  # it is engine-agnostic: gate it on "some serving framework is present", not
-  # on sglang/vllm specifically, or an atom-only host silently loses profiling.
-  # Walks $FRAMEWORKS for the same reason resolve_installed_framework does.
+  # Gate on any importable engine; torch/lib sync narrows to sglang/vllm only.
   local found="" fw probe_py _hotfix_arr
   IFS=',' read -r -a _hotfix_arr <<< "$FRAMEWORKS"
   for fw in "${_hotfix_arr[@]}"; do
@@ -941,6 +947,16 @@ PY
   done
   [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
   log "framework imports: ${found}"
+
+  # Container images: sglang needs the overlay; vLLM ships its own workaround.
+  local run_mode
+  run_mode="$(read_dotenv_var HYPERLOOM_RUN_MODE | tr -d '[:space:]')"
+  if running_in_container || [ "$run_mode" = "docker" ]; then
+    case " ${found} " in
+      *" sglang "*) log "container run with sglang; ROCm profiler hotfix is eligible" ;;
+      *) warn "container run without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
+    esac
+  fi
 }
 
 download_rocm_profiler_hotfix_libs() {
@@ -1045,6 +1061,281 @@ if not hip:
 PY
 }
 
+resolve_torch_lib_dir() {
+  local py="$1"
+  "$py" - <<'PY' 2>/dev/null || true
+import pathlib
+
+try:
+    import torch
+
+    print(pathlib.Path(torch.__file__).resolve().parent / "lib")
+except Exception:
+    pass
+PY
+}
+
+ROCM_PROFILER_HOTFIX_TORCH_LIBS="libamdhip64.so libroctracer64.so"
+ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS="sglang vllm"
+ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR=".profiler_hotfix_backup"
+ROCM_PROFILER_HOTFIX_FINGERPRINT=".fingerprint"
+
+_sha256_file() {
+  local f="$1"
+  [ -f "$f" ] || { printf 'absent'; return 0; }
+  sha256sum "$f" | awk '{print $1}'
+}
+
+_fingerprint_field() {
+  local fp="$1" kind="$2" name="$3"
+  grep "^${kind}:${name}:" "$fp" 2>/dev/null | cut -d: -f3- || true
+}
+
+_write_backup_fingerprint() {
+  local fp="$1" backup_dir="$2" rocm_lib_dir="$3" name src tmp="${fp}.tmp"
+  rm -f "$tmp"
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    if [ -e "${backup_dir}/${name}" ]; then
+      printf 'vendor:%s:%s\n' "$name" "$(_sha256_file "${backup_dir}/${name}")"
+    else
+      printf 'vendor:%s:absent\n' "$name"
+    fi
+    src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+    printf 'hotfix:%s:%s\n' "$name" "$(_sha256_file "$src")"
+  done > "$tmp" || return 1
+  mv -f "$tmp" "$fp" || return 1
+}
+
+# Vendor snapshot is stale only when torch's on-disk libs are neither the
+# recorded vendor, the recorded hotfix, nor the current hotfix source.
+_torch_vendor_stale() {
+  local backup_dir="$1" torch_lib_dir="$2" rocm_lib_dir="$3"
+  local fp="${backup_dir}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}" name src torch_sha vendor_sha hotfix_sha
+
+  [ -f "$fp" ] || return 0
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    vendor_sha="$(_fingerprint_field "$fp" vendor "$name")"
+    hotfix_sha="$(_fingerprint_field "$fp" hotfix "$name")"
+    [ -n "$vendor_sha" ] || return 0
+    if [ ! -e "${torch_lib_dir}/${name}" ]; then
+      [ "$vendor_sha" = "absent" ] || return 0
+      continue
+    fi
+    torch_sha="$(_sha256_file "${torch_lib_dir}/${name}")"
+    src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+    if [ -f "$src" ] && [ "$torch_sha" = "$(_sha256_file "$src")" ]; then
+      if [ -e "${backup_dir}/${name}" ]; then
+        [ "$(_sha256_file "${backup_dir}/${name}")" = "$vendor_sha" ] || return 0
+      elif [ "$vendor_sha" != "absent" ]; then
+        return 0
+      fi
+      continue
+    fi
+    [ "$torch_sha" = "$hotfix_sha" ] && continue
+    [ "$torch_sha" = "$vendor_sha" ] && continue
+    return 0
+  done
+  return 1
+}
+
+_framework_torch_lib_missing() {
+  local default_py="$1" fw probe_py dir
+  for fw in $ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS; do
+    probe_py="$(framework_probe_python "$fw" "$default_py")"
+    _py_has "$probe_py" "$fw" || continue
+    dir="$(resolve_torch_lib_dir "$probe_py")"
+    [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  done
+  return 1
+}
+
+collect_framework_torch_lib_dirs() {
+  local default_py="$1" fw probe_py dir seen=""
+  for fw in $ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS; do
+    probe_py="$(framework_probe_python "$fw" "$default_py")"
+    _py_has "$probe_py" "$fw" || continue
+    dir="$(resolve_torch_lib_dir "$probe_py")"
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    case " ${seen} " in *" ${dir} "*) continue ;; esac
+    seen="${seen:+${seen} }${dir}"
+    printf '%s\t%s\n' "$probe_py" "$dir"
+  done
+}
+
+verify_torch_runtime() {
+  local py="$1"
+  "$py" - <<'PY'
+import torch
+
+if not getattr(torch.version, "hip", None):
+    raise SystemExit("torch.version.hip is empty")
+if torch.cuda.is_available():
+    torch.zeros(1, device="cuda")
+PY
+}
+
+ensure_torch_lib_backup() {
+  local backup_dir="$1" torch_lib_dir="$2" rocm_lib_dir="$3"
+  local name staging fp="${backup_dir}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}"
+  local old_backup old_fp vendor_sha hotfix_sha torch_sha src
+
+  if [ -d "$backup_dir" ]; then
+    _torch_vendor_stale "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir" || return 0
+    log "torch vendor libs changed; refreshing ${backup_dir}"
+    old_backup="${backup_dir}.preserve"
+    rm -rf "$old_backup"
+    mv "$backup_dir" "$old_backup" || return 1
+    old_fp="${old_backup}/${ROCM_PROFILER_HOTFIX_FINGERPRINT}"
+
+    staging="${backup_dir}.staging"
+    rm -rf "$staging"
+    install -d "$staging" || { rm -rf "$old_backup"; return 1; }
+    for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+      [ -e "${torch_lib_dir}/${name}" ] || continue
+      vendor_sha="$(_fingerprint_field "$old_fp" vendor "$name")"
+      hotfix_sha="$(_fingerprint_field "$old_fp" hotfix "$name")"
+      torch_sha="$(_sha256_file "${torch_lib_dir}/${name}")"
+      src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+      if [ "$torch_sha" = "$hotfix_sha" ] \
+          || { [ -f "$src" ] && [ "$torch_sha" = "$(_sha256_file "$src")" ]; }; then
+        [ -e "${old_backup}/${name}" ] \
+          && cp -a "${old_backup}/${name}" "${staging}/${name}" || true
+      else
+        cp -a "${torch_lib_dir}/${name}" "${staging}/${name}" \
+          || { rm -rf "$staging" "$old_backup"; return 1; }
+      fi
+    done
+    mv -T "$staging" "$backup_dir" || { rm -rf "$staging" "$old_backup"; return 1; }
+    rm -rf "$old_backup"
+    _write_backup_fingerprint "$fp" "$backup_dir" "$rocm_lib_dir"
+    return 0
+  fi
+
+  staging="${backup_dir}.staging"
+  rm -rf "$staging"
+  install -d "$staging" || return 1
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    [ -e "${torch_lib_dir}/${name}" ] || continue
+    cp -a "${torch_lib_dir}/${name}" "${staging}/${name}" || { rm -rf "$staging"; return 1; }
+  done
+  mv -T "$staging" "$backup_dir" || { rm -rf "$staging"; return 1; }
+  _write_backup_fingerprint "$fp" "$backup_dir" "$rocm_lib_dir"
+}
+
+restore_torch_libs() {
+  local backup_dir="$1" torch_lib_dir="$2" name
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    if [ -e "${backup_dir}/${name}" ]; then
+      cp -a "${backup_dir}/${name}" "${torch_lib_dir}/${name}" || return 1
+    else
+      rm -f "${torch_lib_dir}/${name}" || return 1
+    fi
+  done
+}
+
+sync_one_torch_lib() {
+  local rocm_lib_dir="$1" py="$2" torch_lib_dir="$3"
+  local backup_dir="${torch_lib_dir}/${ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR}"
+  local name src dst tmp mode pending=""
+
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+    [ -f "$src" ] || { warn "${name} unresolved under ${rocm_lib_dir}"; return 1; }
+    cmp -s "$src" "${torch_lib_dir}/${name}" || pending="${pending:+${pending} }${name}"
+  done
+  [ -n "$pending" ] || { log "torch profiler libs already in sync (${torch_lib_dir})"; return 0; }
+
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would sync ${pending} from ${rocm_lib_dir} into ${torch_lib_dir}"
+    return 0
+  fi
+
+  ensure_torch_lib_backup "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir" \
+    || { warn "cannot back up ${torch_lib_dir}"; return 1; }
+
+  log "syncing ${pending} into torch lib (${torch_lib_dir})"
+  for name in $pending; do
+    src="$(readlink -f "${rocm_lib_dir}/${name}")"
+    dst="${torch_lib_dir}/${name}"
+    tmp="${torch_lib_dir}/.${name}.hotfix-tmp.$$"
+    mode=0644
+    [ -e "$dst" ] && mode="$(stat -c '%a' "$dst")"
+    if ! cp -f "$src" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dst"; then
+      rm -f "$tmp"
+      warn "failed to write ${dst}"
+      restore_torch_libs "$backup_dir" "$torch_lib_dir" \
+        || die "cannot restore ${torch_lib_dir} from ${backup_dir}"
+      return 1
+    fi
+  done
+
+  if ! verify_torch_runtime "$py"; then
+    warn "torch did not come up after the sync; restoring ${torch_lib_dir}"
+    restore_torch_libs "$backup_dir" "$torch_lib_dir" \
+      || die "cannot restore ${torch_lib_dir} from ${backup_dir}"
+    for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+      if [ -e "${backup_dir}/${name}" ] || [ -e "${torch_lib_dir}/${name}" ]; then
+        cmp -s "${backup_dir}/${name}" "${torch_lib_dir}/${name}" \
+          || die "restored ${torch_lib_dir} does not match ${backup_dir}"
+      fi
+    done
+    warn "vendor libraries restored; continuing without the torch lib sync"
+    return 1
+  fi
+  log "torch profiler libs synced into ${torch_lib_dir}"
+}
+
+# torch loads profiler libs from its bundled torch/lib (DT_RPATH=$ORIGIN).
+sync_rocm_profiler_libs_to_torch_lib() {
+  local rocm_lib_dir="${1:-${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}}"
+  local default_py pairs py dir rc=0
+
+  default_py="$(resolve_python)" || { warn "cannot resolve Python"; return 1; }
+  pairs="$(collect_framework_torch_lib_dirs "$default_py")"
+  if [ -z "$pairs" ]; then
+    if _framework_torch_lib_missing "$default_py"; then
+      warn "serving framework importable but torch/lib not resolved; skipping torch lib sync"
+      return 1
+    fi
+    log "no torch/lib to sync for ${ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS}"
+    return 0
+  fi
+
+  while IFS="$(printf '\t')" read -r py dir; do
+    sync_one_torch_lib "$rocm_lib_dir" "$py" "$dir" || rc=1
+  done <<< "$pairs"
+  return "$rc"
+}
+
+verify_rocm_profiler_torch_lib_sync() {
+  local rocm_lib_dir="${1:-${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}}"
+  local default_py pairs dir name src rc=0
+
+  default_py="$(resolve_python)" || return 1
+  pairs="$(collect_framework_torch_lib_dirs "$default_py")"
+  [ -n "$pairs" ] || return 0
+
+  while IFS="$(printf '\t')" read -r _py dir; do
+    for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+      src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+      [ -f "$src" ] || continue
+      cmp -s "$src" "${dir}/${name}" || { warn "torch ${name} differs in ${dir}"; rc=1; }
+    done
+  done <<< "$pairs"
+  return "$rc"
+}
+
+sync_torch_profiler_libs() {
+  local target_dir="$1" verify="${2:-0}" rc=0
+  sync_rocm_profiler_libs_to_torch_lib "$target_dir" \
+    || { warn "torch lib sync reported issues"; rc=1; }
+  if [ "$verify" -eq 1 ]; then
+    verify_rocm_profiler_torch_lib_sync "$target_dir" \
+      || { warn "torch lib sync verification reported issues"; rc=1; }
+  fi
+  return "$rc"
+}
+
 apply_rocm_profiler_hotfix() {
   local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
   local extract_dir backup_dir hip_lib tracer_lib
@@ -1059,6 +1350,7 @@ apply_rocm_profiler_hotfix() {
     log "check-only: ROCm profiler hotfix release asset will not be downloaded"
     log "current libamdhip64.so -> $(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || echo missing)"
     log "current libroctracer64.so -> $(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || echo missing)"
+    sync_torch_profiler_libs "$target_dir" || true
     return 0
   fi
 
@@ -1066,6 +1358,7 @@ apply_rocm_profiler_hotfix() {
     log "would download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
     log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
     log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
+    sync_torch_profiler_libs "$target_dir" || true
     return 0
   fi
 
@@ -1076,6 +1369,7 @@ apply_rocm_profiler_hotfix() {
   if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then
     log "ROCm profiler hotfix already applied (${hip_lib}, ${tracer_lib})"
     verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib" || warn "existing ROCm profiler hotfix verification reported issues"
+    sync_torch_profiler_libs "$target_dir" 1 || true
     rm -rf "$extract_dir"
     return 0
   fi
@@ -1094,7 +1388,35 @@ apply_rocm_profiler_hotfix() {
     die "ROCm profiler hotfix failed and rollback did not complete"
   fi
   rm -rf "$extract_dir"
-  log "ROCm profiler hotfix applied"
+  if sync_torch_profiler_libs "$target_dir"; then
+    log "ROCm profiler hotfix applied"
+  else
+    warn "ROCm profiler hotfix partially applied (/opt/rocm overlay only; torch/lib sync failed)"
+  fi
+}
+
+# Re-read framework env persisted by a prior setup run so Phase 3 targets the
+# same interpreter/venv on re-runs with --install-framework none.
+restore_persisted_framework_env() {
+  if [ -z "$_FRAMEWORK_ENV_WAS_SET" ]; then
+    local saved_fw
+    saved_fw="$(read_dotenv_var HYPERLOOM_FRAMEWORK_ENV)"
+    if [ -n "$saved_fw" ]; then
+      FRAMEWORK_ENV="$saved_fw"
+      log "restored framework env from .env (${FRAMEWORK_ENV})"
+    elif [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
+      FRAMEWORK_ENV="isolated"
+      log "vLLM selected; defaulting to isolated framework env"
+    fi
+  fi
+  if [ -z "${_VLLM_VENV_ROOT_WAS_SET:-}" ]; then
+    local saved_root
+    saved_root="$(read_dotenv_var VLLM_VENV_ROOT)"
+    if [ -n "$saved_root" ]; then
+      VLLM_VENV_ROOT="$saved_root"
+    fi
+  fi
+  return 0
 }
 
 read_dotenv_var() {
@@ -1481,13 +1803,7 @@ EOF
 }
 
 main() {
-  # vLLM defaults to an isolated venv (its ROCm wheel pins a torch that would
-  # clash with the shared host stack). Operators can still force shared with an
-  # explicit $FRAMEWORK_ENV / --framework-env.
-  if [ "$INSTALL_FRAMEWORK" = "vllm" ] && [ -z "$_FRAMEWORK_ENV_WAS_SET" ]; then
-    FRAMEWORK_ENV="isolated"
-    log "vLLM selected; defaulting to isolated framework env"
-  fi
+  restore_persisted_framework_env
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
