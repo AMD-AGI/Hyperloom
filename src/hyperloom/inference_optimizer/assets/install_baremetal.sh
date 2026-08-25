@@ -1401,10 +1401,10 @@ restore_torch_soname_aliases() {
   [ -f "$marker" ] || return 0
   while read -r soname; do
     [ -n "$soname" ] || continue
+    # The alias we installed is a symlink, and cp would write through it.
+    rm -f "${torch_lib_dir}/${soname}" || return 1
     if [ -e "${backup_dir}/${soname}" ]; then
       cp -a "${backup_dir}/${soname}" "${torch_lib_dir}/${soname}" || return 1
-    else
-      rm -f "${torch_lib_dir}/${soname}" || return 1
     fi
   done < "$marker"
   rm -f "$marker"
