@@ -888,6 +888,85 @@ class TestWriteBoundaryGuard:
         decision = self._decide(run_dir, "Bash", {"command": "c++filt _ZN5aiter4moeE"})
         assert decision.behavior == "allow"
 
+    def test_every_shell_command_is_recorded(self, tmp_path):
+        """Bash is not confined, so the record is what makes drift readable."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        seen: list[str] = []
+        guard = cra._write_boundary_guard(run_dir, log=seen.append)
+        asyncio.run(guard("Bash", {"command": "cp a.py /tmp/b.py"}, None))
+        assert any("cp a.py /tmp/b.py" in line for line in seen)
+
+    def test_an_unknown_tool_is_refused_not_allowed(self, tmp_path):
+        """The tool set is the SDK's to grow.
+
+        A callback whose fallthrough is "allow" hands every tool added by a
+        later SDK the freedom this stage withholds, silently, on an upgrade
+        nobody reviewed.
+        """
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        for tool in ("Edit", "NotebookEdit", "SomeFutureFileMover"):
+            decision = self._decide(run_dir, tool, {"file_path": str(run_dir / "x.py")})
+            assert decision.behavior == "deny", tool
+
+    def test_the_read_only_tools_agree_with_the_allowlist(self, tmp_path):
+        """They are pre-approved and should not arrive, but must not contradict."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        for tool in cra.ALLOWED_TOOLS:
+            assert self._decide(run_dir, tool, {}).behavior == "allow", tool
+
+
+class TestTheBoundaryIsNotTradedForCompatibility:
+    def test_an_sdk_without_can_use_tool_gets_no_session(self, tmp_path, monkeypatch):
+        """Widening allowed_tools to keep going is a silent, host-shaped hole.
+
+        The fingerprint does not cover it either: drift is only checked for the
+        candidate sources and their directories, so a write anywhere else would
+        be neither prevented nor detected. Refusing is a reported outcome; the
+        stage is advisory, so the deterministic table still stands.
+        """
+        import claude_agent_sdk as sdk
+
+        class _OptionsWithoutGuard:
+            def __init__(self, **kwargs):
+                if "can_use_tool" in kwargs:
+                    raise TypeError("unexpected keyword argument 'can_use_tool'")
+
+        monkeypatch.setattr(sdk, "ClaudeAgentOptions", _OptionsWithoutGuard)
+        error = asyncio.run(
+            cra._run_claude_session(
+                "prompt",
+                run_dir=tmp_path,
+                model="m",
+                timeout_sec=1.0,
+                log=None,
+            )
+        )
+        assert "can_use_tool" in error
+        assert "unconfined" in error
+
+    def test_an_sdk_without_cwd_still_gets_the_guard(self, tmp_path, monkeypatch):
+        """``cwd`` orders relative paths and carries none of the boundary."""
+        import claude_agent_sdk as sdk
+
+        captured: dict = {}
+
+        class _OptionsWithoutCwd:
+            def __init__(self, **kwargs):
+                if "cwd" in kwargs:
+                    raise TypeError("unexpected keyword argument 'cwd'")
+                captured.update(kwargs)
+
+        monkeypatch.setattr(sdk, "ClaudeAgentOptions", _OptionsWithoutCwd)
+        monkeypatch.setattr(sdk, "query", lambda **_kw: iter(()))
+        asyncio.run(cra._run_claude_session("prompt", run_dir=tmp_path, model="m", timeout_sec=1.0, log=None))
+        assert captured.get("can_use_tool") is not None
+        assert list(captured["allowed_tools"]) == list(cra.ALLOWED_TOOLS)
+        for tool in cra._GATED_TOOLS:
+            assert tool not in captured["allowed_tools"]
+
 
 # --- the stage boundary in tracelens_analysis -------------------------------
 

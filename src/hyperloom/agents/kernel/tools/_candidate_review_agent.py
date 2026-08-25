@@ -526,20 +526,33 @@ def _write_boundary_guard(
     *,
     log: Callable[[str], None] | None = None,
 ) -> Callable[[str, dict[str, Any], Any], Any]:
-    """Build the ``can_use_tool`` callback that confines writes to ``run_dir``.
+    """Build the ``can_use_tool`` callback that decides every gated call.
 
-    This is the enforcement the Claude backend previously only described. The
-    prompt's closing "write nothing outside the run directory" line is now
-    backed for the tool that writes: a ``Write`` naming a path outside the run
-    directory is refused, and the refusal reaches the session as a tool error it
-    can react to rather than as a silent success.
+    Default-deny. A tool this function does not recognise is refused rather
+    than allowed, because the set of tools is the SDK's to grow: a permission
+    callback whose fallthrough is "allow" hands every future tool -- an
+    ``Edit``-alike under a new name, a file mover, a patch applier -- the
+    freedom this stage exists to withhold, and does so silently on an SDK
+    upgrade nobody reviewed.
 
-    ``Bash`` is admitted. A shell command can write anywhere the process can,
-    and reading the command string to guess whether it will is the kind of guard
-    that fails quietly on the first construction nobody predicted -- so it is
-    not attempted here, and :func:`directory_fingerprint` carries that case
-    instead. Routing ``Bash`` through the same callback still buys one thing:
-    every gated call has a single place that decided it, and that place logs.
+    Three decisions, and only three:
+
+    * ``Write`` is the answer channel and is confined to ``run_dir``. A target
+      outside it, or one that cannot be read off the tool input at all, is
+      refused, and the refusal reaches the session as a tool error it can react
+      to rather than as a silent success.
+    * ``Bash`` is admitted, and every call is recorded. A shell command can
+      write anywhere the process can, and reading the command string to guess
+      whether it will is the kind of guard that fails quietly on the first
+      construction nobody predicted -- ``python3 -c`` alone defeats any command
+      allowlist -- so confinement is not attempted here and
+      :func:`directory_fingerprint` carries the case instead. What the callback
+      does add is a record: an unexplained drift afterwards can be read against
+      the commands that ran.
+    * The pre-approved read-only tools are allowed if they ever arrive here.
+      They should not -- an ``allowed_tools`` entry auto-approves ahead of the
+      callback -- but agreeing with :data:`ALLOWED_TOOLS` costs nothing and
+      keeps the two from drifting into a contradiction.
 
     Args:
         run_dir (Path): The only directory the session may write to.
@@ -550,28 +563,40 @@ def _write_boundary_guard(
     """
     import claude_agent_sdk as sdk  # type: ignore[import-not-found]  # noqa: PLC0415
 
+    def _say(message: str) -> None:
+        if log is not None:
+            log(f"[review-agent] {message}")
+
+    def _refuse(message: str) -> Any:
+        _say(f"WARNING: {message}")
+        return sdk.PermissionResultDeny(message=message)
+
     async def _can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
-        if tool_name != "Write":
-            return sdk.PermissionResultAllow()
-        target = next(
-            (
-                str(tool_input.get(key) or "").strip()
-                for key in _WRITE_PATH_KEYS
-                if str(tool_input.get(key) or "").strip()
-            ),
-            "",
-        )
-        # A write whose target cannot be read off the input is refused rather
-        # than allowed: an unrecognised spelling must not become a bypass.
-        if not target or not _within(target, run_dir):
-            message = (
-                f"refused: {tool_name} may only write under {run_dir}; "
-                f"{target or '(no path in tool input)'} is outside it"
+        if tool_name == "Write":
+            target = next(
+                (
+                    str(tool_input.get(key) or "").strip()
+                    for key in _WRITE_PATH_KEYS
+                    if str(tool_input.get(key) or "").strip()
+                ),
+                "",
             )
-            if log is not None:
-                log(f"[review-agent] WARNING: {message}")
-            return sdk.PermissionResultDeny(message=message)
-        return sdk.PermissionResultAllow()
+            if not target or not _within(target, run_dir):
+                return _refuse(
+                    f"refused: {tool_name} may only write under {run_dir}; "
+                    f"{target or '(no path in tool input)'} is outside it"
+                )
+            return sdk.PermissionResultAllow()
+        if tool_name == "Bash":
+            command = str(tool_input.get("command") or "").strip()
+            _say(f"bash (unconfined, tree is fingerprinted): {command[:240]}")
+            return sdk.PermissionResultAllow()
+        if tool_name in ALLOWED_TOOLS:
+            return sdk.PermissionResultAllow()
+        return _refuse(
+            f"refused: {tool_name!r} is not one of the tools this review stage "
+            f"grants ({', '.join((*ALLOWED_TOOLS, *_GATED_TOOLS))})"
+        )
 
     return _can_use_tool
 
@@ -603,31 +628,27 @@ async def _run_claude_session(
             "can_use_tool": _write_boundary_guard(run_dir, log=log),
         }
     )
-    # Degrade one option at a time, and give up the write boundary last: an SDK
-    # that does not know ``cwd`` must not cost the guard as collateral. Dropping
-    # ``can_use_tool`` has to widen ``allowed_tools`` in the same step, because a
-    # gated tool with no decider left would stall on a prompt nobody answers --
-    # that is the pre-existing behaviour, where detection carries the whole
-    # guarantee.
-    without_guard = {
-        **{key: value for key, value in kwargs.items() if key != "can_use_tool"},
-        "allowed_tools": list(ALLOWED_TOOLS) + list(_GATED_TOOLS),
-    }
-    variants = (
-        kwargs,
-        {key: value for key, value in kwargs.items() if key != "cwd"},
-        without_guard,
-        {key: value for key, value in without_guard.items() if key != "cwd"},
-    )
+    # ``cwd`` may be dropped: it orders relative paths and carries none of the
+    # boundary, so an SDK that does not know it still gets a confined session.
+    # ``can_use_tool`` may not. It *is* the boundary, so an SDK that rejects it
+    # gets no session at all -- widening ``allowed_tools`` to keep going would
+    # trade a refusal this stage can report for a silent, host-shaped hole, and
+    # the fingerprint does not cover it: drift is only checked for the candidate
+    # sources and their directories, so a write anywhere else would be neither
+    # prevented nor detected. The stage is advisory, so refusing costs the audit
+    # and leaves the deterministic table standing, which is a reported outcome.
     options = None
-    for variant in variants:
+    for variant in (kwargs, {key: value for key, value in kwargs.items() if key != "cwd"}):
         try:
             options = sdk.ClaudeAgentOptions(**variant)
             break
         except TypeError:
             continue
-    if options is None:  # pragma: no cover - no known SDK rejects the last variant
-        raise TypeError("claude_agent_sdk.ClaudeAgentOptions rejected every option set")
+    if options is None:
+        return (
+            "claude_agent_sdk rejected the options carrying the write boundary "
+            "(can_use_tool); refusing to run an unconfined review session"
+        )
 
     # The in-process SDK query has no client-side read timeout, so a stalled
     # gateway stream blocks until the overall bound -- fifteen minutes of a run
