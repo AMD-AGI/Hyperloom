@@ -84,11 +84,13 @@ def _parse_gpu_list(raw: str) -> list[int]:
 def _explicit_pool() -> list[int] | None:
     """Resolve the operator's explicit GPU pool, or ``None`` when unset.
 
-    A set-but-unparseable value yields ``[]`` so callers fail closed instead of
-    widening to the auto-resolved pool the operator meant to override.
+    An unset or blank value is treated as absent so the caller falls back to
+    the visible-device mask. A non-blank value that parses to no valid ids is
+    treated as a misconfiguration and fails closed rather than widening to the
+    pool the operator intended to override.
     """
     raw = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES")
-    if raw is None:
+    if raw is None or not raw.strip():
         return None
     ids = _parse_gpu_list(raw)
     if not ids:
@@ -288,8 +290,10 @@ class SpecialistGpuPool:
                 "DELETE FROM gpu_leases WHERE expires_at <= ?",
                 (now_iso,),
             )
-            # Same-holder/task acquire is idempotent: return the existing lease
-            # (with a refreshed TTL) rather than grabbing another set of GPUs.
+            # Same-holder/task acquire is idempotent when the existing lease
+            # already satisfies the request: same count and every id still in
+            # this pool. If either condition fails the old lease is stale and is
+            # released so the request can be satisfied from the current pool.
             cur.execute(
                 "SELECT gpu_id, acquired_at FROM gpu_leases WHERE holder_id=? AND task_id=?",
                 (holder_id, task_id),
@@ -297,17 +301,24 @@ class SpecialistGpuPool:
             existing_rows = cur.fetchall()
             if existing_rows:
                 existing_ids = tuple(int(r["gpu_id"]) for r in existing_rows)
-                acquired_at = existing_rows[0]["acquired_at"]
+                pool_set = set(self.gpu_ids)
+                if len(existing_ids) == n and set(existing_ids) <= pool_set:
+                    acquired_at = existing_rows[0]["acquired_at"]
+                    cur.execute(
+                        "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE holder_id=? AND task_id=?",
+                        (expires_iso, now_iso, holder_id, task_id),
+                    )
+                    return GpuLease(
+                        holder_id=holder_id,
+                        task_id=task_id,
+                        gpu_ids=existing_ids,
+                        acquired_at=acquired_at,
+                        expires_at=expires_iso,
+                    )
+                # Stale lease — release it and fall through to a fresh acquire.
                 cur.execute(
-                    "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE holder_id=? AND task_id=?",
-                    (expires_iso, now_iso, holder_id, task_id),
-                )
-                return GpuLease(
-                    holder_id=holder_id,
-                    task_id=task_id,
-                    gpu_ids=existing_ids,
-                    acquired_at=acquired_at,
-                    expires_at=expires_iso,
+                    "DELETE FROM gpu_leases WHERE holder_id=? AND task_id=?",
+                    (holder_id, task_id),
                 )
             placeholders = ",".join("?" * len(self.gpu_ids))
             cur.execute(  # nosec B608 - placeholders string is generated from configured GPU id count.
