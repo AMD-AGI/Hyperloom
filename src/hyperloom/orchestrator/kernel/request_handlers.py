@@ -80,7 +80,6 @@ from ._kernel_decisions import (
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
     is_collective_candidate as is_collective_candidate,
     unattempted_skip_reason as unattempted_skip_reason,
-    _UNATTEMPTED_SKIP_PREFIXES as _UNATTEMPTED_SKIP_PREFIXES,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
 )
 from ..state.kernel_decision_settings import (
@@ -940,7 +939,23 @@ def _validate_kernel_shape_and_paths(
     kernel_id = str(payload.get("kernel_id") or "")
     name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
 
-    has_shapes = bool(candidate.get("shapes"))
+    # Absent dims are dispatchable; malformed ones are not. A dict or a bare
+    # string here is truthy, so a bare truthiness test admitted it and the type
+    # error surfaced deep in driver preparation -- against this kernel's retry
+    # quota, reported as an optimization failure. Nor is it right to read one as
+    # shapeless: an empty ``shapes`` is evidence the trace could not record,
+    # which the backend recovers from source, while a malformed one is a
+    # producer that broke, and reading it as absent hides that indefinitely.
+    raw_shapes = candidate.get("shapes")
+    if raw_shapes and not isinstance(raw_shapes, list):
+        return {
+            "status": "failed",
+            "error_class": "malformed_kernel_shapes",
+            "error": f"shapes must be a list of operand dims, got {type(raw_shapes).__name__}",
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+        }
+    has_shapes = bool(raw_shapes)
     provenance = str(candidate.get("shape_provenance") or payload.get("shape_provenance") or "").strip()
     if has_shapes and provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
         return {
@@ -5710,10 +5725,16 @@ async def run_optimization_handler(
             # that does not exist on the raw hot-kernel row reloaded by the
             # kernel_optimization subprocess.
             single_payload["candidate"] = candidates[0]
-            single_payload.setdefault(
-                "source_file",
-                candidates[0].get("source_file"),
-            )
+            # Assigned, not defaulted. Reconciliation can name a different
+            # kernel than the payload asked for, and this is the same object's
+            # path: a ``setdefault`` kept the requested kernel's source beside
+            # the selected kernel's candidate, so the backend rewrote one
+            # kernel's file while the ledger charged the attempt to the other.
+            selected_source = str(candidates[0].get("source_file") or "")
+            if selected_source:
+                single_payload["source_file"] = selected_source
+            else:
+                single_payload.setdefault("source_file", "")
         else:
             # No routable candidate: canonicalize an aliased id against the full set.
             all_candidates = _all_kernel_candidates(payload)
@@ -6165,11 +6186,12 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
 
 
-#: Skip reasons that mean "never dispatched", not "the optimizer tried and
-#: failed". A caller that named such a kernel must report it as skipped:
-#: recording an attempt for it spends the source's retry quota on a decision no
-#: backend ever made, and reads in the report as a technical failure when the
-#: cause was a threshold or a sibling already holding the task.
+#: ``skipped_out`` key for a reason that is about the candidate table rather than
+#: any one kernel. Not a kernel_id, so the per-kernel lookups cannot collide with
+#: it, and an empty map now means "read the table, everything was eligible".
+TABLE_LEVEL_SKIP_KEY = "*"
+
+
 def _batch_kernel_candidates(
     payload: dict,
     *,
@@ -6197,16 +6219,27 @@ def _batch_kernel_candidates(
             carrying its ``task_group`` when grouped), or an empty list when
             the artifact is missing/unreadable or nothing is eligible.
     """
+
+    # Each of these returns before the per-kernel loop, so ``skipped_out`` came
+    # back empty -- which the caller cannot tell from "the artifact was read and
+    # every kernel was eligible". Filed under ``TABLE_LEVEL_SKIP_KEY`` because no
+    # kernel was ever read to name: the reason is about the artifact. The
+    # per-kernel lookup keys on a kernel_id and so is unaffected.
+    def _no_table(reason: str) -> list[dict[str, Any]]:
+        if skipped_out is not None:
+            skipped_out[TABLE_LEVEL_SKIP_KEY] = reason
+        return []
+
     candidates_path = payload.get("candidates_path")
     if not candidates_path:
-        return []
+        return _no_table("no_candidates_path")
     try:
         data = json.loads(Path(candidates_path).read_text(encoding="utf-8"))
     except Exception:
-        return []
+        return _no_table("candidates_unreadable")
     kernels = data.get("hot_kernels") or data.get("hot_kernels_top15") or []
     if not isinstance(kernels, list):
-        return []
+        return _no_table("candidates_malformed")
     # Drop geometry-only kernels (bypass path tags shape_dispatchable=False) up
     # front so both the grouped and legacy passes agree: they resolve a source
     # yet fail the kernel-opt gate on untrusted shape provenance. Absent field

@@ -44,6 +44,24 @@ def test_empty_shape_dispatches(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("malformed", [{"input_shape": "(8,4096)"}, "(8,4096) bf16", 42])
+def test_a_malformed_shape_is_refused_not_read_as_absent(tmp_path: Path, malformed):
+    """Absent dims are dispatchable; a broken producer is not.
+
+    All three of these are truthy, so a bare truthiness test admitted them and
+    the type error surfaced in driver preparation -- charged to this kernel's
+    retry quota and reported as an optimization failure. Reading them as
+    shapeless would be worse than refusing: an empty ``shapes`` is evidence the
+    trace could not record and the backend recovers it from source, so a
+    producer that broke would be indistinguishable from a graph-launched kernel
+    and stay broken.
+    """
+    payload = {"kernel_id": "k001", "candidate": _candidate(shapes=malformed)}
+    out = krh._validate_kernel_shape_and_paths(payload, session_dir=tmp_path)
+    assert out is not None
+    assert out["error_class"] == "malformed_kernel_shapes"
+
+
 @pytest.mark.parametrize("provenance", ["unresolved", "launch_grid", "tile_name"])
 def test_empty_shape_dispatches_whatever_provenance_says(
     tmp_path: Path,
