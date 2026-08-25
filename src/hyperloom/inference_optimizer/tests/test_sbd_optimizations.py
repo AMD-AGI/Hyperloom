@@ -1249,12 +1249,8 @@ def _ledger_with_baseline(tmp_path, baseline_tput: float):
     parts = assemble_parts(tmp_path)
     operations = list(parts.get("operations") or [])
     measurements = list(parts.get("measurements") or [])
-    operations.append(
-        {"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]}
-    )
-    measurements.append(
-        {"measurement_id": "m-base", "name": "throughput", "value": baseline_tput}
-    )
+    operations.append({"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]})
+    measurements.append({"measurement_id": "m-base", "name": "throughput", "value": baseline_tput})
     return collect_recorded_optimizations(
         "s1",
         operations,
