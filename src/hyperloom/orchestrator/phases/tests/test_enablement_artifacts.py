@@ -123,12 +123,17 @@ def _patch(tmp_path, rel, body="diff --git a/f b/f\n"):
     return str(p)
 
 
+def _round(*patches, artifacts=()):
+    """One accepted enablement round for ``EnablementRound.kept_rounds``."""
+    return {"patches": list(patches), "artifacts": list(artifacts)}
+
+
 def test_write_setting_script_produces_executable(tmp_path):
     en = EnablementRound()
     en.setup_commands = ["pip install vllm==0.24"]
     en.accepted_config = {"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "extra_server_args": "--tp 4"}
     en.framework_root = "/sgl-workspace/sglang"
-    en.kept_patches = [_patch(tmp_path, "runs/specialist/s1/001.patch")]
+    en.kept_rounds = [_round(_patch(tmp_path, "runs/specialist/s1/001.patch"))]
 
     rel = write_setting_script(tmp_path, en, "sglang")
     out = tmp_path / rel
@@ -152,9 +157,9 @@ def test_same_named_patches_do_not_collide(tmp_path):
     """Specialists across rounds pick colliding names; the stack order keeps them apart."""
     en = EnablementRound()
     en.framework_root = "/sgl-workspace/sglang"
-    en.kept_patches = [
-        _patch(tmp_path, "runs/specialist/s1/patches/001_fix.patch", "first\n"),
-        _patch(tmp_path, "runs/specialist/s2/patches/001_fix.patch", "second\n"),
+    en.kept_rounds = [
+        _round(_patch(tmp_path, "runs/specialist/s1/patches/001_fix.patch", "first\n")),
+        _round(_patch(tmp_path, "runs/specialist/s2/patches/001_fix.patch", "second\n")),
     ]
 
     write_setting_script(tmp_path, en, "sglang")
@@ -168,7 +173,7 @@ def test_same_named_patches_do_not_collide(tmp_path):
 def test_patches_dropped_without_a_framework_root(tmp_path):
     """git apply has no target, so emitting the section would guarantee a failure."""
     en = EnablementRound()
-    en.kept_patches = [_patch(tmp_path, "fix.patch")]
+    en.kept_rounds = [_round(_patch(tmp_path, "fix.patch"))]
 
     write_setting_script(tmp_path, en, "sglang")
     text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
@@ -182,7 +187,7 @@ def test_oversized_patch_is_not_referenced(tmp_path):
     en.framework_root = "/sgl-workspace/sglang"
     big = tmp_path / "big.patch"
     big.write_bytes(b"x" * (_FILE_SIZE_LIMIT + 1))
-    en.kept_patches = [str(big)]
+    en.kept_rounds = [_round(str(big))]
 
     write_setting_script(tmp_path, en, "sglang")
     text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
@@ -214,7 +219,7 @@ def test_synthetic_round_does_not_break_a_good_script(tmp_path):
     """A phase-synthesised round carries no framework_root; the persisted one holds."""
     en = EnablementRound()
     en.framework_root = "/sgl-workspace/sglang"
-    en.kept_patches = [_patch(tmp_path, "fix.patch")]
+    en.kept_rounds = [_round(_patch(tmp_path, "fix.patch"))]
 
     write_setting_script(tmp_path, en, "sglang")
     write_setting_script(tmp_path, en, "sglang")
@@ -238,11 +243,13 @@ def test_generated_script_actually_applies_its_patch(tmp_path):
 
     en = EnablementRound()
     en.framework_root = str(root)
-    en.kept_patches = [
-        _patch(
-            tmp_path,
-            "runs/s1/fix.patch",
-            "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n",
+    en.kept_rounds = [
+        _round(
+            _patch(
+                tmp_path,
+                "runs/s1/fix.patch",
+                "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n",
+            )
         )
     ]
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
@@ -269,11 +276,13 @@ def test_generated_script_runs_from_any_cwd(tmp_path):
 
     en = EnablementRound()
     en.framework_root = str(root)
-    en.kept_patches = [
-        _patch(
-            tmp_path,
-            "runs/s1/fix.patch",
-            "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n",
+    en.kept_rounds = [
+        _round(
+            _patch(
+                tmp_path,
+                "runs/s1/fix.patch",
+                "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n",
+            )
         )
     ]
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
