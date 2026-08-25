@@ -26,7 +26,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **`best_result.json` is read again.** `_validated_forge_best_result` gated on
+- **A reproduced warm replay is recorded as an adopted optimization.** The
+  replay was mirrored into the canonical recorder streams before
+  `_promote_warm_replay` reached its keep decision; because a replay's executor
+  settles on `succeeded` either way, every replay was recorded as `discarded`
+  with no adoption. A reproduced one was then pushed onto the stack and moved
+  `cumulative_gain_validated` while the canonical streams held no adoption for
+  it, so `optimizations.entries` came back empty on a session that had
+  measurably gained and the whole gain surfaced as a `reconciliation_gap_pct`.
+  The replay is now mirrored after the ruling: a reproduced one records a keep,
+  chained from the recorded session baseline (not an enqueue-time anchor) so the
+  ledger and `cumulative_gain_validated` are a single number; drift/failed
+  replays stay discarded but their attempt row now carries the measured gain,
+  the threshold, and the reason. `validated` keys off a present accuracy score
+  rather than merely whether an eval ran, so an admitted-but-unscored replay
+  records `keep_verdict_unscored` instead of a fabricated `accuracy_pass`. This
+  is a forward fix: breakdowns already exported without the adoption are not
+  retroactively repaired.
   `schema_version == 1`; KernelForge has stamped `2` into that file since
   2026-08-13. Every published best was therefore rejected and the kernel
   backend fell through to the caller checkpoint or the stdout sentinel, losing

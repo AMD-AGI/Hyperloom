@@ -2050,9 +2050,6 @@ class PreludePhase(PhaseHandler):
         reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
-        # The reading the gain was measured against, kept beside it so the
-        # canonical adoption can state the pair rather than a bare percentage.
-        outcome["baseline_tput_anchor"] = float(baseline_tput)
         outcome["keep_threshold_pct"] = keep_threshold
         if expected_gain > 0:
             historical_bar = expected_gain * min_reproduce
@@ -2128,6 +2125,12 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return
             outcome["status"] = "reproduced"
+            # Publish the reproduced verdict before the stack push / cumulative
+            # update below. Those can raise, and the caller swallows it; the
+            # post-ruling mirror reads this in-memory outcome, so persisting it
+            # first keeps the canonical adoption from disagreeing with a stack
+            # entry that was already pushed.
+            state.warm_replay_outcome = outcome
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
                 outcome["replayed_patch_refs"] = replayed_patch_refs
