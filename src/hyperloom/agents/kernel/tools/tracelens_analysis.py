@@ -4822,8 +4822,13 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             confidence=item.get("source_resolution_confidence"),
             reason=str(item.get("source_resolution_reason") or ""),
             rejected_value=str(item.get("source_file_rejected") or ""),
-            previous_source_file=str(item.get("source_resolution_previous_file") or ""),
-            previous_method=str(item.get("source_resolution_previous_method") or ""),
+            # The names ``apply_revisions`` actually writes. The
+            # ``source_resolution_previous_*`` spelling read here before has no
+            # producer anywhere in the tree, so the audit's previous-path
+            # columns were empty for every row the review rewrote -- the one
+            # case they exist to record.
+            previous_source_file=str(item.get("previous_source_file") or ""),
+            previous_method=str(item.get("previous_method") or ""),
         )
         audit = item.get("source_resolution_llm_audit")
         if isinstance(audit, dict):
@@ -7102,6 +7107,24 @@ def _run_candidate_review_stage(
         },
     )
     artifacts["kernel_candidates_revisions"] = str(revisions_path)
+
+    # Unconditionally, not only when ``changed`` is non-zero. The audit was
+    # written during finalize, before this stage ran, so a review that moved a
+    # ``source_file`` left the public artifact naming the old path while
+    # kernel_candidates.json named the new one -- two answers to "where does
+    # this kernel live", and the one a human reads was the stale one. Rebuilding
+    # on every completed review keeps the two derived from the same table, and
+    # costs one projection over rows already in memory.
+    source_resolution_path = run_dir / _SOURCE_RESOLUTION_NAME
+    if write_source_resolution_artifact(
+        candidates,
+        source_resolution_path,
+        framework=args.framework or "",
+        model_name=args.model_name or "",
+        log_path=log_path,
+    ):
+        artifacts["kernel_source_resolution"] = str(source_resolution_path)
+
     _note(f"candidate review applied {changed} change(s) over {len(outcome.revisions)} revision(s)")
     for line in notes:
         _note(f"  review: {line}")
