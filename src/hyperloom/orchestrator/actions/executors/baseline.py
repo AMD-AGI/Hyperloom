@@ -25,13 +25,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
@@ -51,6 +52,7 @@ from ._aiter_jit import (
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
+
 # The grid module is the namespace the helpers both benching arms share ended up
 # in: how a sentinel returncode reads back, how a round's cap is clamped to the
 # budget, how the two session bounds are resolved, and the hygiene every launch
@@ -81,6 +83,7 @@ from ._accuracy_gate import (
 from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
+    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
     prepare_agentx_runtime,
@@ -592,6 +595,56 @@ def _classify_subprocess_error(
 
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
+
+# An AgentX baseline does not fit either of the caps above, and the cold-start
+# detector cannot see why. That detector counts .so files across the whole aiter
+# JIT dir and calls it warm above 20 -- but the signature it is really about is
+# (model, dtype, TP, max_model_len), and AgentX is the thing that moves
+# max_model_len (6144 -> the model's native window). So the first AgentX round on
+# any box that has run synthetic work is detected WARM, handed 7800s, and then
+# pays the 30+ minute first-compile for a signature it has never built. Measured
+# rounds are 4774s (SGLang) and 6676s (vLLM) before that compile; adding it, plus
+# a cold corpus mmap (~840s), lands at ~9316s. Neither cap covers it, and neither
+# escape hatch reaches it: the cold-cap env var is only read when the probe says
+# cold, and nothing in the tree writes params["timeout_sec"] for a baseline. So a
+# first AgentX run does not merely risk the timeout -- it hits it, and a baseline
+# timeout kills the session before the search starts.
+#
+# Derived rather than pinned, because the one part of the round that is chosen
+# rather than measured is the measurement window: total = setup + corpus + warmup
+# + AGENTX_DURATION + mapping. Deriving keeps the cap correct when an operator
+# changes the window, instead of leaving a second number to remember.
+AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
+AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
+
+
+def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
+    """Resolve the AgentX baseline cap: explicit, else duration + overhead.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The subprocess timeout in seconds for an AgentX baseline launch.
+    """
+    src = os.environ if env is None else env
+
+    def _int(name: str, default: int) -> int:
+        raw = (src.get(name) or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return value if value > 0 else default
+
+    explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
+    if explicit:
+        return explicit
+    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + _int(
+        "AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC
+    )
+
+
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
 # above for callers/tests that import them from this module.
 
@@ -606,9 +659,7 @@ def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     """Set the effective eval mode after lifecycle eligibility is known."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     benchmark = cfg.setdefault("benchmark", {})
-    benchmark.setdefault("envs", {})["RUN_EVAL"] = (
-        "true" if enabled else "false"
-    )
+    benchmark.setdefault("envs", {})["RUN_EVAL"] = "true" if enabled else "false"
     config_path.write_text(
         yaml.safe_dump(cfg, sort_keys=False),
         encoding="utf-8",
@@ -640,10 +691,10 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     deviation from the baseline output).
 
     The kernel lane also drives this executor through synthetic tasks that
-    carry ``kind="baseline"`` literally (integrate re-baseline, the paired-A/B
-    pristine arm, stack validation). Those are throughput-only A/B probes
-    against an already-anchored baseline -- they never anchor one -- so they
-    opt out via ``params["quality_ref_exempt"]`` and are treated exactly like
+    carry ``kind="baseline"`` literally (integrate re-baseline, stack
+    validation). Those are throughput-only A/B probes against an
+    already-anchored baseline -- they never anchor one -- so they opt out via
+    ``params["quality_ref_exempt"]`` and are treated exactly like
     ``replay_warm_recipe``: compare, never establish.
 
     Args:
@@ -658,6 +709,13 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
     if str(task_kind or "") != "baseline":
         return False
     return not (params or {}).get("quality_ref_exempt")
+
+
+# Above this cold-start delta the measured round is unlikely to have settled
+# either: the observed pathological case climbed 14,202 -> 19,374 -> 22,425
+# tok/s across three rounds of one unchanged config, i.e. +36% into round 2 and
+# another +16% into round 3.
+_COLD_START_DELTA_WARN_PCT = 25.0
 
 
 def _is_double_run_accuracy_handoff(
@@ -967,13 +1025,7 @@ def _create_patch_snapshot(
     output_dir: Path,
 ) -> dict[str, Any]:
     """Snapshot only patch-touched worktree and index paths."""
-    touched = list(
-        dict.fromkeys(
-            path
-            for content in patch_contents
-            for path in _patch_touched_paths(content)
-        )
-    )
+    touched = list(dict.fromkeys(path for content in patch_contents for path in _patch_touched_paths(content)))
     if not touched:
         raise ValueError("patch has no touched text paths")
     snapshot_dir = output_dir / "warm_patch_snapshot"
@@ -1076,19 +1128,23 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
                     raise OSError("worktree restore verification failed")
             elif target.exists() or target.is_symlink():
                 raise OSError("removed path still exists after restore")
-            actual_index = subprocess.run(
-                [
-                    "git",
-                    *safe_directory_args(
-                        ["ls-files", "-s", "--", rel],
-                        cwd=repo,
-                    ),
-                ],
-                cwd=repo,
-                capture_output=True,
-                timeout=15,
-                check=True,
-            ).stdout.decode(errors="replace").strip()
+            actual_index = (
+                subprocess.run(
+                    [
+                        "git",
+                        *safe_directory_args(
+                            ["ls-files", "-s", "--", rel],
+                            cwd=repo,
+                        ),
+                    ],
+                    cwd=repo,
+                    capture_output=True,
+                    timeout=15,
+                    check=True,
+                )
+                .stdout.decode(errors="replace")
+                .strip()
+            )
             if actual_index != entry:
                 raise OSError("index restore verification failed")
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -1105,9 +1161,7 @@ def _revert_patches(
     manifest = snapshot_manifest
     if isinstance(manifest, (str, Path)):
         try:
-            manifest = json.loads(
-                Path(manifest).read_text(encoding="utf-8")
-            )
+            manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
             result = {"ok": False, "errors": [f"manifest_read:{exc}"]}
             log.warning(
@@ -1146,9 +1200,7 @@ def _revert_patches(
     if caller_repo != manifest_repo:
         result = {
             "ok": False,
-            "errors": [
-                f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"
-            ],
+            "errors": [f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"],
         }
         log.warning(
             "baseline_executor: exact patch restore failed: %s",
@@ -1207,19 +1259,23 @@ def _three_way_residue_snapshot(
 ) -> dict[str, Any]:
     """Capture pre-existing residue only for this patch's paths."""
     root = Path(repo_path).resolve()
-    unmerged = subprocess.run(
-        [
-            "git",
-            *safe_directory_args(
-                ["ls-files", "-u", "--", *touched],
-                cwd=repo_path,
-            ),
-        ],
-        cwd=repo_path,
-        capture_output=True,
-        timeout=15,
-        check=True,
-    ).stdout.decode(errors="replace").splitlines()
+    unmerged = (
+        subprocess.run(
+            [
+                "git",
+                *safe_directory_args(
+                    ["ls-files", "-u", "--", *touched],
+                    cwd=repo_path,
+                ),
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+        .stdout.decode(errors="replace")
+        .splitlines()
+    )
     markers = (b"<<<<<<< ", b"=======", b">>>>>>> ")
     rows: dict[str, Any] = {}
     for rel in touched:
@@ -1227,9 +1283,7 @@ def _three_way_residue_snapshot(
         marker_lines: list[str] = []
         if target.is_file() and not target.is_symlink():
             marker_lines = [
-                line.decode(errors="replace")
-                for line in target.read_bytes().splitlines()
-                if line.startswith(markers)
+                line.decode(errors="replace") for line in target.read_bytes().splitlines() if line.startswith(markers)
             ]
         rows[rel] = {
             "reject": (root / f"{rel}.rej").exists(),
@@ -1273,20 +1327,70 @@ def _verify_three_way_clean(
         marker_lines: list[str] = []
         if target.is_file() and not target.is_symlink():
             marker_lines = [
-                line.decode(errors="replace")
-                for line in target.read_bytes().splitlines()
-                if line.startswith(markers)
+                line.decode(errors="replace") for line in target.read_bytes().splitlines() if line.startswith(markers)
             ]
         if set(marker_lines) - set(prior.get("markers") or []):
             return False, f"new_conflict_marker:{rel}"
     return True, ""
 
 
+def _patch_paths_from_warm_params(params: dict[str, Any]) -> list[Path]:
+    """Collect diff-header targets from warm-replay patch payloads."""
+    from ...specialists.patch_safety import patch_file_targets
+
+    patch_paths: list[Path] = []
+    seen: set[str] = set()
+    for patch in params.get("patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        content = str(patch.get("patch_content") or "")
+        patch_ref = str(patch.get("patch_ref") or "")
+        if not content and patch_ref:
+            try:
+                content = Path(patch_ref).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+        if not content:
+            continue
+        for old_raw, new_raw in patch_file_targets(content):
+            raw = new_raw if new_raw and new_raw not in {"/dev/null", ""} else old_raw
+            if not raw or raw == "/dev/null" or raw in seen:
+                continue
+            seen.add(raw)
+            patch_paths.append(Path(raw))
+    return patch_paths
+
+
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the active framework root for Explore/Framework Recipe patches."""
+    """Return the framework root whose tree holds the warm-replay patch targets."""
     if not params.get("patches"):
         return ""
+    from .integrate_patch import _resolve_framework_root
+
+    patch_paths = _patch_paths_from_warm_params(params)
+    root = _resolve_framework_root(None, patch_paths=patch_paths or None)
+    if root is not None:
+        return str(root)
     return resolve_session_framework_root()
+
+
+def _revert_warm_patch_state(
+    target_repo: str,
+    *,
+    pre_sha: str = "",
+    snapshot_manifest: Any = None,
+    nogit_backups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Restore warm-replay patch mutations via git snapshot or nogit backups."""
+    if nogit_backups:
+        from ._nogit_patch import _revert_patches_no_git
+
+        try:
+            _revert_patches_no_git(list(nogit_backups))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "errors": [repr(exc)], "channel": "nogit"}
+        return {"ok": True, "errors": [], "channel": "nogit"}
+    return _revert_patches(target_repo, pre_sha, snapshot_manifest)
 
 
 def _apply_warm_patches(
@@ -1300,7 +1404,8 @@ def _apply_warm_patches(
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
-    via ``git apply`` in the target repo, skipping blocklisted patches.
+    via ``git apply`` when the target is a git work-tree, otherwise via the
+    shared nogit ``patch`` CLI path used by integrate_patch.
 
     Legacy patch lists return the list of successfully applied patch metadata
     dicts (best-effort skip semantics). Current-contract timelines set
@@ -1331,7 +1436,16 @@ def _apply_warm_patches(
     statuses: list[dict[str, Any]] = []
     patch_log_dir = output_dir / "warm_patches"
     patch_log_dir.mkdir(parents=True, exist_ok=True)
-    pre_sha = _git_head_sha(target_repo)
+    from ._nogit_patch import _apply_patch_no_git, _is_git_tree
+
+    target_path = Path(target_repo)
+    git_tree = _is_git_tree(target_path)
+    pre_sha = _git_head_sha(target_repo) if git_tree else ""
+    # prelude promotes a required timeline's tree only against a pre_sha and a
+    # git snapshot manifest. nogit produces neither, so serving this path from it
+    # turned a successful replay into validated_recipe_checkout_incomplete --
+    # worse than the fast failure it replaced. Refuse up front, as before; nogit
+    # serves the legacy list, where nothing downstream needs a sha.
     if required_timeline and not pre_sha:
         return {
             "required": True,
@@ -1344,6 +1458,8 @@ def _apply_warm_patches(
             "target_repo": target_repo,
             "rolled_back": False,
         }
+    use_nogit = not git_tree or not pre_sha
+    nogit_backups: list[dict[str, Any]] = []
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
     resolved_contents: dict[int, str] = {}
@@ -1355,9 +1471,7 @@ def _apply_warm_patches(
                 return {
                     "required": True,
                     "status": "failed",
-                    "patches": [
-                        {"patch_ref": patch_file, "status": "failed", "reason": "blocked"}
-                    ],
+                    "patches": [{"patch_ref": patch_file, "status": "failed", "reason": "blocked"}],
                     "applied": [],
                     "failed_ref": patch_file,
                     "failure": "blocked",
@@ -1390,9 +1504,7 @@ def _apply_warm_patches(
                 return {
                     "required": True,
                     "status": "failed",
-                    "patches": [
-                        {"patch_ref": patch_file, "status": "failed", "reason": reason}
-                    ],
+                    "patches": [{"patch_ref": patch_file, "status": "failed", "reason": reason}],
                     "applied": [],
                     "failed_ref": patch_file,
                     "failure": reason,
@@ -1404,7 +1516,7 @@ def _apply_warm_patches(
         resolved_contents[idx] = content
         snapshot_contents.append(content)
     snapshot_manifest: dict[str, Any] | None = None
-    if snapshot_contents:
+    if snapshot_contents and not use_nogit:
         try:
             snapshot_manifest = _create_patch_snapshot(
                 target_repo,
@@ -1432,9 +1544,7 @@ def _apply_warm_patches(
             return []
         if snapshot_manifest is not None:
             params["_warm_patch_snapshot_manifest"] = snapshot_manifest
-            if before_mutation is not None and not bool(
-                before_mutation(snapshot_manifest)
-            ):
+            if before_mutation is not None and not bool(before_mutation(snapshot_manifest)):
                 return {
                     "required": required_timeline,
                     "status": "failed",
@@ -1550,85 +1660,97 @@ def _apply_warm_patches(
 
         method = ""
         try:
-            checked = subprocess.run(
-                ["git", "apply", "--check", str(patch_path)],
-                cwd=target_repo,
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
-            if checked.returncode == 0:
-                subprocess.run(
-                    ["git", "apply", str(patch_path)],
-                    cwd=target_repo,
-                    capture_output=True,
-                    timeout=30,
-                    check=True,
+            if use_nogit:
+                backup_root = patch_log_dir / "patch_backups"
+                ok, err, backups, _feedback = _apply_patch_no_git(
+                    target_path,
+                    patch_path,
+                    backup_root,
+                    seq_offset=len(nogit_backups),
                 )
-                method = "applied"
-            elif required_timeline:
-                reverse = subprocess.run(
-                    ["git", "apply", "-R", "--check", str(patch_path)],
+                if not ok:
+                    raise RuntimeError(err or "nogit patch apply failed")
+                nogit_backups.extend(backups)
+                method = "applied_nogit"
+            else:
+                checked = subprocess.run(
+                    ["git", "apply", "--check", str(patch_path)],
                     cwd=target_repo,
                     capture_output=True,
                     timeout=30,
                     check=False,
                 )
-                if reverse.returncode == 0:
-                    method = (
-                        "already_present"
-                        if _patch_present_in_committed_head(
-                            target_repo,
-                            patch_path,
-                        )
-                        else "present_in_dirty_worktree"
+                if checked.returncode == 0:
+                    subprocess.run(
+                        ["git", "apply", str(patch_path)],
+                        cwd=target_repo,
+                        capture_output=True,
+                        timeout=30,
+                        check=True,
                     )
-                else:
-                    touched = _patch_touched_paths(patch_content)
-                    before_residue = _three_way_residue_snapshot(
-                        target_repo,
-                        touched,
-                    )
-                    three_way = subprocess.run(
-                        ["git", "apply", "--3way", str(patch_path)],
+                    method = "applied"
+                elif required_timeline:
+                    reverse = subprocess.run(
+                        ["git", "apply", "-R", "--check", str(patch_path)],
                         cwd=target_repo,
                         capture_output=True,
                         timeout=30,
                         check=False,
                     )
-                    if three_way.returncode == 0:
-                        clean, residue = _verify_three_way_clean(
+                    if reverse.returncode == 0:
+                        method = (
+                            "already_present"
+                            if _patch_present_in_committed_head(
+                                target_repo,
+                                patch_path,
+                            )
+                            else "present_in_dirty_worktree"
+                        )
+                    else:
+                        touched = _patch_touched_paths(patch_content)
+                        before_residue = _three_way_residue_snapshot(
                             target_repo,
                             touched,
-                            before_residue,
                         )
-                        if not clean:
-                            raise RuntimeError(residue)
-                        method = "applied_3way"
-                    else:
-                        detail = (
-                            three_way.stderr.decode(errors="replace")[:500]
-                            if three_way.stderr
-                            else "git apply --3way failed"
+                        three_way = subprocess.run(
+                            ["git", "apply", "--3way", str(patch_path)],
+                            cwd=target_repo,
+                            capture_output=True,
+                            timeout=30,
+                            check=False,
                         )
-                        raise RuntimeError(detail)
-            else:
-                detail = (
-                    checked.stderr.decode(errors="replace")[:500]
-                    if checked.stderr
-                    else "git apply --check failed"
-                )
-                raise RuntimeError(detail)
+                        if three_way.returncode == 0:
+                            clean, residue = _verify_three_way_clean(
+                                target_repo,
+                                touched,
+                                before_residue,
+                            )
+                            if not clean:
+                                raise RuntimeError(residue)
+                            method = "applied_3way"
+                        else:
+                            detail = (
+                                three_way.stderr.decode(errors="replace")[:500]
+                                if three_way.stderr
+                                else "git apply --3way failed"
+                            )
+                            raise RuntimeError(detail)
+                else:
+                    detail = (
+                        checked.stderr.decode(errors="replace")[:500] if checked.stderr else "git apply --check failed"
+                    )
+                    raise RuntimeError(detail)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
             log.warning(
-                "baseline_executor: git apply failed for patch %s: %s",
+                "baseline_executor: warm patch apply failed for %s: %s",
                 patch_file,
                 exc,
             )
-            status.update(status="failed", reason="git_apply_failed", detail=str(exc)[:500])
+            reason = "nogit_apply_failed" if use_nogit else "git_apply_failed"
+            status.update(status="failed", reason=reason, detail=str(exc)[:500])
             statuses.append(status)
             if required_timeline:
-                failed_ref, failure = patch_file, "git_apply_failed"
+                failed_ref, failure = patch_file, reason
                 break
             continue
 
@@ -1641,12 +1763,16 @@ def _apply_warm_patches(
         status["status"] = method
         statuses.append(status)
 
+    if nogit_backups:
+        params["_warm_patch_nogit_backups"] = nogit_backups
+
     if required_timeline:
         if failed_ref:
-            restore = _revert_patches(
+            restore = _revert_warm_patch_state(
                 target_repo,
-                pre_sha,
-                snapshot_manifest,
+                pre_sha=pre_sha,
+                snapshot_manifest=snapshot_manifest,
+                nogit_backups=nogit_backups,
             )
             return {
                 "required": True,
@@ -1679,57 +1805,27 @@ def _rollback_warm_kernel_apply_results(
     results: Any,
     snapshots: Any = None,
 ) -> dict[str, Any]:
-    """Rollback kernel mutations and report whether every restore succeeded."""
-    if isinstance(snapshots, list) and snapshots:
-        errors: list[str] = []
-        for snapshot in reversed(snapshots):
-            target = Path(str(snapshot.get("target") or ""))
-            try:
-                if snapshot.get("existed"):
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(
-                        Path(str(snapshot.get("backup") or "")).read_bytes()
-                    )
-                    if snapshot.get("mode") is not None:
-                        target.chmod(int(snapshot["mode"]))
-                elif target.exists() or target.is_symlink():
-                    target.unlink()
-                if snapshot.get("existed"):
-                    expected = Path(
-                        str(snapshot.get("backup") or "")
-                    ).read_bytes()
-                    if not target.is_file() or target.read_bytes() != expected:
-                        raise OSError("kernel restore verification failed")
-                elif target.exists() or target.is_symlink():
-                    raise OSError("kernel target still exists after restore")
-            except OSError as exc:
-                errors.append(f"{target}:{type(exc).__name__}:{exc}")
-        return {"ok": not errors, "errors": errors}
+    """Rollback kernel mutations and report whether every restore succeeded.
+
+    Restoring the snapshots is not on its own enough: the applies also left
+    backup manifests, and on the multi-node path the patch is on every pod.
+    Both halves have to be undone, which is what the prelude rollback does.
+
+    Args:
+        results (Any): Apply results carrying the backup manifests to revert.
+        snapshots (Any): Pristine copies captured before the mutation.
+
+    Returns:
+        dict[str, Any]: ``ok`` and the accumulated ``errors``.
+    """
     if not isinstance(results, list):
         return {"ok": False, "errors": ["invalid_apply_results"]}
-    from ...kernel.request_handlers import _maybe_revert_kernel_patch
+    from ...phases.prelude import PreludePhase
 
-    errors: list[str] = []
-    for result in reversed(results):
-        if not isinstance(result, dict):
-            continue
-        try:
-            reverted = _maybe_revert_kernel_patch(result)
-            if reverted.get("status") != "ok":
-                raise RuntimeError(
-                    str(
-                        reverted.get("error")
-                        or reverted.get("reason")
-                        or f"kernel revert status={reverted.get('status')}"
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "baseline_executor: combined warm-kernel rollback failed",
-                exc_info=True,
-            )
-            errors.append(f"{type(exc).__name__}:{exc}")
-    return {"ok": not errors, "errors": errors}
+    return PreludePhase._revert_warm_kernel_patches(
+        [r for r in results if isinstance(r, dict)],
+        list(snapshots) if isinstance(snapshots, list) else None,
+    )
 
 
 class BaselineExecutor:
@@ -1901,6 +1997,22 @@ class BaselineExecutor:
             timeout_sec = int(explicit)
             log.info(
                 "baseline_executor: timeout=%ds (explicit task param)",
+                timeout_sec,
+            )
+            return timeout_sec
+
+        # Ahead of the probe on purpose: the probe cannot answer this case. See
+        # AGENTX_BASELINE_OVERHEAD_SEC -- AgentX moves max_model_len, which is
+        # part of the JIT signature the cold/warm split is really about, while
+        # the probe only counts kernels globally. Asking it first would return
+        # WARM and the 7800s cap that a first AgentX round cannot meet.
+        if agentx_enabled():
+            timeout_sec = agentx_baseline_timeout_sec()
+            log.info(
+                "baseline_executor: timeout=%ds (AgentX: AGENTX_DURATION + overhead). "
+                "The aiter cold/warm probe is not consulted -- it counts kernels "
+                "globally and cannot see that AgentX changes the JIT signature, so "
+                "it reports WARM while the round pays a first-compile.",
                 timeout_sec,
             )
             return timeout_sec
@@ -2243,6 +2355,50 @@ class BaselineExecutor:
         except OSError:
             return False
         return False
+
+    @staticmethod
+    def _record_baseline_convergence(
+        result: dict[str, Any],
+        warmup_tput: Any,
+    ) -> None:
+        """Record how steady the baseline anchor actually is.
+
+        The double-run discards round 1 by design, which leaves exactly one
+        usable measurement -- and one measurement cannot be shown to be steady.
+        That is worth stating rather than assuming: the whole gain ledger is
+        graded against this number with a 3% KEEP threshold, and a real session
+        once produced 14,202 -> 19,374 -> 22,425 tok/s from one unchanged
+        configuration. Establishing convergence needs a third round.
+
+        So the verdict is recorded (it will read ``insufficient_rounds``) along
+        with the cold-start delta, and a warning is raised only when that delta
+        is large enough to suggest round 2 had not settled either. Never raises,
+        and never fails the baseline -- halting here would stall the session.
+        """
+        try:
+            from hyperloom.orchestrator.measurement.convergence import assess_convergence
+
+            warm = float(warmup_tput or 0.0)
+            measured = float(result.get("output_throughput") or 0.0)
+            verdict = assess_convergence([warm, measured])
+            record: dict[str, Any] = verdict.to_dict()
+            if warm > 0 and measured > 0:
+                delta_pct = (measured - warm) / warm * 100.0
+                record["cold_start_delta_pct"] = round(delta_pct, 2)
+                if delta_pct > _COLD_START_DELTA_WARN_PCT:
+                    result.setdefault("nonfatal_warnings", [])
+                    result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
+                    log.warning(
+                        "baseline_executor: measured round is %.1f%% above the warm-up round "
+                        "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
+                        "anchor every later gain is graded against may be low",
+                        delta_pct,
+                        warm,
+                        measured,
+                    )
+            result["baseline_convergence"] = record
+        except Exception:  # noqa: BLE001 - observability must never break a baseline
+            log.debug("baseline convergence record failed", exc_info=True)
 
     @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
@@ -2927,14 +3083,13 @@ class BaselineExecutor:
         _pre_patch_sha = ""
 
         timeout_sec = self._resolve_timeout(params)
-        # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
-        # if none, leave the YAML's hardcoded `model:` for fixture-based tests.
-        # Live state is read from ctx.extra (the executor is a module-level
-        # singleton with self.shared_state=None on the Coordinator path).
-        resolved_model = (
-            str(params.get("model_path") or "").strip()
-            or os.environ.get("MODEL_PATH", "").strip()
-            or str(getattr(live_shared_state, "model_path", "") or "").strip()
+        # Model path: unified resolver (params → $MODEL_PATH → SharedState), then
+        # serving-path normalization (HL_MODEL_BASE / HF cache). If none, leave
+        # the YAML's hardcoded `model:` for fixture-based tests.
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=str(getattr(live_shared_state, "model_path", "") or ""),
+            for_serving=True,
         )
         # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
         resolved_gpu = (
@@ -3061,9 +3216,7 @@ class BaselineExecutor:
                 materialized_config_path,
                 enabled=False,
             )
-        run_eval_disabled = materialized_run_eval_disabled(
-            materialized_config_path
-        )
+        run_eval_disabled = materialized_run_eval_disabled(materialized_config_path)
 
         # Asked before the lease, because a round that will not be run should not
         # hold a GPU while being refused.
@@ -3110,12 +3263,11 @@ class BaselineExecutor:
             return stopped_result
 
         before_apply_sha = _git_head_sha(patch_target)
+
         def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
             if live_shared_state is None:
                 return True
-            pending = dict(
-                getattr(live_shared_state, "warm_replay_pending", {}) or {}
-            )
+            pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
             pending.update(
                 {
                     "status": "preparing_required_recipe",
@@ -3158,10 +3310,7 @@ class BaselineExecutor:
                     *list(kernel_rollback.get("errors") or []),
                 ]
                 rollback_result = {
-                    "ok": bool(
-                        recipe_rollback.get("ok")
-                        and kernel_rollback.get("ok")
-                    ),
+                    "ok": bool(recipe_rollback.get("ok") and kernel_rollback.get("ok")),
                     "recipe": recipe_rollback,
                     "kernel": kernel_rollback,
                     "errors": rollback_errors,
@@ -3183,9 +3332,7 @@ class BaselineExecutor:
                             "rollback_errors": rollback_errors,
                         }
                         if hasattr(live_shared_state, "set_stop_reason"):
-                            live_shared_state.set_stop_reason(
-                                "warm_replay_rollback_failed"
-                            )
+                            live_shared_state.set_stop_reason("warm_replay_rollback_failed")
                     try:
                         live_shared_state.save(self.session_dir)
                     except Exception:  # noqa: BLE001
@@ -3194,20 +3341,11 @@ class BaselineExecutor:
                             exc_info=True,
                         )
                 return {
-                    "status": (
-                        "required_patch_failed"
-                        if rollback_result["ok"]
-                        else "required_patch_rollback_failed"
-                    ),
+                    "status": ("required_patch_failed" if rollback_result["ok"] else "required_patch_rollback_failed"),
                     "error_class": (
-                        "required_patch_failed"
-                        if rollback_result["ok"]
-                        else "warm_replay_rollback_failed"
+                        "required_patch_failed" if rollback_result["ok"] else "warm_replay_rollback_failed"
                     ),
-                    "error": str(
-                        patch_application.get("failure")
-                        or "required recipe timeline patch failed"
-                    ),
+                    "error": str(patch_application.get("failure") or "required recipe timeline patch failed"),
                     "required_patch_failure": patch_application,
                     "failed_patch_ref": patch_application.get("failed_ref"),
                     "warm_kernel_rolled_back": bool(kernel_rollback.get("ok")),
@@ -3215,20 +3353,14 @@ class BaselineExecutor:
                     "workspace": str(output_dir),
                 }
             if live_shared_state is not None:
-                pending = dict(
-                    getattr(live_shared_state, "warm_replay_pending", {}) or {}
-                )
+                pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
                 pending.update(
                     {
                         "status": "benchmarking",
                         "recipe_patch_target": patch_target,
                         "recipe_patch_pre_sha": _pre_patch_sha,
-                        "recipe_patch_snapshot_manifest": patch_application.get(
-                            "snapshot_manifest"
-                        ),
-                        "recipe_patch_statuses": list(
-                            patch_application.get("patches") or []
-                        ),
+                        "recipe_patch_snapshot_manifest": patch_application.get("snapshot_manifest"),
+                        "recipe_patch_statuses": list(patch_application.get("patches") or []),
                     }
                 )
                 live_shared_state.warm_replay_pending = pending
@@ -3290,22 +3422,24 @@ class BaselineExecutor:
                     result["warm_patch_result"] = patch_application
                     result["warm_patch_pre_sha"] = _pre_patch_sha
                     result["warm_patch_target"] = patch_target
-                    result["warm_patch_snapshot_manifest"] = patch_application.get(
-                        "snapshot_manifest"
-                    )
+                    result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
                     result["warm_patch_canonical_target"] = patch_target
-                    result["warm_kernel_apply_results"] = list(
-                        params.get("warm_kernel_apply_results") or []
-                    )
+                    result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return result
             finally:
-                if applied_patches and _pre_patch_sha and not isinstance(
-                    patch_application, dict
+                # A required timeline's tree is promoted by prelude after this
+                # returns, so it must stay patched; reverting here handed prelude
+                # a clean tree and silently lost the replay.
+                if (
+                    applied_patches
+                    and not isinstance(patch_application, dict)
+                    and (_pre_patch_sha or params.get("_warm_patch_nogit_backups"))
                 ):
-                    _revert_patches(
+                    _revert_warm_patch_state(
                         patch_target,
-                        _pre_patch_sha,
-                        params.get("_warm_patch_snapshot_manifest"),
+                        pre_sha=_pre_patch_sha,
+                        snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
+                        nogit_backups=list(params.get("_warm_patch_nogit_backups") or []),
                     )
                 if bench_lease is not None:
                     bench_lease.close()
@@ -3326,12 +3460,33 @@ class BaselineExecutor:
             # Round 1 (warmup): boot + run, leave running so round 2 can
             # re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
+            # A replayed KB config is promoted onto ``current_best`` and becomes
+            # the reference every later measurement in the session is taken
+            # against, so it may not be adopted on throughput alone. The warmup
+            # round is the only round that evaluates, so forcing it here is what
+            # gives the promotion gate a score to judge; inheriting a contract
+            # with RUN_EVAL off would leave the gate with no evidence. The
+            # staged-accuracy lane owns its own eval schedule and is left alone.
+            # ``force_disable_eval`` marks the salvage retry taken when the eval
+            # is itself what aborted the run; forcing it back on there would
+            # reproduce the failure and lose the throughput baseline too.
+            # ``--no-eval`` is the operator saying no eval runs this session, and
+            # forcing one here would spend the time it was passed to save while
+            # silently overriding that. A replay is then promoted unjudged, which
+            # is the trade the flag already makes everywhere else.
+            force_warmup_eval = (
+                str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
+                and not defer_accuracy_until_after_measure
+                and not force_disable_eval
+                and not eval_disabled
+            )
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
                 warmup_dir,
                 cleanup=False,
                 pid_dir=pid_dir,
                 port=port,
+                run_eval=True if force_warmup_eval else None,
             )
             log.info(
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
@@ -3365,13 +3520,9 @@ class BaselineExecutor:
                     warmup_result["warm_patch_result"] = patch_application
                     warmup_result["warm_patch_pre_sha"] = _pre_patch_sha
                     warmup_result["warm_patch_target"] = patch_target
-                    warmup_result["warm_patch_snapshot_manifest"] = patch_application.get(
-                        "snapshot_manifest"
-                    )
+                    warmup_result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
                     warmup_result["warm_patch_canonical_target"] = patch_target
-                    warmup_result["warm_kernel_apply_results"] = list(
-                        params.get("warm_kernel_apply_results") or []
-                    )
+                    warmup_result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
@@ -3394,18 +3545,13 @@ class BaselineExecutor:
                 )
                 if not affordable:
                     if gate_evidence.get("one_more_measurement_sec"):
-                        why = (
-                            "a hot pass (%.0fs) and one variant to read against it "
-                            "(%.0fs) need %.0fs" % (
-                                gate_evidence.get("measure_round_sec", 0.0),
-                                gate_evidence.get("one_more_measurement_sec", 0.0),
-                                gate_evidence.get("expected_cost_sec", 0.0),
-                            )
-                        )
-                    else:
-                        why = "a hot pass needs %.0fs" % (
+                        why = "a hot pass (%.0fs) and one variant to read against it (%.0fs) need %.0fs" % (
+                            gate_evidence.get("measure_round_sec", 0.0),
+                            gate_evidence.get("one_more_measurement_sec", 0.0),
                             gate_evidence.get("expected_cost_sec", 0.0),
                         )
+                    else:
+                        why = "a hot pass needs %.0fs" % (gate_evidence.get("expected_cost_sec", 0.0),)
                     log.warning(
                         "baseline_executor: %s, and %.0fs is left (bound=%s), so the hot "
                         "pass is not run. It would have bought a denominator nothing "
@@ -3458,17 +3604,10 @@ class BaselineExecutor:
                 result["warm_patch_result"] = patch_application
                 result["warm_patch_pre_sha"] = _pre_patch_sha
                 result["warm_patch_target"] = patch_target
-                result["warm_patch_snapshot_manifest"] = patch_application.get(
-                    "snapshot_manifest"
-                )
+                result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
                 result["warm_patch_canonical_target"] = patch_target
-                result["warm_kernel_apply_results"] = list(
-                    params.get("warm_kernel_apply_results") or []
-                )
-            if (
-                result.get("status") != "succeeded"
-                and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS
-            ):
+                result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
+            if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
                 # The gate before this pass admitted it and the run's clock took
                 # it anyway -- the pass overran what it was priced at. Reporting
                 # the round as failed would throw away the warmup's figure too,
@@ -3496,6 +3635,7 @@ class BaselineExecutor:
                     "baseline_double_run_discarded_first",
                 )
                 result["warmup_round_tput"] = warmup_tput
+                self._record_baseline_convergence(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the
                 # explore soft-kill anchor. Explore variants restart the server,
                 # so report round 1's full boot+client wall-clock; round 2's
@@ -3548,10 +3688,7 @@ class BaselineExecutor:
                             run_eval=True,
                         )
                         try:
-                            accuracy_timeout_sec = int(
-                                params.get("accuracy_timeout_sec")
-                                or timeout_sec
-                            )
+                            accuracy_timeout_sec = int(params.get("accuracy_timeout_sec") or timeout_sec)
                         except (TypeError, ValueError):
                             accuracy_timeout_sec = timeout_sec
                         accuracy_result = await self._run_reported_round(
@@ -3569,9 +3706,7 @@ class BaselineExecutor:
                         )
                         result["accuracy_stage"] = {
                             "status": accuracy_result.get("status"),
-                            "error_class": accuracy_result.get(
-                                "error_class"
-                            ),
+                            "error_class": accuracy_result.get("error_class"),
                             "workspace": accuracy_result.get("workspace"),
                         }
                         if accuracy_result.get("status") == "succeeded":
@@ -3585,9 +3720,7 @@ class BaselineExecutor:
                                     result[key] = accuracy_result[key]
                         else:
                             result.setdefault("nonfatal_warnings", [])
-                            result["nonfatal_warnings"].append(
-                                "post_measure_accuracy_failed"
-                            )
+                            result["nonfatal_warnings"].append("post_measure_accuracy_failed")
                     else:
                         result["accuracy_stage"] = {
                             "status": "skipped",
@@ -3606,16 +3739,19 @@ class BaselineExecutor:
                 port=port,
             )
             # Revert warm-replay patches to prevent state leakage into
-            # subsequent tasks that reuse the same InferenceX checkout.
+            # subsequent tasks that reuse the same InferenceX checkout. A
+            # required timeline is exempt: prelude promotes that tree after this
+            # returns and needs it still patched.
             if (
                 applied_patches
-                and _pre_patch_sha
                 and not isinstance(patch_application, dict)
+                and (_pre_patch_sha or params.get("_warm_patch_nogit_backups"))
             ):
-                _revert_patches(
+                _revert_warm_patch_state(
                     patch_target,
-                    _pre_patch_sha,
-                    params.get("_warm_patch_snapshot_manifest"),
+                    pre_sha=_pre_patch_sha,
+                    snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
+                    nogit_backups=list(params.get("_warm_patch_nogit_backups") or []),
                 )
             if bench_lease is not None:
                 bench_lease.close()
@@ -3891,9 +4027,7 @@ class BaselineExecutor:
             port=port,
         )
         if run_eval is not None:
-            bench.setdefault("envs", {})["RUN_EVAL"] = (
-                "true" if run_eval else "false"
-            )
+            bench.setdefault("envs", {})["RUN_EVAL"] = "true" if run_eval else "false"
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:
@@ -4157,6 +4291,7 @@ class BaselineExecutor:
                 capture_meta=capture_meta,
             )
         return None
+
     async def _run_single_benchmark(
         self,
         *,
@@ -4754,7 +4889,10 @@ baseline_executor = BaselineExecutor()
 __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "BASELINE_COLD_START_TIMEOUT_SEC",
+    "AGENTX_BASELINE_OVERHEAD_SEC",
+    "AGENTX_DEFAULT_DURATION_SEC",
     "BASELINE_DEFAULT_TIMEOUT_SEC",
+    "agentx_baseline_timeout_sec",
     "BaselineExecutor",
     "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",

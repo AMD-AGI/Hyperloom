@@ -248,6 +248,10 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "missing_integration_inputs",
         "patch_not_applied",
         "apply_failed",
+        # The served context cannot host an eval request, so the accuracy gate
+        # can never return a verdict under this configuration. The patch was
+        # never fairly measured, so it must not spend a KEEP attempt.
+        "eval_context_too_small",
         "mn_server_restart_failed_post_patch",
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
@@ -541,6 +545,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     continue_kernel_after_gemm: bool = True
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
+    # Which benchmark workload this session measures: "agentx" (agentic trace
+    # replay) or "synthetic" (ISL/OSL). Recorded at seed time and asserted on
+    # resume: the KEEP ledger is keyed on server args alone, so measurements
+    # from the two modes would silently overwrite each other in the same rows.
+    # Empty on sessions predating the field (treated as "not asserted").
+    benchmark_mode: str = ""
+    # Generation counter for AgentX measurements. Bumped whenever a change makes
+    # previously recorded AgentX numbers incomparable (aiperf/scenario upgrade,
+    # corpus generation, a fixed measurement defect). A resume whose stored
+    # epoch differs must not reuse the old KEEPs or baseline anchor.
+    agentx_epoch: int = 0
     # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
         default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
@@ -642,6 +657,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     operator_server_args: str = ""
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
+    # Operator-supplied custom-workload paths. Fresh launch publishes them as
+    # env from ``--framework-path`` / ``--benchmark-scripts-dir``; a resume
+    # that does not re-pass those flags must re-export them from here or the
+    # scriptable runner cannot find the entrypoint (rc=2, no measurement).
+    bypass_scripts_dir: str = ""
+    framework_repo_path: str = ""
+    # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
+    benchmark_backend: str = ""
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
@@ -929,11 +952,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # session start. The dataclass default is a placeholder for tests/direct
     # construction; the CLI/manifest default is whole-machine GPU detection.
     gpu_specialist_capacity: int = 0
-    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it once acted on.
+    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
     pending_escalate_hint: str = ""
-    # last cleared escalate hint (audit only) for the breakdown.
+    # last hint that actually drove a phase transition (audit only) for the breakdown.
     last_consumed_escalate_hint: str = ""
     last_consumed_escalate_hint_ts: str = ""
+    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown. Distinct from last_consumed_escalate_hint: that field means "this drove a transition", which a discarded hint never did.
+    last_discarded_escalate_hint: str = ""
+    last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
@@ -1088,8 +1114,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                         normalized = str(path.resolve())
                     except OSError:
                         log.debug(
-                            "profile workload path resolution failed for %s; "
-                            "keeping the unresolved path",
+                            "profile workload path resolution failed for %s; keeping the unresolved path",
                             path,
                             exc_info=True,
                         )
@@ -1103,9 +1128,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             except (TypeError, ValueError):
                 context[name] = 0
         raw_server_args = (
-            params.get("extra_server_args")
-            if "extra_server_args" in params
-            else params.get("base_extra_args")
+            params.get("extra_server_args") if "extra_server_args" in params else params.get("base_extra_args")
         )
         server_args = str(raw_server_args or "").strip()
         server_args = sanitize_profile_server_args(server_args)
@@ -1114,15 +1137,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         except ValueError:
             context["server_args"] = " ".join(server_args.split())
 
-        raw_envs = (
-            params.get("extra_envs")
-            if "extra_envs" in params
-            else params.get("base_extra_envs")
-        )
+        raw_envs = params.get("extra_envs") if "extra_envs" in params else params.get("base_extra_envs")
         if isinstance(raw_envs, dict):
             context["extra_envs"] = {
-                str(key): str(value)
-                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
+                str(key): str(value) for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
             }
         else:
             context["extra_envs"] = {}
@@ -1134,11 +1152,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         context["remove_args"] = _normalized_list("base_remove_args", "remove_args")
         context["unset_envs"] = _normalized_list("base_unset_envs", "unset_envs")
-        args_mode = (
-            params.get("args_mode")
-            if "args_mode" in params
-            else params.get("base_args_mode")
-        )
+        args_mode = params.get("args_mode") if "args_mode" in params else params.get("base_args_mode")
         context["args_mode"] = str(args_mode or "append").strip().lower()
 
         current_best = self.current_best if isinstance(self.current_best, dict) else {}
@@ -1153,9 +1167,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else {}
         )
         serving_config = {
-            "extra_server_args": str(
-                current_best.get("extra_server_args") or ""
-            ).strip(),
+            "extra_server_args": str(current_best.get("extra_server_args") or "").strip(),
             "extra_envs": extra_envs,
         }
         if any((serving_config["extra_server_args"], extra_envs)):
@@ -1173,10 +1185,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         the forge shape resolvers and the kernel-entry reprofile gate. Returns
         ``False`` when the last profile did not succeed or recorded no workload.
         """
-        if (
-            str(getattr(self, "last_profile_status", "") or "").strip().lower()
-            != "succeeded"
-        ):
+        if str(getattr(self, "last_profile_status", "") or "").strip().lower() != "succeeded":
             return False
         recorded = getattr(self, "last_profile_workload", None)
         if not isinstance(recorded, dict) or not recorded:
@@ -1189,11 +1198,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # unequal and every fresh profile would be discarded as stale. This
         # matches the vLLM block-FP8 path, which passes
         # current_profile_workload_context() as ``expected``.
-        target = (
-            expected
-            if isinstance(expected, dict) and expected
-            else self.current_profile_workload_context()
-        )
+        target = expected if isinstance(expected, dict) and expected else self.current_profile_workload_context()
         return recorded == target
 
     def record_profile_workload(
@@ -1246,11 +1251,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         has_runtime_override = any(key in current_best for key in runtime_keys) or any(
             key in incoming for key in runtime_keys
         )
-        recorded = (
-            self.last_profile_workload
-            if isinstance(self.last_profile_workload, dict)
-            else {}
-        )
+        recorded = self.last_profile_workload if isinstance(self.last_profile_workload, dict) else {}
         # A bare baseline/profile ``current_best`` carries no runtime fields, so
         # the only record of what the server actually ran with is the last
         # profile. Backfilling it keeps "no override" from reading as an empty
@@ -1404,9 +1405,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             # Lift flat enablement_* keys from old state.json into EnablementRound.
             _ENABLEMENT_ROUND_FIELDS = set(EnablementRound.__dataclass_fields__)
             flat = {
-                k[len("enablement_"):]: v
+                k[len("enablement_") :]: v
                 for k, v in raw.items()
-                if k.startswith("enablement_") and k[len("enablement_"):] in _ENABLEMENT_ROUND_FIELDS
+                if k.startswith("enablement_") and k[len("enablement_") :] in _ENABLEMENT_ROUND_FIELDS
             }
             # Prefer any nested blob already present (from a partial migration).
             if not isinstance(filtered.get("enablement"), dict):
@@ -1435,7 +1436,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 # copy, so mutating an entry would also rewrite the caller's
                 # ``raw`` — and ``from_dict`` takes a mapping it does not own.
                 filtered["optimization_stack"] = [
-                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5):]}
+                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5) :]}
                     if (
                         isinstance(entry, dict)
                         and str(entry.get("action") or "") == _FRAMEWORK_STACK_ACTION_V5
@@ -1690,9 +1691,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             if explore_elapsed_s is not None:
                 summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
                 summary["explore_ratio"] = (
-                    round(explore_elapsed_s / session_elapsed_s, 4)
-                    if session_elapsed_s > 0.0
-                    else 0.0
+                    round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
                 )
         except Exception:  # noqa: BLE001 - status telemetry must stay best-effort
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
@@ -1867,7 +1866,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return text
 
     def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint (recording consumption in audit fields) so the next tick doesn't re-trigger; returns cleared hint.
+        """Pop the pending hint because it drove a phase transition; returns cleared hint.
+
+        Records the hint into ``last_consumed_escalate_hint`` — an audit field
+        that specifically means "this hint drove a transition". A hint that
+        was thrown away without acting on it is a different event and must go
+        through :meth:`discard_pending_escalate_hint` instead, or a discard
+        would misreport itself as a consumption in the breakdown.
 
         Returns:
             str: The consumed hint (``""`` when none was pending).
@@ -1878,6 +1883,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.pending_escalate_hint = ""
         self.last_consumed_escalate_hint = hint
         self.last_consumed_escalate_hint_ts = _now_iso()
+        return hint
+
+    def discard_pending_escalate_hint(self) -> str:
+        """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint.
+
+        Records the hint into ``last_discarded_escalate_hint`` rather than
+        ``last_consumed_escalate_hint`` — the hint never drove anything, so
+        recording it as consumed would tell the breakdown the opposite of
+        what happened.
+
+        Returns:
+            str: The discarded hint (``""`` when none was pending).
+        """
+        hint = (self.pending_escalate_hint or "").strip()
+        if not hint:
+            return ""
+        self.pending_escalate_hint = ""
+        self.last_discarded_escalate_hint = hint
+        self.last_discarded_escalate_hint_ts = _now_iso()
         return hint
 
     def enablement_close_guard_active(self) -> bool:
@@ -1915,6 +1939,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         return _m.record_phase_transition(
             self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix
+        )
+
+    def append_phase_history_event(
+        self,
+        *,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+        ts: str | None = None,
+        ts_unix: float | None = None,
+    ) -> dict[str, Any]:
+        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
+        from ..phases import machine_state as _m
+
+        return _m.append_phase_history_event(
+            self,
+            reason=reason,
+            evidence=evidence,
+            ts=ts,
+            ts_unix=ts_unix,
         )
 
     def current_top_bottleneck(self) -> str:
@@ -1964,20 +2007,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "status": str(result.get("status") or ""),
             "decision": str(result.get("decision") or ""),
             "kept": result["kept"],
-            "requires_e2e_validation": result[
-                "requires_e2e_validation"
-            ],
-            "integration_status": str(
-                result.get("integration_status") or ""
-            ),
-            "integration_decision": str(
-                result.get("integration_decision") or ""
-            ),
+            "requires_e2e_validation": result["requires_e2e_validation"],
+            "patch_cleanup_status": str(result.get("patch_cleanup_status") or result.get("integration_status") or ""),
+            "integration_decision": str(result.get("integration_decision") or ""),
             "kernel_id": str(result.get("kernel_id") or ""),
             "kernel_name": str(result.get("kernel_name") or ""),
-            "source_file": str(
-                result.get("source_file") or result.get("target_file") or ""
-            ),
+            "source_file": str(result.get("source_file") or result.get("target_file") or ""),
             "kernel_repo": str(result.get("kernel_repo") or ""),
             "backend": "forge_collective",
             "engine": str(result.get("engine") or "forge_collective"),
@@ -1986,16 +2021,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "collective_op": str(result.get("collective_op") or ""),
             "world_size": result.get("world_size"),
             "workspace": str(result.get("workspace") or ""),
-            "patch_path": str(
-                result.get("patch") or result.get("patch_path") or ""
-            ),
+            "patch_path": str(result.get("patch") or result.get("patch_path") or ""),
             "iterations": result.get("iterations"),
             "salvaged": bool(result.get("salvaged")),
-            "duration_sec": (
-                result.get("duration_sec")
-                or result.get("elapsed_sec")
-                or result.get("runtime_sec")
-            ),
+            "duration_sec": (result.get("duration_sec") or result.get("elapsed_sec") or result.get("runtime_sec")),
             "error_class": str(result.get("error_class") or ""),
             "error": str(result.get("error") or "")[-1200:],
             "ts": str(result.get("ts") or _now_iso()),
@@ -2008,11 +2037,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Build the integration fields stored on a collective campaign."""
         revert = result.get("revert_result")
         finalize = result.get("finalize_result")
+        # Fall back to legacy field names for --resume compat with older sessions.
+        patch_cleanup_status = str(result.get("patch_cleanup_status") or result.get("integration_status") or "")
+        patch_cleanup_action = str(
+            result.get("patch_cleanup_action") or result.get("integration_recovery_action") or ""
+        )
         return {
-            "integration_status": str(result["integration_status"]),
-            "integration_recovery_action": str(
-                result.get("integration_recovery_action") or ""
-            ),
+            "patch_cleanup_status": patch_cleanup_status,
+            "patch_cleanup_action": patch_cleanup_action,
             "integration_decision": str(result["decision"]).strip().upper(),
             "integration_result_status": str(result.get("status") or ""),
             "integration_gain_pct": result.get("gain_pct"),
@@ -2022,16 +2054,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "integration_report_path": str(result.get("report_path") or ""),
             "integration_error_class": str(result.get("error_class") or ""),
             "integration_error": str(result.get("error") or "")[-1200:],
-            "integration_revert_status": (
-                str(revert.get("status") or "")
-                if isinstance(revert, dict)
-                else ""
-            ),
-            "integration_finalize_status": (
-                str(finalize.get("status") or "")
-                if isinstance(finalize, dict)
-                else ""
-            ),
+            "integration_revert_status": (str(revert.get("status") or "") if isinstance(revert, dict) else ""),
+            "integration_finalize_status": (str(finalize.get("status") or "") if isinstance(finalize, dict) else ""),
             "integration_ts": _now_iso(),
         }
 
@@ -2040,17 +2064,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(result, dict):
             raise TypeError("Collective result must be a mapping")
         incoming = dict(result)
-        incoming_attempt_id = str(
-            incoming.get("collective_attempt_id") or ""
-        ).strip()
+        incoming_attempt_id = str(incoming.get("collective_attempt_id") or "").strip()
         previous = (
             dict(self.last_collective)
             if isinstance(self.last_collective, dict)
             and incoming_attempt_id
-            and str(
-                self.last_collective.get("collective_attempt_id") or ""
-            ).strip()
-            == incoming_attempt_id
+            and str(self.last_collective.get("collective_attempt_id") or "").strip() == incoming_attempt_id
             else {}
         )
         recorded = {**previous, **incoming}
@@ -2072,9 +2091,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             raise ValueError("Collective result E2E flags must be boolean")
         if kept != (decision == "KEEP") or requires_e2e != kept:
             raise ValueError("Collective result contract is inconsistent")
-        attempt_id = str(
-            recorded.get("collective_attempt_id") or ""
-        ).strip()
+        attempt_id = str(recorded.get("collective_attempt_id") or "").strip()
         if not attempt_id:
             raise ValueError("Collective result is missing a stable attempt identity")
         recorded["collective_attempt_id"] = attempt_id
@@ -2091,14 +2108,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 or (field_name == "kernel_speedup" and value <= 0)
                 or (field_name == "gpu_pct" and value < 0)
             ):
-                raise ValueError(
-                    f"Collective result has invalid {field_name}"
-                )
+                raise ValueError(f"Collective result has invalid {field_name}")
         recorded.setdefault(
-            "integration_status",
-            "pending"
-            if requires_e2e
-            else "complete",
+            "patch_cleanup_status",
+            "pending" if requires_e2e else "complete",
         )
 
         snapshot = self._collective_attempt_snapshot(recorded)
@@ -2135,59 +2148,39 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(result, dict):
             raise TypeError("Collective integration result must be a mapping")
         integration = dict(result)
-        integration_id = str(
-            integration_id or integration.get("integration_id") or ""
-        ).strip()
+        integration_id = str(integration_id or integration.get("integration_id") or "").strip()
         if not integration_id:
             raise ValueError("Collective integration is missing integration_id")
         decision = str(integration.get("decision") or "").strip().upper()
         if decision not in {"KEEP", "REVERT", "NEEDS_REVIEW"}:
-            raise ValueError(
-                f"Invalid collective integration decision: {decision!r}"
-            )
-        integration_status = str(
-            integration.get("integration_status") or ""
+            raise ValueError(f"Invalid collective integration decision: {decision!r}")
+        # Fall back to legacy field names for --resume compat with older sessions.
+        patch_cleanup_status = str(
+            integration.get("patch_cleanup_status") or integration.get("integration_status") or ""
         ).strip()
-        if integration_status not in {"complete", "recovery_required"}:
-            raise ValueError(
-                "Collective integration_status must be complete or "
-                "recovery_required"
-            )
+        if patch_cleanup_status not in {"complete", "recovery_required"}:
+            raise ValueError("Collective patch_cleanup_status must be complete or recovery_required")
         recovery_action = str(
-            integration.get("integration_recovery_action") or ""
+            integration.get("patch_cleanup_action") or integration.get("integration_recovery_action") or ""
         ).strip()
-        if integration_status == "complete" and recovery_action:
-            raise ValueError(
-                "Completed collective integration cannot require recovery"
-            )
-        if (
-            integration_status == "recovery_required"
-            and recovery_action not in {"finalize", "revert"}
-        ):
-            raise ValueError(
-                "Collective recovery action must be finalize or revert"
-            )
+        if patch_cleanup_status == "complete" and recovery_action:
+            raise ValueError("Completed collective integration cannot require recovery")
+        if patch_cleanup_status == "recovery_required" and recovery_action not in {"finalize", "revert"}:
+            raise ValueError("Collective recovery action must be finalize or revert")
         for field_name in ("gain_pct", "base_tput", "new_tput"):
             value = integration.get(field_name)
             if value is None:
                 continue
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-            ):
-                raise ValueError(
-                    f"Collective integration has invalid {field_name}"
-                )
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"Collective integration has invalid {field_name}")
         integration["decision"] = decision
-        integration["integration_status"] = integration_status
+        integration["patch_cleanup_status"] = patch_cleanup_status
+        integration["patch_cleanup_action"] = recovery_action
         if not isinstance(self.last_collective, dict):
             raise ValueError("last_collective must be a mapping")
         last = dict(self.last_collective)
         if str(last.get("integration_id") or "") != integration_id:
-            raise ValueError(
-                "Collective integration_id does not match last_collective"
-            )
+            raise ValueError("Collective integration_id does not match last_collective")
         attempt_id = str(last.get("collective_attempt_id") or "").strip()
         if not attempt_id:
             raise ValueError("last_collective is missing collective_attempt_id")
@@ -2203,9 +2196,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             and str(item.get("integration_id") or "") == integration_id
         ]
         if len(matches) != 1:
-            raise ValueError(
-                "Collective integration must match exactly one campaign"
-            )
+            raise ValueError("Collective integration must match exactly one campaign")
         integration_fields = self._collective_integration_snapshot(integration)
         last.update(integration_fields)
         history[matches[0]].update(integration_fields)
@@ -3110,13 +3101,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     len(disk["kernels"]),
                     disk["path"],
                 )
-        steady_state_trace = (
-            result.get("steady_state_trace")
-            or artifacts.get("tracelens_steady_state_trace")
-            or ""
-        )
-        summary, kernel_roofline, reusable_ids, withheld_collective = (
-            self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        steady_state_trace = result.get("steady_state_trace") or artifacts.get("tracelens_steady_state_trace") or ""
+        summary, kernel_roofline, reusable_ids, withheld_collective = self._build_hot_kernel_summaries(
+            result, kernel_roofline_path
         )
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
@@ -3146,13 +3133,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     warnings_cleaned.append(dict(entry))
         if withheld_collective:
             log.warning(
-                "kernel targets: withholding %d collective kernel(s) from kernel_opt "
-                "for the collective lane: %s",
+                "kernel targets: withholding %d collective kernel(s) from kernel_opt for the collective lane: %s",
                 len(withheld_collective),
-                ", ".join(
-                    f"{item['kernel_id']}({item['name'][:60]})"
-                    for item in withheld_collective
-                ),
+                ", ".join(f"{item['kernel_id']}({item['name'][:60]})" for item in withheld_collective),
             )
             warnings_cleaned.append(
                 {

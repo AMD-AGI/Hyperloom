@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,13 +33,23 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
-from hyperloom.orchestrator.state.task_registry import Task, TaskRegistry
+from hyperloom.orchestrator.state.task_registry import (
+    IllegalTransition,
+    Task,
+    TaskRegistry,
+)
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
 )
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+
+async def _immediately(payload: dict) -> dict:
+    """Executor stub that returns without yielding."""
+    return payload
 
 
 def _heartbeat() -> Intent:
@@ -121,11 +132,34 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
     res = await sub.run_task(task)
     assert res.state == "failed"
     assert "no runner" in res.error
+    assert res.error_class == "no_executor"
     db.close()
 
 
 @pytest.mark.asyncio
-async def test_sub_agent_runner_acquires_lane(tmp_path):
+async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
+    """A raised executor exception must not collapse into the generic
+    unknown_error gap bucket -- error_class carries the exception's own class name.
+    """
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    async def exe(ctx):
+        raise TimeoutError("benchmark server never came up")
+
+    sub.register_executor("bench_runner", exe)
+    task = await tr.create(kind="bench_runner", params={}, idempotency_key="k-y")
+    res = await sub.run_task(task)
+    assert res.state == "failed"
+    assert res.error_class == "TimeoutError"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_back(tmp_path):
+    """Lanes are won by the caller and handed over; the runner returns them."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -144,10 +178,49 @@ async def test_sub_agent_runner_acquires_lane(tmp_path):
         requires_lanes=["benchmark_lane"],
         lease_ttl_sec=30,
     )
-    res = await sub.run_task(task)
+    lease = await locks.acquire_many(
+        ["benchmark_lane"],
+        holder_id=task.task_id,
+        task_id=task.task_id,
+        action="bench_runner",
+        ttl_sec=30,
+    )
+
+    res = await sub.run_task(task, prebound_lease=lease)
+
     assert res.state == "succeeded"
     assert "benchmark_lane" in seen_lease["lanes"]
     assert "benchmark_lane" not in await locks.lane_holders()
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_path):
+    """Running it anyway would run it unserialised, which is the bug the lanes exist to prevent."""
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    ran = {"called": False}
+
+    async def exe(_ctx):
+        ran["called"] = True
+        return {}
+
+    sub.register_executor("bench_runner", exe)
+    task = await tr.create(
+        kind="bench_runner",
+        params={},
+        idempotency_key="k-bench-nolease",
+        requires_lanes=["benchmark_lane"],
+        lease_ttl_sec=30,
+    )
+
+    with pytest.raises(ValueError, match="without a lease"):
+        await sub.run_task(task)
+
+    assert ran["called"] is False
+    assert (await tr.get(task.task_id)).state == "queued"
     db.close()
 
 
@@ -726,42 +799,6 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_kill_task_by_robustness(session_dir):
-    delegate = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "long_running",
-            "params": {},
-            "idempotency_key": "k-long-1",
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
-
-    c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        await c.tick(1)  # delegate enqueued; dispatcher fails (no runner)
-        all_tasks = await c.tasks.by_state("failed")
-        assert all_tasks
-
-        new_task = await c.tasks.create(
-            kind="long_running",
-            params={},
-            idempotency_key="k-long-2",
-        )
-        await c._handle_intent(
-            "robustness",
-            Intent(
-                type=IntentType.KILL_TASK,
-                payload={"task_id": new_task.task_id, "reason": "stalled", "scope": "task"},
-            ),
-        )
-        after = await c.tasks.get(new_task.task_id)
-        assert after.state == "cancelled"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
@@ -823,9 +860,7 @@ async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(ses
         assert (await c.tasks.get(b.task_id)).state == "cancelled"
         assert "baseline" not in c.shared_state.pruned_families
         events = await c.bus.tail(topic="event")
-        assert any(
-            m.payload.get("kind") == "prune_branch" and m.payload.get("scope") == "queued" for m in events
-        )
+        assert any(m.payload.get("kind") == "prune_branch" and m.payload.get("scope") == "queued" for m in events)
     finally:
         await c.stop()
 
@@ -1244,9 +1279,7 @@ def _eval_failed_result() -> dict:
 
 
 @pytest.mark.asyncio
-async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_node(
-    session_dir, monkeypatch
-):
+async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_node(session_dir, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1441,9 +1474,7 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
         st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
         st.enablement.eval_contract_fingerprint = "measured-fp"
 
-        await c._handle_unpromotable_result(
-            _mk_task("baseline", "t-noeval"), _eval_unavailable_result()
-        )
+        await c._handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
 
         # The measured characterization survives...
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
@@ -2117,43 +2148,56 @@ def test_critic_md_carves_out_archival_actions():
     assert "Always `approve` archival actions" in text
 
 
-# Dispatcher resilience to disappearing ``tasks`` rows + report-task run-loop exit.
 @pytest.mark.asyncio
-async def test_sub_agent_runner_swallows_tasknotfound_on_final_transition(
+async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     tmp_path,
 ):
+    """A row cancelled between dispatch and the claim must not keep its lanes.
+
+    The rejection itself is the double-spawn guard and still reaches the
+    caller; what must not survive it is the lease, which would otherwise hold
+    every conflicting lane until the TTL sweep noticed.
+    """
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
+    sub.register_executor("explore", lambda _ctx: _immediately({}))
 
-    payload = {
-        "tput": 4632.8,
-        "params_search_update": {"tested": {"fp1": {"name": "v1"}}},
-    }
-
-    async def long_runner(ctx):
-        db.raw.execute("DELETE FROM tasks WHERE task_id=?", (ctx.task.task_id,))
-        db.raw.commit()
-        return payload
-
-    sub.register_executor("params", long_runner)
-    task = await tr.create(kind="params", params={}, idempotency_key="k-params-1")
-    res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-    assert res.result == payload, (
-        "executor result must survive the TaskNotFound -- the dispatcher "
-        "uses it to update params_search ledger; losing it stalls N19c"
+    task = await tr.create(
+        kind="explore",
+        params={},
+        idempotency_key="k-claim-rejected",
+        requires_lanes=["benchmark_lane"],
+        lease_ttl_sec=600,
     )
+    lease = await locks.acquire_many(
+        ["benchmark_lane"],
+        holder_id=task.task_id,
+        task_id=task.task_id,
+        action="explore",
+        ttl_sec=600,
+    )
+    await tr.transition(task.task_id, "cancelled", evidence={"reason": "prune_branch"})
+
+    with pytest.raises(IllegalTransition):
+        await sub.run_task(task, prebound_lease=lease)
+
+    assert await locks.lane_holders() == {}
     db.close()
 
 
 @pytest.mark.asyncio
-async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
+async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
     tmp_path,
-    caplog,
 ):
+    """Losing the race for a lane is a retry, not a task that started.
+
+    Claiming the row first would stamp it ``running`` for work that never
+    began, and every ``tasks.running()`` reader -- the KERNEL idle guard, the
+    CLOSE sequencer -- would hold a phase open for it until the lease TTL
+    expired.
+    """
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2161,28 +2205,85 @@ async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
 
     ran = {"called": False}
 
-    async def runner(ctx):
+    async def runner(_ctx):
         ran["called"] = True
-        return {"tput": 1.0}
+        return {}
 
-    sub.register_executor("baseline", runner)
+    sub.register_executor("profile", runner)
+    await locks.acquire_many(
+        ["profile_lane"],
+        holder_id="someone-else",
+        task_id="someone-else",
+        action="profile",
+        ttl_sec=600,
+    )
     task = await tr.create(
-        kind="baseline",
+        kind="profile",
         params={},
-        idempotency_key="k-baseline-1",
+        idempotency_key="k-lane-busy",
+        requires_lanes=["profile_lane"],
+        lease_ttl_sec=600,
     )
-    db.raw.execute("DELETE FROM tasks WHERE task_id=?", (task.task_id,))
-    db.raw.commit()
+    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
 
-    with caplog.at_level("WARNING"):
-        res = await sub.run_task(task)
+    assert await disp.run_task_registered(task) is None
 
-    assert ran["called"] is True
+    assert ran["called"] is False
+    assert (await tr.get(task.task_id)).state == "queued"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path):
+    """The handle is the whole point: without it a cancel cannot find the action.
+
+    Going straight to ``sub.run_task`` is what left the kernel-entry reprofile
+    and the closing steps off ``_inflight_actions``, where a shutdown or a spent
+    budget could not stop them.
+    """
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    registered: list[str] = []
+
+    async def runner(ctx):
+        registered.extend(disp._inflight_actions)
+        return {}
+
+    sub.register_executor("roofline", runner)
+    task = await tr.create(kind="roofline", params={}, idempotency_key="k-registered")
+
+    res = await disp.run_task_registered(task)
+
     assert res.state == "succeeded"
-    assert res.result == {"tput": 1.0}
-    assert any("vanished" in rec.message.lower() for rec in caplog.records), (
-        "expected the disappearing-row warning to fire"
-    )
+    assert registered == [task.task_id]
+    assert disp._inflight_actions == {}, "the handle must not outlive the action"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_runner_fails_a_row_whose_workspace_cannot_be_made(
+    tmp_path,
+):
+    """An ENOSPC while preparing the workspace is a failed task, not a live one."""
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    sub.register_executor("explore", lambda _ctx: _immediately({}))
+
+    def _no_space(_task):
+        raise OSError(28, "No space left on device")
+
+    sub._pre_mkdir_workspace = _no_space
+    task = await tr.create(kind="explore", params={}, idempotency_key="k-enospc")
+
+    res = await sub.run_task(task)
+
+    assert res.state == "failed"
+    assert (await tr.get(task.task_id)).state == "failed"
     db.close()
 
 
@@ -2278,34 +2379,6 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "target_reached"
         assert persisted.last_tick_exception["stage"] == "advance_phase"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
-    # Defensive audit (log-only): killing a queued/running task must still
-    # cancel it (behaviour unchanged) AND emit a log-only audit record.
-    import logging
-
-    c = Coordinator(session_dir, backends=_build_backends({}))
-    try:
-        task = await c.tasks.create(
-            kind="long_running",
-            params={},
-            idempotency_key="k-audit-kill-1",
-        )
-        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
-            await c._handle_intent(
-                "robustness",
-                Intent(
-                    type=IntentType.KILL_TASK,
-                    payload={"task_id": task.task_id, "reason": "stalled", "scope": "task"},
-                ),
-            )
-        after = await c.tasks.get(task.task_id)
-        assert after.state == "cancelled"
-        assert any("kill_task audit" in r.getMessage() and task.task_id in r.getMessage() for r in caplog.records)
     finally:
         await c.stop()
 

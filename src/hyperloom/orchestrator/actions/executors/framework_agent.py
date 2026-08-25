@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._accuracy_gate import (
     accuracy_keep_block,
@@ -510,8 +511,7 @@ class FrameworkAgentExecutor:
             if explicit_framework_root:
                 _error_class = "framework_source_root_rejected"
                 _error = (
-                    f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured source allowlist"
+                    f"framework_source_root {explicit_framework_root!r} is not under the configured source allowlist"
                 )
             else:
                 _error_class = "no_framework_agent_root"
@@ -834,6 +834,7 @@ class FrameworkAgentExecutor:
                 slug=slug,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                state_model_path=str(getattr(extra.get("shared_state") or extra.get("state"), "model_path", "") or ""),
             )
         except FrameworkScriptMismatchError as exc:
             reverted = self._revert_patches(
@@ -1181,6 +1182,7 @@ class FrameworkAgentExecutor:
         slug: str,
         session_deadline_sec: float | None = None,
         variant_expected_sec: float | None = None,
+        state_model_path: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy
         gate. Mirrors :meth:`IntegratePatchExecutor._bench_patch`.
@@ -1194,6 +1196,9 @@ class FrameworkAgentExecutor:
                 session context.
             variant_expected_sec: Expected bench runtime used to decide whether
                 the remaining budget can fit this bench at all.
+            state_model_path: ``SharedState.model_path``, the last fallback in
+                the model-path precedence. Passed in because the caller owns the
+                session context.
 
         Returns:
             A ``(bench, gate_evidence)`` tuple: the bench result dict and a
@@ -1202,7 +1207,16 @@ class FrameworkAgentExecutor:
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             raise RuntimeError(f"framework bench: config not found at {config_path}")
-        resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
+        # This bench launches a server, so the value has to be a servable path:
+        # the shared resolver walks HL_MODEL_BASE and the hub cache, where the
+        # local two-step did not, and handed a bare repo id straight to the
+        # server. It falls back to the original string, so an unresolvable
+        # value degrades exactly as before rather than emptying.
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=state_model_path,
+            for_serving=True,
+        )
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )

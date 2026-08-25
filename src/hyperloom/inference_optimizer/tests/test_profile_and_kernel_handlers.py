@@ -635,9 +635,7 @@ def test_materialize_profile_annotation_flag_wins_over_a_stale_yaml_value(
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
-    assert extra.rindex("detailed_trace_annotation True") > extra.rindex(
-        "detailed_trace_annotation False"
-    ), extra
+    assert extra.rindex("detailed_trace_annotation True") > extra.rindex("detailed_trace_annotation False"), extra
 
 
 def test_materialize_profile_restore_rejects_a_zero_max_iterations(
@@ -1059,6 +1057,112 @@ def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
         "",
     )
     assert "shape-discovery" not in extra, extra
+
+
+def test_materialize_profile_sglang_drops_annotations_when_patch_fails(
+    tmp_path,
+    monkeypatch,
+):
+    """A failed patch also clears the annotation-only capture options.
+
+    Without the server-side patch the trace carries no ``kernel_shape_profiler``
+    events, so requesting shape discovery / detailed annotations only pays the
+    capture cost. The vLLM branch already drops its equivalent flag."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert body["shape_discovery"] is False, body
+    assert body["detailed_annotations"] is False, body
+
+
+def test_materialize_profile_sglang_keeps_annotations_when_patch_succeeds(
+    tmp_path,
+    monkeypatch,
+):
+    """The healthy path is untouched: annotations stay on when the patch lands."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert body["shape_discovery"] is True, body
+    assert body["detailed_annotations"] is True, body
+
+
+def test_materialize_profile_sglang_keeps_annotations_when_patch_not_attempted(
+    tmp_path,
+    monkeypatch,
+):
+    """HYPERLOOM_ENABLE_PATCH=0 must not degrade the capture options.
+
+    Patching disabled is not the same as patching failed: the image may ship the
+    TraceLens patch already applied, in which case the annotations still work."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    counts = _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert counts == {"vllm": 0, "sglang": 0}, counts
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in envs
+    body = json.loads(envs["PROFILE_EXTRA_BODY"])
+    assert body["shape_discovery"] is True, body
+    assert body["detailed_annotations"] is True, body
+
+
+def test_materialize_profile_sglang_drops_graph_capture_flag_when_eager(
+    tmp_path,
+    monkeypatch,
+):
+    """``--disable-cuda-graph`` and ``--enable-profile-cuda-graph`` contradict.
+
+    The eager flag arrives via ``extra_server_args`` while the graph-capture
+    profiling flag comes from the profile YAML, so the two only meet after the
+    merges. An eager server captures no graph, leaving nothing to profile."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(
+        tmp_path,
+        "sglang",
+        {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
+    )
+    out = _materialize_config_with_envs(src, tmp_path, extra_server_args="--disable-cuda-graph")
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--disable-cuda-graph" in extra.split(), extra
+    assert "--enable-profile-cuda-graph" not in extra.split(), extra
+
+
+def test_materialize_profile_sglang_keeps_graph_capture_flag_without_eager(
+    tmp_path,
+    monkeypatch,
+):
+    """Graph-mode profiling keeps the capture flag (the healthy path)."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(
+        tmp_path,
+        "sglang",
+        {"CONC": 32, "ISL": 256, "OSL": 1024, "EXTRA_SGLANG_ARGS": "--enable-profile-cuda-graph"},
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--enable-profile-cuda-graph" in extra.split(), extra
 
 
 def test_materialize_profile_kill_switch_skips_patcher_entirely(
@@ -1621,7 +1725,6 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         task_id="t-atom-roofline",
         idempotency_key="t-atom-roofline",
         requires_lanes=[],
-        allowed_tools=[],
         side_effects=[],
         lease_ttl_sec=0,
     )
@@ -3147,6 +3250,63 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
     assert "warnings=[" in rendered
 
 
+def test_format_last_trace_analyze_renders_low_compute_warning_numbers(session_dir):
+    """The compact line must carry the numbers the Coordinator routes on.
+
+    ``low_gpu_compute_pct`` exists to send a run to comm/params instead of
+    kernel rewriting, and telling a comm-bound window from a host-bound one
+    needs ``exposed_comm_pct``. A per-field ``if`` chain that only knew
+    ``idle_pct`` rendered this warning as a bare code with every number gone.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json.gz"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {
+                    "code": "low_gpu_compute_pct",
+                    "severity": "warning",
+                    "compute_pct": 3.99,
+                    "threshold_pct": 10.0,
+                    "exposed_comm_pct": 95.99,
+                    "source": "/tmp/x/analysis.md",
+                    "message": "low compute",
+                }
+            ],
+        },
+    )
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
+    assert "low_gpu_compute_pct(" in rendered
+    assert "compute=3.99%" in rendered
+    assert "exposed_comm=95.99%" in rendered
+    assert "threshold=10.0%" in rendered
+
+
+def test_format_last_trace_analyze_renders_both_gate_warnings(session_dir):
+    """Both gates can fire on one window; neither may erase the other's numbers."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    state.record_trace_analyze(
+        {"trace_input": "/tmp/trace.json.gz"},
+        {
+            "status": "ok",
+            "hot_kernels": [],
+            "trace_health_warnings": [
+                {"code": "high_gpu_idle_pct", "severity": "warning", "idle_pct": 95.0, "threshold_pct": 80.0},
+                {"code": "low_gpu_compute_pct", "severity": "warning", "compute_pct": 3.0, "threshold_pct": 10.0},
+            ],
+        },
+    )
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
+    assert "high_gpu_idle_pct(idle=95.0%,threshold=80.0%)" in rendered
+    assert "low_gpu_compute_pct(compute=3.0%,threshold=10.0%)" in rendered
+
+
 def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
     """Tool-failure warning carries ``returncode``; the prompt must surface ``rc=N`` to distinguish a crash from a benign skip."""
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -3619,7 +3779,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
-    """REQUEST with no registered handler emits an auto-reject RESPONSE and advances the kernel cursor."""
+    """REQUEST with no registered handler emits an auto-reject RESPONSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = True
@@ -3643,8 +3803,6 @@ async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
         assert r.payload["result"]["error_class"] == "unknown_kernel_kind"
         assert r.payload["source"] == "coordinator_auto_reject"
         assert "valid_kinds" in r.payload["result"]
-        cur = await c.cursors.load("kernel_agent")
-        assert cur.last_processed_seq == req_msgs[0].seq
     finally:
         await c.stop()
 
@@ -4469,9 +4627,7 @@ def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tm
     trace_dir = tmp_path / "torch_trace"
     chunk = _gz_trace(trace_dir / "trace_split" / "aaa_mixed_0.trace.json.gz", 32)
     capture = _gz_trace(trace_dir / "zzz_rank_0.trace.json.gz", 40_000)
-    sidecar = _gz_trace(
-        trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32
-    )
+    sidecar = _gz_trace(trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32)
 
     found = _trace_files_for_dir(trace_dir)
 

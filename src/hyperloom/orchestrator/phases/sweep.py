@@ -62,8 +62,7 @@ class SweepPhase(PhaseHandler):
         denied = self._time_budget_denial_for_action("conc_sweep")
         if denied is not None:
             log.info(
-                "SWEEP entry (from=%s): conc_sweep cannot fit the session budget "
-                "(%s); recording terminal skip.",
+                "SWEEP entry (from=%s): conc_sweep cannot fit the session budget (%s); recording terminal skip.",
                 from_phase or "<unknown>",
                 denied,
             )
@@ -251,6 +250,8 @@ class SweepPhase(PhaseHandler):
             kind="sweep",
             params=params,
             idempotency_key=f"internal-sweep-{reason}{self._cycle_idem_suffix()}",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("sweep")[1],
         )
         if was_existing:
             log.info(

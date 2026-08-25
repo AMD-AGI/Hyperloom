@@ -320,14 +320,16 @@ def _infera_restart_config_matches(
     args: argparse.Namespace,
     framework: str,
     pd_mode: str,
+    kv_transfer_backend: str = "",
 ) -> bool:
     """Whether the requested restart matches the last successful Infera launch.
 
-    Mirrors the RayJob resume fast-path config check: same framework / model /
-    tp / ep / pd_mode / normalized extra-args (plus per-role PD knobs when
-    disaggregated). A mismatch means the round changed a served flag, so the
-    server MUST be relaunched (never resumed) or the benchmark would measure
-    stale config.
+    Covers the same ground as the RayJob resume fast path, which compares one
+    topology record rather than these fields one by one: framework / model /
+    tp / ep / pd_mode / normalized extra-args, plus the per-role PD knobs and
+    the KV transfer backend when disaggregated. A mismatch means the round
+    changed a served flag, so the server MUST be relaunched (never resumed) or
+    the benchmark would measure stale config.
 
     Args:
         state (dict[str, Any]): The infera multi-node state (carries
@@ -335,6 +337,10 @@ def _infera_restart_config_matches(
         args (argparse.Namespace): Parsed ``restart-server`` arguments.
         framework (str): Resolved framework for this restart.
         pd_mode (str): Resolved PD mode (``"aggregated"`` / ``"disaggregated"``).
+        kv_transfer_backend (str): Resolved PD KV-transfer backend for this
+            restart. It reaches the pods as
+            ``--disaggregation-transfer-backend``, so it is a served flag and
+            must block a resume when it changes.
 
     Returns:
         bool: True only when every served-config field matches the last launch.
@@ -363,6 +369,7 @@ def _infera_restart_config_matches(
     return (
         args_pn == state_pn
         and args_dn == state_dn
+        and (state.get("last_restart_pd_transfer_backend") or "").strip() == (kv_transfer_backend or "").strip()
         and int(state.get("last_restart_pd_prefill_tp") or 0) == int(getattr(args, "pd_prefill_tp", 0) or 0)
         and int(state.get("last_restart_pd_decode_tp") or 0) == int(getattr(args, "pd_decode_tp", 0) or 0)
         and int(state.get("last_restart_pd_prefill_ep") or 0) == int(getattr(args, "pd_prefill_ep", 0) or 0)
@@ -481,7 +488,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         "no",
         "off",
     )
-    if resume_enabled and _infera_restart_config_matches(state, args, framework, pd_mode):
+    if resume_enabled and _infera_restart_config_matches(state, args, framework, pd_mode, kv):
         probe_timeout = min(30, max(10, int(poll_timeout)))
         if _infera_servers_alive(state, _infera_all_gpu_targets(state), timeout=probe_timeout):
             info(
@@ -619,6 +626,9 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_pd_decode_nodes"] = pd_decode_nodes
         state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
         state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
+        # The orchestrator's PD arg resolution reads this key as its fallback
+        # tier between an explicit argument and $PD_TRANSFER_BACKEND.
+        state["last_restart_pd_transfer_backend"] = kv
         state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
         state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
         state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
@@ -871,10 +881,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
         for record in per_node:
             ip = str(record.get("host") or "")
             target = _infera_target_for_host(state, ip)
-            op_args = (
-                "revert --records-json "
-                f"{shlex.quote(json.dumps([record], sort_keys=True))}"
-            )
+            op_args = f"revert --records-json {shlex.quote(json.dumps([record], sort_keys=True))}"
             parsed, tx = _infera_ssh_node_op(
                 state,
                 target,
@@ -908,9 +915,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     """
     state = _infera_require_state()
     try:
-        records_by_host = json.loads(
-            getattr(args, "records_json", "") or "{}"
-        )
+        records_by_host = json.loads(getattr(args, "records_json", "") or "{}")
         backup_map = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         err(f"--backup-map-json not valid JSON: {exc}")
@@ -934,10 +939,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
         target = _infera_target_for_host(state, str(ip))
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"revert-patch (infera): ssh -> {ip}:{port}")
-        op_args = (
-            "revert --records-json "
-            f"{shlex.quote(json.dumps(records, sort_keys=True))}"
-        )
+        op_args = f"revert --records-json {shlex.quote(json.dumps(records, sort_keys=True))}"
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):
             per_node.append({"host": ip, **parsed})
@@ -965,10 +967,7 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
     per_node, failures = [], []
     for ip, records in records_by_host.items():
         target = _infera_target_for_host(state, str(ip))
-        op_args = (
-            "finalize --records-json "
-            f"{shlex.quote(json.dumps(records, sort_keys=True))}"
-        )
+        op_args = f"finalize --records-json {shlex.quote(json.dumps(records, sort_keys=True))}"
         parsed, tx = _infera_ssh_node_op(
             state,
             target,
@@ -981,9 +980,7 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
             failures.append(
                 {
                     "host": ip,
-                    "error": (parsed or {}).get("error")
-                    or tx.get("stderr")
-                    or "unknown",
+                    "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown",
                     **tx,
                 }
             )

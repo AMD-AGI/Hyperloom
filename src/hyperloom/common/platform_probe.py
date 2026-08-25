@@ -65,9 +65,7 @@ def read_kernel_file(path: Path | str, *, root: Path = DEFAULT_ROOT) -> str:
 
 def sysfs_available(*, root: Path = DEFAULT_ROOT) -> bool:
     """Whether host CPU sysfs is visible, i.e. whether a probe is meaningful."""
-    return bool(read_kernel_file(f"{_CPU_ROOT}/smt/active", root=root)) or (
-        root / _CPU_ROOT / "cpu0"
-    ).exists()
+    return bool(read_kernel_file(f"{_CPU_ROOT}/smt/active", root=root)) or (root / _CPU_ROOT / "cpu0").exists()
 
 
 def smt_state(*, root: Path = DEFAULT_ROOT) -> str | None:
@@ -81,10 +79,7 @@ def smt_state(*, root: Path = DEFAULT_ROOT) -> str | None:
 def socket_count(*, root: Path = DEFAULT_ROOT) -> int | None:
     """Distinct physical package IDs, or ``None`` when none are readable."""
     try:
-        ids = {
-            read_kernel_file(p)
-            for p in (root / _CPU_ROOT).glob("cpu*/topology/physical_package_id")
-        }
+        ids = {read_kernel_file(p) for p in (root / _CPU_ROOT).glob("cpu*/topology/physical_package_id")}
     except OSError:
         return None
     return len(ids - {""}) or None

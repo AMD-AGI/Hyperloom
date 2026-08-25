@@ -779,7 +779,8 @@ def _run_client_and_eval(
             base_url=base_url,
             conc=conc,
             out_dir=str(workspace / "lm_eval"),
-            tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip() or "gsm8k",
+            tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
+            or "gsm8k",
             limit=(str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip() or None),
         )
         eval_rc = _run_subprocess(eval_cmd, timeout_s, workspace, "eval")
@@ -840,7 +841,10 @@ def _server_env(
     """Build the server subprocess env from the materialized benchmark envs.
 
     The whole mapping is exported, so an env-only candidate is a real experiment
-    rather than a rerun of the baseline.
+    rather than a rerun of the baseline. That also carries
+    ``AITER_LOG_TUNED_CONFIG`` through to the server, which bypass runs need:
+    without it their logs have no tuned-config hit lines, and both the GEMM
+    demand list and the apply verdict silently lose their input.
     """
     profiler_dirs = (
         dict.fromkeys(("VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR", "ATOM_TORCH_PROFILER_DIR"), profile_dir)

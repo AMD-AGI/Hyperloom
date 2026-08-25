@@ -650,9 +650,7 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
         getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
     ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
     try:
-        outcome = framework_deps.ensure(
-            framework, python_exe=python_exe, pip_extra=tuple(pip_extra)
-        )
+        outcome = framework_deps.ensure(framework, python_exe=python_exe, pip_extra=tuple(pip_extra))
     except framework_deps.TorchClobberedError as exc:
         print(f"Preflight: FATAL {exc}", file=sys.stderr)
         sys.exit(2)
@@ -1636,25 +1634,91 @@ def _print_recipe_kb_queue_status() -> None:
 
 
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
-_INFERENCEX_REF_DEFAULT = "a4bb43afa7fd74c1356583ed29e51421be010f0f"
+# MUST stay in lockstep with INFERENCEX_REF in assets/install.sh. These are two
+# independent clone paths -- install.sh's ensure_inferencex, and _clone_inferencex
+# below when a session starts without $INFERENCEX_PATH -- and the synthetic path
+# sources benchmark_lib.sh from whichever checkout wins. Letting them drift puts
+# two different measurement harnesses in the same fleet under one Hyperloom
+# commit, with nothing in the logs saying which one ran.
+_INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
 
 
-def _inferencex_checkout_ok(path: Path | str) -> bool:
-    """True when ``path`` is a usable InferenceX checkout, not a stub.
+def _inferencex_head_sha(path: Path | str) -> str:
+    """Full SHA at ``path``'s HEAD, or "" when it cannot be read."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (out.stdout or "").strip() if out.returncode == 0 else ""
+
+
+def _inferencex_ref_matches(path: Path | str, ref: str) -> bool:
+    """Whether the checkout at ``path`` is at ``ref``.
+
+    Only decidable when ``ref`` is a hex SHA -- a branch name cannot be compared
+    against a HEAD without a network round trip, and the pin is a SHA in every
+    shipped configuration. An unreadable HEAD (a tarball drop with no ``.git``)
+    is treated as a match: refusing it would reject checkouts that work today
+    over the absence of metadata we only just started asking for.
+    """
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or ""):
+        return True
+    head = _inferencex_head_sha(path)
+    if not head:
+        return True
+    return head.startswith(ref.lower()) or ref.lower().startswith(head)
+
+
+def _inferencex_checkout_ok(path: Path | str, *, ref: str | None = None) -> bool:
+    """True when ``path`` is a usable InferenceX checkout at the expected ref.
 
     A bare ``is_dir()`` check accepts a half-cloned dir left behind by a
     ``git init`` that then failed to fetch/checkout. Magpie sources
     ``benchmarks/benchmark_lib.sh`` at runtime, so require that file to
     exist — a complete checkout always has it, a stub never does.
 
+    Completeness alone was not enough. Two independent clone paths write
+    InferenceX (install.sh's ``ensure_inferencex`` and ``_clone_inferencex``
+    below), the candidate order also picks up Magpie's own submodule, and none
+    of them recorded which revision won. A checkout cloned before a pin bump
+    therefore stayed "usable" forever, so the bump never reached the box; and
+    two processes on the same Hyperloom commit could measure against different
+    InferenceX revisions with nothing in the logs naming either. Since the
+    synthetic path sources ``benchmark_lib.sh`` from whichever checkout wins,
+    that drift is not AgentX-scoped.
+
     Args:
         path (Path | str): The candidate InferenceX checkout directory.
+        ref: Expected revision; defaults to the configured pin. Pass ``""`` to
+            skip the revision check (used when re-validating a fresh clone,
+            which was just checked out at the pin by construction).
 
     Returns:
-        bool: ``True`` when the checkout contains
-            ``benchmarks/benchmark_lib.sh``.
+        bool: ``True`` when the checkout is complete and at the expected ref.
     """
-    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+    if not (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file():
+        return False
+    if ref is None:
+        ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    if not ref:
+        return True
+    return _inferencex_ref_matches(path, ref)
+
+
+def _inferencex_dest_name(ref: str) -> str:
+    """Per-revision checkout dir name, matching install.sh's ``InferenceX@<sha>``.
+
+    A single shared ``InferenceX`` directory is what let a pre-bump clone be
+    reused indefinitely: there was nowhere for a second revision to live, so the
+    first one won by existing.
+    """
+    slug = ref if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or "") else re.sub(r"[^A-Za-z0-9._-]", "-", ref or "head")
+    return f"InferenceX@{slug}"
 
 
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
@@ -1690,7 +1754,7 @@ def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> b
             "'--concurrent-requests' flag from a Magpie benchmark script "
             f"(MAGPIE_PATH={magpie_path or '<unset>'}, "
             f"INFERENCEX_PATH={inferencex_path}). RUN_EVAL=true baselines will "
-            "abort with \"Unknown parameter: --concurrent-requests\"; eval "
+            'abort with "Unknown parameter: --concurrent-requests"; eval '
             "concurrency must flow via EVAL_CONCURRENT_REQUESTS/CONC instead."
         )
     return ok
@@ -1831,8 +1895,11 @@ def _clone_inferencex(dest: Path) -> str | None:
                 check=True,
                 timeout=600,
             )
-        if not _inferencex_checkout_ok(dest):
+        # ref="" : the tree was just checked out at `ref` by construction, so
+        # re-deriving the pin here would only re-read what we wrote.
+        if not _inferencex_checkout_ok(dest, ref=""):
             raise OSError(f"clone reported success but {dest_str} is missing benchmarks/benchmark_lib.sh")
+        log.info("InferenceX cloned into %s at %s", dest_str, _inferencex_head_sha(dest) or ref)
         return dest_str
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
@@ -1862,9 +1929,7 @@ def _preflight(
     # the restore baseline are taken after it loads. Only what the installer env
     # file injects on top is undone below.
     provider_mode = _provider_only_mode()
-    provider_snapshot = {
-        key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)
-    }
+    provider_snapshot = {key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)}
     _load_kernel_agent_env_fallback()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
@@ -2084,8 +2149,10 @@ def _preflight(
         # resolve_dep_dir so a process that did not inherit INFERENCEX_PATH still
         # finds it; falls back to the bare dir). Legacy read-only host mounts
         # removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        _want_ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
         for candidate in (
             magpie_root / "InferenceX",
+            _resolve_dep_dir(_inferencex_dest_name(_want_ref)),
             _resolve_dep_dir("InferenceX"),
         ):
             if _inferencex_checkout_ok(candidate):
@@ -2097,13 +2164,26 @@ def _preflight(
                     f"InferenceX checkout at {candidate}; cloning a "
                     "writable checkout instead."
                 )
-    # When no writable checkout was found, clone one ourselves. baseline cannot
-    # run without InferenceX, so a clone failure is a hard error.
+            elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
+                # Complete but at the wrong revision: the case that used to be
+                # accepted silently. Magpie's submodule pins its own ref, so this
+                # is expected there rather than a fault -- say which, and move on
+                # to a checkout at our pin.
+                print(
+                    f"Preflight: ignoring InferenceX at {candidate}: it is at "
+                    f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
+                    f"not the pinned {_want_ref[:12]}."
+                )
+    # When no writable checkout at the pin was found, clone one ourselves.
+    # baseline cannot run without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
         from ..session.paths import deps_cache_root as _open_source_default
 
-        dest = _open_source_default() / "InferenceX"
-        print(f"Preflight: InferenceX not found; cloning into {dest} ...")
+        _ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+        # Per-revision dir, matching install.sh: a shared name is what allowed a
+        # pre-bump clone to be reused forever.
+        dest = _open_source_default() / _inferencex_dest_name(_ref)
+        print(f"Preflight: no InferenceX checkout at {_ref[:12]}; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
             print(

@@ -318,7 +318,7 @@ class _StubSub:
         self._state = state
         self._landed_tput = landed_tput
 
-    async def run_task(self, task: Any) -> None:
+    async def run_task(self, task: Any, **_kwargs: Any) -> None:
         self.tasks_run.append(task)
         if self._state is not None and self._landed_tput is not None:
             self._state.roofline_snapshots.append(
@@ -376,9 +376,7 @@ async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state)
     coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
-    coord.shared_state.last_profile_workload = (
-        coord.shared_state.current_profile_workload_context()
-    )
+    coord.shared_state.last_profile_workload = coord.shared_state.current_profile_workload_context()
 
     await coord._maybe_reprofile_for_kernel()
 
@@ -425,9 +423,7 @@ async def test_kernel_entry_reprofiles_when_backend_context_changes(coord: Coord
     await coord._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
-    assert coord.sub.tasks_run[0].params["base_extra_envs"] == {
-        "VLLM_ROCM_USE_AITER_LINEAR": "1"
-    }
+    assert coord.sub.tasks_run[0].params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER_LINEAR": "1"}
 
 
 @pytest.mark.asyncio
@@ -448,7 +444,7 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
 
     class _RaisingSub:
-        async def run_task(self, _task: Any) -> None:
+        async def run_task(self, _task: Any, **_kwargs: Any) -> None:
             raise RuntimeError("profile crashed")
 
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
@@ -468,9 +464,7 @@ async def test_kernel_entry_reprofiles_when_workload_changed_at_same_tput(
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.shared_state.conc = 64
     coord.shared_state.last_profile_status = "succeeded"
-    coord.shared_state.last_profile_workload = (
-        coord.shared_state.profile_workload_context()
-    )
+    coord.shared_state.last_profile_workload = coord.shared_state.profile_workload_context()
     coord.shared_state.conc = 128
     coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
 
@@ -516,9 +510,7 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     # After the reprofile the recorded workload reflects the current config
     # (aiter + the new env), so the next entry sees no config change.
     assert (
-        coord.shared_state.last_profile_workload["serving_config"]["extra_envs"][
-            "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
-        ]
+        coord.shared_state.last_profile_workload["serving_config"]["extra_envs"]["SGLANG_FP8_BLOCKSCALE_CK_MAX_M"]
         == "256"
     )
 

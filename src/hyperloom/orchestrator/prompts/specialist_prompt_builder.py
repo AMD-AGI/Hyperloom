@@ -20,6 +20,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.prompt_safety import defang_prompt_structure
+
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
@@ -998,10 +1000,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         )
         deliverable_line = "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard"
     else:
-        capability_line = (
-            "probe the host via Bash, and use as many of your ``max_turns`` LLM"
-            " turns as you need"
-        )
+        capability_line = "probe the host via Bash, and use as many of your ``max_turns`` LLM turns as you need"
         deliverable_line = "(Section 8) carrying ``proposal_set``. The hard"
     if inp.allocated_gpu_ids:
         leaf_examples = "bench N candidates of one lever at once, or read several subsystems"
@@ -1029,9 +1028,10 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
         capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
-        "are discouraged when a real bottleneck is on the table. Quality is",
-        "scored over quantity: cap your final ``proposal_set`` at the",
-        "**top-6** ranked picks (see Section 8).",
+        "are discouraged when a real bottleneck is on the table — but stop once",
+        "rounds stop yielding new findings; the wall clock is not the only stop",
+        "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
+        "cap**. One real beats two padded; ``empty=true`` beats one padded.",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1132,8 +1132,7 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "- Write and run arbitrary scripts — autotune harnesses, "
         + "microbenchmarks, profilers (rocprof / torch.profiler / your own "
         + "breakdown).",
-        "- Start / restart a real server on your own cards and benchmark it "
-        + "however you see fit.",
+        "- Start / restart a real server on your own cards and benchmark it " + "however you see fit.",
         "- Profile freely to get a fresh trace after a change — don't rely only "
         + "on the static roofline snapshot you were handed.",
         "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
@@ -1236,7 +1235,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     # Deliverable line based on scope × mode.
     scope = (inp.scope or "domain").lower()
     if scope == "freeform":
-        anchor = (inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else "")
+        anchor = inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else ""
         deliverable = "freeform investigation — see task description"
     else:
         anchor = inp.gap_canonical_id or ""
@@ -1270,17 +1269,18 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
         if inp.applied_stack:
             stack_items = ", ".join(
-                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)"
-                for e in inp.applied_stack[:6]
+                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
             )
             rows.append(f"- applied stack: {stack_items}")
 
-    rows.extend([
-        "",
-        "Judged by: the Coordinator benches your proposals end-to-end against",
-        "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
-        "alongside. You are not asked to prove the number.",
-    ])
+    rows.extend(
+        [
+            "",
+            "Judged by: the Coordinator benches your proposals end-to-end against",
+            "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
+            "alongside. You are not asked to prove the number.",
+        ]
+    )
 
     kind = (inp.task_kind or "").strip()
     brief = _TASK_KIND_BRIEFS.get(kind, "")
@@ -1288,7 +1288,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(["", brief])
 
     if inp.pr_lead:
-        title = str(inp.pr_lead.get("title") or "").strip()
+        title = defang_prompt_structure(str(inp.pr_lead.get("title") or "").strip())
         url = str(inp.pr_lead.get("url") or "").strip()
         diff_url = str(inp.pr_lead.get("diff_url") or "").strip()
         rows.append("")
@@ -1300,10 +1300,12 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"Diff: {diff_url} (fetch with WebFetch)")
 
     if inp.prior_attempts:
-        rows.extend([
-            "",
-            "Already tried this session — avoid the same or equivalent change:",
-        ])
+        rows.extend(
+            [
+                "",
+                "Already tried this session — avoid the same or equivalent change:",
+            ]
+        )
         for att in inp.prior_attempts[:20]:
             if not isinstance(att, dict):
                 continue
@@ -1447,9 +1449,8 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Return True when every prior KB/PR/research source is empty, so a
-    cold-start directive is injected instead of letting specialists return
-    an empty proposal_set.
+    """Return True when every prior KB/PR/research source is empty, so the
+    cold-start directive is injected in place of the KB block.
 
     Args:
         inp: The specialist prompt inputs.
@@ -1495,7 +1496,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
             )
             return rows
         if cold:
-            # Cold-start directive: propose domain-focus defaults, not an empty set.
+            # Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
             rows.extend(
                 [
                     "**COLD-START MODE — no priors available.**",
@@ -1508,27 +1509,22 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     "- Warm-start recipe: ``(none)`` (Section 5).",
                     "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
                     "",
-                    "**Directive — DO NOT return an empty proposal_set.** "
-                    + "Treat the *Winning techniques* + *Pitfalls* in your "
-                    + "**domain focus** block (Section 1) as your fallback "
-                    + "prior. Pick the **1–2 most conservative, "
-                    + "well-attested defaults** from those bullets that are "
-                    + "compatible with the hardware (Section 2) and the "
-                    + "gap symptom (Section 3); flag each with "
-                    + "``provenance: domain_focus_default`` in the proposal "
-                    + "and say it is an unvalidated fallback prior in the "
-                    + "proposal's ``reason``. Do NOT add a ``confidence`` "
-                    + "field: self-reported confidence / gain fields are "
-                    + "stripped from your output before review. Use the "
-                    + "``residual_questions`` field to record what RecipeKB, "
-                    + "research, or ``mcp__pr_monitor__*`` query a future round should pursue.",
-                    "",
-                    "If the *Winning techniques* block is generic enough "
-                    + "that no proposal is safer than a coin-flip, you may "
-                    + "still emit ``empty=true`` — but you MUST cite which "
-                    + "bullets you considered and why each was rejected "
-                    + "(in ``summary``). A bare empty exit with no rationale "
-                    + "will be treated as a tool failure by the Coordinator.",
+                    "**Directive — a coin-flip proposal is worse than none.** "
+                    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
+                    + "Section 1 as your fallback prior and take the **1–2 "
+                    + "most conservative, well-attested defaults** that fit "
+                    + "the hardware (Section 2) and the gap symptom "
+                    + "(Section 3); flag each ``provenance: "
+                    + "domain_focus_default`` and call it an unvalidated "
+                    + "fallback in the proposal's ``reason``. If none clears "
+                    + "that bar, emit ``empty=true`` and cite in ``summary`` "
+                    + "which you considered and why each was rejected — a "
+                    + "bare empty exit with no rationale reads as a tool "
+                    + "failure. Do NOT add a ``confidence`` field: "
+                    + "self-reported confidence / gain fields are stripped "
+                    + "before review. Record in ``residual_questions`` what "
+                    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
+                    + "future round should pursue.",
                 ]
             )
         else:
@@ -1807,7 +1803,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
         # Version-mismatch annotation; the LLM gets the final call.
         version_note = _format_version_note(inp, attrs)
-        rows.append(f"- **{statement}**{meta}{version_note}")
+        rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
         if impact_str:
             rows.append(f"    impact: {impact_str}")
     if len(rows) == 2:  # only the header + blank line, all lessons filtered out
@@ -2097,18 +2093,22 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
     exit_lines: list[str] = []
     if channel == "A" or channel == "":
-        exit_lines.extend([
-            "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-            "with intent type ``specialist_done`` and the payload schema below.",
-        ])
+        exit_lines.extend(
+            [
+                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
+                "with intent type ``specialist_done`` and the payload schema below.",
+            ]
+        )
     if channel == "B" or channel == "":
         if channel == "":
             exit_lines.append("")
-        exit_lines.extend([
-            "**Exit — file write (subprocess runtime):** write the same payload to",
-            f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-            "The dispatcher polls for that file as the exit signal; stop after writing.",
-        ])
+        exit_lines.extend(
+            [
+                "**Exit — file write (subprocess runtime):** write the same payload to",
+                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+                "The dispatcher polls for that file as the exit signal; stop after writing.",
+            ]
+        )
 
     if authors_patches:
         patch_fields = [
@@ -2119,12 +2119,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "- ``artifacts_written`` lists any non-diff tuned artifacts to install",
             "  (e.g. an autotuned config JSON) as objects ``{source, target, kind,",
             "  description}``: ``source`` is a path inside your worktree, ``target``",
-            "  is the install path — PREFER a framework-relative path (e.g.",
-            "  ``configs/model_configs/foo.csv``); an absolute path is accepted only",
-            "  if it resolves inside an allowlisted framework root. ``integrate_patch``",
-            "  backs up the target, installs the artifact, runs the same E2E gate, and",
-            "  restores the backup on REVERT. A non-diff tuned artifact is a FULL",
-            "  result — set ``empty=false`` when ``artifacts_written`` is non-empty.",
+            "  is the install path — PREFER a framework-relative path; an absolute",
+            "  path is accepted only if it resolves inside an allowlisted framework",
+            "  root. ``integrate_patch`` backs up the target, installs the artifact,",
+            "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
+            "  tuned artifact is a FULL result — set ``empty=false`` when",
+            "  ``artifacts_written`` is non-empty.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
@@ -2227,11 +2227,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "coupling across several proposals."
         ),
         (
-            "- ``proposal_set`` MUST contain AT MOST **6** entries. You are a "
-            "curator, not a brainstormer: rank candidates by expected gain x "
-            "your confidence, drop everything that contradicts ``kb_subgraph`` "
-            "/ ``pr_evidence`` already in your prompt, and only emit the "
-            "surviving top 6. Fewer is better than padding."
+            "- ``proposal_set``: **2 entries is the norm, 4 the hard cap.** You "
+            "are a curator, not a brainstormer: rank by expected gain x "
+            "confidence, drop anything contradicting ``kb_subgraph`` / "
+            "``pr_evidence``, and stop at 2. A 3rd or 4th must beat the median "
+            "of the first two. Padding is a failure, not thoroughness: each "
+            "weak entry costs a Critic reject and a slot on the serial "
+            "benchmark queue. One real proposal is a better round than two "
+            "padded ones, and ``empty=true`` is better than one."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
@@ -2481,7 +2484,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             [
                 "## 10. NOTES FROM ORCHESTRATION",
                 "",
-                inp.notes,
+                defang_prompt_structure(inp.notes),
             ]
         )
 

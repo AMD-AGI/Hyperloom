@@ -82,9 +82,7 @@ import time
 #: records it instead of asserting an answer for LLM inference that AMD does not
 #: publish. The guide covers 9004 (Genoa); these knobs and their semantics carry
 #: forward to 9005 (Turin), which is what the fleet actually runs.
-SOURCE = (
-    "AMD BIOS & Workload Tuning Guide for EPYC 9004 (pub. 58011 rev 1.0), ch. 5"
-)
+SOURCE = "AMD BIOS & Workload Tuning Guide for EPYC 9004 (pub. 58011 rev 1.0), ch. 5"
 
 CHECKED: dict[str, dict] = {
     "core_performance_boost": {
@@ -273,6 +271,7 @@ def sample_cores(count: int) -> list[int]:
 # Measurement
 # --------------------------------------------------------------------------
 
+
 def _spinner(seconds: int) -> subprocess.Popen:
     """A busy process used purely to raise one core's clock."""
     return subprocess.Popen(  # nosec B603 - fixed argv, no shell.
@@ -412,8 +411,7 @@ def os_layer(quick: bool = False) -> dict:
         "identity": ident,
         "smt": "enabled" if smt_active == "1" else ("disabled" if smt_active == "0" else "unknown"),
         "nps": ident["nps"],
-        "cpufreq_governor": read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-        or "unknown",
+        "cpufreq_governor": read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or "unknown",
         "boost_sysfs": boost or "n/a",
         "boost_ceiling_mhz": round(int(ceiling) / 1000) if ceiling.isdigit() else None,
         "hwcr": f"0x{hwcr:016x}" if hwcr is not None else None,
@@ -447,6 +445,7 @@ def os_layer(quick: bool = False) -> dict:
 # --------------------------------------------------------------------------
 # Verdicts
 # --------------------------------------------------------------------------
+
 
 def normalize(value: object) -> str:
     """Lower-case, whitespace-collapsed form used for every comparison."""
@@ -550,8 +549,11 @@ def render(osl: dict, rows: list[dict]) -> None:
         print("Off target:")
         for r in fails:
             print(f"    {r['knob']}: {r['value']} (want {r['target']})")
-            print(textwrap.fill(CHECKED[r["key"]]["basis"], width=76,
-                                initial_indent="        ", subsequent_indent="        "))
+            print(
+                textwrap.fill(
+                    CHECKED[r["key"]]["basis"], width=76, initial_indent="        ", subsequent_indent="        "
+                )
+            )
     if unknown:
         print("Unresolved (not a pass):")
         for r in unknown:

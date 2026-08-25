@@ -463,9 +463,7 @@ def test_eval_concurrency_fixes_idempotent(tmp_path):
     lib = (tmp_path / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
     # The parser case survived (not stripped) and stayed idempotent.
     assert lib.count("--concurrent-requests|--concurrent_requests") == 1
-    assert "--concurrent-requests" not in (
-        tmp_path / "benchmarks" / "vllm_mi355x.sh"
-    ).read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in (tmp_path / "benchmarks" / "vllm_mi355x.sh").read_text(encoding="utf-8")
 
 
 def test_eval_fixes_run_when_benchmarker_missing(monkeypatch, tmp_path):
@@ -493,9 +491,7 @@ def test_full_flow_covers_inferencex_and_ordering(tmp_path):
     with the remote-trust patch on sglang running BEFORE the generic strip."""
     magpie = _make_magpie(tmp_path / "magpie")
     # Add a flagged generic vllm script to the Magpie scripts dir too.
-    (magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh").write_text(
-        _VLLM_LEGACY, encoding="utf-8"
-    )
+    (magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh").write_text(_VLLM_LEGACY, encoding="utf-8")
     ix = _make_inferencex(tmp_path / "ix")
     status = mp.magpie_scripts_patch_status(str(magpie), str(ix))
     assert status.atomic_ok is True
@@ -507,12 +503,10 @@ def test_full_flow_covers_inferencex_and_ordering(tmp_path):
     assert "MAGPIE_TRUST_REMOTE_CODE" in sglang
     assert "--concurrent-requests" not in sglang
     # Both Magpie's and InferenceX's generic vllm scripts were stripped.
-    assert "--concurrent-requests" not in (
-        magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh"
-    ).read_text(encoding="utf-8")
-    assert "--concurrent-requests" not in (
-        ix / "benchmarks" / "vllm_mi355x.sh"
-    ).read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in (magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--concurrent-requests" not in (ix / "benchmarks" / "vllm_mi355x.sh").read_text(encoding="utf-8")
 
 
 # ---- regression: run-time eval-concurrency compat (2026-07-27 outage) ------
@@ -588,9 +582,8 @@ def test_ensure_eval_concurrency_compat_falls_back_to_env(monkeypatch, tmp_path)
 
     assert mp.ensure_eval_concurrency_compat() is True
 
-    assert (
-        "--concurrent-requests"
-        not in (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(
+        encoding="utf-8"
     )
     assert mp._RUN_LM_EVAL_PARSER_SENTINEL in (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
 
@@ -667,9 +660,7 @@ def test_compat_true_when_only_the_belt_fails(tmp_path):
     passing the flag, so accuracy eval runs fine."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
-    (ix / "benchmarks" / "benchmark_lib.sh").write_text(
-        "run_lm_eval() { : ; }\n", encoding="utf-8"
-    )
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
     assert mp._apply_eval_concurrency_fixes(None, str(ix)) is False
     assert mp.ensure_eval_concurrency_compat(None, str(ix)) is True
 
@@ -713,15 +704,11 @@ def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
     # run_lm_eval definition at all, so the belt has nothing to patch.
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
-    (ix / "benchmarks" / "benchmark_lib.sh").write_text(
-        "# no run_lm_eval here\n", encoding="utf-8"
-    )
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("# no run_lm_eval here\n", encoding="utf-8")
 
     assert mp.ensure_eval_concurrency_compat(str(magpie), str(ix)) is False
     # The blocker is still reported by the scanner, so callers can name the file.
-    assert [p.name for p in mp.live_eval_concurrency_flag_scripts(str(magpie), None)] == [
-        "sglang_mi355x.sh"
-    ]
+    assert [p.name for p in mp.live_eval_concurrency_flag_scripts(str(magpie), None)] == ["sglang_mi355x.sh"]
 
 
 # ---- unreadable files: the patcher must degrade, never crash a run ---------
@@ -800,12 +787,12 @@ _BENCHMARK_LIB_MERGED_CASE = (
     "#!/bin/bash\n"
     "run_lm_eval() {\n"
     '    local port="${PORT:-8888}"\n'
-    '    local top_p=1\n'
+    "    local top_p=1\n"
     '    local concurrent_requests="${EVAL_CONCURRENT_REQUESTS:-${CONC:-64}}"\n'
     "    while [[ $# -gt 0 ]]; do\n"
-    "        case \"$1\" in\n"
+    '        case "$1" in\n'
     "            --port|--task|--results-dir|--gen-max-tokens|--temperature|--top-p)\n"
-    "                case \"$1\" in\n"
+    '                case "$1" in\n'
     '                    --port)           port="$2" ;;\n'
     '                    --top-p)          top_p="$2" ;;\n'
     "                esac\n"
@@ -895,7 +882,7 @@ _BENCHMARK_LIB_MULTI_CATCHALL = (
     "#!/bin/bash\n"
     "wait_for_server_ready() {\n"
     "    while [[ $# -gt 0 ]]; do\n"
-    "        case \"$1\" in\n"
+    '        case "$1" in\n'
     '            --port) port="$2"; shift 2 ;;\n'
     "            *)\n"
     '                echo "Unknown parameter: $1" >&2\n'
@@ -906,15 +893,14 @@ _BENCHMARK_LIB_MULTI_CATCHALL = (
     "}\n"
     "\n"
     "parse_other() {\n"
-    "    case \"$1\" in\n"
+    '    case "$1" in\n'
     "        *)\n"
     '            echo "Unknown parameter: $1" >&2\n'
     "            return 1\n"
     "            ;;\n"
     "    esac\n"
     "}\n"
-    "\n"
-    + _BENCHMARK_LIB_MERGED_CASE
+    "\n" + _BENCHMARK_LIB_MERGED_CASE
 )
 
 
@@ -968,14 +954,25 @@ def test_tolerance_not_fooled_by_outer_catchall_sentinel(tmp_path):
 
 
 def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
-    """Integration: the real a4bb43af benchmark_lib.sh (if present) must get its
-    run_lm_eval taught the flag, with the sentinel landing inside that function.
+    """Integration against a real benchmark_lib.sh, when one is checked in.
 
-    Skips silently when the fixture is not checked in, so the suite stays
-    hermetic; the logic is already covered by the multi-catch-all stub above."""
+    The fixture it names has never been in the tree, so this has always skipped
+    -- and because its docstring claimed the stub above covered it, the gap read
+    as intentional. The stub covers the *shape*; it cannot tell you whether the
+    file upstream actually pins still has that shape, which is the question a
+    pin bump raises and the one whose wrong answer makes install.sh die().
+
+    That question is now answered by ``test_inferencex_anchor_contract`` --
+    hermetically via a recorded ``magpie_patch`` entry, and against the real
+    pinned file when the repo is reachable. This case stays as a convenience for
+    dropping a local copy in to debug against, and says what it is.
+    """
     fixture = Path(__file__).parent / "fixtures" / "benchmark_lib_a4bb43af.sh"
     if not fixture.is_file():
-        pytest.skip("real pinned benchmark_lib.sh fixture not present")
+        pytest.skip(
+            "no local benchmark_lib.sh fixture; the pinned file is verified by "
+            "test_inferencex_anchor_contract (magpie_patch)"
+        )
     lib = tmp_path / "benchmark_lib.sh"
     lib.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
 

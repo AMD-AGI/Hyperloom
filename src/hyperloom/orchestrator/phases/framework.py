@@ -411,10 +411,7 @@ class FrameworkPhase(PhaseHandler):
             ``True`` if a framework-owned specialist/integrate_patch task is queued or running,
             or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
-        unprocessed_ids = {
-            self._framework_candidate_key(c)
-            for c in self._unprocessed_framework_agent_candidates()
-        }
+        unprocessed_ids = {self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()}
         # The local-exploration arm's synthetic candidate id never appears in a
         # PR batch, so it is "in flight" while it lacks a terminal progress row.
         processed_ids = self._framework_processed_candidate_keys()
@@ -424,7 +421,6 @@ class FrameworkPhase(PhaseHandler):
             if not cand_id or cand_id in unprocessed_ids:
                 return True
             return cand_id.startswith("local_explore:") and cand_id not in processed_ids
-
 
         try:
             queued = await self.tasks.queued()
@@ -853,9 +849,7 @@ class FrameworkPhase(PhaseHandler):
             # Cross-framework ports route to a dedicated rewrite domain; the
             # same-framework case follows the session's framework kind.
             "domain": (
-                "cross_framework_rewrite_specialist"
-                if is_cross_framework
-                else self._authoring_specialist_domain()
+                "cross_framework_rewrite_specialist" if is_cross_framework else self._authoring_specialist_domain()
             ),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
@@ -869,7 +863,6 @@ class FrameworkPhase(PhaseHandler):
             "framework_batch_id": batch_id,
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
-            "readonly": False,
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
@@ -896,16 +889,6 @@ class FrameworkPhase(PhaseHandler):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            allowed_tools=[
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
@@ -1177,7 +1160,6 @@ class FrameworkPhase(PhaseHandler):
             "enablement_setup_commands": base_setup,
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
-            "readonly": False,
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
@@ -1539,16 +1521,6 @@ class FrameworkPhase(PhaseHandler):
             params=params,
             idempotency_key=idem,
             requires_lanes=lanes,
-            allowed_tools=[
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
@@ -1764,9 +1736,7 @@ class FrameworkPhase(PhaseHandler):
                 state.enablement.validation_pending = True
                 # Increment generation so the new window gets a fresh idempotency
                 # key and cannot reuse a prior terminal TaskRegistry row.
-                state.enablement.revalidation_generation = (
-                    int(state.enablement.revalidation_generation or 0) + 1
-                )
+                state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
                 state.enablement.revalidation_task_id = ""
             else:
                 state.enablement.succeeded = True
@@ -2083,7 +2053,6 @@ class FrameworkPhase(PhaseHandler):
             "framework": framework_name,
             "task_kind": "explore_apply_retry",
             "source": "coordinator_internal",
-            "readonly": False,
             "notes": notes,
             "apply_retry_attempt": attempt,
             "prior_patches": retry_feedback[0].get("patch") if retry_feedback else "",
@@ -2101,16 +2070,6 @@ class FrameworkPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                allowed_tools=[
-                    "Read",
-                    "Grep",
-                    "Glob",
-                    "Write",
-                    "Edit",
-                    "Bash",
-                    "WebSearch",
-                    "WebFetch",
-                ],
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
             )
@@ -2421,9 +2380,7 @@ class FrameworkPhase(PhaseHandler):
         """
         progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
         n = sum(
-            1
-            for p in progress
-            if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
+            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
         )
         return f"local_explore:{n}"
 
@@ -2515,20 +2472,22 @@ class FrameworkPhase(PhaseHandler):
         if rewrite_arm:
             notes = self._render_rewrite_evidence_for_prompt() or self._rewrite_evidence_absence_note()
         try:
-            state.upsert_gap({
-                "canonical_id": gap_cid,
-                "symptom": gap or "Author a throughput patch from live source + profiling evidence",
-                "layer": "framework",
-                "severity": "medium",
-                "domain_hint": domain,
-                "source": "coordinator_internal",
-            })
+            state.upsert_gap(
+                {
+                    "canonical_id": gap_cid,
+                    "symptom": gap or "Author a throughput patch from live source + profiling evidence",
+                    "layer": "framework",
+                    "severity": "medium",
+                    "domain_hint": domain,
+                    "source": "coordinator_internal",
+                }
+            )
         except Exception:  # noqa: BLE001
             log.debug("FRAMEWORK local-explore: upsert_gap failed", exc_info=True)
         prior_attempts: list[dict[str, Any]] = []
         try:
             memory = self._build_framework_working_memory()
-            for t in (memory.get("tried_and_why") or []):
+            for t in memory.get("tried_and_why") or []:
                 if isinstance(t, dict) and str(t.get("ref") or "").strip():
                     prior_attempts.append(t)
         except Exception:  # noqa: BLE001
@@ -2550,7 +2509,6 @@ class FrameworkPhase(PhaseHandler):
             "framework_audit": {},
             "framework_local_explore": True,
             "source": "coordinator_internal",
-            "readonly": False,
             **self._framework_gpu_params(),
         }
         try:
@@ -2562,16 +2520,6 @@ class FrameworkPhase(PhaseHandler):
             "kind": "specialist",
             "params": params,
             "requires_lanes": lanes,
-            "allowed_tools": [
-                "Read",
-                "Grep",
-                "Glob",
-                "Write",
-                "Edit",
-                "Bash",
-                "WebSearch",
-                "WebFetch",
-            ],
             "side_effects": ["writes_results", "writes_patches"],
             "lease_ttl_sec": ttl,
         }
@@ -3185,9 +3133,6 @@ class FrameworkPhase(PhaseHandler):
         """
         state = self.shared_state
         try:
-            history = getattr(state, "phase_history", None)
-            if not isinstance(history, list):
-                return
             from ..framework import client as _fa_client
             from ..framework.artifacts import summarize_candidate_outcomes
 
@@ -3222,10 +3167,10 @@ class FrameworkPhase(PhaseHandler):
             if advisory:
                 log.warning("FRAMEWORK advisory: %s", advisory)
 
-            history.append(
-                {
+            state.append_phase_history_event(
+                reason=reason,
+                evidence={
                     "event": "framework_agent_phase_done",
-                    "reason": reason,
                     "failure_count": int(failure_count),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
                     "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
@@ -3235,8 +3180,7 @@ class FrameworkPhase(PhaseHandler):
                     "tested": int(summary.get("tested") or 0),
                     "consecutive_empty_discoveries": consecutive_empty,
                     "advisory": advisory,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
+                },
             )
         except Exception:  # noqa: BLE001 — defensive
             pass
@@ -3423,17 +3367,15 @@ class FrameworkPhase(PhaseHandler):
                 last_exc,
             )
             try:
-                history = getattr(state, "phase_history", None)
-                if isinstance(history, list):
-                    history.append(
-                        {
-                            "event": "framework_agent_discover_failed",
-                            "attempt": failures,
-                            "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                            "error": repr(last_exc),
-                            "ts": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
+                state.append_phase_history_event(
+                    reason="framework_agent_discover_failed",
+                    evidence={
+                        "event": "framework_agent_discover_failed",
+                        "attempt": failures,
+                        "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
+                        "error": repr(last_exc),
+                    },
+                )
             except Exception:  # noqa: BLE001 — defensive
                 pass
             state.save(self.session_dir)
@@ -3529,9 +3471,7 @@ class FrameworkPhase(PhaseHandler):
             # against every other task; the handler below turns this into a
             # warning plus a progress row.
             if not lanes:
-                raise RuntimeError(
-                    "framework_agent resolved to no lanes; the task would run without GPU exclusivity."
-                )
+                raise RuntimeError("framework_agent resolved to no lanes; the task would run without GPU exclusivity.")
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
                 params=params,
@@ -4165,8 +4105,10 @@ class FrameworkPhase(PhaseHandler):
             elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
                 component = "sgl_kernel"
             elif framework == "vllm" and (
-                "vllm/_c" in log_lower or "vllm.extension" in log_lower
-                or "_c.so" in log_lower or "vllm._c" in sym_lower
+                "vllm/_c" in log_lower
+                or "vllm.extension" in log_lower
+                or "_c.so" in log_lower
+                or "vllm._c" in sym_lower
             ):
                 component = "vllm_source"
             else:
@@ -4226,8 +4168,7 @@ class FrameworkPhase(PhaseHandler):
             task_id = await self.enqueue_targeted_build(action)
             if task_id:
                 log.info(
-                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s "
-                    "arch_stall=%s gpu_arch=%s task=%s",
+                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s gpu_arch=%s task=%s",
                     signature.kind,
                     component,
                     bool(arch_stall and not is_compiled_gap),
@@ -4320,8 +4261,7 @@ class FrameworkPhase(PhaseHandler):
                 source_pr_url = _pr
             if not _repo_matches_targeted_build_component(repo_url, component):
                 log.warning(
-                    "ENABLEMENT: specialist-requested build repo/component mismatch "
-                    "component=%s repo_url=%s",
+                    "ENABLEMENT: specialist-requested build repo/component mismatch component=%s repo_url=%s",
                     component,
                     repo_url,
                 )
@@ -4371,51 +4311,82 @@ class FrameworkPhase(PhaseHandler):
         boot the model before KEEP is declared. Each row is read once, except that
         a build whose probe was cancelled before it ran is read again: nothing
         launched the runtime, so nothing has decided anything about that build.
+
+        Oldest-unrouted-first avoids starving older builds when a newer row is
+        already routed; the tradeoff is that a succeeded build whose probe cannot
+        be enqueued yet is retried every tick and can defer newer failed builds
+        until its probe opens or the budget recovers.
         """
         try:
             all_tasks = []
             for st in ("succeeded", "failed"):
-                all_tasks.extend(
-                    t for t in await self.tasks.by_state(st) if t.kind == "targeted_build"
-                )
+                all_tasks.extend(t for t in await self.tasks.by_state(st) if t.kind == "targeted_build")
             if not all_tasks:
                 return
-            # Pick the most recent terminal row (by updated_at).
-            task = sorted(all_tasks, key=lambda t: str(getattr(t, "updated_at", "") or ""))[-1]
-            task_id = str(getattr(task, "task_id", "") or "")
-            # Skip rows already accounted for (tracked by enablement_build_manifest),
-            # unless what they were routed to was cancelled before it ran, which
-            # leaves the build no more launched than an unrouted one.
-            state = self.shared_state
-            routed = self._build_routing_record(task_id)
-            if routed is not None and not await self._build_probe_was_cancelled(routed):
+            # Oldest terminal row first so a newer, already-routed build cannot
+            # hide an older build that still needs routing.
+            for task in sorted(
+                all_tasks,
+                key=lambda t: str(getattr(t, "updated_at", "") or ""),
+            ):
+                task_id = str(getattr(task, "task_id", "") or "")
+                # Skip rows already accounted for (tracked by enablement_build_manifest),
+                # unless what they were routed to was cancelled before it ran, which
+                # leaves the build no more launched than an unrouted one.
+                routed = self._build_routing_record(task_id)
+                if routed is not None and not await self._build_probe_was_cancelled(routed):
+                    continue
+
+                if task.state == "succeeded":
+                    await self._route_succeeded_build(task, routed)
+                else:
+                    await self._route_failed_build(task)
                 return
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
-            if task.state == "succeeded":
-                await self._route_succeeded_build(task, routed)
-                return
+    async def _route_failed_build(self, task: "Task") -> None:
+        """Route a failed targeted_build row through the enablement rearm path."""
+        task_id = str(getattr(task, "task_id", "") or "")
+        state = self.shared_state
+        fc = ""
+        # failed row — read failure_class from history or last_build_failure
+        history = getattr(task, "history", None) or []
+        if isinstance(history, (list, tuple)) and history:
+            last_ev = history[-1]
+            if isinstance(last_ev, dict):
+                fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
 
-            # A failed build is accounted for the moment it is read: the rearm
-            # below is the whole outcome, so re-reading the row would charge the
-            # stall streak twice for one build.
-            self._note_build_routed(task_id)
-            fc = ""
-            # failed row — read failure_class from history or last_build_failure
-            history = getattr(task, "history", None) or []
-            if isinstance(history, (list, tuple)) and history:
-                last_ev = history[-1]
-                if isinstance(last_ev, dict):
-                    fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
+        lbf = state.enablement.last_build_failure or {}
+        if not fc and isinstance(lbf, dict):
+            fc = str(lbf.get("failure_class") or "")
 
-            lbf = state.enablement.last_build_failure or {}
-            if not fc and isinstance(lbf, dict):
-                fc = str(lbf.get("failure_class") or "")
+        # Novelty ledger: time-based failures are always advanced; defect
+        # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
+        # has not been seen before (novel), reverted when it is a repeat.
+        time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
+        novelty_key: list[Any] | None = None
+        if fc in time_classes:
+            new_log = str(state.enablement.launch_log or "")
+            res = {
+                "enablement": True,
+                "status": "advanced",
+                "advanced": True,
+                "patches_applied": [],
+                "enablement_launch_log": new_log,
+            }
+        else:
+            from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
 
-            # Novelty ledger: time-based failures are always advanced; defect
-            # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
-            # has not been seen before (novel), reverted when it is a repeat.
-            time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
-            if fc in time_classes:
+            task_params = getattr(task, "params", None) or {}
+            _action = _TBA.from_state(task_params)
+            _key = list(_bnk(_action))
+            ledger = list(state.enablement.build_novelty or [])
+            is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
+            if is_repeat:
+                res = {"enablement": True, "status": "reverted"}
+                novelty_key = None
+            else:
                 new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
@@ -4424,36 +4395,21 @@ class FrameworkPhase(PhaseHandler):
                     "patches_applied": [],
                     "enablement_launch_log": new_log,
                 }
-            else:
-                from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
-
-                task_params = getattr(task, "params", None) or {}
-                _action = _TBA.from_state(task_params)
-                _key = list(_bnk(_action))
-                ledger = list(state.enablement.build_novelty or [])
-                is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
-                ledger.append(_key)
-                state.enablement.build_novelty = ledger[-20:]
-                if is_repeat:
-                    res = {"enablement": True, "status": "reverted"}
-                else:
-                    new_log = str(state.enablement.launch_log or "")
-                    res = {
-                        "enablement": True,
-                        "status": "advanced",
-                        "advanced": True,
-                        "patches_applied": [],
-                        "enablement_launch_log": new_log,
-                    }
-            log.info(
-                "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
-                res["status"],
-                task_id,
-                fc,
-            )
-            self._maybe_rearm_enablement(res)
-        except Exception:  # noqa: BLE001 — never wedge the tick
-            log.debug("enablement: route_build_outcomes failed", exc_info=True)
+                novelty_key = _key
+        log.info(
+            "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
+            res["status"],
+            task_id,
+            fc,
+        )
+        # Rearm, ledger append, and manifest ack must stay together: a failed
+        # rearm leaves the build unrouted and the novelty ledger unchanged.
+        self._maybe_rearm_enablement(res)
+        if novelty_key is not None:
+            ledger = list(state.enablement.build_novelty or [])
+            ledger.append(novelty_key)
+            state.enablement.build_novelty = ledger[-20:]
+        self._note_build_routed(task_id)
 
     async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
         """Turn a succeeded targeted build into a launch probe, or a no-progress round.
@@ -4491,11 +4447,9 @@ class FrameworkPhase(PhaseHandler):
 
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
-            self._note_build_routed(task_id)
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            self._maybe_rearm_enablement(
-                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
-            )
+            self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
+            self._note_build_routed(task_id)
             return
 
         log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
@@ -4629,9 +4583,7 @@ class FrameworkPhase(PhaseHandler):
         }
         # Prefer the eval-origin probe config so the re-run keeps the original
         # workload/eval contract; fall back to the promoted baseline config.
-        cfg = str(state.enablement.probe_config_path or "") or str(
-            getattr(state, "baseline_config_path", "") or ""
-        )
+        cfg = str(state.enablement.probe_config_path or "") or str(getattr(state, "baseline_config_path", "") or "")
         if cfg:
             params["config_path"] = cfg
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
@@ -4745,6 +4697,8 @@ class FrameworkPhase(PhaseHandler):
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
             generation=int(state.enablement.revalidation_generation or 0),
             label="revalidation",
+            # Without a TTL the row is invisible to ``reclaim_expired_running``.
+            lease_ttl_sec=self._registry_lanes_ttl("baseline")[1],
         )
         state.enablement.revalidation_generation = generation
         return task
@@ -4904,18 +4858,12 @@ class FrameworkPhase(PhaseHandler):
         if not isinstance(progress, list):
             progress = []
             self.shared_state.framework_agent_phase_progress = progress
-        matching = [
-            row
-            for row in progress
-            if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id
-        ]
+        matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
         if any(str(row.get("provenance") or "") != "authored_empty" for row in matching):
             return
         if matching:
             progress[:] = [
-                row
-                for row in progress
-                if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
+                row for row in progress if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
             ]
         # Roll the batch max-gain stat the plateau judge reads.
         batches = getattr(self.shared_state, "framework_agent_batches", None) or []
@@ -4998,9 +4946,8 @@ class FrameworkPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — stale bus entries are ignored
                 continue
             integrate_params = getattr(integrate_task, "params", None) or {}
-            if (
-                str(integrate_params.get("specialist_task_id") or "") != specialist_task_id
-                or not bool(integrate_params.get("framework_agent_authoring"))
+            if str(integrate_params.get("specialist_task_id") or "") != specialist_task_id or not bool(
+                integrate_params.get("framework_agent_authoring")
             ):
                 continue
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
@@ -5372,6 +5319,8 @@ class FrameworkPhase(PhaseHandler):
                 kind="explore",
                 params=params,
                 idempotency_key=f"framework-config-explore-round{int(round_no)}{self._cycle_idem_suffix()}",
+                # Without a TTL the row is invisible to ``reclaim_expired_running``.
+                lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
             )
         except Exception:  # noqa: BLE001 -- defensive; never wedge the pump
             log.exception("framework_config: failed to enqueue explore round")
@@ -5552,7 +5501,7 @@ class FrameworkPhase(PhaseHandler):
             # subphase (and the mn-explore bridge skips it to avoid double-consume).
             "framework_config_generation": True,
             "source": "coordinator_internal",
-            "readonly": True,
+            "mode": "research",
             "notes": notes,
             **self._framework_gpu_params(),
         }
@@ -5568,7 +5517,6 @@ class FrameworkPhase(PhaseHandler):
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
-                allowed_tools=["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
                 side_effects=["writes_results"],
                 lease_ttl_sec=ttl,
             )

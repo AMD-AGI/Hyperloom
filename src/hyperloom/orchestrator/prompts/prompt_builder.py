@@ -21,6 +21,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ActionMetadata,
+    COORDINATOR_INTERNAL_ACTIONS,
     FULL_ENABLED_ACTIONS,
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -213,9 +214,9 @@ def _section_phase_semantics(
     lines.extend(
         [
             "",
-            "roofline, profile, replay_warm_recipe, conc_sweep and framework_agent",
-            "are never in the sets above: the Coordinator auto-manages them and",
-            "PolicyGate denies any attempt to propose them. Denial of any action",
+            f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
+            "sets above: the Coordinator auto-manages them and PolicyGate denies",
+            "any attempt to propose them. Denial of any action",
             "lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
@@ -464,7 +465,13 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "provenance values: 'llm_direct', 'default_grid', "
-            "'specialist:<domain-or-tag>' (audit/advisory, not a gate)."
+            "'specialist:<domain-or-tag>' (audit/advisory, not a gate). "
+            "SIZE: target 4 variants, hard maximum 6. Variants run serially "
+            "on a single benchmark lane at ~13min each, so a 4-variant round "
+            "is about an hour of GPU. Submit a 5th or 6th only when it still "
+            "beats the median of the four you already have; a grid the round "
+            "cannot finish is truncated from the end, dropping whatever you "
+            "ranked last rather than whatever is worth least."
         )
     if name == "sweep":
         return (
@@ -589,8 +596,11 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "      `last_action_failures` + `explore_search.winners_history`.",
             "   c. **KB sub-graphs + warm-start recipe** when present —",
             "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
-            "   d. **specialist proposal_set** — when an explore round just",
-            "      finished, the proposal_set drives the next `explore` grid.",
+            "   d. **`=== Untested proposals (current cycle) ===`** — the",
+            "      executable specialist proposals this cycle that no explore",
+            "      round has benched, ranked by gap severity and truncated to",
+            "      a count the block states. This is the grid's primary",
+            "      source; an entry marked ATOMIC goes in verbatim.",
             "   e. **Ordering facts**: baseline runs before anything else",
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
             "      automatically from the Coordinator-owned analysis task at",
@@ -710,6 +720,10 @@ def _idea_generation_lines() -> list[str]:
         "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
         "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
+        "",
+        "Draw first from `=== Untested proposals (current cycle) ===`; the",
+        "five moves above are for topping the grid up to its target of 4",
+        "(hard maximum 6) once the queue is drained of anything worth running.",
         "",
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
@@ -1033,10 +1047,7 @@ def build_orchestration_prompt(
     # the model how to answer. Nothing later in the pipeline can tell that apart
     # from a fragment that simply had nothing to say.
     if transport and transport not in TRANSPORTS:
-        raise ValueError(
-            f"unknown prompt transport {transport!r}; expected one of "
-            f"{', '.join(sorted(TRANSPORTS))}"
-        )
+        raise ValueError(f"unknown prompt transport {transport!r}; expected one of {', '.join(sorted(TRANSPORTS))}")
     actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
         action_registry,
         enabled_actions,

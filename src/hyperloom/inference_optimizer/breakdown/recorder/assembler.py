@@ -209,8 +209,7 @@ def _normalize_kernel_route_operations(out: dict[str, Any]) -> None:
         if isinstance(operation, dict)
         and operation.get("kind") == "strategy_selection"
         and operation.get("strategy_group") == "kernel_optimizer"
-        and str(operation.get("status") or "").lower()
-        not in {"revoked", "reverted", "superseded", "skipped"}
+        and str(operation.get("status") or "").lower() not in {"revoked", "reverted", "superseded", "skipped"}
     ]
     selections_by_cycle: dict[str, list[dict[str, Any]]] = {}
     for selection in selections:
@@ -221,17 +220,13 @@ def _normalize_kernel_route_operations(out: dict[str, Any]) -> None:
 
     for cycle_selections in selections_by_cycle.values():
         selection_ids = {
-            str(selection.get("operation_id") or "")
-            for selection in cycle_selections
-            if selection.get("operation_id")
+            str(selection.get("operation_id") or "") for selection in cycle_selections if selection.get("operation_id")
         }
         if len(selection_ids) != 1:
             continue
         selection = cycle_selections[-1]
         selection_id = next(iter(selection_ids))
-        selected_strategy = str(
-            (selection.get("outputs") or {}).get("selected_strategy") or ""
-        )
+        selected_strategy = str((selection.get("outputs") or {}).get("selected_strategy") or "")
         cycle_routes = [
             operation
             for operation in operations
@@ -243,19 +238,12 @@ def _normalize_kernel_route_operations(out: dict[str, Any]) -> None:
             route
             for route in cycle_routes
             if str(route.get("strategy") or "") == selected_strategy
-            and str(route.get("status") or "").lower()
-            not in {"revoked", "reverted", "skipped"}
+            and str(route.get("status") or "").lower() not in {"revoked", "reverted", "skipped"}
         ]
         active_route = selected_routes[-1] if selected_routes else None
-        active_route_id = (
-            str(active_route.get("operation_id") or "")
-            if isinstance(active_route, dict)
-            else ""
-        )
+        active_route_id = str(active_route.get("operation_id") or "") if isinstance(active_route, dict) else ""
         for route in cycle_routes:
-            competition = dict(
-                ((route.get("extensions") or {}).get("route_competition") or {})
-            )
+            competition = dict(((route.get("extensions") or {}).get("route_competition") or {}))
             if route is active_route:
                 competition.update(
                     {
@@ -264,10 +252,7 @@ def _normalize_kernel_route_operations(out: dict[str, Any]) -> None:
                         "normalized_from_operations": True,
                     }
                 )
-            elif (
-                str(route.get("strategy") or "") != selected_strategy
-                or active_route is not None
-            ):
+            elif str(route.get("strategy") or "") != selected_strategy or active_route is not None:
                 previous_status = str(route.get("status") or "")
                 route["status"] = "superseded"
                 competition.update(
@@ -368,12 +353,7 @@ def _deep_merge(
         elif isinstance(previous, list) and isinstance(value, list):
             merged[key] = _merge_lists(previous, value, conflicts=conflicts, path=path)
         else:
-            if (
-                conflicts is not None
-                and previous is not None
-                and value is not None
-                and previous != value
-            ):
+            if conflicts is not None and previous is not None and value is not None and previous != value:
                 # A field arriving twice with two values. Filling a gap is what
                 # partial updates are for and says nothing; replacing an answer
                 # with a different one is a disagreement settled by whichever
@@ -605,11 +585,7 @@ def _kernel_outcome(
     """
     if e2e:
         decision = str(e2e.get("decision") or "").upper()
-        validation_tier = str(
-            e2e.get("final_validation_tier")
-            or e2e.get("validation_tier")
-            or ""
-        ).strip().lower()
+        validation_tier = str(e2e.get("final_validation_tier") or e2e.get("validation_tier") or "").strip().lower()
         final_validated = e2e.get("validated") is True or validation_tier in {
             "final",
             "final_validation",

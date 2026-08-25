@@ -84,10 +84,19 @@ def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
         The output-format block appended to the thread's developer
         instructions.
     """
+    from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT
+
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
     heartbeat = json.dumps({"topic": "heartbeat", "body_md": "ok"})
+    has_send_message = _IT.SEND_MESSAGE in set(allowed_intents)
+    heartbeat_line = (
+        f"- ALWAYS emit at least one intent. With nothing to report, emit\n"
+        f'  {{"intent_type": "send_message", "payload": {json.dumps(heartbeat)}}}.'
+        if has_send_message
+        else "- ALWAYS emit exactly one intent; the schema requires it."
+    )
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 Your final message MUST be exactly one JSON object matching the enforced
@@ -102,8 +111,7 @@ output schema — no prose, no code fences, nothing around it:
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
   substance.
-- ALWAYS emit at least one intent. With nothing to report, emit
-  {{"intent_type": "send_message", "payload": {json.dumps(heartbeat)}}}.
+{heartbeat_line}
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -299,9 +307,7 @@ class CodexBackend:
         # compaction parser reads that as degenerate, skips the compaction, and
         # leaves the conversation growing -- the failure this backend exists to
         # end. An explicit per-turn override is the only channel available.
-        turn_prompt = (
-            f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
-        )
+        turn_prompt = f"{_PER_TURN_SCHEMA_OVERRIDE}\n\n{prompt}" if allow_no_intent else prompt
 
         async def _one_attempt() -> Any:
             """Acquire the session and run one turn under the retry policy."""
@@ -418,9 +424,7 @@ class CodexBackend:
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
-            part
-            for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents))
-            if part
+            part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
         )
 
     def reset_conversation(self) -> None:

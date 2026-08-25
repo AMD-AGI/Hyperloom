@@ -115,10 +115,7 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
     if not isinstance(row, Mapping):
         return False
     if isinstance(row.get("replay_material_available"), bool):
-        return bool(
-            row.get("replayable")
-            and row.get("replay_material_available")
-        )
+        return bool(row.get("replayable") and row.get("replay_material_available"))
     if isinstance(row.get("replayable"), bool):
         return bool(row.get("replayable"))
     best_config = row.get("best_config")
@@ -254,9 +251,7 @@ def _donor_is_trustworthy(
     """
     if not isinstance(donor, Mapping):
         return False
-    if isinstance(donor.get("replayable"), bool) and not donor.get(
-        "replayable"
-    ):
+    if isinstance(donor.get("replayable"), bool) and not donor.get("replayable"):
         return False
     if not _has_replayable_config(donor):
         return False
@@ -426,9 +421,7 @@ def _find_config_donor(
         relax_framework_version,
     ) in tiers:
         labels = {
-            key: value
-            for key, value in labels.items()
-            if value and value not in ("unknown_model_type", "unknown_arch")
+            key: value for key, value in labels.items() if value and value not in ("unknown_model_type", "unknown_arch")
         }
         usable: list[Mapping[str, Any]] = []
         candidates = _search_warm_candidates(
@@ -446,17 +439,11 @@ def _find_config_donor(
                 _candidate_dimension(candidate, "hardware"),
             ):
                 continue
-            if (
-                _candidate_dimension(candidate, "precision")
-                != target_precision
-            ):
+            if _candidate_dimension(candidate, "precision") != target_precision:
                 continue
-            if (
-                relax_framework_version
-                and not _framework_version_is_compatible(
-                    framework_version,
-                    _candidate_dimension(candidate, "framework_version"),
-                )
+            if relax_framework_version and not _framework_version_is_compatible(
+                framework_version,
+                _candidate_dimension(candidate, "framework_version"),
             ):
                 continue
             if _donor_is_trustworthy(
@@ -515,10 +502,7 @@ def _build_warm_start_context(
     """
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
-    current_remote = bool(
-        isinstance(recipe, Mapping)
-        and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
-    )
+    current_remote = bool(isinstance(recipe, Mapping) and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE)
     ctx: dict[str, Any] = {
         "status": status,
         "match": {
@@ -541,17 +525,8 @@ def _build_warm_start_context(
         ctx["lessons"] = list(prior_source.get("lessons") or [])
         ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
     # Replay config comes from the donor, or the identity recipe as self-donor.
-    donor = (
-        config_donor
-        if not current_remote and isinstance(config_donor, Mapping)
-        else None
-    )
-    if (
-        not current_remote
-        and donor is None
-        and isinstance(recipe, Mapping)
-        and _has_replayable_config(recipe)
-    ):
+    donor = config_donor if not current_remote and isinstance(config_donor, Mapping) else None
+    if not current_remote and donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
         donor = recipe
         config_donor_tier = config_donor_tier or "self"
         if config_donor_confidence is None:
@@ -588,11 +563,7 @@ def _build_warm_start_context(
                 "best_throughput": best_tput,
                 "config_source": str(donor.get("canonical_id") or ""),
                 "config_tier": config_donor_tier or "self",
-                "config_confidence": float(
-                    confidence
-                    if config_donor_confidence is None
-                    else config_donor_confidence
-                ),
+                "config_confidence": float(confidence if config_donor_confidence is None else config_donor_confidence),
             }
             donor_canonical_id = str(donor.get("canonical_id") or "")
             donor_model = str(donor.get("model") or "")
@@ -600,23 +571,17 @@ def _build_warm_start_context(
             breakdown_link = str(donor.get("breakdown_link") or "")
             if donor_session is not None:
                 breakdown_link = str(
-                    donor_session.get("breakdown_link")
-                    or donor_session.get("session_breakdown_url")
-                    or breakdown_link
+                    donor_session.get("breakdown_link") or donor_session.get("session_breakdown_url") or breakdown_link
                 )
             recommended_replay.update(
                 {
                     "donor_canonical_id": donor_canonical_id,
                     "donor_model": donor_model,
                     "donor_session_id": (
-                        str(donor_session.get("session_id") or "")
-                        if donor_session is not None
-                        else ""
+                        str(donor_session.get("session_id") or "") if donor_session is not None else ""
                     ),
                     "donor_family_tags": (
-                        [str(tag) for tag in family_tags]
-                        if isinstance(family_tags, (list, tuple, set))
-                        else []
+                        [str(tag) for tag in family_tags] if isinstance(family_tags, (list, tuple, set)) else []
                     ),
                     "donor_gain_pct": expected_gain,
                     "donor_breakdown_link": breakdown_link,
@@ -958,11 +923,7 @@ def _hardware_fallback_values(hardware: str) -> list[str]:
         value = str(hardware or "").strip().lower()
         return [value] if value else []
     _sku, family, suffix = parsed
-    return [
-        f"{sku}{suffix}"
-        for sku, sku_family in _GPU_ISA_BY_SKU.items()
-        if sku_family == family
-    ]
+    return [f"{sku}{suffix}" for sku, sku_family in _GPU_ISA_BY_SKU.items() if sku_family == family]
 
 
 def _hardware_is_compatible(target: str, candidate: str) -> bool:
@@ -979,6 +940,7 @@ def _hardware_is_compatible(target: str, candidate: str) -> bool:
         and target_parsed[1] == candidate_parsed[1]
         and target_parsed[2] == candidate_parsed[2]
     )
+
 
 def _framework_semver(version: str) -> Version | None:
     """Parse a framework's PEP 440 version."""
@@ -1062,9 +1024,7 @@ def _candidate_dimension(row: Mapping[str, Any], key: str) -> str:
     if value not in (None, ""):
         return str(value).strip().lower()
     try:
-        dimensions = cid_to_path_components(
-            str(row.get("canonical_id") or "")
-        )
+        dimensions = cid_to_path_components(str(row.get("canonical_id") or ""))
     except ValueError:
         return ""
     names = (
@@ -1094,16 +1054,16 @@ def _rank_warm_candidates(
     ranked.sort(key=_max_session_gain, reverse=True)
     ranked.sort(
         key=lambda row: (
-            _framework_semver(
-                _candidate_dimension(row, "framework_version")
+            (
+                _framework_semver(_candidate_dimension(row, "framework_version"))
+                if _framework_version_is_compatible(
+                    target_version,
+                    _candidate_dimension(row, "framework_version"),
+                )
+                else None
             )
-            if _framework_version_is_compatible(
-                target_version,
-                _candidate_dimension(row, "framework_version"),
-            )
-            else None
-        )
-        or Version("0.dev0"),
+            or Version("0.dev0")
+        ),
         reverse=True,
     )
     return ranked
@@ -1142,10 +1102,7 @@ def _remote_candidate_matches(
         or row.get("replay_material_available") is not True
     ):
         return False
-    return all(
-        _candidate_dimension(row, key) == str(value).strip().lower()
-        for key, value in labels.items()
-    )
+    return all(_candidate_dimension(row, key) == str(value).strip().lower() for key, value in labels.items())
 
 
 def _cascade_warm_start_search(
@@ -1175,11 +1132,7 @@ def _cascade_warm_start_search(
     except Exception as exc:  # noqa: BLE001
         log.info("warm-start exact get non-fatal failure: %s", exc)
         exact = None
-    if (
-        isinstance(exact, Mapping)
-        and exact
-        and str(exact.get("canonical_id") or "") == cid
-    ):
+    if isinstance(exact, Mapping) and exact and str(exact.get("canonical_id") or "") == cid:
         if _recipe_is_actionable(exact):
             return dict(exact), "exact", 1.0
         exact_history = exact
@@ -1239,17 +1192,11 @@ def _cascade_warm_start_search(
                 _candidate_dimension(candidate, "hardware"),
             ):
                 continue
-            if (
-                _candidate_dimension(candidate, "precision")
-                != target_precision_value
-            ):
+            if _candidate_dimension(candidate, "precision") != target_precision_value:
                 continue
-            if (
-                relax_framework_version
-                and not _framework_version_is_compatible(
-                    target_framework_version,
-                    _candidate_dimension(candidate, "framework_version"),
-                )
+            if relax_framework_version and not _framework_version_is_compatible(
+                target_framework_version,
+                _candidate_dimension(candidate, "framework_version"),
             ):
                 continue
             if not _donor_is_trustworthy(
@@ -1459,6 +1406,21 @@ def run_t0_anchor(
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
 
+        # Third Recipe sink; see agentx_kb_write_blocked. _build_t0_trace_extras
+        # copies SharedState.isl/osl into the row, which under AgentX are the
+        # inert 1024/1024 placeholders -- so anchoring here mis-tags the
+        # cross-session row exactly as the CLOSE-time write would.
+        from hyperloom.orchestrator.actions.executors._workload_envs import (
+            agentx_kb_write_blocked,
+        )
+
+        if agentx_kb_write_blocked(shared_state):
+            log.info(
+                "T0 anchor: skipping put_recipe (AgentX); the recipe row has no "
+                "mode or workload dimension and isl/osl are placeholders here."
+            )
+            return
+
         try:
             kb.put_recipe(
                 canonical_id=cid,
@@ -1530,8 +1492,7 @@ def run_t0_anchor(
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
     current_remote_point = bool(
-        isinstance(warm_point, Mapping)
-        and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
+        isinstance(warm_point, Mapping) and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
     )
     _tgt_conc = getattr(shared_state, "conc", None)
     _tgt_isl = getattr(shared_state, "isl", None)
@@ -1664,15 +1625,9 @@ def run_t0_anchor(
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
     exact_history = warm_point.get("exact_history")
-    history_source = (
-        exact_history if isinstance(exact_history, Mapping) else warm_point
-    )
-    pitfalls_list: list[dict[str, Any]] = list(
-        history_source.get("pitfalls") or []
-    )
-    lessons_list: list[dict[str, Any]] = list(
-        history_source.get("lessons") or []
-    )
+    history_source = exact_history if isinstance(exact_history, Mapping) else warm_point
+    pitfalls_list: list[dict[str, Any]] = list(history_source.get("pitfalls") or [])
+    lessons_list: list[dict[str, Any]] = list(history_source.get("lessons") or [])
     try:
         pit_path = recipe_kb_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)

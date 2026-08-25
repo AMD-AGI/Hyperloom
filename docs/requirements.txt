@@ -1,7 +1,11 @@
 # Documentation build dependencies for the Hyperloom Sphinx site.
-# Install with:  pip install -r docs/requirements.txt
+#
+# Reproducible builds (CI, Read the Docs): pip install -r docs/sphinx/requirements.txt
+# Quick local install: pip install -r docs/requirements.txt
 rocm-docs-core[api_reference]
 myst-parser>=2.0
 linkify-it-py>=2.0
 # Pin transitive dep above CVE-2026-45409 (affects idna 3.9.0).
 idna>=3.10
+# sphinx-book-theme 1.1.x crashes on Sphinx 9 (add_source_buttons unpacks None).
+sphinx>=8.1,<9

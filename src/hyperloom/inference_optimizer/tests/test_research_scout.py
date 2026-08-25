@@ -160,18 +160,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     )
 
     assert task is not None
-    assert task.params["readonly"] is True
-    assert task.allowed_tools == [
-        "Read",
-        "Grep",
-        "Glob",
-        "Write",
-        "WebSearch",
-        "WebFetch",
-    ]
-    assert "Bash" not in task.allowed_tools
-    assert "Edit" not in task.allowed_tools
-    assert "MultiEdit" not in task.allowed_tools
+    assert task.params["mode"] == "research"
     assert task.side_effects == ["writes_results"]
     assert task.params["seen_pr_ids"] == ["https://pr/seen"]
     assert "Does this vLLM version support the backend?" in task.params["notes"]
@@ -182,11 +171,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         [{"what": "enable aiter", "source": "https://example.test/aiter"}],
     )
     coord._seed_gaps_from_research_hints()
-    first_id = next(
-        row["canonical_id"]
-        for row in coord.shared_state.gaps
-        if row.get("symptom") == "enable aiter"
-    )
+    first_id = next(row["canonical_id"] for row in coord.shared_state.gaps if row.get("symptom") == "enable aiter")
     research_hints.append_hints(
         tmp_path,
         [{"what": "use hipblaslt", "source": "https://example.test/hipblaslt"}],

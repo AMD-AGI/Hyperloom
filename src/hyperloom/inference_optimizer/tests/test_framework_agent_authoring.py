@@ -288,14 +288,11 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     params = spec["params"]
     assert params["framework_agent_authoring"] is True
     assert params["domain"] == "serving_specialist"
-    assert params["readonly"] is False
     assert params["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
     assert params.get("task_kind") == "framework_authoring"
     pr_lead = params.get("pr_lead") or {}
     assert _CANDIDATE["pr_url"] == pr_lead.get("url") or _CANDIDATE["pr_url"] in params.get("notes", "")
     assert _CANDIDATE["diff_url"] == pr_lead.get("diff_url") or _CANDIDATE["diff_url"] in params.get("notes", "")
-    assert "Write" in spec["allowed_tools"]
-    assert "Edit" in spec["allowed_tools"]
     assert spec["requires_lanes"] == ["research_lane"]
 
 
@@ -689,8 +686,8 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
         return None
 
     stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-    stub._record_framework_agent_authored_outcome = (
-        lambda *, task, result: recorded.append(str(result.result.get("status") or ""))
+    stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
+        str(result.result.get("status") or "")
     )
     stub._maybe_rearm_authored_lane = lambda *_args, **_kwargs: None
     stub._drain_apply_fail_retry_pending = _noop_async
@@ -1157,10 +1154,7 @@ def test_framework_agent_repo_url_origin_framework_known() -> None:
     assert (
         Coordinator._framework_agent_repo_url_origin_framework("https://github.com/sgl-project/sglang.git") == "sglang"
     )
-    assert (
-        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/xdit-project/xDiT.git")
-        == "xdit"
-    )
+    assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/xdit-project/xDiT.git") == "xdit"
 
 
 def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> None:

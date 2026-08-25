@@ -513,121 +513,6 @@ def test_speedup_below_gate_needs_review(tmp_path):
     assert any("below KEEP" in r for r in proposal["reasons"])
 
 
-# GEAK prompt yaml patcher: rewrites a misleading example to placeholders.
-
-
-def _seed_yaml(tmp_path):
-    """Minimal copy of the relevant upstream YAML block (works without minisweagent installed)."""
-    yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
-    yaml.parent.mkdir(parents=True)
-    yaml.write_text(
-        "system_prompt: |\n"
-        "    profile_kernel:\n"
-        "    - Forbidden in `command`: `&&`, `cd`\n"
-        '    - Good example: `command="python3 scripts/task_runner.py performance",'
-        ' workdir="/path/to/project"`\n'
-        '    - Also ok: `command="python3 /absolute/path/to/scripts/task_runner.py'
-        ' performance"`\n'
-        '    - Bad example: `command="cd /path && python3 scripts/task_runner.py'
-        ' performance"`\n'
-        "    other_tool:\n"
-        "    - keep\n",
-        encoding="utf-8",
-    )
-    return yaml
-
-
-def test_geak_prompt_patcher_replaces_misleading_example(tmp_path, monkeypatch):
-    import geak_prompt_patcher as gpp
-
-    yaml = _seed_yaml(tmp_path)
-    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
-
-    ok, msg = gpp.ensure_geak_prompt_patched()
-    assert ok is True
-    assert "patched" in msg
-    text = yaml.read_text(encoding="utf-8")
-    assert "task_runner.py performance" not in text
-    assert "<your_benchmark.py>" in text
-    assert "Forbidden in `command`" in text
-    assert "other_tool" in text
-
-
-def test_geak_prompt_patcher_idempotent(tmp_path, monkeypatch):
-    import geak_prompt_patcher as gpp
-
-    yaml = _seed_yaml(tmp_path)
-    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
-
-    ok1, _ = gpp.ensure_geak_prompt_patched()
-    text1 = yaml.read_text(encoding="utf-8")
-    assert ok1 is True
-
-    ok2, msg2 = gpp.ensure_geak_prompt_patched()
-    text2 = yaml.read_text(encoding="utf-8")
-    assert ok2 is True
-    assert "already patched" in msg2
-    assert text1 == text2
-
-
-def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch):
-    """Missing YAML → ``ensure_geak_prompt_patched`` returns ``(False, …)``."""
-    import geak_prompt_patcher as gpp
-
-    monkeypatch.setenv(
-        "HYPERLOOM_GEAK_PROMPT_YAML",
-        str(tmp_path / "does_not_exist.yaml"),
-    )
-    ok, msg = gpp.ensure_geak_prompt_patched()
-    assert ok is False
-    assert "minisweagent not installed" in msg
-
-
-def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
-    """Upstream wording drift → patcher refuses rather than half-patching the YAML."""
-    import geak_prompt_patcher as gpp
-
-    yaml = tmp_path / "drifted.yaml"
-    yaml.write_text(
-        "system_prompt: |\n"
-        "    profile_kernel:\n"
-        '    - Good example: `command="python3 different_runner.py", workdir="/x"`\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
-
-    ok, msg = gpp.ensure_geak_prompt_patched()
-    assert ok is False
-    assert "upstream example block changed" in msg
-    assert "different_runner.py" in yaml.read_text(encoding="utf-8")
-
-
-def test_geak_prompt_patcher_recognises_upstream_already_fixed(tmp_path, monkeypatch):
-    """When upstream YAML already uses generic <your-test-command> placeholders,
-    the patcher returns ok without modifying the file."""
-    import geak_prompt_patcher as gpp
-
-    yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
-    yaml.parent.mkdir(parents=True)
-    yaml.write_text(
-        "system_prompt: |\n"
-        "    profile_kernel:\n"
-        "    - Forbidden in `command`: `&&`, `cd`\n"
-        '    - Good example: `command="<your-test-command>", workdir="/path/to/project"`\n'
-        '    - Bad example: `command="cd /path/to/project && <your-test-command>"`\n'
-        "    other_tool:\n"
-        "    - keep\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("HYPERLOOM_GEAK_PROMPT_YAML", str(yaml))
-
-    ok, msg = gpp.ensure_geak_prompt_patched()
-    assert ok is True
-    assert "upstream" in msg.lower() or "already" in msg.lower()
-    # File must not be modified.
-    assert "<your-test-command>" in yaml.read_text(encoding="utf-8")
-
-
 def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     bench = tmp_path / "bench.py"
     bench.write_text("print('ok')\n", encoding="utf-8")
@@ -1086,9 +971,7 @@ def test_build_patch_snapshot_uses_exported_files_without_kernel_repo(
     )
 
     assert res is not None
-    assert (
-        Path(res["snapshot_dir"]) / "vllm" / "ops" / "kernel.py"
-    ).read_text() == "VALUE = 2\n"
+    assert (Path(res["snapshot_dir"]) / "vllm" / "ops" / "kernel.py").read_text() == "VALUE = 2\n"
 
 
 def test_prepare_deploy_patch_drops_python_cache_entries(tmp_path):
@@ -1119,14 +1002,7 @@ def test_prepare_deploy_patch_drops_python_cache_entries(tmp_path):
 def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
     deploy_root = tmp_path / "site-packages"
     source = deploy_root / "vllm" / "model_executor" / "attention.py"
-    changed = (
-        deploy_root
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
-    )
+    changed = deploy_root / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     source.parent.mkdir(parents=True)
     changed.parent.mkdir(parents=True)
     source.write_text("def wrapper():\n    return True\n")
@@ -1134,10 +1010,7 @@ def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
     descriptors = [
         {
             "op": "write",
-            "path": (
-                "vllm/v1/attention/ops/"
-                "triton_unified_attention.py"
-            ),
+            "path": ("vllm/v1/attention/ops/triton_unified_attention.py"),
             "is_new": False,
         }
     ]
@@ -1230,28 +1103,14 @@ def test_verification_deploys_sibling_forge_change_without_kernel_repo(
 ):
     deploy_root = tmp_path / "site-packages"
     source = deploy_root / "vllm" / "model_executor" / "attention.py"
-    changed = (
-        deploy_root
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
-    )
+    changed = deploy_root / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     source.parent.mkdir(parents=True)
     changed.parent.mkdir(parents=True)
     source.write_text("def wrapper():\n    return True\n")
     changed.write_text("def kernel():\n    return 1\n")
 
     exported = tmp_path / "canonical-files"
-    exported_changed = (
-        exported
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
-    )
+    exported_changed = exported / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     exported_changed.parent.mkdir(parents=True)
     exported_changed.write_text("def kernel():\n    return 2\n")
     patch = tmp_path / "forge.patch"
@@ -1297,16 +1156,9 @@ def test_verification_deploys_sibling_forge_change_without_kernel_repo(
     assert verification["artifact_valid"] is True
     assert bundle["type"] == "patch_snapshot"
     assert bundle["repo_root"] == str(deploy_root)
-    assert bundle["write_paths"] == [
-        "vllm/v1/attention/ops/triton_unified_attention.py"
-    ]
+    assert bundle["write_paths"] == ["vllm/v1/attention/ops/triton_unified_attention.py"]
     assert (
-        Path(bundle["snapshot_dir"])
-        / "vllm"
-        / "v1"
-        / "attention"
-        / "ops"
-        / "triton_unified_attention.py"
+        Path(bundle["snapshot_dir"]) / "vllm" / "v1" / "attention" / "ops" / "triton_unified_attention.py"
     ).read_text() == "def kernel():\n    return 2\n"
 
 
@@ -1361,14 +1213,8 @@ def test_forge_patch_builds_multifile_deploy_bundle(tmp_path):
     runtime = repo / "csrc" / "cpp_itfs" / "pa" / "pa_kernels.cuh"
     mirror.parent.mkdir(parents=True)
     runtime.parent.mkdir(parents=True)
-    old_mirror = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void original_kernel() {}\n'
-    )
-    new_mirror = (
-        '#include <hip/hip_runtime.h>\n'
-        'extern "C" void optimized_kernel() {}\n'
-    )
+    old_mirror = '#include <hip/hip_runtime.h>\nextern "C" void original_kernel() {}\n'
+    new_mirror = '#include <hip/hip_runtime.h>\nextern "C" void optimized_kernel() {}\n'
     mirror.write_text(old_mirror, encoding="utf-8")
     runtime.write_text("OLD_RUNTIME\n", encoding="utf-8")
     artifact = tmp_path / "v1_forge.cu"
@@ -1502,8 +1348,7 @@ def test_unrecoverable_forge_timeout_is_not_promoted_to_partial(
     output_dir = tmp_path / "forge-output"
     output_dir.mkdir()
     (output_dir / "optimization_report.md").write_text(
-        "micro_speedup: N/A (no validated improvement kept)\n"
-        "[correctness] fail\n"
+        "micro_speedup: N/A (no validated improvement kept)\n[correctness] fail\n"
     )
     source = tmp_path / "kernel.py"
     source.write_text("def kernel(x):\n    return x\n")
@@ -2385,8 +2230,7 @@ def test_pending_integration_keeps_the_micro_proposal_and_names_the_deferral(tmp
 
     assert proposal["decision"] == "KEEP"
     assert proposal["reasons"] == [
-        "framework apply-back reference-verified; framework E2E/accuracy "
-        "deferred to integrate"
+        "framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"
     ]
 
 
@@ -2513,8 +2357,7 @@ def test_rewrite_backend_result_reaches_a_reference_verified_keep(tmp_path, monk
     proposal = ko.make_proposal(verification)
     assert proposal["decision"] == "KEEP"
     assert proposal["reasons"] == [
-        "framework apply-back reference-verified; framework E2E/accuracy "
-        "deferred to integrate"
+        "framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"
     ]
 
 
@@ -2529,3 +2372,29 @@ def test_pending_integration_does_not_rescue_a_below_threshold_speedup(tmp_path)
 
     assert proposal["decision"] == "NEEDS_REVIEW"
     assert any("below KEEP threshold" in reason for reason in proposal["reasons"])
+
+
+def test_build_prompt_out_of_root_source_file_not_embedded(tmp_path):
+    # A planted directory carrying a root substring is outside every real root.
+    planted = tmp_path / "sgl-workspace" / "aiter"
+    planted.mkdir(parents=True)
+    planted_file = planted / "kernel.py"
+    planted_file.write_text("PLANTED_CONTENT", encoding="utf-8")
+
+    prompt = ko.build_prompt(_candidate(), _args(source_file=str(planted_file)))
+
+    assert "PLANTED_CONTENT" not in prompt
+
+
+def test_build_prompt_in_root_source_file_embedded(tmp_path, monkeypatch):
+    src = tmp_path / "kernel.py"
+    src.write_text("def in_root_kernel(): pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths.resolve_patch_target_roots",
+        lambda: (str(tmp_path) + "/",),
+    )
+
+    prompt = ko.build_prompt(_candidate(), _args(source_file=str(src)))
+
+    assert "in_root_kernel" in prompt

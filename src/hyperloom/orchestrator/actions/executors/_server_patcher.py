@@ -141,10 +141,7 @@ def _version_accepted(
         manifest_versions = _load_supported_versions_from_manifest(patches_dir)
         if manifest_versions is not None:
             return text in manifest_versions
-    return any(
-        text == minor or text.startswith(f"{minor}.")
-        for minor in _SGLANG_DEFAULT_ALLOWED_MINORS
-    )
+    return any(text == minor or text.startswith(f"{minor}.") for minor in _SGLANG_DEFAULT_ALLOWED_MINORS)
 
 
 # Path within the TraceLens checkout that hosts the patch sets.
@@ -577,15 +574,13 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
         probed = _probe_isolated_vllm()
         if probed is None:
             log.info(
-                "_server_patcher: vllm not importable (%s) and no isolated "
-                "$VLLM_VENV_ROOT vllm; skip patch",
+                "_server_patcher: vllm not importable (%s) and no isolated $VLLM_VENV_ROOT vllm; skip patch",
                 e,
             )
             return None
         version, install_root = probed
         log.info(
-            "_server_patcher: main-process vllm unimportable; using isolated "
-            "vllm %s at %s",
+            "_server_patcher: main-process vllm unimportable; using isolated vllm %s at %s",
             version,
             install_root,
         )
@@ -771,9 +766,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         if _patch_set_writes(written, parts)
     )
     optional_patches = frozenset(
-        p.name
-        for p in filtered_patches
-        if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
+        p.name for p in filtered_patches if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
     )
     return _PatchPlan(
         framework="sglang",

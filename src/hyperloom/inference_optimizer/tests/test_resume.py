@@ -486,7 +486,6 @@ class TestN23ResumePerSession:
         assert exc.value.code == 2
 
 
-
 # _load_kernel_agent_env_fallback hard-fails on bad state
 
 
@@ -731,3 +730,25 @@ class TestTracelensRootEnvCorrection:
         good.mkdir()
         monkeypatch.setenv("TRACELENS_ROOT", str(good))
         cli_preflight._check_tracelens_root_exists()
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_custom_workload_paths(session_dir):
+    """Coordinator reload must not drop the paths a custom resume re-exports."""
+    SharedState(
+        session_id="custom-resume",
+        framework="custom",
+        bypass_scripts_dir="/opt/worldplay/scripts",
+        framework_repo_path="/opt/worldplay/src",
+        benchmark_backend="bypass",
+    ).save(session_dir)
+
+    coordinator = Coordinator(session_dir, backends=_backends_full())
+    try:
+        state = coordinator.shared_state
+        assert state.framework == "custom"
+        assert state.bypass_scripts_dir == "/opt/worldplay/scripts"
+        assert state.framework_repo_path == "/opt/worldplay/src"
+        assert state.benchmark_backend == "bypass"
+    finally:
+        await coordinator.stop()

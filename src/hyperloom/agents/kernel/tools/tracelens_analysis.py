@@ -60,6 +60,8 @@ from tracelens_skill_runner import (
     _resolve_launcher_to_abs_source,
     aggregate_by_source_function,
     discover_capture_folder,
+    extract_compute_pct_from_analysis_md,
+    extract_exposed_comm_pct_from_analysis_md,
     extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     parse_analysis_md,
@@ -72,12 +74,18 @@ from _nccl_summary_candidates import extract_collective_candidates
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
 
-# Idle-gate threshold + high-idle warning: shared single source of truth so the
-# TraceLens and bypass routes gate on identical semantics.
+# Capture-vs-workload trace classification, shared across routes so a sidecar is
+# recognised identically whichever backend reads the profile.
+from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+
+# Trace-health gate thresholds + warnings (high idle, low compute): shared single
+# source of truth so the TraceLens and bypass routes gate on identical semantics.
 from _idle_gate import (
     build_graph_under_recorded_warning as _build_graph_under_recorded_warning,
     build_high_idle_warning as _build_high_idle_warning,
+    build_low_compute_warning as _build_low_compute_warning,
     resolve_idle_pct_threshold,
+    resolve_min_compute_pct_threshold,
 )
 
 # Canonical roofline_source provenance enum, shared with the bypass route so both
@@ -488,6 +496,42 @@ def _evaluate_idle_gate_with_graph_guard(
         )
     _, high_idle_warning = _evaluate_high_idle_gate(idle_pct, report_path)
     return threshold, high_idle_warning, None
+
+
+def _evaluate_low_compute_gate(
+    compute_pct: float | None,
+    exposed_comm_pct: float | None,
+    report_path: Path,
+) -> tuple[float, dict[str, Any] | None]:
+    """Return the compute threshold plus a warning when the compute share is too low.
+
+    Complements :func:`_evaluate_idle_gate_with_graph_guard`. The idle gate
+    cannot see a window whose wall time is consumed by a spin-waiting
+    collective, because that wait is charged as GPU-busy time -- such a trace
+    reports ~0% idle alongside a single-digit compute share. Since a kernel
+    rewrite is bounded by the compute share, both regimes warrant the same
+    response: suppress the hot-kernel list and let the Coordinator route
+    elsewhere.
+
+    Args:
+        compute_pct: Compute share of trace wall time, or ``None`` when the
+            source report did not expose it (gate is skipped).
+        exposed_comm_pct: Exposed-communication share, for warning context.
+        report_path: Path to the source report, recorded in the warning.
+
+    Returns:
+        The resolved threshold and the ``low_gpu_compute_pct`` warning, or
+        ``None`` when the gate does not fire.
+    """
+    threshold = resolve_min_compute_pct_threshold()
+    if compute_pct is None or compute_pct >= threshold:
+        return threshold, None
+    return threshold, _build_low_compute_warning(
+        compute_pct=compute_pct,
+        threshold_pct=threshold,
+        report_path=report_path,
+        exposed_comm_pct=exposed_comm_pct,
+    )
 
 
 def _build_trace_split_warning(
@@ -1018,6 +1062,42 @@ _PHASE_FRAGMENT_RE = re.compile(
 )
 
 
+def _is_capture_fragment(path: Path, root: Path | None = None) -> bool:
+    """Whether a trace path is a CUDA-graph capture sidecar.
+
+    Thin alias over :func:`_capture_shapes.is_capture_fragment`, which both
+    trace-analysis routes share so the answer cannot drift between them. Both
+    callers here need that same answer: discovery demotes sidecars below a real
+    capture, and the preflight refuses an input made of nothing else.
+
+    Args:
+        path: The trace file path to classify.
+        root: Directory the classification is relative to, when known.
+
+    Returns:
+        True when ``path`` is a graph-capture sidecar rather than a workload
+        trace.
+    """
+    return _shared_is_capture_fragment(path, root)
+
+
+def _capture_classification_root(trace_input: Path) -> Path:
+    """Root to classify candidates discovered from ``trace_input`` against.
+
+    A directory input is its own root, so a ``capture_traces/`` component below
+    it counts. A file input resolves to its parent, which leaves the filename as
+    the only component and keeps an unrelated ancestor directory out of the
+    decision.
+
+    Args:
+        trace_input: The ``--trace-input`` path.
+
+    Returns:
+        The directory candidate paths are made relative to.
+    """
+    return trace_input if trace_input.is_dir() else trace_input.parent
+
+
 def _is_derived_trace(path: Path, root: Path | None = None) -> bool:
     """Whether a trace path is splitter output rather than a raw capture.
 
@@ -1123,7 +1203,7 @@ def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, in
         return (0, -size, name)
     if re.search(r"TP-\d+-DECODE\.trace\.json(?:\.gz)?$", name):
         return (2, -size, name)
-    if name.startswith("bs_") or name.startswith("graph_capture"):
+    if _is_capture_fragment(path, root):
         return (3, -size, name)
     return (1, -size, name)
 
@@ -1853,11 +1933,7 @@ def _relaxed_candidate_keywords(name: str) -> list[str]:
     relaxed: list[str] = []
     for token in tokens:
         token = token.strip("_")
-        if (
-            len(token) < 3
-            or token in seen
-            or token in _TYPE_BLOCKLIST
-        ):
+        if len(token) < 3 or token in seen or token in _TYPE_BLOCKLIST:
             continue
         seen.add(token)
         relaxed.append(token)
@@ -2141,9 +2217,7 @@ def _inject_collective_candidates(
     the report surfaces it -- a log line alone leaves the lane looking as if the
     workload simply had no collective.
     """
-    if not isinstance(candidates, list) or any(
-        not isinstance(item, dict) for item in candidates
-    ):
+    if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
         raise ValueError("Collective candidates must be a list of mappings")
     existing = [dict(item) for item in candidates]
     roots = list(source_roots or [])
@@ -2151,6 +2225,7 @@ def _inject_collective_candidates(
         aiter_csrc = _aiter_csrc_root().rstrip("/")
         if aiter_csrc and Path(aiter_csrc).is_dir():
             roots.append(aiter_csrc)
+
     def _skip(code: str, detail: str, notes: list[str] | None = None) -> list[dict[str, Any]]:
         """Record a visible reason the collective lane got no candidate."""
         message = f"nccl_summary: {detail}; skipping injection"
@@ -2210,8 +2285,7 @@ def _inject_collective_candidates(
         # the lane still got nothing.
         return _skip(
             "collective_symbols_unresolved",
-            "no summary row resolved to a device source under "
-            + ", ".join(roots),
+            "no summary row resolved to a device source under " + ", ".join(roots),
             notes=messages,
         )
 
@@ -2224,31 +2298,19 @@ def _inject_collective_candidates(
         values = item.get("input_dtypes") or item.get("dtypes") or []
         if not values:
             values = _dtypes_from_shapes(item.get("shapes") or [])
-        return [
-            str(value).strip()
-            for value in values
-            if isinstance(value, str) and value.strip()
-        ]
+        return [str(value).strip() for value in values if isinstance(value, str) and value.strip()]
 
     def _has_workload(item: dict[str, Any]) -> bool:
         """Return whether the trace row carries driver inputs."""
-        return bool(
-            item.get("input_shapes") or item.get("shapes")
-        ) and bool(_workload_dtypes(item))
+        return bool(item.get("input_shapes") or item.get("shapes")) and bool(_workload_dtypes(item))
 
     def _is_all_reduce_workload(item: dict[str, Any]) -> bool:
         """Return whether a traced workload has all-reduce semantics."""
         contract = item.get("kernel_contract")
-        if (
-            isinstance(contract, dict)
-            and str(contract.get("kind") or "") == "collective"
-        ):
+        if isinstance(contract, dict) and str(contract.get("kind") or "") == "collective":
             return str(contract.get("collective_op") or "") == "all_reduce"
         name = _name(item)
-        return any(
-            tag in name
-            for tag in ("all_reduce", "allreduce", "cross_device_reduce")
-        )
+        return any(tag in name for tag in ("all_reduce", "allreduce", "cross_device_reduce"))
 
     def _workload_family(item: dict[str, Any]) -> str:
         """Collapse prefill and decode rows from one profiled wrapper."""
@@ -2303,18 +2365,12 @@ def _inject_collective_candidates(
         if dtypes:
             target["input_dtypes"] = dtypes
         provenance = next(
-            (
-                str(donor.get("shape_provenance") or "")
-                for donor in donors
-                if donor.get("shape_provenance")
-            ),
+            (str(donor.get("shape_provenance") or "") for donor in donors if donor.get("shape_provenance")),
             "",
         )
         if provenance:
             target["shape_provenance"] = provenance
-        target["workload_source_kernels"] = [
-            str(donor.get("name") or "") for donor in donors
-        ]
+        target["workload_source_kernels"] = [str(donor.get("name") or "") for donor in donors]
         hottest = max(
             donors,
             key=lambda donor: float(donor.get("duration_us") or 0.0),
@@ -2322,22 +2378,18 @@ def _inject_collective_candidates(
         target["workload_source_kernel"] = str(hottest.get("name") or "")
 
     by_name = {_name(item): item for item in existing if _name(item)}
-    workload_rows = [
-        item
-        for item in existing
-        if _has_workload(item) and _is_all_reduce_workload(item)
-    ]
+    workload_rows = [item for item in existing if _has_workload(item) and _is_all_reduce_workload(item)]
     workload_families: dict[str, list[dict[str, Any]]] = {}
     for row in workload_rows:
         family = _workload_family(row)
         if family:
             workload_families.setdefault(family, []).append(row)
-    allow_inferred_shapes = (
-        os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "")
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"}
-    )
+    allow_inferred_shapes = os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     appended: list[dict[str, Any]] = []
     for item in extracted:
         exact = by_name.get(_name(item))
@@ -2356,11 +2408,7 @@ def _inject_collective_candidates(
         if exact is not None and _has_workload(exact):
             donors = [exact]
             borrowed = False
-        elif (
-            allow_inferred_shapes
-            and len(workload_families) == 1
-            and _is_all_reduce_workload(item)
-        ):
+        elif allow_inferred_shapes and len(workload_families) == 1 and _is_all_reduce_workload(item):
             # Shapes are inferred from the sole all-reduce family, valid only
             # because the symbol is itself an all-reduce. Handing the driver
             # shapes the traced kernel never ran would yield confident SNR and
@@ -3424,11 +3472,7 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
         return None
     return {
         "operation": str(row.get("name") or ""),
-        "input_shapes": (
-            [{"call_num": 1, "shape": "<br>".join(operands)}]
-            if operands
-            else []
-        ),
+        "input_shapes": ([{"call_num": 1, "shape": "<br>".join(operands)}] if operands else []),
         "input_dtypes": tensor_dtypes,
         "raw_arg_spec": raw_arg_spec,
     }
@@ -3899,12 +3943,22 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
 
 
+# Provenance for a candidate's ``gpu_pct``. Only ``e2e_window`` is comparable
+# with the percentages ``parse_analysis_md`` lifts out of analysis.md; the other
+# two are best-effort and are recorded so a consumer can tell them apart instead
+# of silently ranking incomparable numbers against each other.
+GPU_PCT_BASIS_E2E = "e2e_window"
+GPU_PCT_BASIS_SIDECAR = "sidecar_reported"
+GPU_PCT_BASIS_LISTED_OPS = "listed_ops_sum"
+
+
 def recover_other_bucket_candidates(
     skill_output_dir: Path | str | None,
     existing_candidates: list[dict[str, Any]],
     *,
     top_k: int = 10,
     min_gpu_pct: float | None = None,
+    total_window_us: float | None = None,
     log: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover HIGH-GPU-time ops missing from analysis.md (any category).
@@ -3922,12 +3976,38 @@ def recover_other_bucket_candidates(
     Fires for ops that are (a) absent from ``existing_candidates`` by name and
     (b) at or above ``min_gpu_pct`` of total GPU time.
 
+    Whenever ``total_window_us`` is known, ``gpu_pct`` is normalized against it
+    -- the same denominator ``parse_analysis_md`` uses -- so both candidate
+    sources stay comparable inside one ranked ``hot_kernels[]``. The sidecar's
+    own percentage column is preferred only as a fallback, because its
+    denominator is not the trace wall span: ``ops_summary.csv`` normalizes
+    against total *op* time, which excludes collectives, so on a comm-dominated
+    trace its percentages run an order of magnitude above the end-to-end share.
+    Mixing the two bases in one field silently produced unrankable candidate
+    lists (a fallback op at "23.5% GPU" outranking an analysis.md op at "4.7%
+    GPU" when the true e2e shares were 0.5% and 4.7%). The basis actually used
+    is recorded on each candidate as ``gpu_pct_basis``.
+
+    Note this bypasses rather than repairs the ambiguity: ``_RANK_PCT_KEYS``
+    still maps both ``% of compute time`` and ``%e2e`` onto one ``gpu_pct``, so
+    a run with no ``gpu_timeline.csv`` to supply ``total_window_us`` falls back
+    to whatever the sidecar reported and carries the original mixed-basis
+    hazard -- now labelled ``sidecar_reported`` rather than silent. Splitting
+    those aliases into separate fields is the real repair and is not done here.
+
     Args:
         skill_output_dir: The TraceLens skill output directory to scan.
         existing_candidates: Candidates already extracted from analysis.md.
         top_k: Maximum number of recovered candidates to return.
         min_gpu_pct: Minimum GPU-time percentage to qualify; defaults to the
-            ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` env value (10%).
+            ``HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT`` env value (10%). Compared
+            against the sidecar's own share, not against ``gpu_pct``, so
+            admission is unchanged by the reporting basis (see
+            ``_admission_pct``).
+        total_window_us: Wall span of the analyzed trace, in microseconds. When
+            omitted or non-positive the function falls back to the sidecar's
+            reported percentage, then to a share of the listed ops, and marks
+            the candidates accordingly.
         log: Optional logging callable for diagnostics.
 
     Returns:
@@ -3941,41 +4021,78 @@ def recover_other_bucket_candidates(
         min_gpu_pct = _resolve_other_bucket_min_gpu_pct()
 
     have = {str(c.get("name") or "").strip().lower() for c in existing_candidates if isinstance(c, dict)}
-    total_us = sum(r["gpu_us"] for r in ranking if r.get("gpu_us") is not None) or 0.0
+    listed_ops_us = sum(r["gpu_us"] for r in ranking if r.get("gpu_us") is not None) or 0.0
+    window_us = float(total_window_us) if total_window_us is not None and total_window_us > 0 else 0.0
 
-    def _pct(rec: dict[str, Any]) -> float | None:
-        """Return a record's GPU-time percentage.
+    def _admission_pct(rec: dict[str, Any]) -> float | None:
+        """Return the share ``min_gpu_pct`` has always been compared against.
+
+        Deliberately the pre-existing quantity -- the sidecar's own percentage,
+        else the record's share of the rows we can see -- and NOT the e2e share
+        below. ``min_gpu_pct`` is a tuned constant (10%) whose meaning is "a
+        large slice of the GPU work we know about"; re-pointing it at the wall
+        span would silently raise the bar by the reciprocal of the compute
+        share, and on an ordinary compute-bound trace (60% compute, work spread
+        over eight kernels) that takes this whole recovery path from eight
+        candidates to zero. Admission stays on the old basis; only the number we
+        publish moves.
 
         Args:
             rec: A ranking record.
 
         Returns:
-            The explicit ``gpu_pct`` when present, else the share of
-            ``total_us`` derived from ``gpu_us``, else ``None``.
+            The admission share, or ``None`` when the record carries neither a
+            reported percentage nor a usable GPU time.
         """
         if rec.get("gpu_pct") is not None:
             return float(rec["gpu_pct"])
-        if total_us > 0 and rec.get("gpu_us") is not None:
-            return rec["gpu_us"] / total_us * 100.0
+        gpu_us = rec.get("gpu_us")
+        if listed_ops_us > 0 and gpu_us is not None:
+            return gpu_us / listed_ops_us * 100.0
         return None
 
-    qualifying: list[tuple[float, dict[str, Any]]] = []
+    def _reported_pct(rec: dict[str, Any]) -> tuple[float, str] | None:
+        """Return the percentage to publish and the basis it was computed on.
+
+        Args:
+            rec: A ranking record.
+
+        Returns:
+            A ``(percentage, basis)`` pair, or ``None`` when the record carries
+            neither a usable GPU time nor a reported percentage.
+        """
+        gpu_us = rec.get("gpu_us")
+        if window_us > 0 and gpu_us is not None:
+            return gpu_us / window_us * 100.0, GPU_PCT_BASIS_E2E
+        # No trace wall span available (e.g. a JSON sidecar with no
+        # gpu_timeline.csv beside it): fall back to whatever the sidecar
+        # reported, then to a share of the rows we can see.
+        if rec.get("gpu_pct") is not None:
+            return float(rec["gpu_pct"]), GPU_PCT_BASIS_SIDECAR
+        if listed_ops_us > 0 and gpu_us is not None:
+            return gpu_us / listed_ops_us * 100.0, GPU_PCT_BASIS_LISTED_OPS
+        return None
+
+    qualifying: list[tuple[float, str, dict[str, Any]]] = []
     for rec in ranking:
         name_l = str(rec.get("name") or "").strip().lower()
         if not name_l or name_l in have:
             continue
         # Gate on any high-GPU-time op missing from existing candidates.
-        pct = _pct(rec)
-        if pct is None or pct < min_gpu_pct:
+        admission = _admission_pct(rec)
+        if admission is None or admission < min_gpu_pct:
             continue
-        qualifying.append((pct, rec))
+        scored = _reported_pct(rec)
+        if scored is None:
+            continue
+        qualifying.append((scored[0], scored[1], rec))
 
     if not qualifying:
         return []
     qualifying.sort(key=lambda t: t[0], reverse=True)
 
     out: list[dict[str, Any]] = []
-    for pct, rec in qualifying[: max(1, top_k)]:
+    for pct, pct_basis, rec in qualifying[: max(1, top_k)]:
         gpu_us = rec.get("gpu_us")
         out.append(
             {
@@ -3987,6 +4104,7 @@ def recover_other_bucket_candidates(
                 "shapes": [],
                 "tracelens_category": rec.get("category") or "other",
                 "gpu_pct": round(pct, 3),
+                "gpu_pct_basis": pct_basis,
                 "candidate_source": "other_bucket_fallback",
             }
         )
@@ -3994,11 +4112,24 @@ def recover_other_bucket_candidates(
             log(
                 f"candidate recovery fallback (#514/#515): recovered "
                 f"high-GPU-time op {rec['name']!r} (~{pct:.1f}% GPU time, "
+                f"basis={pct_basis}, "
                 f"category={rec.get('category') or 'other'!r}) that has no "
                 f"analysis.md reasoning-candidate block; routing through "
                 f"classify_patchability so a reusable native kernel still "
                 f"reaches GEAK"
             )
+    # One batch on two bases is the state this labelling exists to prevent: the
+    # percentages are then not comparable with each other, let alone with the
+    # analysis.md candidates they get ranked against. It is reachable when only
+    # some ranking rows carry an absolute GPU time, so say so rather than leave
+    # the evidence buried in a field nothing reads yet.
+    bases = {c["gpu_pct_basis"] for c in out}
+    if len(bases) > 1 and log is not None:
+        log(
+            f"candidate recovery fallback: gpu_pct spans {sorted(bases)} in one "
+            f"batch, so the recovered candidates are not mutually comparable; "
+            f"rank them on gpu_pct_basis-matched subsets only"
+        )
     return out
 
 
@@ -4012,10 +4143,7 @@ def recover_other_bucket_candidates(
 # vs ".h", ordering makes the intent explicit.
 _SOURCE_EXT_RE = re.compile(
     r"\.(?:"
-    + "|".join(
-        re.escape(ext.lstrip("."))
-        for ext in sorted(PATH_SHAPED_EXTENSIONS, key=len, reverse=True)
-    )
+    + "|".join(re.escape(ext.lstrip(".")) for ext in sorted(PATH_SHAPED_EXTENSIONS, key=len, reverse=True))
     + r")\b",
     re.IGNORECASE,
 )
@@ -4137,9 +4265,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     try:
         import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
 
-        payload = yaml.safe_load(
-            Path(config_path).expanduser().read_text(encoding="utf-8")
-        )
+        payload = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - runtime context is advisory
         log.warning("could not read source runtime config: %s", type(exc).__name__)
         return ""
@@ -4150,9 +4276,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     return " ".join(
         str(value).strip()
         for key, value in envs.items()
-        if str(key).startswith("EXTRA_")
-        and str(key).endswith("_ARGS")
-        and str(value).strip()
+        if str(key).startswith("EXTRA_") and str(key).endswith("_ARGS") and str(value).strip()
     )
 
 
@@ -4257,9 +4381,7 @@ def _apply_llm_source_fallback(item: dict[str, Any]) -> None:
             return
         # Answered but not accepted: invented path, low confidence, or refusal.
         audit["outcome"] = "declined"
-        _append_resolution_reason(
-            item, f"llm_fallback_declined: {reason or 'no candidate accepted'}"
-        )
+        _append_resolution_reason(item, f"llm_fallback_declined: {reason or 'no candidate accepted'}")
         log.info(
             "LLM source fallback declined for %r over %d shortlist entr(ies): %s",
             name,
@@ -4400,9 +4522,7 @@ def _resolve_trace_launchers(
             for item in candidates:
                 if _trace_launcher_key(item) in wanted:
                     item.setdefault("source_resolution_reason", reason)
-        summary = (
-            f"trace launcher tier: resolved {len(found)}/{len(wanted)} unresolved candidate(s)"
-        )
+        summary = f"trace launcher tier: resolved {len(found)}/{len(wanted)} unresolved candidate(s)"
         log.info("%s", summary)
         # Also to the run log: that is where an operator looks when candidates
         # come out unresolved, and a logger record does not survive there.
@@ -4415,8 +4535,7 @@ def _resolve_trace_launchers(
         # hides unreadable traces, import errors and parse failures alike.
         reason = f"trace_resolver_error: {type(exc).__name__}: {exc}"
         log.warning(
-            "trace launcher resolution failed for %d candidate(s) (%s); "
-            "falling back to grep",
+            "trace launcher resolution failed for %d candidate(s) (%s); falling back to grep",
             len(wanted),
             reason,
         )
@@ -4493,11 +4612,7 @@ def _finalize_candidates(
             if _fused_moe_shapes is None:
                 _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
             if _fused_moe_invocation_cases is None:
-                _fused_moe_invocation_cases = (
-                    resolve_fused_moe_invocation_cases_from_csv(
-                        perf_report_csv_dir
-                    )
-                )
+                _fused_moe_invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
             invocation_cases = list(_fused_moe_invocation_cases or [])
             if not item.get("shapes") and _fused_moe_shapes:
                 item["shapes"] = list(_fused_moe_shapes)
@@ -4520,11 +4635,7 @@ def _finalize_candidates(
                 invocation_cases = [
                     {
                         "operation": operation,
-                        "input_shapes": (
-                            item.get("input_shapes")
-                            or item.get("shapes")
-                            or []
-                        ),
+                        "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
                         "input_dtypes": item.get("input_dtypes") or [],
                         "raw_arg_spec": item.get("raw_arg_spec") or {},
                     },
@@ -4597,9 +4708,7 @@ def _finalize_candidates(
                     else:
                         item.pop("source_line", None)
                         item.pop("source_function", None)
-                        item["source_resolution_method"] = getattr(
-                            _KSC, "METHOD_GREP", "name_grep"
-                        )
+                        item["source_resolution_method"] = getattr(_KSC, "METHOD_GREP", "name_grep")
                         if trace_source:
                             _append_resolution_reason(
                                 item,
@@ -4752,12 +4861,8 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             confidence=item.get("source_resolution_confidence"),
             reason=str(item.get("source_resolution_reason") or ""),
             rejected_value=str(item.get("source_file_rejected") or ""),
-            previous_source_file=str(
-                item.get("source_resolution_previous_file") or ""
-            ),
-            previous_method=str(
-                item.get("source_resolution_previous_method") or ""
-            ),
+            previous_source_file=str(item.get("source_resolution_previous_file") or ""),
+            previous_method=str(item.get("source_resolution_previous_method") or ""),
         )
         audit = item.get("source_resolution_llm_audit")
         if isinstance(audit, dict):
@@ -4874,14 +4979,10 @@ def apply_resolution_entries_to_candidates(
         item["source_resolution_previous_method"] = str(entry.get("previous_method") or "")
         item["kernel_repo"] = find_repo_root(new_source) if new_source else ""
         item["source_type"] = source_type_for(item.get("name", ""), new_source)
-        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
-            item.get("name", ""), new_source
-        ):
+        if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(item.get("name", ""), new_source):
             item["source_type"] = "vendor_binary"
             item["vendor_dispatch_wrapper"] = True
-        item["runtime_generated_kernel"] = is_runtime_generated_kernel(
-            item.get("name", ""), new_source
-        )
+        item["runtime_generated_kernel"] = is_runtime_generated_kernel(item.get("name", ""), new_source)
         _stamp_candidate_metadata(item, op_cat_map)
         changed += 1
     return changed
@@ -4943,12 +5044,8 @@ def write_source_resolution_artifact(
             _review_source_resolution(doc, log_path=log_path)
         # Fold any revision back onto the candidates: they, not this file, are
         # what the dispatch stage reads.
-        reviewed_entries = [
-            entry for entry in (doc.get("entries") or []) if isinstance(entry, dict)
-        ]
-        applied = apply_resolution_entries_to_candidates(
-            reviewed_entries, candidates, op_cat_map
-        )
+        reviewed_entries = [entry for entry in (doc.get("entries") or []) if isinstance(entry, dict)]
+        applied = apply_resolution_entries_to_candidates(reviewed_entries, candidates, op_cat_map)
         if applied:
             review_metadata = {
                 str(entry.get("kernel_id") or ""): {
@@ -4982,10 +5079,7 @@ def write_source_resolution_artifact(
         atomic_write_json(path, doc)
         final_entries = doc.get("entries") or []
         resolved = sum(1 for entry in final_entries if entry.get("source_file"))
-        summary = (
-            f"source resolution: {resolved}/{len(final_entries)} "
-            f"kernel(s) located -> {path.name}"
-        )
+        summary = f"source resolution: {resolved}/{len(final_entries)} kernel(s) located -> {path.name}"
         log.info("%s", summary)
         if log_path:
             append_log(log_path, summary)
@@ -5359,6 +5453,53 @@ def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
         return []
 
 
+# TraceLens has spelled the compute / exposed-communication timeline rows
+# several ways across versions; accept every spelling seen in the wild rather
+# than silently reporting "no compute row" (which would disable the gate).
+_COMPUTE_TIMELINE_TYPES = ("computation_time", "compute_time", "computation", "compute")
+_EXPOSED_COMM_TIMELINE_TYPES = ("exposed_comm_time", "exposed_communication_time", "exposed_communication")
+
+#: Column spellings for the share and duration cells of a gpu_timeline row. The
+#: row *labels* were already matched by shape; the columns holding the numbers
+#: need the same tolerance, or a renamed header reads as "value 0" instead of
+#: "value unknown".
+_GPU_TIMELINE_PCT_COLUMNS = ("percent", "percentage", "percentage (%)", "pct", "%")
+_GPU_TIMELINE_MS_COLUMNS = ("time ms", "time (ms)", "time_ms", "ms")
+
+
+def _gpu_timeline_cell(row: dict[str, str], columns: tuple[str, ...]) -> float | None:
+    """Read one numeric cell from a gpu_timeline row, or ``None`` if unusable.
+
+    Absent, blank and unparseable all collapse to ``None`` rather than to a
+    number. A defaulted ``0`` is not a neutral answer here: the low-compute gate
+    fires *below* its threshold, so a renamed or truncated column would read as
+    "0% compute" and suppress the hot-kernel list on every trace, silently and
+    with ``status`` still ``ok``. Every caller must be able to distinguish "the
+    profile says zero" from "this file did not tell us".
+
+    Args:
+        row: A parsed ``gpu_timeline.csv`` row.
+        columns: Accepted column spellings, in priority order.
+
+    Returns:
+        The cell value, or ``None`` when no accepted column carries a number.
+    """
+    lowered = {str(k).strip().lower(): v for k, v in row.items() if k}
+    for column in columns:
+        if column not in lowered:
+            continue
+        raw = lowered[column]
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            # csv.DictReader hands back None for a short row, and float(None)
+            # raises TypeError rather than ValueError.
+            return float(str(raw).strip().rstrip("%"))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
     """Read GPU idle percentage directly from gpu_timeline.csv.
 
@@ -5368,16 +5509,59 @@ def _extract_idle_pct_from_gpu_timeline(output_dir: Path) -> float | None:
 
     Returns:
         The GPU idle percentage, or ``None`` when the CSV is absent or has no
-        idle-time row.
+        usable idle-time row.
     """
-    try:
-        for row in _load_gpu_timeline_rows(output_dir):
-            if (row.get("type") or "").strip().lower() == "idle_time":
-                return float(row.get("percent", 0))
-    except ValueError:
-        # malformed CSV numeric field; treat as absent
-        return None
+    for row in _load_gpu_timeline_rows(output_dir):
+        if (row.get("type") or "").strip().lower() == "idle_time":
+            return _gpu_timeline_cell(row, _GPU_TIMELINE_PCT_COLUMNS)
     return None
+
+
+def _extract_pct_from_gpu_timeline(output_dir: Path, row_types: tuple[str, ...]) -> float | None:
+    """Read a percentage from the first matching gpu_timeline.csv row type.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+        row_types: Accepted ``type`` spellings, in priority order.
+
+    Returns:
+        The percentage, or ``None`` when the CSV is absent, carries none of the
+        accepted row types, or holds no readable share column.
+    """
+    rows = _load_gpu_timeline_rows(output_dir)
+    by_type = {(row.get("type") or "").strip().lower(): row for row in rows}
+    for row_type in row_types:
+        row = by_type.get(row_type)
+        if row is not None:
+            return _gpu_timeline_cell(row, _GPU_TIMELINE_PCT_COLUMNS)
+    return None
+
+
+def _extract_compute_pct_from_gpu_timeline(output_dir: Path) -> float | None:
+    """Read the GPU compute percentage from gpu_timeline.csv.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+
+    Returns:
+        The compute percentage, or ``None`` when unavailable.
+    """
+    return _extract_pct_from_gpu_timeline(output_dir, _COMPUTE_TIMELINE_TYPES)
+
+
+def _extract_exposed_comm_pct_from_gpu_timeline(output_dir: Path) -> float | None:
+    """Read the exposed-communication percentage from gpu_timeline.csv.
+
+    Args:
+        output_dir: The analysis output directory holding
+            ``perf_report_csvs/gpu_timeline.csv``.
+
+    Returns:
+        The exposed-communication percentage, or ``None`` when unavailable.
+    """
+    return _extract_pct_from_gpu_timeline(output_dir, _EXPOSED_COMM_TIMELINE_TYPES)
 
 
 def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
@@ -5389,15 +5573,12 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
 
     Returns:
         The trace total time in microseconds, or ``None`` when the CSV is
-        absent or has no total-time row.
+        absent or has no usable total-time row.
     """
-    try:
-        for row in _load_gpu_timeline_rows(output_dir):
-            if (row.get("type") or "").strip().lower() == "total_time":
-                return float(row.get("time ms", 0)) * 1000.0
-    except ValueError:
-        # malformed CSV numeric field; treat as absent
-        return None
+    for row in _load_gpu_timeline_rows(output_dir):
+        if (row.get("type") or "").strip().lower() == "total_time":
+            ms = _gpu_timeline_cell(row, _GPU_TIMELINE_MS_COLUMNS)
+            return None if ms is None else ms * 1000.0
     return None
 
 
@@ -5872,7 +6053,7 @@ def run_command(
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 # Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "cf3e4b19c2ac080a921a18a6add96b38526b4a8b"
+_TRACELENS_REF_DEFAULT = "171dd74721ca1ec45709e5805b68ae1f65e27811"
 
 
 def _default_tracelens_root() -> Path:
@@ -6874,9 +7055,7 @@ def write_reports(
                         )
                         if _est:
                             _diff_report["analytic_ceiling"] = _est
-                            _actual_us = float(
-                                _diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0
-                            )
+                            _actual_us = float(_diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0)
                             if _est.get("ideal_ms") and _actual_us > 0:
                                 _diff_report["analytic_within_pct"] = round(
                                     _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
@@ -7028,10 +7207,7 @@ def main() -> int:
     parser.add_argument(
         "--runtime-config",
         default="",
-        help=(
-            "Materialized workload YAML used only to recover EXTRA_*_ARGS for "
-            "bounded source-resolution context."
-        ),
+        help=("Materialized workload YAML used only to recover EXTRA_*_ARGS for bounded source-resolution context."),
     )
     parser.add_argument(
         "--height",
@@ -7198,16 +7374,10 @@ def main() -> int:
         for key, value in os.environ.items()
         if key.startswith("EXTRA_") and key.endswith("_ARGS") and value.strip()
     )
-    materialized_server_args = _runtime_server_args_from_config(
-        str(getattr(args, "runtime_config", "") or "")
-    )
+    materialized_server_args = _runtime_server_args_from_config(str(getattr(args, "runtime_config", "") or ""))
     set_runtime_context(
         model_path=str(getattr(args, "model_path", "") or ""),
-        server_args=" ".join(
-            value
-            for value in (inherited_server_args, materialized_server_args)
-            if value
-        ),
+        server_args=" ".join(value for value in (inherited_server_args, materialized_server_args) if value),
         framework=str(getattr(args, "framework", "") or ""),
         precision=str(getattr(args, "precision", "") or ""),
     )
@@ -7259,6 +7429,38 @@ def main() -> int:
         # be taken.
         analysis_trace_path = trace_files[0]
 
+        # Fail-fast when the input is nothing but CUDA-graph capture sidecars.
+        #
+        # Ahead of the kernel probe below because the two answer different
+        # questions and only this one is reliable here. A capture records the
+        # graph being built, so it carries a handful of stray kernels rather
+        # than none -- 2 out of 1.49M events on the run that prompted this --
+        # and a probe that asks "are there any kernels" therefore passes it and
+        # hands the splitter a file with no iteration loop in it. The splitter
+        # then fails with ``trace_split_no_steady_state``, which reads as "the
+        # window was too short" and sends the next person to lengthen a capture
+        # that was never a workload timeline to begin with.
+        #
+        # ``all`` rather than ``any``: a healthy profile writes the annotated
+        # trace *beside* its sidecars, and discovery already sorts those first.
+        # Only an input with nothing else in it is unanalysable.
+        if not args.dry_run and trace_files:
+            capture_root = _capture_classification_root(trace_input)
+            if all(_is_capture_fragment(p, capture_root) for p in trace_files):
+                raise RuntimeError(
+                    "trace_input_capture_only: "
+                    f"all {len(trace_files)} trace file(s) under {trace_input} "
+                    "are CUDA-graph capture sidecars. "
+                    "A capture records graph construction rather than "
+                    "execution, so it holds no per-iteration annotations for "
+                    "the steady-state splitter to cut on. "
+                    "The upstream profile produced no annotated workload trace: "
+                    "re-profile so the run writes one beside the sidecars. "
+                    "Sidecars are a supported auxiliary input -- pass them as "
+                    "--capture-folder alongside a real trace, never as "
+                    "--trace-input."
+                )
+
         # Fail-fast on CPU-only traces.
         #
         # Probes candidates in discovery order rather than only the first. A
@@ -7298,8 +7500,7 @@ def main() -> int:
                     break
             append_log(
                 log_path,
-                f"trace_gpu_kernel_events={kernel_event_count} "
-                f"(probed={', '.join(probed)})",
+                f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
             )
             if analysis_trace_path != trace_files[0]:
                 promotion_warning: dict[str, Any] = {
@@ -7717,25 +7918,50 @@ def main() -> int:
                         raw_trace_path,
                     )
                 )
+                compute_pct_value = _extract_compute_pct_from_gpu_timeline(tracelens_dir)
+                exposed_comm_pct_value = _extract_exposed_comm_pct_from_gpu_timeline(
+                    tracelens_dir,
+                )
+                compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
+                    compute_pct_value,
+                    exposed_comm_pct_value,
+                    tracelens_dir / "analysis.md",
+                )
                 if graph_under_recorded_warning is not None:
+                    # Under-recording deflates every recorded share alike, so the
+                    # compute share is as unreliable as idle% here.
+                    low_compute_warning = None
                     trace_health_warnings.append(graph_under_recorded_warning)
                     append_log(
                         log_path,
                         "deterministic: high idle% is a graph under-recording "
                         "artifact (profiler captured ~1 of N graph replays); "
-                        "skipping the idle gate and keeping hot_kernels[].",
+                        "skipping the idle/compute gates and keeping hot_kernels[].",
                     )
-                if high_idle_warning is not None:
-                    assert idle_pct_value is not None
+                if high_idle_warning is not None or low_compute_warning is not None:
                     agent_candidates = []
                     allow_empty_candidates = True
-                    trace_health_warnings.append(high_idle_warning)
-                    append_log(
-                        log_path,
-                        f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
-                        f"(threshold {idle_pct_threshold:.2f}%); "
-                        "suppressing hot_kernels[]",
-                    )
+                    if high_idle_warning is not None:
+                        assert idle_pct_value is not None
+                        trace_health_warnings.append(high_idle_warning)
+                        append_log(
+                            log_path,
+                            f"deterministic: GPU Idle % = {idle_pct_value:.2f}% "
+                            f"(threshold {idle_pct_threshold:.2f}%); "
+                            "suppressing hot_kernels[]",
+                        )
+                    if low_compute_warning is not None:
+                        assert compute_pct_value is not None
+                        trace_health_warnings.append(low_compute_warning)
+                        append_log(
+                            log_path,
+                            f"deterministic: GPU Compute % = "
+                            f"{compute_pct_value:.2f}% (threshold "
+                            f"{compute_pct_threshold:.2f}%); suppressing "
+                            "hot_kernels[] — a kernel rewrite is bounded by "
+                            "the compute share and cannot move end-to-end "
+                            "latency here",
+                        )
                 else:
                     if idle_pct_value is not None and graph_under_recorded_warning is None:
                         append_log(
@@ -7838,31 +8064,67 @@ def main() -> int:
                             raw_trace_path,
                         )
                     )
+                    compute_pct_value = extract_compute_pct_from_analysis_md(
+                        skill_result.report_path,
+                    )
+                    exposed_comm_pct_value = extract_exposed_comm_pct_from_analysis_md(
+                        skill_result.report_path,
+                    )
+                    compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
+                        compute_pct_value,
+                        exposed_comm_pct_value,
+                        skill_result.report_path,
+                    )
                     if graph_under_recorded_warning is not None:
+                        # Under-recording deflates every recorded share alike, so
+                        # the compute share is as unreliable as idle% here.
+                        low_compute_warning = None
                         trace_health_warnings.append(graph_under_recorded_warning)
                         append_log(
                             log_path,
                             "TraceLens high idle% is a graph under-recording "
                             "artifact (profiler captured ~1 of N graph replays); "
-                            "skipping the idle gate and keeping hot_kernels[].",
+                            "skipping the idle/compute gates and keeping hot_kernels[].",
                         )
-                    if high_idle_warning is not None:
-                        assert idle_pct_value is not None
+                    if high_idle_warning is not None or low_compute_warning is not None:
                         agent_candidates = []
                         allow_empty_candidates = True
-                        trace_health_warnings.append(high_idle_warning)
-                        report_source = "skipped:high_gpu_idle_pct"
-                        append_log(
-                            log_path,
-                            f"TraceLens Executive Summary reports "
-                            f"Idle % = {idle_pct_value:.2f}% (threshold "
-                            f"{idle_pct_threshold:.2f}%); suppressing "
-                            "hot_kernels[] — kernel rewriting cannot move "
-                            "end-to-end latency in the high-idle regime. "
-                            "Coordinator will see this in "
-                            "trace_health_warnings[] and route to "
-                            "parameter optimization.",
-                        )
+                        # Both gates can fire on one window (95% idle AND 3%
+                        # compute is a real shape), so accumulate rather than
+                        # let the second suppression erase the first, matching
+                        # the "+".join the non-suppressed path already uses.
+                        skipped_sources: list[str] = []
+                        if high_idle_warning is not None:
+                            assert idle_pct_value is not None
+                            trace_health_warnings.append(high_idle_warning)
+                            skipped_sources.append("skipped:high_gpu_idle_pct")
+                            append_log(
+                                log_path,
+                                f"TraceLens Executive Summary reports "
+                                f"Idle % = {idle_pct_value:.2f}% (threshold "
+                                f"{idle_pct_threshold:.2f}%); suppressing "
+                                "hot_kernels[] — kernel rewriting cannot move "
+                                "end-to-end latency in the high-idle regime. "
+                                "Coordinator will see this in "
+                                "trace_health_warnings[] and route to "
+                                "parameter optimization.",
+                            )
+                        if low_compute_warning is not None:
+                            assert compute_pct_value is not None
+                            trace_health_warnings.append(low_compute_warning)
+                            skipped_sources.append("skipped:low_gpu_compute_pct")
+                            append_log(
+                                log_path,
+                                f"TraceLens Executive Summary reports "
+                                f"Compute % = {compute_pct_value:.2f}% "
+                                f"(threshold {compute_pct_threshold:.2f}%); "
+                                "suppressing hot_kernels[] — a kernel rewrite "
+                                "is bounded by the compute share and cannot "
+                                "move end-to-end latency here. Coordinator "
+                                "will see this in trace_health_warnings[] and "
+                                "route to comm/parameter optimization.",
+                            )
+                        report_source = "+".join(skipped_sources)
                     else:
                         if idle_pct_value is not None and graph_under_recorded_warning is None:
                             append_log(
@@ -7884,6 +8146,9 @@ def main() -> int:
                             skill_result.output_dir,
                             report_cands,
                             top_k=args.top_k,
+                            total_window_us=_extract_total_time_us_from_gpu_timeline(
+                                skill_result.output_dir,
+                            ),
                             log=lambda msg: append_log(log_path, msg),
                         )
                         if fallback_cands:
@@ -8026,9 +8291,7 @@ def main() -> int:
                     allow_review=False,
                 )
             if source_resolution_path.is_file():
-                artifacts["kernel_source_resolution"] = str(
-                    source_resolution_path
-                )
+                artifacts["kernel_source_resolution"] = str(source_resolution_path)
         artifacts.update(
             write_reports(
                 run_dir,

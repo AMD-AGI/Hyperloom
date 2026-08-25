@@ -3,10 +3,10 @@
 
 """SubAgentRunner
 
-Runs one already-queued ``tasks`` row: acquires its lanes, replays PolicyGate
-at dispatch, invokes the deterministic Python ``ActionRunner`` executor
-registered for ``task.kind`` in ``self.executor_registry``, and transitions the
-row to its terminal state.
+Runs one already-queued ``tasks`` row under the lease its caller won: replays
+PolicyGate at dispatch, invokes the deterministic Python ``ActionRunner``
+executor registered for ``task.kind`` in ``self.executor_registry``, and
+transitions the row to its terminal state.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import logging
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskRegistry
+from ..state.task_registry import IllegalTransition, Task, TaskRegistry
 from ..trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
@@ -35,6 +35,8 @@ log = logging.getLogger(__name__)
 # can only ever attest to this one agent. Widening that — letting any running
 # task vouch for whoever happens to be quiet — is what allowed a single busy
 # task to silence stall detection for the whole session.
+# Only work that becomes a row is covered here; inline kernel requests are kept
+# visible by a bus heartbeat around the handler instead.
 PROGRESS_OWNER_AGENT = "orchestration"
 
 
@@ -68,16 +70,47 @@ class SubAgentResult:
         state (str): Terminal state — ``"succeeded"`` / ``"failed"``.
         result (dict): Executor result payload (empty on failure).
         error (str | None): Error string when the task failed, else None.
+        error_class (str): Machine-readable failure category. Not a closed
+            enum — each producer mints its own values, so a new prefix
+            family here is discoverable only via its consumers, not via a
+            central registry:
+
+            * ``"policy_{rule}"`` (e.g.
+              ``"policy_source_file_outside_trusted_scope"``): a
+              ``PolicyDenied`` dispatch rejection, keyed on
+              :attr:`PolicyDenied.rule <..policy.gate.PolicyDenied.rule>`.
+              Falls through any exact-match bucket below by design — a
+              policy denial isn't a runtime crash/oom/hang, so
+              :meth:`writeback._pitfall_severity_for` correctly excludes it
+              from ``SEVERITY_CRASH``. Still lands in the gap ledger as its
+              own ``(action, error_class)`` key
+              (:meth:`explore._extract_gaps_from_attempts`), which is enough
+              to group repeat denials without a dedicated bucket.
+            * ``"crash"`` / ``"oom"`` / ``"hang"`` / ``"detokenizer_stall"``:
+              exact-matched by :meth:`writeback._pitfall_severity_for` to
+              classify a failure as crash-severity for the KB.
+            * ``"no_executor"``: no runner registered for the task's
+              ``kind`` — set directly on this dataclass, same site as
+              ``policy_{rule}``, so this exit no longer collapses into
+              ``"unknown_error"`` either.
+            * The raised exception's ``__class__.__name__`` (e.g.
+              ``"TimeoutError"``): an executor raised instead of returning a
+              result. Same reasoning — a real class beats the generic
+              bucket, even though the exact name isn't enumerable up front.
+            * Anything else (including empty): executors set their own
+              ``error_class`` inside ``result``, or leave it unset, in which
+              case the gap ledger buckets it as ``"unknown_error"``.
     """
 
     task_id: str
     state: str  # "succeeded" / "failed"
     result: dict
     error: str | None = None
+    error_class: str = ""
 
 
 class SubAgentRunner:
-    """Routes ``delegate`` work to the matching ActionRunner + holds leases.
+    """Routes ``delegate`` work to the matching ActionRunner, and releases its lease.
 
     ``executor_registry`` maps ``task.kind`` → :data:`ExecutorFn` (tests
     register stubs; production registers shell-wrapping executors).
@@ -150,43 +183,30 @@ class SubAgentRunner:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
-    async def _transition_resilient(
+    async def _write_terminal(
         self,
         task_id: str,
         new_state: str,
         *,
         evidence: dict | None = None,
         context: str,
-        allow_terminal: bool = False,
     ) -> None:
-        """Transition a task to ``new_state``, tolerating a row lost to retention.
+        """Record a task's terminal state, tolerating a row already terminal.
+
+        The one place this runner leaves a task. A watchdog can reclaim the row
+        first, and losing that race means the outcome is already recorded. The
+        ``queued -> running`` claim does not come through here: its rejection is
+        the double-spawn guard and has to reach the caller.
 
         Args:
             task_id: The task to transition.
-            new_state: The target state.
+            new_state: The terminal state to record.
             evidence: Optional evidence dict recorded with the transition.
-            context: Short label describing the transition call site.
-            allow_terminal: Also tolerate an already-terminal row. Only for
-                terminal transitions; on ``queued -> running`` the rejection is
-                the double-spawn guard and must propagate.
-
-        Raises:
-            IllegalTransition: When the row is already terminal and
-                ``allow_terminal`` is False.
+            context: Short label describing the call site.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
-        except TaskNotFound:
-            log.warning(
-                "sub_agent_runner: tasks row for task_id=%s vanished before "
-                "transition→%s (context=%s); keeping the executor result",
-                task_id,
-                new_state,
-                context,
-            )
         except IllegalTransition:
-            if not allow_terminal:
-                raise
             log.warning(
                 "sub_agent_runner: task_id=%s already terminal before "
                 "transition→%s (context=%s); keeping the executor result",
@@ -202,15 +222,17 @@ class SubAgentRunner:
         prebound_lease: Lease | None = None,
         extra_context: dict | None = None,
     ) -> SubAgentResult:
-        """Acquire required lanes, transition queued→running, execute, transition out.
+        """Claim the row, execute it, record the outcome.
 
-        With ``prebound_lease`` the runner skips its own acquire but still
-        owns the release in its finally block.
+        From the claim onwards every exit writes a terminal state, so a row
+        reads ``running`` only while a live coroutine owns it -- which is what
+        the phase gates and the ``tasks.running()`` readers assume. The lease is
+        released by a single finally on every path, a rejected claim included.
 
         Args:
             task: The task to execute.
-            prebound_lease: Optional already-acquired lease; when given, the
-                runner skips its own acquire but still releases it.
+            prebound_lease: The lease the caller won for this task's lanes;
+                released here. ``None`` only for a task that needs no lanes.
             extra_context: Optional extra values merged into the
                 :class:`RunnerContext`.
 
@@ -218,80 +240,75 @@ class SubAgentRunner:
             The :class:`SubAgentResult` capturing terminal state and payload.
         """
         runner = self.executor_registry.get(task.kind)
+        lease: Lease | None = prebound_lease
+        try:
+            if self.policy is not None:
+                try:
+                    self.policy.validate_dispatched_task(
+                        task.kind,
+                        dict(task.params or {}),
+                        task_id=task.task_id,
+                    )
+                except PolicyDenied as denied:
+                    await self._write_terminal(
+                        task.task_id,
+                        "cancelled",
+                        evidence={
+                            "reason": "policy_denied",
+                            "rule": denied.rule,
+                            "error": str(denied),
+                        },
+                        context="dispatch_policy_denied",
+                    )
+                    rule = denied.rule or "denied"
+                    return SubAgentResult(
+                        task_id=task.task_id,
+                        state="failed",
+                        result={},
+                        error=str(denied),
+                        error_class=f"policy_{rule}",
+                    )
 
-        if self.policy is not None:
-            try:
-                self.policy.validate_dispatched_task(
-                    task.kind,
-                    dict(task.params or {}),
-                    task_id=task.task_id,
+            # Running an action whose lanes nobody holds would run it
+            # unserialised, so a missing lease is a caller bug, not a fallback.
+            if lease is None and task.requires_lanes:
+                raise ValueError(
+                    f"task {task.task_id} ({task.kind}) requires lanes "
+                    f"{list(task.requires_lanes)} but was dispatched without a lease"
                 )
-            except PolicyDenied as denied:
-                await self._transition_resilient(
+
+            # Rejection here is the double-spawn guard; it belongs to the caller.
+            await self.tasks.transition(task.task_id, "running")
+
+            if runner is None:
+                await self._write_terminal(
                     task.task_id,
-                    "cancelled",
-                    evidence={
-                        "reason": "policy_denied",
-                        "rule": getattr(denied, "rule", None),
-                        "error": str(denied),
-                    },
-                    context="dispatch_policy_denied",
+                    "failed",
+                    evidence={"reason": "no_executor", "kind": task.kind},
+                    context="no_executor",
                 )
-                if prebound_lease is not None:
-                    await self.locks.release(prebound_lease)
                 return SubAgentResult(
                     task_id=task.task_id,
                     state="failed",
                     result={},
-                    error=str(denied),
+                    error=f"no runner registered for kind={task.kind!r}",
+                    error_class="no_executor",
                 )
 
-        await self._transition_resilient(
-            task.task_id,
-            "running",
-            context="enter_running",
-        )
-
-        if runner is None:
-            await self._transition_resilient(
-                task.task_id,
-                "failed",
-                evidence={"reason": "no_executor", "kind": task.kind},
-                context="no_executor",
-                allow_terminal=True,
-            )
-            if prebound_lease is not None:
-                await self.locks.release(prebound_lease)
-            return SubAgentResult(
-                task_id=task.task_id,
-                state="failed",
-                result={},
-                error=f"no runner registered for kind={task.kind!r}",
-            )
-
-        lease: Lease | None = prebound_lease
-        owned_lease = prebound_lease is None
-        if owned_lease and task.requires_lanes:
-            lease = await self.locks.acquire_many(
-                list(task.requires_lanes),
-                holder_id=task.task_id,
-                task_id=task.task_id,
-                action=task.kind,
-                ttl_sec=task.lease_ttl_sec or 60,
-            )
-        try:
-            workspace = self._pre_mkdir_workspace(task)
-            extra: dict = {}
-            if workspace is not None:
-                extra["workspace"] = str(workspace)
-            if self.session_dir is not None:
-                extra["session_dir"] = str(self.session_dir)
-            if self.shared_state is not None:
-                extra["shared_state"] = self.shared_state
-            if extra_context:
-                extra.update(dict(extra_context))
-            ctx = RunnerContext(task=task, lease=lease, extra=extra)
+            # Workspace prep is inside the terminal-writing block: an ENOSPC
+            # there is a task that failed, not a task still running.
             try:
+                workspace = self._pre_mkdir_workspace(task)
+                extra: dict = {}
+                if workspace is not None:
+                    extra["workspace"] = str(workspace)
+                if self.session_dir is not None:
+                    extra["session_dir"] = str(self.session_dir)
+                if self.shared_state is not None:
+                    extra["shared_state"] = self.shared_state
+                if extra_context:
+                    extra.update(dict(extra_context))
+                ctx = RunnerContext(task=task, lease=lease, extra=extra)
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
@@ -302,34 +319,32 @@ class SubAgentRunner:
                 # and read as live work to every phase gate until the TTL sweep
                 # noticed. Recorded as ``cancelled`` rather than ``failed``
                 # because the action was never given the chance to fail.
-                await self._transition_resilient(
+                await self._write_terminal(
                     task.task_id,
                     "cancelled",
                     evidence={"reason": "cancelled_in_flight"},
                     context="executor_cancelled",
-                    allow_terminal=True,
                 )
                 raise
             except Exception as exc:  # noqa: BLE001 — surface to task.history
-                await self._transition_resilient(
+                await self._write_terminal(
                     task.task_id,
                     "failed",
                     evidence={"error": repr(exc)},
                     context="executor_exception",
-                    allow_terminal=True,
                 )
                 return SubAgentResult(
                     task_id=task.task_id,
                     state="failed",
                     result={},
                     error=repr(exc),
+                    error_class=exc.__class__.__name__,
                 )
-            await self._transition_resilient(
+            await self._write_terminal(
                 task.task_id,
                 "succeeded",
                 evidence={"result_keys": sorted(result_payload.keys())},
                 context="executor_success",
-                allow_terminal=True,
             )
             return SubAgentResult(
                 task_id=task.task_id,
@@ -337,7 +352,7 @@ class SubAgentRunner:
                 result=result_payload,
             )
         finally:
-            # Always release whoever acquired the lease — pre-bound or owned.
+            # The caller won the lease; releasing it is this runner's job.
             if lease is not None:
                 await self.locks.release(lease)
 

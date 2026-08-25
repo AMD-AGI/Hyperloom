@@ -389,9 +389,7 @@ class PhaseEvent(TypedDict, total=False):
     """
 
     ts: str
-    action: (
-        str  # baseline / profile / explore / roofline / sweep / kernel_opt / integrate (+ archived: backends / params / validate_stack)
-    )
+    action: str  # baseline / profile / explore / roofline / sweep / kernel_opt / integrate (+ archived: backends / params / validate_stack)
     task_id: str
     kernel_id: str | None  # only for kernel_agent-owned actions
     status: str  # succeeded / failed
@@ -408,8 +406,10 @@ class PhaseEvent(TypedDict, total=False):
 # Capability summary — Capability cards in UI
 class CapabilityEntry(TypedDict, total=False):
     status: str  # kept / reverted / tried / attempted / not_attempted / not_configured / failed / completed
-    attempts: int
-    keeps: int  # kernels adopted at integrate (NOT micro-only KEEP)
+    attempts: int  # invocation rows, NOT distinct kernels: how many tries
+    keeps: int  # distinct kernels adopted at integrate (NOT micro-only KEEP)
+    micro_only_keeps: int  # micro-KEPT kernels that never reached integrate
+    pending_integrate: int  # micro-KEPT kernels whose integrate verdict is undecided
     reverts: int  # micro-KEPT kernels reverted at integrate (e2e regressed)
     e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
     tested: int  # for backends/params/explore: distinct variants tested
@@ -432,8 +432,7 @@ class CapabilitySummary(TypedDict, total=False):
 
     Attributes:
         geak (CapabilityEntry): GEAK kernel-generation capability.
-        forge (CapabilityEntry): Forge kernel-generation capability; emitted by
-            the collector but not yet declared on this TypedDict.
+        forge (CapabilityEntry): Forge kernel-generation capability.
         explore (CapabilityEntry): Primary explore (param/backend search) row.
         backends (CapabilityEntry): Compatibility alias for backend exploration.
         params (CapabilityEntry): Compatibility alias for param exploration.
@@ -445,6 +444,7 @@ class CapabilitySummary(TypedDict, total=False):
     """
 
     geak: CapabilityEntry
+    forge: CapabilityEntry
     # primary explore row; backends/params/validate_stack are compat aliases.
     explore: CapabilityEntry
     backends: CapabilityEntry
@@ -590,6 +590,11 @@ class AdoptedKernel(TypedDict, total=False):
         last_status (str): Last recorded status.
         adopted_at (str): ISO UTC timestamp of adoption.
         attempt_count (int): Number of attempts before adoption.
+        basis (str): Throughput basis the gain was measured on ("hot" / "cold"
+            / "" when the writer did not record one). A gain is meaningless
+            without the baseline it was measured against.
+        alignment_status (str): Whether the producer's baseline agreed with the
+            orchestrator's ("" when not recorded).
     """
 
     kernel_id: str
@@ -601,6 +606,8 @@ class AdoptedKernel(TypedDict, total=False):
     last_status: str
     adopted_at: str
     attempt_count: int
+    basis: str
+    alignment_status: str
 
 
 class RejectedKernel(TypedDict, total=False):
@@ -1029,6 +1036,7 @@ class Geak(TypedDict, total=False):
     output_parity: str | None
     accepted_kernels: list[Any]
     accepted_kernels_source: str | None
+    accepted_kernels_kind_sources: dict[str, int]
     accepted_heads: list[Any]
     kernels_optimized: int
     accepted_config: dict[str, Any]
@@ -1306,6 +1314,22 @@ class PhaseBreakdownGemmTuning(TypedDict, total=False):
     by_tuned_file: dict[str, float]
 
 
+class PhaseBreakdownGeak(TypedDict, total=False):
+    """GEAK e2e gain, split by what was actually running when it was measured.
+
+    ``by_contribution`` keys on ``config`` / ``kernel`` / ``joint``. A GEAK
+    revalidation benchmarks server arguments, env and the authored overlay
+    together against one baseline, so a ``joint`` row's gain cannot be divided
+    between them; it is reported whole under ``joint`` rather than split by
+    guess. ``by_kernel_id`` names the authored kernels that were loaded, and is
+    empty for a config-only gain.
+    """
+
+    total_gain_pct: float
+    by_contribution: dict[str, float]
+    by_kernel_id: dict[str, float]
+
+
 class PhaseBreakdown(TypedDict, total=False):
     """Per-phase gain attribution.
 
@@ -1321,6 +1345,8 @@ class PhaseBreakdown(TypedDict, total=False):
             down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.
         gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
             bucketed separately from source-level kernel rewrites.
+        geak (PhaseBreakdownGeak): GEAK e2e gain, split by whether a config, a
+            kernel, or both were running when it was measured.
         sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
         close (PhaseBreakdownExplore): CLOSE phase gain (usually 0).
         unattributed (PhaseBreakdownExplore): Gain whose phase could not be inferred.
@@ -1331,6 +1357,7 @@ class PhaseBreakdown(TypedDict, total=False):
     explore: PhaseBreakdownExplore
     kernel_agent: PhaseBreakdownKernel
     gemm_tuning: PhaseBreakdownGemmTuning
+    geak: PhaseBreakdownGeak
     sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
     close: PhaseBreakdownExplore  # usually 0
     unattributed: PhaseBreakdownExplore  # gain whose phase couldn't be inferred
@@ -1419,12 +1446,28 @@ class KBFlusherStatus(TypedDict, total=False):
 
 
 class WarmReplayOutcome(TypedDict, total=False):
-    """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields."""
+    """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields.
+
+    ``eval_ran`` / ``replay_accuracy`` / ``baseline_accuracy`` are recorded on
+    every replay that reached a throughput measurement, not only on rejection:
+    a config that was checked and passed is a different record from one that
+    was never checked. ``eval_ran`` is what separates "the model scored 0.0"
+    from "no score exists", which are otherwise both a null accuracy.
+
+    A measurement that fails never stops the run. The replay is admitted and
+    ``eval_error`` carries why no score could be read, so an unjudged promotion
+    is visible after the fact rather than silently indistinguishable from a
+    judged one.
+    """
 
     status: str
     expected_gain_pct: float
     actual_gain_pct: float
     throughput_after: float
+    eval_ran: bool
+    eval_error: str | None
+    replay_accuracy: float | None
+    baseline_accuracy: float | None
     warm_recipe_tier: str
     warm_recipe_conf: float
     config_source: str
@@ -2060,7 +2103,7 @@ class CollectiveAttempt(TypedDict, total=False):
     error: str
     integration_id: str
     integration_decision: str
-    integration_status: str
+    patch_cleanup_status: str
     integration_result_status: str
     integration_revert_status: str
     integration_finalize_status: str

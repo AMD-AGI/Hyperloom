@@ -65,7 +65,6 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
-from hyperloom.orchestrator.roles.robustness_pulse import _PULSE_TIMEOUT_SEC
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -525,6 +524,54 @@ class TestPreDispatchBackstop:
         assert [t.task_id for t, _, _ in spawned] == []
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
+    @pytest.mark.asyncio
+    async def test_a_queued_targeted_build_is_dropped_when_the_budget_is_spent(
+        self,
+        coord: Coordinator,
+    ):
+        """The kind the pump does not join is still subject to the budget gate.
+
+        It is exempt from being *joined*, not from admission: a compile started
+        against a spent budget runs on past the session it was charged to.
+        """
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="targeted_build",
+            params={},
+            idempotency_key="q-build",
+            requires_lanes=["build_lane"],
+            lease_ttl_sec=900,
+        )
+        _set_budget(coord, minutes=600, elapsed_min=600.0)
+
+        spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=set())
+
+        assert [t.task_id for t, _, _ in spawned] == []
+        assert (await coord.tasks.get(task.task_id)).state == "cancelled"
+        assert task.task_id not in coord.dispatcher._inflight_actions
+
+    @pytest.mark.asyncio
+    async def test_a_targeted_build_that_fits_is_dispatched_but_not_joined(
+        self,
+        coord: Coordinator,
+    ):
+        """It is registered for cancellation and excluded, but never joined."""
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind="targeted_build",
+            params={},
+            idempotency_key="q-build-fits",
+            requires_lanes=["build_lane"],
+            lease_ttl_sec=900,
+        )
+        exclude: set[str] = set()
+
+        spawned = await coord.dispatcher._spawn_fitting_queued(exclude_ids=exclude)
+
+        assert [t.task_id for t, _, _ in spawned] == []
+        assert task.task_id in coord.dispatcher._inflight_actions
+        assert task.task_id in exclude
+        await coord.dispatcher.cancel_inflight_actions(reason="test_teardown")
 
     @pytest.mark.asyncio
     async def test_a_queued_conc_sweep_the_budget_outlived_is_recorded_as_skipped(
@@ -821,20 +868,13 @@ class TestTheCooperativeStopWindowsCompose:
         """
         assert _COOPERATIVE_CANCEL_GRACE_SEC == 8.5 + 0.25 + 5.0 + 10.0
 
-    def test_the_variant_boundary_tick_is_skipped_rather_than_budgeted_for(self):
-        """The one step in the unwind this window deliberately does not cover.
+    def test_a_cancelled_scope_is_visible_to_the_work_inside_it(self):
+        """The unwind's steps read the scope, not a returncode.
 
-        A cooperative stop returns its sentinel, so ``run_grid`` reaches its
-        variant boundary the ordinary way and would spend the robustness tick's
-        whole budget there -- between recording the stopped round's row and
-        releasing what the round held, which are the terms above. Counting it
-        would take the window past what an operator's own ``SIGTERM`` grace
-        allows, so the tick gives way instead: the scope it reads is cancelled for
-        the rest of the action's life, so once the cancel is out no boundary
-        spends it.
+        A cooperative stop returns its sentinel rather than raising, so a step
+        can be reached on the ordinary path with the cancel already outstanding
+        and has to ask.
         """
-        assert _PULSE_TIMEOUT_SEC == 8.0
-        assert 8.5 + 0.25 + 5.0 + 10.0 + _PULSE_TIMEOUT_SEC > _COOPERATIVE_CANCEL_GRACE_SEC
         scope = CancelScope()
         with use_cancel_scope(scope):
             assert not stop_was_asked_for()
@@ -1385,9 +1425,7 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert stamped == pytest.approx(start + 3600.0, abs=2.0)
 
     @pytest.mark.asyncio
-    async def test_run_stamps_a_fractional_budget_before_int_truncation(
-        self, coord: Coordinator
-    ):
+    async def test_run_stamps_a_fractional_budget_before_int_truncation(self, coord: Coordinator):
         from hyperloom.common.coerce import to_unix
 
         try:
@@ -1413,9 +1451,7 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert coord.shared_state.deadline_unix == pytest.approx(original)
 
     @pytest.mark.asyncio
-    async def test_a_spent_session_stops_instead_of_reissuing_the_budget(
-        self, coord: Coordinator
-    ):
+    async def test_a_spent_session_stops_instead_of_reissuing_the_budget(self, coord: Coordinator):
         from datetime import datetime, timedelta, timezone
 
         start = datetime.now(timezone.utc) - timedelta(hours=3)

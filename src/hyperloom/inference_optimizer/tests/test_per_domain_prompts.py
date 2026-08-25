@@ -464,8 +464,6 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
-    SPECIALIST_ACTION_NAME,
-    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
@@ -479,7 +477,6 @@ from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
 from hyperloom.orchestrator.specialists.runner import (
-    DEFAULT_SPECIALIST_TOOLS,
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
     build_empty_specialist_done,
@@ -694,46 +691,24 @@ def test_R2_max_turns_zero_allowed_unbounded(gate):
     )
 
 
-def test_R2_max_turns_negative_allowed(gate):
-    """A negative max_turns is self-limiting (empty turn range), so it is not denied."""
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": {
-                    "domain": "serving_specialist",
-                    "gap_canonical_id": "gap.x",
-                    "max_turns": -1,
+def test_R2_max_turns_negative_denied(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.x",
+                        "max_turns": -1,
+                    },
                 },
-            },
-        ),
-    )
-
-
-def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
-    """The synthetic ``specialist`` action_name bypasses the action-catalogue lookup that would deny it as ``unknown_action``."""
-    # Even with a catalogue wired, the specialist branch is checked before the unknown_action gate.
-    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-
-    gate_with_registry = PolicyGate(
-        role_registry=default_role_registry(),
-        action_registry=ACTION_CATALOGUE,
-    )
-    gate_with_registry.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": SPECIALIST_ACTION_NAME,
-                "params": {
-                    "domain": "serving_specialist",
-                    "gap_canonical_id": "gap.x",
-                },
-            },
-        ),
-    )
+            ),
+        )
+    assert exc.value.rule == "specialist_dispatch_source"
+    assert "max_turns" in str(exc.value)
 
 
 # research_lane lane registration.
@@ -801,7 +776,7 @@ def test_pr_monitor_section_lists_all_granted_tools():
     _sys, usr_p = _build_serving_prompt(task_id="tool-drift", pr_monitor_available=True)
     prefix = "mcp__pr_monitor__"
     for tool_full in PR_MONITOR_TOOL_NAMES:
-        short = tool_full[len(prefix):]
+        short = tool_full[len(prefix) :]
         assert short in usr_p, (
             f"Granted PR Monitor tool '{short}' is not advertised in §6 PR MONITOR. "
             "Update _section_pr_feed in specialist_prompt_builder.py."
@@ -945,12 +920,12 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
     assert "unknown specialist domain" in result.specialist_done["reason"]
 
 
-def test_specialist_tool_denylist_is_empty():
-    """KB write MCP tools were removed with specialist recipe_kb; denylist is empty."""
-    assert SPECIALIST_TOOL_DENYLIST == frozenset()
+def test_specialist_tool_denylist_blocks_dangerous_tools():
+    """KillShell and SlashCommand are denied to enforce the process-safety prompt rule."""
+    assert "KillShell" in SPECIALIST_TOOL_DENYLIST
+    assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
     for write_tool in ("Edit", "Write", "MultiEdit"):
         assert write_tool not in SPECIALIST_TOOL_DENYLIST
-        assert write_tool in DEFAULT_SPECIALIST_TOOLS
 
 
 def test_build_empty_specialist_done_shape():

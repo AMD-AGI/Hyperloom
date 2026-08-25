@@ -133,9 +133,7 @@ def test_invalid_rebuild_command_rejected_before_snapshot_mutation(akp, tmp_path
     )
     snapshot_dir = tmp_path / "snapshot"
     snapshot_dir.mkdir()
-    (snapshot_dir / "kernel.cpp").write_text(
-        "// PATCHED kernel\nint main() { return 1; }\n", encoding="utf-8"
-    )
+    (snapshot_dir / "kernel.cpp").write_text("// PATCHED kernel\nint main() { return 1; }\n", encoding="utf-8")
 
     res = akp.apply_kernel_patch(
         patch_path=str(patch),

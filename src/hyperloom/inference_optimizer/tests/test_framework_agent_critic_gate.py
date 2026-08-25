@@ -30,10 +30,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {
-        name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "critic", "robustness")
-    }
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 @pytest.fixture

@@ -75,9 +75,7 @@ def index_device_symbols(
     pending = {str(symbol).strip() for symbol in symbols if str(symbol).strip()}
     if not pending:
         return {}, False
-    alternatives = "|".join(
-        re.escape(symbol) for symbol in sorted(pending, key=lambda value: (-len(value), value))
-    )
+    alternatives = "|".join(re.escape(symbol) for symbol in sorted(pending, key=lambda value: (-len(value), value)))
     pattern = re.compile(r"\b(?P<symbol>" + alternatives + r")\s*\(")
     located: dict[str, tuple[str, int, str]] = {}
     scanned = 0
@@ -132,14 +130,8 @@ def _prorated_totals(
         or not math.isfinite(float(total_time_ms))
         or total_time_ms <= 0
     ):
-        raise ValueError(
-            "nccl_summary.total_time_ms must be finite and positive"
-        )
-    if (
-        isinstance(total_count, bool)
-        or not isinstance(total_count, int)
-        or total_count <= 0
-    ):
+        raise ValueError("nccl_summary.total_time_ms must be finite and positive")
+    if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count <= 0:
         raise ValueError("nccl_summary.total_count must be a positive integer")
     sampled: "OrderedDict[str, float]" = OrderedDict()
     streams: dict[str, int] = {}
@@ -245,8 +237,7 @@ def extract_collective_candidates(
         if located is None:
             if log_fn is not None:
                 log_fn(
-                    f"nccl_summary: no device source for symbol {symbol!r} "
-                    f"({name[:60]}); dropping collective candidate"
+                    f"nccl_summary: no device source for symbol {symbol!r} ({name[:60]}); dropping collective candidate"
                 )
             continue
         source_file, source_line, source_function = located

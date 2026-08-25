@@ -82,9 +82,7 @@ def _run(tmp_path: Path, *, forge_path: str | None, import_ok: bool) -> tuple[st
     Returns (stdout, returncode, pip_called).
     """
     fake_py = _fake_python(tmp_path, import_ok=import_ok)
-    forge_line = (
-        f'export FORGE_PATH="{forge_path}"' if forge_path is not None else "unset FORGE_PATH || true"
-    )
+    forge_line = f'export FORGE_PATH="{forge_path}"' if forge_path is not None else "unset FORGE_PATH || true"
     harness = f"""#!/usr/bin/env bash
 set -euo pipefail
 log() {{ echo "[log] $*"; }}

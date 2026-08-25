@@ -1,6 +1,6 @@
 ---
 name: robustness-agent
-description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / prune_branch / delegate).
+description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (prune_branch / delegate).
 ---
 
 # Robustness Agent
@@ -10,8 +10,7 @@ A Python package that ships the `robustness` agent for the
 
 The agent observes shared state, the orchestration agent's inbox, and
 cluster telemetry; classifies symptoms; and emits Coordinator-validated
-intents (alert / prune_branch / kill_task / delegate / etc.) plus
-on-disk findings.
+intents (alert / prune_branch / delegate / etc.) plus on-disk findings.
 
 ## Quick start
 
@@ -149,7 +148,7 @@ listed below.
 | `repeated_policy_denied` (≥ 3) | medium | `alert(medium)` | `event` |
 | `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(...)`; HIGH tier also emits `prune_branch(family)` | `event` |
 | `idempotency_replay` | medium | `alert(medium)` | `event` |
-| `recover_unsuccessful` | high | `alert(high)` + `delegate(report)` | `event` |
+| `recover_unsuccessful` | high | `alert(high)` | `event` |
 | `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | `local_health` |
 | `local_server_unreachable`, no server process and no benchmark client of this session | — | suppressed (an idle stretch, not an outage) | `local_health` |
 | `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | `local_health` |
@@ -160,9 +159,9 @@ listed below.
 | `fd_pressure` (≥ warn_pct / ≥ crit_pct) | medium / high | `alert(medium)` / `alert(high)` | `local_health` |
 | `ray_head_dead` | high | `alert(high)` | `local_health` |
 | `gpu_memory_leaked` | high | `alert(high)` + `delegate(recover, force_gpu_cleanup=True)` | `gpu_leak` |
-| `deadline_warning` | medium / high | `alert(...)`; HIGH tier also emits `delegate(report)` | `budget` |
-| `deadline_imminent` | high | `alert(high)` + `delegate(report)` | `budget` |
-| `deadline_hard_cutoff` | high | `alert(high)` + `delegate(report)` | `budget` |
+| `deadline_warning` | medium / high | `alert(...)` | `budget` |
+| `deadline_imminent` | high | `alert(high)` | `budget` |
+| `deadline_hard_cutoff` | high | `alert(high)` | `budget` |
 | `budget_burn_no_gain` | medium | `alert(medium)` | `budget` |
 | `budget_strategy_drift` | medium | `alert(medium)` | `budget` |
 | `phase_budget_nearly_exhausted` | medium | `alert(medium)` | `phase_budget` |
@@ -190,7 +189,7 @@ listed below.
 | `kernel_opt_no_progress` | high | `alert(high)` + `prune_branch(kernel_opt)` | `kernel_pipeline` |
 | `state_json_corrupt` | high | `alert(high)` | `state_integrity` |
 | `coordinator_wal_bloat` (≥ warn / ≥ critical bytes) | medium / high | `alert(medium)` / `alert(high)` | `state_integrity` |
-| `stale_lease` | high | `alert(high)` + `kill_task(task_id)` | `state_integrity` |
+| `stale_lease` | high | `alert(high)` | `state_integrity` |
 | `inbox_bloat` (≥ warn / ≥ critical bytes) | low / medium | `send_message(observation)` / `alert(medium)` | `state_integrity` |
 | `coordinator_zombie` | high | `alert(high)` | `state_integrity` |
 | `gateway_auth_outage` | high | `alert(high)` | `external_deps` |
@@ -203,7 +202,7 @@ alert's `detail.suggestion` field and the ladder never auto-emits
 `escalate_strategy_change` — the intent stays PolicyGate-allowed for
 explicit drives, but Orchestration owns the phase-advance decision.
 `delegate` is constrained to the `ROBUSTNESS_DELEGATE_ACTIONS`
-allowlist (`accuracy_gate` / `recover` / `report` / `server_lifecycle`).
+allowlist (`recover` only); all other policing intents ride alerts.
 
 Cooldown: identical `(symptom_name, subject)` keys are silenced for
 `config.cooldown_ticks` ticks (default 5) to avoid inbox flooding.

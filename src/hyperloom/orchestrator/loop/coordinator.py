@@ -260,8 +260,7 @@ def _framework_config_levers_from_done(
             arg_tokens = [str(a) for a in args if str(a).strip()]
             if any(any(ch.isspace() for ch in token) for token in arg_tokens):
                 log.warning(
-                    "FRAMEWORK config lever %r has a whitespace-bearing argv "
-                    "token; dropping the args%s",
+                    "FRAMEWORK config lever %r has a whitespace-bearing argv token; dropping the args%s",
                     entry.get("name"),
                     " while preserving its environment overrides" if extra_envs else "",
                 )
@@ -271,8 +270,7 @@ def _framework_config_levers_from_done(
                 parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
                 if parsed_args is None:
                     log.warning(
-                        "FRAMEWORK config lever %r has unparseable server args; "
-                        "dropping the args%s",
+                        "FRAMEWORK config lever %r has unparseable server args; dropping the args%s",
                         entry.get("name"),
                         " while preserving its environment overrides" if extra_envs else "",
                     )
@@ -345,7 +343,6 @@ def _defang_alert_payload(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_defang_alert_payload(v) for v in value]
     return value
-
 
 
 def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
@@ -825,6 +822,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
 
+        # Per-agent (seq, msg_id) of the last message its prompt rendered.
+        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+
         # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
         self._backend_error_streak: dict[str, int] = {name: 0 for name in self.role_registry}
         self._backend_error_alarm_armed: dict[str, bool] = {name: True for name in self.role_registry}
@@ -904,7 +904,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_delegate": "router",
         "_handle_request": "router",
         "_handle_response": "router",
-        "_handle_kill_task": "router",
         "_handle_extend_lease": "router",
         "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
@@ -1061,6 +1060,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_enqueue_specialist_requested_build": "phase_framework",
         "_maybe_route_build_outcomes": "phase_framework",
         "_route_succeeded_build": "phase_framework",
+        "_route_failed_build": "phase_framework",
         "_build_routing_record": "phase_framework",
         "_note_build_routed": "phase_framework",
         "_build_probe_was_cancelled": "phase_framework",
@@ -1153,11 +1153,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_proposal_task_map": "proposals",
         "_registry_lanes_ttl": "dispatcher",
         "_cycle_idem_suffix": "dispatcher",
-        "_cursor_advance_to_latest": "dispatcher",
+        "_advance_rendered_cursor": "conversation",
         "_dispatch_paused_for_phase_budget": "dispatcher",
         "_pump_dispatcher_once": "dispatcher",
         "_spawn_fitting_queued": "dispatcher",
-        "_run_dispatched_with_gpu_release": "dispatcher",
+        "run_task_registered": "dispatcher",
         "_specialist_wall_budget_sec": "dispatcher",
         "_specialist_progress_publisher": "dispatcher",
         "_resolve_serving_tp": "dispatcher",
@@ -1216,8 +1216,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_prune_runs_for_disk": "maintenance",
         "_maybe_checkpoint_orchestration": "maintenance",
         "enqueue_targeted_build": "build_lifecycle",
-        "_maybe_pump_targeted_build": "build_lifecycle",
-        "_maybe_reap_targeted_build": "build_lifecycle",
     }
 
     def __getattr__(self, name: str):
@@ -1499,13 +1497,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
-        finalize_status = str(
-            getattr(self.shared_state, "recipe_finalize_status", "") or ""
-        )
-        if (
-            getattr(self.shared_state, "close_sequence_done", False)
-            and finalize_status in {"written", "skipped", "disabled"}
-        ):
+        finalize_status = str(getattr(self.shared_state, "recipe_finalize_status", "") or "")
+        if getattr(self.shared_state, "close_sequence_done", False) and finalize_status in {
+            "written",
+            "skipped",
+            "disabled",
+        }:
             return
         try:
             config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
@@ -1551,9 +1548,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # optimization_stack actions warranting a post-opt roofline; pure
     # param-search (explore/sweep) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
-        {"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
-    )
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
@@ -1786,13 +1781,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_framework_agent_phase_safely(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
-                    # Off-loop targeted-build pump + reaper (each guarded; never
-                    # blocks the tick — the build runs in its own process group).
-                    try:
-                        await self._maybe_reap_targeted_build(tick=tick_n)
-                        await self._maybe_pump_targeted_build(tick=tick_n)
-                    except Exception:  # noqa: BLE001
-                        log.exception("targeted-build tick raised")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._await_within_session_bound(
@@ -2001,6 +1989,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 "observation",
                 {"kind": "no_intent_emitted", "agent": agent_name, "error": str(exc)[:500]},
             )
+            await self._advance_rendered_cursor(agent_name)
             return
         except Exception as exc:  # noqa: BLE001
             # Catch-all so one agent's bad turn never stops the loop.
@@ -2054,6 +2043,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+        await self._advance_rendered_cursor(agent_name)
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

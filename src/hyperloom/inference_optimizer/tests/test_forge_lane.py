@@ -23,8 +23,13 @@ def test_invocation_section_forge_is_own_lane() -> None:
 
 def test_capability_summary_has_distinct_forge_row() -> None:
     forge_invs = [{"kernel_id": "k1", "decision": "KEEP", "micro_speedup": 1.4}]
+    # The integrate verdict is what promotes a micro KEEP into a reported
+    # adoption; see test_breakdown_report_integrity for the micro-only lane.
+    state = {
+        "kernel_integrate_attempts": {"attempt-1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 2.0}}
+    }
     cap = collectors.collect_capability_summary(
-        {},
+        state,
         [],
         [],
         forge_invocations=forge_invs,

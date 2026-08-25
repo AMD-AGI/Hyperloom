@@ -35,6 +35,56 @@ def _scriptable_script_name(framework: str, runner_type: str) -> str:
     return f"{framework}_{runner_type}.sh"
 
 
+def scriptable_script_candidates(
+    framework: str,
+    runner_type: str,
+    inferencex_root: str,
+    bench: dict[str, Any] | None = None,
+) -> list[Path]:
+    """Return the search list ``resolve_scriptable_script`` walks, in order.
+
+    The list is the forensic trail for a miss: launch-time fail-fast and the
+    pre-spawn rc=2 path both print it so the operator can see which drawers
+    were opened. Existence is not checked here.
+
+    Args:
+        framework: Scriptable framework name (e.g. xdit).
+        runner_type: GPU runner (e.g. mi300x).
+        inferencex_root: InferenceX checkout root (fallback location).
+        bench: Materialized benchmark section; absolute ``benchmark_script``
+            is listed first when present.
+
+    Returns:
+        Candidate paths in resolution order, duplicates dropped.
+    """
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    explicit = str((bench or {}).get("benchmark_script") or "").strip()
+    if explicit:
+        _add(Path(explicit))
+    name = _scriptable_script_name(framework, runner_type)
+    override = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    if override:
+        _add(Path(override) / name)
+    # Bundled entrypoints are version-matched to this checkout, so they must be
+    # reachable by name too: any rebuild path that re-pins the bare
+    # {framework}_{runner}.sh would otherwise resolve to nothing.
+    _add(asset_root() / "assets" / "benchmark_scripts" / name)
+    magpie_path = os.environ.get("MAGPIE_PATH", "").strip()
+    if magpie_path:
+        _add(Path(magpie_path, "Magpie", "scripts", "benchmark", name))
+    _add(Path(inferencex_root, "benchmarks", name))
+    return candidates
+
+
 def resolve_scriptable_script(
     framework: str,
     runner_type: str,
@@ -53,27 +103,9 @@ def resolve_scriptable_script(
     Returns:
         The resolved script path, or None when not found.
     """
-    explicit = str((bench or {}).get("benchmark_script") or "").strip()
-    if explicit:
-        explicit_path = Path(explicit)
-        if explicit_path.is_file():
-            return explicit_path
-    name = _scriptable_script_name(framework, runner_type)
-    candidates: list[Path] = []
-    override = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
-    if override:
-        candidates.append(Path(override) / name)
-    # Bundled entrypoints are version-matched to this checkout, so they must be
-    # reachable by name too: any rebuild path that re-pins the bare
-    # {framework}_{runner}.sh would otherwise resolve to nothing.
-    candidates.append(asset_root() / "assets" / "benchmark_scripts" / name)
-    magpie_path = os.environ.get("MAGPIE_PATH", "").strip()
-    if magpie_path:
-        candidates.append(Path(magpie_path, "Magpie", "scripts", "benchmark", name))
-    candidates.append(Path(inferencex_root, "benchmarks", name))
-    for c in candidates:
-        if c.is_file():
-            return c
+    for candidate in scriptable_script_candidates(framework, runner_type, inferencex_root, bench):
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -145,7 +177,16 @@ def run_scriptable(
     """
     script = resolve_scriptable_script(framework, runner_type, inferencex_root, bench)
     if script is None:
-        return 2, f"scriptable benchmark script not found for {framework}_{runner_type}.sh"
+        name = _scriptable_script_name(framework, runner_type)
+        candidates = scriptable_script_candidates(framework, runner_type, inferencex_root, bench)
+        tried = "\n".join(f"  - {path}" for path in candidates) or "  (none)"
+        error = f"scriptable benchmark script not found for {name}"
+        # Pre-spawn miss never opens Popen, so there is no child stderr. Write
+        # the search list onto the scriptable log so grid_runner's on-disk
+        # fallback (and the Magpie-compatible alias write_report builds) can
+        # carry the diagnostic instead of a blank abort_reason.json.
+        _write_logs(workspace, "", f"{error}\ntried:\n{tried}\n")
+        return 2, error
     env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
     cmd = ["bash", str(script)]
     # Streamed straight to disk instead of captured in memory: a runner killed
@@ -195,6 +236,7 @@ def _write_logs(workspace: Path, stdout: str, stderr: str, *, append: bool = Fal
     """
     mode = "a" if append else "w"
     try:
+        workspace.mkdir(parents=True, exist_ok=True)
         if stdout:
             with (workspace / "scriptable_stdout.log").open(mode, encoding="utf-8") as fh:
                 fh.write(stdout)

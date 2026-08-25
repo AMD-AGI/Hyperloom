@@ -40,16 +40,13 @@ def logical_operator_name(candidate: dict[str, Any] | None) -> str:
     """Return the balanced-template-normalized logical operation for Forge."""
     candidate = candidate or {}
     task_group = candidate.get("task_group")
-    identity = (
-        task_group.get("operator_identity")
-        if isinstance(task_group, dict)
-        else None
-    )
+    identity = task_group.get("operator_identity") if isinstance(task_group, dict) else None
     raw = (
-        identity.get("operation")
-        if isinstance(identity, dict)
-        else ""
-    ) or candidate.get("operation") or candidate.get("name") or ""
+        (identity.get("operation") if isinstance(identity, dict) else "")
+        or candidate.get("operation")
+        or candidate.get("name")
+        or ""
+    )
     normalized = normalize_operation_key(str(raw).strip())
     return re.sub(r"\s*::\s*", "::", normalized)
 
@@ -116,22 +113,14 @@ def build_operator_identity(
 ) -> dict[str, Any]:
     """Build the versioned operator identity shared by all TraceLens routes."""
     kind = "native" if str(source_kind).lower() == "native" else "py"
-    operation_key = (
-        native_operation_key(operation)
-        if kind == "native"
-        else normalize_operation_key(operation)
-    )
+    operation_key = native_operation_key(operation) if kind == "native" else normalize_operation_key(operation)
     identity = {
         "version": OPERATOR_IDENTITY_VERSION,
         "source_kind": kind,
         "source_path": canonical_source_path(source_path),
         "operation": operation_key,
     }
-    function_key = (
-        native_operation_key(function_name)
-        if kind == "native"
-        else str(function_name or "").strip()
-    )
+    function_key = native_operation_key(function_name) if kind == "native" else str(function_name or "").strip()
     if function_key:
         identity["function"] = function_key
     return identity
@@ -176,17 +165,9 @@ def legacy_operator_identity_keys(
             ]
         )
     )
-    operation_key = (
-        native_operation_key(operation)
-        if kind == "native"
-        else normalize_operation_key(operation)
-    )
+    operation_key = native_operation_key(operation) if kind == "native" else normalize_operation_key(operation)
     function_keys = {
-        (
-            native_operation_key(function_name)
-            if kind == "native"
-            else str(function_name or "")
-        ),
+        (native_operation_key(function_name) if kind == "native" else str(function_name or "")),
         operation_key,
     }
     if kind == "native" and "::" in operation_key:
@@ -315,11 +296,7 @@ def _is_attention_workload(row: dict[str, Any]) -> bool:
         )
     ).lower()
     contract = row.get("kernel_contract")
-    contract_kind = (
-        str(contract.get("kind") or "").lower()
-        if isinstance(contract, dict)
-        else ""
-    )
+    contract_kind = str(contract.get("kind") or "").lower() if isinstance(contract, dict) else ""
     return (
         "attention" in labels
         or "attn" in labels
@@ -330,19 +307,10 @@ def _is_attention_workload(row: dict[str, Any]) -> bool:
 
 def _attention_dimensions(shapes: list[list[int]]) -> dict[str, int]:
     """Derive Q/K/V semantic dimensions from ordered rank-3 tensor shapes."""
-    rank_three = [
-        shape
-        for shape in shapes
-        if len(shape) == 3 and all(dimension > 0 for dimension in shape)
-    ]
+    rank_three = [shape for shape in shapes if len(shape) == 3 and all(dimension > 0 for dimension in shape)]
     for index in range(len(rank_three) - 2):
         query, key, value = rank_three[index : index + 3]
-        if (
-            key == value
-            and query[0] == key[0]
-            and query[2] == key[2]
-            and query[1] >= key[1]
-        ):
+        if key == value and query[0] == key[0] and query[2] == key[2] and query[1] >= key[1]:
             return {
                 "QTOKENS": query[0],
                 "QHEADS": query[1],

@@ -38,11 +38,10 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 
 # -- apply_compatibility_filter -------------------------------------------
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
-    monkeypatch.setenv("MODEL_PATH", "meta-llama-3-8b")
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
     monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "")
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
-    kept, dropped = gr.apply_compatibility_filter(grid)
+    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
     assert [v.name for v in kept] == ["plain"]
     assert len(dropped) == 1
     assert dropped[0]["source"] == "compatibility_filter"
@@ -50,20 +49,18 @@ def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
 
 
 def test_compatibility_filter_drops_on_missing_help_flag(monkeypatch) -> None:
-    monkeypatch.setenv("MODEL_PATH", "deepseek-moe")
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
     monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--some-other-flag")
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid)
+    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
     assert kept == []
     assert "too old" in dropped[0]["reason"]
 
 
 def test_compatibility_filter_no_model_path_assumes_compatible(monkeypatch) -> None:
-    monkeypatch.delenv("MODEL_PATH", raising=False)
     monkeypatch.setattr(vf, "_probe_server_help_text", lambda fw: "--enable-ep-moe")
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid)
+    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
@@ -369,9 +366,7 @@ def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
     args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
     out = gr._shell_safe_dedupe(args)
     assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
-    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {
-        "rope_scaling": None
-    }
+    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {"rope_scaling": None}
 
 
 def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
@@ -403,6 +398,27 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
         args_mode="replace",
     )
     assert out == "--also-bad 2 --keep 4"
+
+
+def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+    out = gr.compose_server_args(
+        inherited_args="--no-enable-prefix-caching --block-size 128",
+        base_extra_args="--no-enable-prefix-caching",
+        variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
+    )
+    assert "--no-enable-prefix-caching" not in out
+    assert "--block-size 128" in out
+    assert "--kv-cache-dtype fp8" in out
+
+
+def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+    out = gr.compose_server_args(
+        inherited_args="--ignored",
+        base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
+        variant_extra_args="--kv-cache-dtype fp8",
+        args_mode="replace",
+    )
+    assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
 
 
 def test_remove_server_args_accepts_multi_flag_string() -> None:

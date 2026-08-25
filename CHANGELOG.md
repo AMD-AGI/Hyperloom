@@ -5,6 +5,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
+  `--max-iters` this repository put on every `forge-loop` and
+  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
+  are bounded by `--max-hours`, and the flag had already been documented there
+  as accepted-and-ignored. The compiled/ASM fellow cap those variables fed was
+  therefore a no-op that logged a cap it never applied. `--max-hours` and the
+  hard-kill timeout remain the only budget controls, exactly as before.
+
+### Changed
+
+- **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
+  KernelForge renamed the option to match the spelling the rest of its CLI
+  already used, and `forge-fuse` rejects an unknown option outright rather than
+  ignoring it, so every fusion run was exiting 2 before it started and
+  surfacing as a missing `fusion_manifest.json`. The `llm_model` key in the
+  wrapper's own input JSON is unchanged.
+
+### Fixed
+
+- **`best_result.json` is read again.** `_validated_forge_best_result` gated on
+  `schema_version == 1`; KernelForge has stamped `2` into that file since
+  2026-08-13. Every published best was therefore rejected and the kernel
+  backend fell through to the caller checkpoint or the stdout sentinel, losing
+  the one record that survives a hard kill — the case it exists for. The gate
+  is gone rather than corrected: every field the evidence is read for is
+  already checked on its own — the commit against the workspace history, the
+  timings for being positive, the score for actually improving — so a version
+  number decided nothing those checks do not, and was the only part that could
+  fail closed on a bump that changed none of them. The eight tests that already
+  covered this salvage path were passing only because their fixtures carried
+  the same wrong version.
+
 ## [v1.0.0b2] - 2026-08-19
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
@@ -262,7 +296,7 @@ for the user-facing summary.
   into the container and every carrier defaults it to `geak`.
 
   `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been partially
-  superseded by `docs/conceptual/kernel-execution-path.md`, which documents the
+  superseded by `docs/reference/kernel-execution-path.md`, which documents the
   programmatic dispatch flow and artifact layout. Operator sections from the
   original (Credentials, Ray head, Recovery, TraceLens Requirements, Proposal
   Rules) are not carried over; refer to the individual reference docs for those.

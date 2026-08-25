@@ -155,9 +155,7 @@ class _Stub:
     _next_local_explore_candidate_id = FrameworkPhase._next_local_explore_candidate_id
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
-    _enqueue_framework_agent_local_explore_specialist = (
-        FrameworkPhase._enqueue_framework_agent_local_explore_specialist
-    )
+    _enqueue_framework_agent_local_explore_specialist = FrameworkPhase._enqueue_framework_agent_local_explore_specialist
     _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
     _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
     _select_best_framework_agent_candidate = FrameworkPhase._select_best_framework_agent_candidate
@@ -254,9 +252,8 @@ def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path)
     # Boilerplate is in _TASK_KIND_BRIEFS; notes is empty on a fresh dispatch.
     assert params.get("task_kind") == "framework_local_explore"
     assert params.get("notes", "") == ""
-    # WebSearch/WebFetch available so the specialist can compare upstream latest.
-    assert "WebSearch" in created["allowed_tools"]
-    assert "WebFetch" in created["allowed_tools"]
+    # The per-task tool whitelist is gone; the specialist tool policy is a denylist.
+    assert "allowed_tools" not in created
     # Idempotency keyed on the candidate id.
     assert created["idempotency_key"] == "framework_agent_local_explore:local_explore:0"
     # The specialist->candidate provenance map is recorded.
@@ -366,9 +363,7 @@ def test_pump_pivots_to_local_explore_on_discovery_failure(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_done is False
     assert len(stub.tasks.created) == 1
     assert stub.tasks.created[0]["params"]["framework_local_explore"] is True
-    assert (
-        stub.tasks.created[0]["params"]["framework_agent_candidate_id"] == "local_explore:0"
-    )
+    assert stub.tasks.created[0]["params"]["framework_agent_candidate_id"] == "local_explore:0"
 
 
 def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
@@ -457,9 +452,7 @@ def test_pseudo_candidate_gap_canonical_id_is_not_literal_local_explore():
     assert pseudo is not None
     cid = pseudo["gap_canonical_id"]
     assert cid != "local_explore", "gap_canonical_id must not be the bare literal 'local_explore'"
-    assert cid.startswith("gap.framework.local_explore."), (
-        f"expected gap.framework.local_explore.<id>, got {cid!r}"
-    )
+    assert cid.startswith("gap.framework.local_explore."), f"expected gap.framework.local_explore.<id>, got {cid!r}"
 
 
 def test_local_explore_dispatch_registers_gap_on_real_state():

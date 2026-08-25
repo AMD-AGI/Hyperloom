@@ -16,13 +16,14 @@ from hyperloom.orchestrator.roles.agent_role import (
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
+    IntentValidationError,
+    validate_envelope,
 )
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     DELEGATE_ACTION_REQUIRED_PAYLOAD,
     DELEGATE_ACTION_SOURCE_ALLOWLIST,
     KERNEL_AGENT_OWNED_ACTIONS,
-    KILL_TASK_SOURCE_ALLOWLIST,
     PolicyDenied,
     PolicyGate,
     REQUEST_ROUTING,
@@ -79,7 +80,6 @@ def test_orchestration_permissions():
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
-    assert IntentType.KILL_TASK in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
 
 
@@ -92,13 +92,11 @@ def test_critic_review_only_codex_no_tools():
     assert IntentType.DELEGATE not in role.allowed_intents
     assert IntentType.REQUEST not in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
-    assert IntentType.KILL_TASK not in role.allowed_intents
 
 
 def test_robustness_scheduling_police():
     role = default_role_registry()["robustness"]
     assert role.backend_type == BackendType.CLAUDE
-    assert IntentType.KILL_TASK in role.allowed_intents
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
@@ -129,8 +127,7 @@ def test_review_verdict_critic_only():
     assert "objection" not in REVIEW_VERDICTS
 
 
-def test_kill_and_robustness_only_renamed():
-    assert KILL_TASK_SOURCE_ALLOWLIST == frozenset({"robustness", "orchestration"})
+def test_robustness_only_intents():
     assert ROBUSTNESS_ONLY_SOURCE_ALLOWLIST == frozenset({"robustness"})
     assert ROBUSTNESS_ONLY_INTENTS == frozenset(
         {
@@ -138,6 +135,14 @@ def test_kill_and_robustness_only_renamed():
             IntentType.ESCALATE_STRATEGY_CHANGE,
         }
     )
+
+
+def test_kill_task_is_not_a_valid_intent_type():
+    """kill_task left the vocabulary; an envelope carrying it must be rejected."""
+    assert "kill_task" not in {member.value for member in IntentType}
+    envelope = {"intents": [{"intent_type": "kill_task", "payload": {"task_id": "t1", "reason": "stalled"}}]}
+    with pytest.raises(IntentValidationError, match="not in allowed set"):
+        validate_envelope(envelope)
 
 
 def test_core_state_fields_includes_current_best():
@@ -180,8 +185,8 @@ def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
 
 def test_gate_orchestration_propose_kernel_owned_rejected():
     """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
-    state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     for action in ("kernel_opt", "gemm_tuning", "integrate"):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
@@ -197,8 +202,8 @@ def test_gate_orchestration_propose_kernel_owned_rejected():
 def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
     """Hyperloom does not pre-filter GEAK applicability by precision."""
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -210,8 +215,8 @@ def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
 
 def test_gate_run_gemm_tuning_request_allowed_for_fp8_geak(monkeypatch):
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL", precision="fp8", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    state = SharedState(phase="KERNEL_AGENT", precision="fp8", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -224,8 +229,8 @@ def test_gate_run_gemm_tuning_request_allowed_for_fp8_geak(monkeypatch):
 def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -417,6 +422,43 @@ def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
     assert exc.value.rule == "delegate_action_evidence"
 
 
+@pytest.mark.parametrize(
+    "phase,action",
+    [
+        ("PRELUDE", "baseline"),
+        ("EXPLORE", "explore"),
+        ("SWEEP", "sweep"),
+        ("CLOSE", "session_breakdown"),
+    ],
+)
+def test_gate_robustness_delegate_out_of_scope_action_denied(phase, action):
+    """Robustness cannot delegate actions outside its declared set, even when the phase allows them."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    gate = PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=SharedState(phase=phase, framework="sglang"),
+        strict_phase=True,
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "robustness",
+            Intent(type=IntentType.DELEGATE, payload={"action_name": action}),
+        )
+    assert exc.value.rule == "role"
+
+
+def test_gate_robustness_delegate_recover_still_allowed_in_all_phases(gate):
+    """recover remains the one action robustness may delegate in any phase."""
+    payload = {
+        "action_name": "recover",
+        "reason": "gpu_memory_leaked",
+        "force_gpu_cleanup": True,
+        "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
+    }
+    gate.validate_intent("robustness", Intent(type=IntentType.DELEGATE, payload=payload))
+
+
 def test_gate_orchestration_request_to_kernel_ok(gate):
     gate.validate_intent(
         "orchestration",
@@ -488,50 +530,6 @@ def test_gate_critic_delegate_rejected_by_role(gate):
             ),
         )
     assert exc.value.rule == "role"
-
-
-def test_gate_robustness_kill_task_ok(gate):
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.KILL_TASK,
-            payload={"task_id": "t1", "reason": "stalled", "scope": "task"},
-        ),
-    )
-
-
-def test_gate_orchestration_kill_task_allowed(gate):
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.KILL_TASK,
-            payload={"task_id": "t1", "reason": "stalled"},
-        ),
-    )
-
-
-def test_gate_orchestration_kill_task_process_scope_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.KILL_TASK,
-                payload={"task_id": "t1", "reason": "stalled", "scope": "process"},
-            ),
-        )
-    assert exc.value.rule == "kill_scope"
-
-
-def test_gate_robustness_kill_task_process_scope_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(
-                type=IntentType.KILL_TASK,
-                payload={"task_id": "t1", "reason": "stalled", "scope": "process"},
-            ),
-        )
-    assert exc.value.rule == "kill_scope"
 
 
 def test_gate_robustness_prune_branch_requires_family(gate):

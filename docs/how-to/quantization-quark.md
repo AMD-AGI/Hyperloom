@@ -4,7 +4,7 @@ myst:
         "description": "Enable and configure the optional AMD Quark quantization prelude in Hyperloom. Covers structured quantization schemes, Quark checkout, and environment variable configuration."
         "keywords": "Hyperloom, quantization, AMD Quark, fp8, mxfp4, ptq, MI355X, AMD GPU, ROCm, LLM inference, quantize-scheme"
 ---
-# Quantization with AMD Quark
+# Enable quantization with AMD Quark in Hyperloom
 
 The optional quantization prelude drives [AMD Quark](https://quark.docs.amd.com/)
 before the optimization loop starts, then rewrites `--model` to the exported

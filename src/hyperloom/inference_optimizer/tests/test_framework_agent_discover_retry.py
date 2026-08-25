@@ -50,6 +50,23 @@ class _StateStub:
     def save(self, _session_dir: Path) -> None:
         self._saves += 1
 
+    def append_phase_history_event(self, **kwargs: Any) -> dict[str, Any]:
+        from hyperloom.orchestrator.phases import machine_state as _ms
+
+        return _ms.append_phase_history_event(self, **kwargs)
+
+
+def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+    from hyperloom.orchestrator.phases.machine_state import phase_history_event_name
+
+    rows: list[dict[str, Any]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        if phase_history_event_name(row) == event:
+            rows.append(row)
+    return rows
+
 
 class _CoordinatorStub:
     """Minimal stub to bind the Coordinator's discover methods to.
@@ -106,10 +123,11 @@ def test_discover_failure_bumps_counter_without_flipping_phase_done(
     assert out is False
     assert stub.shared_state.framework_agent_discover_failures == 1
     assert stub.shared_state.framework_agent_phase_done is False
-    failed = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_discover_failed"]
+    failed = _phase_history_event_rows(stub.shared_state.phase_history, "framework_agent_discover_failed")
     assert len(failed) == 1
-    assert failed[0]["attempt"] == 1
-    assert failed[0]["limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert failed[0]["evidence"]["attempt"] == 1
+    assert failed[0]["evidence"]["limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert failed[0]["ts_unix"] > 0
 
 
 def test_discover_three_consecutive_failures_reach_retry_limit(
@@ -332,13 +350,14 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
         failure_count=3,
     )
 
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"]
+    rows = _phase_history_event_rows(stub.shared_state.phase_history, "framework_agent_phase_done")
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_retries_exhausted"
-    assert rows[0]["failure_count"] == 3
-    assert rows[0]["retry_limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-    assert rows[0]["batches_discovered"] == 2
+    assert rows[0]["evidence"]["failure_count"] == 3
+    assert rows[0]["evidence"]["retry_limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert rows[0]["evidence"]["batches_discovered"] == 2
     assert "ts" in rows[0]
+    assert rows[0]["ts_unix"] > 0
 
 
 def test_record_framework_agent_phase_done_records_empty_payload_reason(
@@ -353,8 +372,8 @@ def test_record_framework_agent_phase_done_records_empty_payload_reason(
         failure_count=0,
     )
 
-    rows = [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"]
+    rows = _phase_history_event_rows(stub.shared_state.phase_history, "framework_agent_phase_done")
     assert len(rows) == 1
     assert rows[0]["reason"] == "discover_empty_payload"
-    assert rows[0]["failure_count"] == 0
-    assert rows[0]["batches_discovered"] == 0
+    assert rows[0]["evidence"]["failure_count"] == 0
+    assert rows[0]["evidence"]["batches_discovered"] == 0

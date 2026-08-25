@@ -634,6 +634,37 @@ def _spawn_remote(
     return _detach_framework_launch(cmd, log_file, pid_file, sub_env, node_rank)
 
 
+# Budget for one node-pinned rollback kill (SIGTERM + report; no death-wait).
+_ROLLBACK_TIMEOUT_SEC = 30
+
+
+def _rollback_remote(pid: int) -> str:
+    """SIGTERM a spawned rank's process group, ON the node that owns the PID.
+
+    Must run as a NodeAffinity-pinned actor on that rank's own node: the PID is
+    resolvable only in the namespace that produced it.
+
+    Args:
+        pid: The PID reported by that node's spawn actor.
+
+    Returns:
+        str: A short human-readable outcome for the driver's log.
+    """
+    import os as _os
+    import signal as _signal
+
+    if pid <= 0:
+        return f"skipped: sentinel pid={pid}"
+    try:
+        _os.killpg(_os.getpgid(pid), _signal.SIGTERM)
+    except ProcessLookupError:
+        return f"no-op: pid={pid} already gone"
+    except PermissionError:
+        # Not ours to signal -- report rather than pretend it was cleaned up.
+        return f"DENIED: pid={pid} not signallable by this uid"
+    return f"SIGTERM sent to pgid of pid={pid}"
+
+
 def _rank0_pid_from_log(pid_dir: str) -> int | None:
     """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort).
 
@@ -1065,8 +1096,11 @@ def main() -> int:
 
     # Spawn one actor per rank (num_gpus=0; the framework reserves GPUs itself).
     SpawnActor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
-    pids: dict[str, int] = {}  # pid_file_name -> real PID
-    refs: list[tuple[str, Any]] = []  # noqa: F821  Any imported below
+    # tag -> (node_id, real PID). A PID is only meaningful in the namespace that
+    # produced it, and this driver shares one only with rank 0 (_pick_head_first),
+    # so every PID travels with the node that owns it.
+    pids: dict[str, tuple[str, int]] = {}
+    refs: list[tuple[str, str, Any]] = []  # (tag, node_id, actor_ref)
 
     if pd_mode == "disaggregated":
         # Group A: prefill — nodes[0:pn], TP=ptp; rank-0 binds the prefill port.
@@ -1100,7 +1134,7 @@ def main() -> int:
                 pd_kv_parallel_size=2,
                 pid_file_name=f"prefill_{grp_rank}.pid",
             )
-            refs.append((f"prefill_{grp_rank}", actor_ref))
+            refs.append((f"prefill_{grp_rank}", node["NodeID"], actor_ref))
 
         # Group B: decode — nodes[pn:pn+dn]; dist-init port = prefill + 1.
         decode_head_ip = nodes[pn].get("NodeManagerAddress", head_ip)
@@ -1133,7 +1167,7 @@ def main() -> int:
                 pd_kv_parallel_size=2,
                 pid_file_name=f"decode_{grp_rank}.pid",
             )
-            refs.append((f"decode_{grp_rank}", actor_ref))
+            refs.append((f"decode_{grp_rank}", node["NodeID"], actor_ref))
     else:
         # Aggregated: single server group spans all nodes.
         for rank, node in enumerate(nodes):
@@ -1156,27 +1190,50 @@ def main() -> int:
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
             )
-            refs.append((f"rank_{rank}", actor_ref))
+            refs.append((f"rank_{rank}", node["NodeID"], actor_ref))
 
-    for tag, ref in refs:
+    RollbackActor = ray.remote(num_cpus=0, num_gpus=0)(_rollback_remote)
+    for tag, node_id, ref in refs:
         try:
             pid = ray.get(ref, timeout=120)
-            pids[tag] = pid
+            pids[tag] = (node_id, pid)
             _log(f"{tag}: spawned pid={pid}")
         except Exception as exc:  # noqa: BLE001
             _log(f"{tag}: spawn FAILED: {type(exc).__name__}: {exc}")
             # Roll back already-spawned ranks so no half-started servers leak.
-            for tag2, p2 in pids.items():
-                _log(f"rolling back {tag2} pid={p2}")
+            # Each kill is dispatched to the node that owns the PID; PIDs are
+            # namespace-local and are never signalled from here. A pid <= 0 is
+            # the vLLM worker sentinel and names no process -- os.getpgid(0)
+            # would resolve to this driver's own process group.
+            for tag2, (node_id2, p2) in pids.items():
+                if p2 <= 0:
+                    _log(f"rolling back {tag2}: sentinel pid={p2} (no process); skipped")
+                    continue
                 try:
-                    os.killpg(os.getpgid(p2), 15)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                    outcome = ray.get(
+                        RollbackActor.options(
+                            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                                node_id=node_id2,
+                                soft=False,
+                            ),
+                        ).remote(p2),
+                        timeout=_ROLLBACK_TIMEOUT_SEC,
+                    )
+                    _log(f"rolling back {tag2} pid={p2} on node={node_id2[:16]}...: {outcome}")
+                except Exception as rb_exc:  # noqa: BLE001
+                    # An unreachable rank keeps its GPUs until the platform
+                    # reclaims the cluster, so it is reported rather than dropped.
+                    _log(
+                        f"WARN rollback of {tag2} pid={p2} on node={node_id2[:16]}... "
+                        f"FAILED: {type(rb_exc).__name__}: {rb_exc}; that rank may "
+                        f"still hold GPU memory"
+                    )
             return 1
 
     # Health-tail probe targets the leader: rank_0 (aggregated) / prefill_0 (PD).
     leader_tag = "rank_0" if pd_mode == "aggregated" else "prefill_0"
-    _log_rank0_post_spawn(Path(args.log_dir), pids.get(leader_tag))
+    _leader_entry = pids.get(leader_tag)
+    _log_rank0_post_spawn(Path(args.log_dir), _leader_entry[1] if _leader_entry else None)
 
     summary: dict[str, Any] = {
         "framework": args.framework,
@@ -1186,7 +1243,7 @@ def main() -> int:
         "nnodes": args.nnodes,
         "head_ip": head_ip,
         "dist_init_port": args.dist_init_port,
-        "ranks": [{"tag": r, "pid": pids[r]} for r in sorted(pids)],
+        "ranks": [{"tag": r, "node_id": pids[r][0], "pid": pids[r][1]} for r in sorted(pids)],
         "pid_dir": args.pid_dir,
         "log_dir": args.log_dir,
         "inference_port": _INFERENCE_PORT,

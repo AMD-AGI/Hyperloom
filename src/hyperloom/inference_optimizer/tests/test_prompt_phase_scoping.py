@@ -125,9 +125,7 @@ def test_baseline_recovery_detail_only_in_prelude(registry):
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         # Detailed fingerprint text lives in the reference doc, not in any prompt.
-        assert BASELINE_FINGERPRINT not in text, (
-            f"baseline fingerprint detail leaked into {phase} prompt"
-        )
+        assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint detail leaked into {phase} prompt"
         if phase == _ps.PHASE_PRELUDE:
             assert "RULE F1" in text
             assert "RULE F2" in text
@@ -551,11 +549,10 @@ def test_the_payload_contract_lists_only_required_keys():
 
     The notes were appended to the generated required-field list, under a label
     that says "Required keys". That printed `alert:{severity,summary,severity ∈
-    low|medium|high}` -- severity twice -- and presented `kill_task.scope`,
-    `prune_branch.scope` and `extend_lease.reason` as required when
-    validate_envelope requires none of them. The same string is the description
-    of Claude's emit_intent tool, so the drift this contract exists to prevent
-    was introduced into it.
+    low|medium|high}` -- severity twice -- and presented `prune_branch.scope`
+    and `extend_lease.reason` as required when validate_envelope requires none
+    of them. The same string is the description of Claude's emit_intent tool,
+    so the drift this contract exists to prevent was introduced into it.
     """
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
@@ -567,7 +564,6 @@ def test_the_payload_contract_lists_only_required_keys():
 
     assert "alert:{severity,summary}" in rendered
     assert "severity ∈" not in rendered
-    assert "kill_task:{task_id,reason}" in rendered
     assert "scope" not in rendered
     for intent_type, required in _PAYLOAD_REQUIRED.items():
         assert f"{intent_type.value}:{{{','.join(required)}}}" in rendered
@@ -581,7 +577,6 @@ def test_the_payload_constraints_are_rendered_separately():
     rendered = payload_constraints(IntentType)
 
     assert "alert.severity ∈ low|medium|high" in rendered
-    assert "kill_task.scope must be 'task'" in rendered
     assert "prune_branch.scope ∈ family|queued" in rendered
     assert "extend_lease.reason is optional" in rendered
 

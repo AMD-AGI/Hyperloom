@@ -18,6 +18,17 @@ Supporting constants / helpers used by both callers:
 * :data:`_PATCH_DEV_NULL`   — the sentinel ``/dev/null`` path in diff headers.
 * :func:`_strip_path_prefix` — drop leading path components like ``git apply -p<n>``.
 * :func:`_is_within`        — containment check (both paths pre-resolved).
+* :func:`_sanitize_git_index_lines` — drop ``index`` headers that contradict ``---``.
+
+Placeholder git index headers
+-----------------------------
+Unlike ``git apply``, GNU ``patch`` honours the ``index <old>..<new>`` line and
+reads an all-zero *old* blob hash as a file creation. Specialists write
+placeholder hashes, so a modification hunk can arrive as
+``index 0000000..1111111`` alongside ``--- a/path``, and ``patch`` then refuses
+it with ``... which already exists!``. :func:`_sanitize_git_index_lines` drops
+such contradicting lines before the CLI sees the patch; genuine creations
+(``--- /dev/null``) keep theirs.
 
 Backup naming
 -------------
@@ -70,6 +81,73 @@ _PATCH_DEV_NULL = "/dev/null"
 
 # Characters unsafe in filenames (replaced with ``_`` in rel_flat).
 _UNSAFE_NAME_RE = re.compile(r"[/\\:<>\"?*|]")
+
+# A git ``index <old>..<new>`` header whose *old* blob hash is all zeros.
+_ZERO_OLD_INDEX_RE = re.compile(r"^index 0+\.\.")
+
+
+def _old_path_after_index(lines: list[str], start: int) -> str | None:
+    """Return the ``--- `` path token of the file block containing ``lines[start]``.
+
+    Scans forward from an ``index`` line to that block's ``--- `` header,
+    stopping at the next ``diff --git`` header or the first hunk marker so a
+    later block's header is never attributed to this one.
+
+    Args:
+        lines: The patch text split into lines.
+        start: Index of the ``index`` line to resolve.
+
+    Returns:
+        The raw pre-image path token, or ``None`` when the block has no
+        ``--- `` header.
+    """
+    for line in lines[start + 1 :]:
+        if line.startswith("--- "):
+            return line[4:].strip().split("\t")[0]
+        if line.startswith("diff --git ") or line.startswith("@@"):
+            return None
+    return None
+
+
+def _sanitize_git_index_lines(patch_text: str) -> tuple[str, int]:
+    """Drop git ``index`` lines whose all-zero old blob contradicts the ``---`` header.
+
+    GNU ``patch`` reads an all-zero *old* blob hash as "this hunk creates the
+    file" and then refuses the hunk with ``The next patch would create the file
+    X, which already exists!`` -- even though the accompanying ``--- a/X``
+    header says X is being *modified*. ``git apply`` ignores the index line
+    entirely, so such a patch applies through the git channel and fails only
+    here, which makes the failure look like a bad patch rather than a header
+    disagreement.
+
+    Specialists emit placeholder index lines rather than real blob hashes, so
+    the contradiction is common enough to absorb rather than reject. The
+    ``---``/``+++`` headers are the authoritative unified-diff surface and GNU
+    ``patch`` does not need the index line, so a contradicting one is dropped.
+
+    A genuine creation hunk carries ``--- /dev/null`` and keeps its index line,
+    so real file creations are unaffected.
+
+    Args:
+        patch_text: The unified-diff text to sanitize.
+
+    Returns:
+        A ``(sanitized_text, dropped_count)`` pair. When nothing contradicts,
+        ``dropped_count`` is ``0`` and the text is returned unmodified.
+    """
+    lines = patch_text.splitlines(keepends=True)
+    kept: list[str] = []
+    dropped = 0
+    for idx, line in enumerate(lines):
+        if _ZERO_OLD_INDEX_RE.match(line):
+            old_path = _old_path_after_index(lines, idx)
+            if old_path is not None and old_path != _PATCH_DEV_NULL:
+                dropped += 1
+                continue
+        kept.append(line)
+    if not dropped:
+        return patch_text, 0
+    return "".join(kept), dropped
 
 
 def _strip_path_prefix(path: str, level: int) -> str:
@@ -219,6 +297,31 @@ def _apply_patch_no_git(
     """
     from ._apply_feedback import ApplyFeedback, read_patch_source_context
 
+    try:
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        err_msg = f"cannot read patch file: {exc}"
+        return (
+            False,
+            err_msg,
+            [],
+            ApplyFeedback(patch=str(patch_path), channel="nogit", tried_levels=[], stderr=err_msg),
+        )
+
+    # Feed the CLI a copy with contradicting index headers removed; keep the
+    # original path in feedback so advisories point at what the author wrote.
+    patch_input = patch_path
+    sanitized_text, dropped_index_lines = _sanitize_git_index_lines(patch_text)
+    if dropped_index_lines:
+        backup_root.mkdir(parents=True, exist_ok=True)
+        patch_input = backup_root / f"{patch_path.stem}.sanitized.diff"
+        patch_input.write_text(sanitized_text, encoding="utf-8")
+        log.info(
+            "nogit patch: dropped %d placeholder git index line(s) from %s that contradicted the --- header",
+            dropped_index_lines,
+            patch_path.name,
+        )
+
     # Detect strip level via dry-run; accumulate stderr per level for feedback.
     detected_level: int | None = None
     dry_run_stderrs: list[str] = []
@@ -227,7 +330,7 @@ def _apply_patch_no_git(
         tried_levels.append(lvl)
         try:
             cp = subprocess.run(
-                ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_path)],
+                ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_input)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -268,7 +371,7 @@ def _apply_patch_no_git(
         # case the apply is a satisfied no-op -- report success with no backups
         # (the patch that really made those edits owns the backups needed for a
         # correct revert).
-        if _reverse_applies_cleanly(framework_root, patch_path):
+        if _reverse_applies_cleanly(framework_root, patch_input):
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
                 patch_path.name,
@@ -277,7 +380,6 @@ def _apply_patch_no_git(
         combined_stderr = "\n".join(dry_run_stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
         try:
-            patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
             source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         except Exception:  # noqa: BLE001
             source_ctx = ""
@@ -303,12 +405,6 @@ def _apply_patch_no_git(
                 stderr=err_message,
             ),
         )
-
-    # Resolve target files to back up before mutation.
-    try:
-        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return _fail(f"cannot read patch file: {exc}", [])
 
     framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -440,7 +536,7 @@ def _apply_patch_no_git(
     rej_dir.mkdir(parents=True, exist_ok=True)
     try:
         cp2 = subprocess.run(
-            ["patch", f"-p{detected_level}", "--reject-file=-", "-i", str(patch_path)],
+            ["patch", f"-p{detected_level}", "--reject-file=-", "-i", str(patch_input)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -463,7 +559,6 @@ def _apply_patch_no_git(
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
         source_ctx = ""
         try:
-            patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
             source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         except Exception:  # noqa: BLE001
             pass
@@ -558,5 +653,6 @@ __all__ = [
     "_is_git_tree",
     "_is_within",
     "_revert_patches_no_git",
+    "_sanitize_git_index_lines",
     "_strip_path_prefix",
 ]

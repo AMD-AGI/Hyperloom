@@ -67,6 +67,8 @@ class TestCollectiveBudget:
 
     def test_state_without_the_hook_is_tolerated(self):
         assert _collective_budget(SimpleNamespace(), None, 14400) == (3.08, 14388)
+
+
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 
 
@@ -118,9 +120,7 @@ def _state_from_disk(tmp_path, *entries) -> SimpleNamespace:
 
 def test_selects_the_hottest_collective(tmp_path):
     hot = _collective_entry(kernel_id="k002", gpu_pct=9.1)
-    picked = select_collective_candidate(
-        _state_from_disk(tmp_path, _collective_entry(), hot)
-    )
+    picked = select_collective_candidate(_state_from_disk(tmp_path, _collective_entry(), hot))
     assert picked["kernel_id"] == "k002"
 
 
@@ -131,17 +131,13 @@ def test_prefers_source_resolved_nccl_summary_over_wrapper(tmp_path):
         gpu_pct=4.0,
         candidate_source="nccl_summary",
     )
-    picked = select_collective_candidate(
-        _state_from_disk(tmp_path, wrapper, resolved)
-    )
+    picked = select_collective_candidate(_state_from_disk(tmp_path, wrapper, resolved))
     assert picked["kernel_id"] == "k009"
 
 
 def test_skips_non_collective_kernels(tmp_path):
     gemm = _collective_entry(kernel_id="k001", gpu_pct=40.0, kernel_contract={"kind": "gemm"})
-    picked = select_collective_candidate(
-        _state_from_disk(tmp_path, gemm, _collective_entry())
-    )
+    picked = select_collective_candidate(_state_from_disk(tmp_path, gemm, _collective_entry()))
     assert picked["kernel_id"] == "k007"
 
 
@@ -166,9 +162,7 @@ def test_invalid_candidate_does_not_hide_a_valid_candidate(tmp_path):
     )
     valid = _collective_entry(kernel_id="k002")
 
-    picked = select_collective_candidate(
-        _state_from_disk(tmp_path, invalid, valid)
-    )
+    picked = select_collective_candidate(_state_from_disk(tmp_path, invalid, valid))
 
     assert picked["kernel_id"] == "k002"
 
@@ -187,10 +181,7 @@ def test_reads_the_enriched_rows_from_candidates_path(tmp_path):
     picked = select_collective_candidate(state)
     assert picked is not None
     assert picked["kernel_id"] == "k007"
-    assert all(
-        "kernel_contract" in row
-        for row in state.last_trace_analyze["hot_kernels_top15"]
-    )
+    assert all("kernel_contract" in row for row in state.last_trace_analyze["hot_kernels_top15"])
 
 
 def test_still_ranks_by_gpu_pct_when_reading_from_disk(tmp_path):
@@ -223,9 +214,7 @@ def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
     # The prompt offers this list as the kernel_opt target set, so a collective
     # left in it would dispatch an empty batch on every pick.
     assert state.last_trace_analyze["reusable_native_kernel_ids"] == []
-    codes = {
-        w.get("code") for w in state.last_trace_analyze["trace_health_warnings"]
-    }
+    codes = {w.get("code") for w in state.last_trace_analyze["trace_health_warnings"]}
     assert "collective_lane_withheld_kernels" in codes
 
 
@@ -329,7 +318,7 @@ def test_collective_replay_preserves_completed_integration(tmp_path):
 
     state.record_collective(campaign, tmp_path)
 
-    assert state.last_collective["integration_status"] == "complete"
+    assert state.last_collective["patch_cleanup_status"] == "complete"
     assert state.last_collective["integration_decision"] == "KEEP"
 
 
@@ -427,10 +416,7 @@ def test_the_fallback_share_is_judged_on_its_own_floor(monkeypatch):
     one kernel's whole GPU time, which a compute overlap can hide entirely. A
     share that clears the roofline floor must not therefore clear the fallback's.
     """
-    between = (
-        KernelPhase.COLLECTIVE_COMM_PCT_FLOOR
-        + KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR
-    ) / 2
+    between = (KernelPhase.COLLECTIVE_COMM_PCT_FLOOR + KernelPhase.COLLECTIVE_CANDIDATE_GPU_PCT_FLOOR) / 2
     monkeypatch.setattr(
         krh,
         "select_collective_candidate",
@@ -443,6 +429,7 @@ def test_the_fallback_share_is_judged_on_its_own_floor(monkeypatch):
 
 def test_candidate_fallback_survives_an_unreadable_artifact(monkeypatch):
     """A broken candidates artifact closes the gate instead of raising."""
+
     def _raise(_state):
         raise ValueError("candidate artifact has no valid hot_kernels list")
 
@@ -480,15 +467,23 @@ def _gate_with_analysis(candidates_path: str, last_collective: dict) -> bool:
 
 def test_skip_is_terminal_for_the_analysis_that_produced_it():
     """Re-deciding the same analysis on every KERNEL re-entry is noise."""
-    assert _gate_with_analysis("/run/a/kernel_candidates.json",
-                               {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}) is False
+    assert (
+        _gate_with_analysis(
+            "/run/a/kernel_candidates.json", {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}
+        )
+        is False
+    )
 
 
 def test_skip_does_not_block_a_later_analysis():
     """Nothing clears last_collective, so an unscoped skip would lock the lane
     out for the whole session even after a new trace exposes a collective."""
-    assert _gate_with_analysis("/run/b/kernel_candidates.json",
-                               {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}) is True
+    assert (
+        _gate_with_analysis(
+            "/run/b/kernel_candidates.json", {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}
+        )
+        is True
+    )
 
 
 def test_skip_without_an_analysis_key_does_not_block():
@@ -506,9 +501,7 @@ def test_gate_respects_the_kill_switch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_collective_only_mode_never_falls_through_to_kernel_opt(
-    tmp_path, monkeypatch
-):
+async def test_collective_only_mode_never_falls_through_to_kernel_opt(tmp_path, monkeypatch):
     """A directed Collective session must wind down even when its gate is closed."""
     from hyperloom.orchestrator.phases import machine_state
 
@@ -583,3 +576,65 @@ def test_policy_gate_rejects_an_llm_issued_lane_request():
             )
         assert exc.value.rule == "phase_incompatible"
         assert kind in str(exc.value)
+
+
+def test_resume_compat_old_integration_status_accepted(tmp_path):
+    """A state.json written before the patch_cleanup_status migration must load cleanly.
+
+    The validator and classifiers fall back to the legacy 'integration_status'
+    field so a --resume of a session that was mid-collective-integration when
+    the binary was updated does not raise.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.kernel.attempt_summary import (
+        _classify_collective_attempt,
+        CATEGORY_INTEGRATED,
+        CATEGORY_KEEP_PENDING,
+    )
+    from hyperloom.orchestrator.phases.machine_state import collective_integration_pending
+    from types import SimpleNamespace
+
+    state = SharedState.load_or_init(tmp_path)
+    campaign = {
+        "collective_attempt_id": "attempt-legacy",
+        "integration_id": "integ-legacy",
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+    }
+    state.record_collective(campaign, tmp_path)
+
+    # Simulate a state.json written by old code: integration_status instead of
+    # patch_cleanup_status.
+    old_style_result = {
+        "status": "ok",
+        "decision": "KEEP",
+        "integration_status": "complete",  # old field name
+        "integration_recovery_action": "",
+    }
+    # Should not raise despite using the old field.
+    state.record_collective_integration(old_style_result, tmp_path, integration_id="integ-legacy")
+
+    # Reads are also backward-compat.
+    last = state.last_collective
+    assert last.get("patch_cleanup_status") == "complete" or last.get("integration_status") == "complete"
+    assert last["integration_decision"] == "KEEP"
+
+    # Classifiers handle old records.
+    old_record = {"integration_decision": "KEEP", "integration_status": "complete"}
+    assert _classify_collective_attempt(old_record) == CATEGORY_INTEGRATED
+
+    old_pending = {"integration_decision": "KEEP", "integration_status": "pending"}
+    assert _classify_collective_attempt(old_pending) == CATEGORY_KEEP_PENDING
+
+    # collective_integration_pending uses fallback too.
+    fake_state = SimpleNamespace(
+        last_collective={
+            "kept": True,
+            "requires_e2e_validation": True,
+            "integration_status": "pending",  # old field, no patch_cleanup_status
+        }
+    )
+    assert collective_integration_pending(fake_state) is True

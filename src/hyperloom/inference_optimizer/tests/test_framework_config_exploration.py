@@ -88,6 +88,8 @@ def _fake_self(**state_overrides):
         _dispatch_framework_config_generation_specialist=_async_return("gen-default"),
         _run_framework_config_exploration=_async_return("run-default"),
         _dispatch_paused_for_phase_budget=lambda: False,
+        # Stands in for the dispatcher's action-catalogue TTL lookup.
+        _registry_lanes_ttl=lambda kind: ([], 1800),
     )
     for name in (
         "_build_framework_config_grid",
@@ -449,7 +451,7 @@ def test_dispatch_generation_specialist_params_and_marker():
     p = call["params"]
     assert p["domain"] == "serving_specialist"
     assert p["framework_config_generation"] is True
-    assert p["readonly"] is True
+    assert p["mode"] == "research"
     assert p["gap_layer"] == "framework"
     assert p["framework"] == "sglang"
 

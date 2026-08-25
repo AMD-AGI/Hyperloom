@@ -39,8 +39,8 @@ def test_missing_or_empty_kind_does_not_establish():
 def test_quality_ref_exempt_baseline_does_not_establish():
     """Synthetic kernel-lane re-baselines opt out of establishing the ref.
 
-    Integrate re-baseline, the paired-A/B pristine arm and stack validation all
-    carry ``kind="baseline"`` literally, but are throughput-only probes against
+    Integrate re-baseline and stack validation both carry ``kind="baseline"``
+    literally, but are throughput-only probes against
     an already-anchored baseline.
     """
     assert _should_establish_quality_ref("baseline", {"quality_ref_exempt": True}) is False

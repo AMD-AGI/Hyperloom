@@ -49,9 +49,7 @@ class _Response:
 
 
 def _rpc_body(result: object, *, request_id: str = "1") -> bytes:
-    return json.dumps(
-        {"jsonrpc": "2.0", "id": request_id, "result": result}
-    ).encode()
+    return json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}).encode()
 
 
 def test_select_mcp_response_handles_json_sse_and_bare_results() -> None:
@@ -61,14 +59,9 @@ def test_select_mcp_response_handles_json_sse_and_bare_results() -> None:
     )
     assert response["result"] == {"ok": True}
 
-    sse = (
-        'event: message\n'
-        'data: {"jsonrpc":"2.0","id":"1","result":{"ok":"sse"}}\n\n'
-    )
+    sse = 'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":{"ok":"sse"}}\n\n'
     assert _select_mcp_response(sse, "1")["result"] == {"ok": "sse"}
-    assert _select_mcp_response('{"nodes":["a"]}', allow_bare_result=True) == {
-        "nodes": ["a"]
-    }
+    assert _select_mcp_response('{"nodes":["a"]}', allow_bare_result=True) == {"nodes": ["a"]}
     assert _select_mcp_response(
         '{"jsonrpc":"2.0","id":"other","result":{"fallback":true}}',
         "wanted",
@@ -82,9 +75,7 @@ def test_require_http_url_rejects_non_http_schemes() -> None:
 
 
 def test_call_decodes_json_rpc_text_content(monkeypatch) -> None:
-    body = _rpc_body(
-        {"content": [{"type": "text", "text": '{"page":{"slug":"x"}}'}]}
-    )
+    body = _rpc_body({"content": [{"type": "text", "text": '{"page":{"slug":"x"}}'}]})
     monkeypatch.setattr(
         "urllib.request.urlopen",
         lambda request, timeout: _Response(body),
@@ -99,11 +90,7 @@ def test_call_decodes_json_rpc_text_content(monkeypatch) -> None:
 
 
 def test_call_reads_sse_and_native_bare_results(monkeypatch) -> None:
-    sse = (
-        b'event: message\n'
-        b'data: {"jsonrpc":"2.0","id":"1","result":{"content":'
-        b'[{"text":"{\\"ok\\":true}"}]}}\n\n'
-    )
+    sse = b'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"{\\"ok\\":true}"}]}}\n\n'
     responses = iter(
         (
             _Response(sse, content_type="text/event-stream", content_length=False),
@@ -145,9 +132,7 @@ def test_call_returns_bare_non_dict_and_unparsed_text(monkeypatch) -> None:
     responses = iter(
         (
             _Response(b'["a","b"]', content_length=False),
-            _Response(
-                _rpc_body({"content": [{"type": "text", "text": "plain text"}]})
-            ),
+            _Response(_rpc_body({"content": [{"type": "text", "text": "plain text"}]})),
         )
     )
     monkeypatch.setattr(

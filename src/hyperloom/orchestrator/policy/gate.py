@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
+from ..framework.paths import (
+    resolve_session_framework_root,
+    resolve_source_file_allowlist,
+    resolved_within,
+    source_file_candidates,
+)
 from ..bus.gpu_pool import (
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
@@ -23,7 +27,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
-    KERNEL_REQUEST_KIND_ALIASES,
+    REQUEST_KIND_TO_OWNED_ACTION,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from ..phases.machine_state import (
@@ -123,9 +127,12 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-# Per-action delegate source allowlist; unlisted actions fall through to the general delegate rules.
+ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
+
+# Per-action delegate source allowlist, derived so it cannot drift from
+# ROBUSTNESS_DELEGATE_ONLY_ACTIONS; unlisted actions carry no source restriction.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
-    "recover": frozenset({"robustness"}),
+    action: ROBUSTNESS_ONLY_SOURCE_ALLOWLIST for action in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 }
 
 
@@ -368,10 +375,6 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# kill_task sources; the other scheduling-police intents stay robustness-only.
-KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
-KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
-
 # prune_branch scopes. ``family`` retires the action for the rest of the run;
 # ``queued`` only drains the backlog and leaves the family usable.
 PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
@@ -392,7 +395,6 @@ ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
 )
-ROBUSTNESS_ONLY_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
 
 # Per-intent source override: PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE widen to orchestration.
 _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
@@ -441,6 +443,39 @@ _WARM_REPLAY_ACTION = "replay_warm_recipe"
 _REMOTE_RECIPE_FILES_PARTS = ("runtime", "remote_recipe", "files")
 _MAX_POLICY_PATCH_BYTES = 4 * 1024 * 1024
 
+# Placeholder/not-found sentinels that upstream lookups (or an LLM restating
+# a miss as prose) can leave in a SOURCE_LIKE_FIELDS value instead of leaving
+# the field empty. Treated as an absent field, not a bogus path: a resolver
+# miss should degrade the delegate gracefully, not deny the whole intent.
+# Includes the vendor-label and TraceLens placeholder forms pinned by
+# reject_non_path_source()'s own test (test_source_resolution_guards.py
+# _SENTINELS) -- those reach here verbatim when a stale/cached candidate
+# still carries a placeholder TraceLens meant to zero at the producer.
+#
+# Not made redundant by tracelens_analysis.reject_non_path_source(): that
+# guard only runs inside _finalize_candidates(), so it only protects
+# source_file values that flowed through the TraceLens candidate pipeline. A
+# delegate request can still carry one of these placeholders some other way
+# (an LLM restating a miss as prose directly into a task field, or a resumed
+# session replaying kernel_candidates.json written before this producer guard
+# existed) and this is the last check before PolicyGate would otherwise deny
+# or admit it as a bogus path.
+_SOURCE_FILE_ABSENT_SENTINELS: frozenset[str] = frozenset(
+    {
+        "not found",
+        "none",
+        "n/a",
+        "null",
+        "unknown",
+        "unresolved",
+        "missing",
+        "tbd",
+        "<unresolved>",
+        "aiter (vendor)",
+        "triton (vendor)",
+    }
+)
+
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
@@ -449,74 +484,12 @@ def _trace_path_allowlist() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: a single-element tuple holding the multi-node profile
             trace root, normalized with a trailing ``/``. Boundary safety is
-            enforced by :func:`_resolved_within`, not by the trailing slash.
+            enforced by :func:`resolved_within`, not by the trailing slash.
     """
     from hyperloom.inference_optimizer.session.paths import mn_profile_trace_root
 
     root = str(mn_profile_trace_root()).rstrip("/") + "/"
     return (root,)
-
-
-def _resolved_within(value: str, root: str) -> bool:
-    """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
-
-    Replaces a raw ``str.startswith`` prefix test so that ``..`` traversal and
-    shared-prefix boundary tricks (e.g. ``/x/aiter`` vs ``/x/aiterX``) cannot
-    slip a path past an allowlist root. Legitimate real paths nested under a
-    root are accepted identically to the old prefix check.
-
-    Args:
-        value (str): the candidate path string.
-        root (str): an allowlist root (may carry a trailing slash).
-
-    Returns:
-        bool: True when the resolved ``value`` equals or is nested under the
-            resolved ``root``; False on any resolution error or escape.
-    """
-    try:
-        v = Path(str(value)).resolve()
-        r = Path(str(root)).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return v == r or v.is_relative_to(r)
-
-
-# A profile trace names a frame as ``<path>(<line>): <function>``. The suffix is
-# not part of the path and the path is relative to the tree being profiled.
-_TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
-
-
-def _source_file_candidates(value: str) -> tuple[str, ...]:
-    """Return the path forms a ``source_file`` value may legitimately take.
-
-    Roofline evidence reaches the orchestration prompt as trace frames, and the
-    model cites them verbatim when it dispatches. Checking such a frame as
-    written resolves it against the process CWD — the Hyperloom checkout — which
-    is under no allowlist root, so every citation is denied and the task it
-    carries is cancelled before it runs.
-
-    Traversal is not widened by this: each candidate is still resolved and
-    bounded by :func:`_resolved_within`, so ``../`` climbs out of the root and
-    fails as before.
-
-    Args:
-        value (str): The raw field value.
-
-    Returns:
-        tuple[str, ...]: ``value`` first (so absolute paths behave exactly as
-            they did), then the de-annotated form, then that form resolved
-            against the tree this session is optimizing.
-    """
-    raw = str(value).strip()
-    out: list[str] = [raw]
-    bare = _TRACE_FRAME_SUFFIX.sub("", raw).strip()
-    if bare and bare != raw:
-        out.append(bare)
-    if bare and not Path(bare).is_absolute():
-        root = resolve_session_framework_root()
-        if root:
-            out.append(str(Path(root) / bare))
-    return tuple(out)
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
@@ -630,6 +603,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "pending_escalate_hint",
         "last_consumed_escalate_hint",
         "last_consumed_escalate_hint_ts",
+        "last_discarded_escalate_hint",
+        "last_discarded_escalate_hint_ts",
         "plateau_overrides",
         # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
@@ -686,7 +661,6 @@ class PolicyGate:
     """
 
     role_registry: dict[str, "AgentRole"]
-    action_registry: Any | None = None
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
@@ -758,8 +732,6 @@ class PolicyGate:
             self._validate_response(payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
             self._validate_review_verdict(role, payload)
-        elif intent.type == IntentType.KILL_TASK:
-            self._validate_kill_task(role, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
             self._validate_extend_lease(payload)
         elif intent.type in ROBUSTNESS_ONLY_INTENTS:
@@ -779,11 +751,11 @@ class PolicyGate:
         """Re-validate a persisted queued task before executor dispatch.
 
         Defense-in-depth for forged ``coordinator.db`` rows: replays path
-        containment and delegate action gates that normally run at intent
-        ingress. Coordinator-managed internal actions receive path checks
-        only (they are never LLM-delegated). Phase compatibility is
-        intentionally skipped so legitimately queued work is not rejected
-        after a phase transition.
+        containment and structural delegate action gates. Coordinator-managed
+        internal actions receive path checks only. Phase compatibility is
+        skipped so legitimately queued work is not rejected after a phase
+        transition, and source rules are skipped because the task row does not
+        persist the originating role; both are enforced at intent ingress.
 
         Args:
             action_name: The task ``kind`` / delegate action name.
@@ -792,8 +764,8 @@ class PolicyGate:
                 revalidation baseline.
 
         Raises:
-            PolicyDenied: When the task would have been rejected had it
-                arrived via ``IntentRouter`` delegate validation.
+            PolicyDenied: When the task fails path-containment or structural
+                delegate action validation.
         """
         kind = str(action_name or "").strip()
         if not kind:
@@ -805,9 +777,7 @@ class PolicyGate:
             raise PolicyDenied("unknown agent 'orchestration'", rule="role")
         trusted_framework_targets: frozenset[str] = frozenset()
         if kind == _WARM_REPLAY_ACTION:
-            trusted_framework_targets = self._validate_warm_replay_targets(
-                params_dict
-            )
+            trusted_framework_targets = self._validate_warm_replay_targets(params_dict)
         self._validate_payload_paths(
             role,
             IntentType.DELEGATE,
@@ -833,6 +803,7 @@ class PolicyGate:
             role,
             payload,
             check_phase=False,
+            check_source=False,
             skip_baseline_singleton=skip_baseline_singleton,
         )
 
@@ -925,6 +896,7 @@ class PolicyGate:
         payload: dict[str, Any],
         *,
         check_phase: bool,
+        check_source: bool = True,
         skip_baseline_singleton: bool = False,
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
@@ -937,6 +909,9 @@ class PolicyGate:
                 (intent ingress). Dispatch-time replay passes False so
                 legitimately queued tasks are not rejected after a phase
                 transition.
+            check_source: When True, enforce the role-scoped source rules.
+                Dispatch replay passes False because the task row does not
+                persist the originating role.
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -972,25 +947,25 @@ class PolicyGate:
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
-        # Unwired in production: coordinator.py builds the gate without
-        # action_registry, so this is None there.
-        if self.action_registry is not None and self.action_registry.get(action_name) is None:
-            raise PolicyDenied(
-                f"unknown action_name={action_name!r} (not in the action catalogue)",
-                rule="unknown_action",
-            )
-        # Per-action source allowlist (e.g. ``recover`` is robustness-only).
-        allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
-        if allowed_sources is not None and role.name not in allowed_sources:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot delegate action={action_name!r} (allowed: {sorted(allowed_sources)!r})",
-                rule="delegate_action_source",
-                hint=(
-                    "side-effecting actions like `recover` are reserved for "
-                    "the robustness agent; emit an ALERT and let robustness "
-                    "escalate via its action-ladder instead"
-                ),
-            )
+        if check_source:
+            # Robustness delegates nothing beyond its own declared action set.
+            if role.name in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST and action_name not in ROBUSTNESS_DELEGATE_ONLY_ACTIONS:
+                raise PolicyDenied(
+                    f"role={role.name!r} cannot delegate action={action_name!r}; "
+                    f"allowed: {sorted(ROBUSTNESS_DELEGATE_ONLY_ACTIONS)!r}",
+                    rule="role",
+                )
+            allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
+            if allowed_sources is not None and role.name not in allowed_sources:
+                raise PolicyDenied(
+                    f"role={role.name!r} cannot delegate action={action_name!r} (allowed: {sorted(allowed_sources)!r})",
+                    rule="delegate_action_source",
+                    hint=(
+                        "side-effecting actions like `recover` are reserved for "
+                        "the robustness agent; emit an ALERT and let robustness "
+                        "escalate via its action-ladder instead"
+                    ),
+                )
         # Per-action required-payload guard (e.g. ``recover`` must carry ``reason`` + ``evidence``); top-level or under ``params``.
         required = DELEGATE_ACTION_REQUIRED_PAYLOAD.get(action_name)
         if required:
@@ -1020,11 +995,10 @@ class PolicyGate:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
         Requires ``action_name``, then hard-rejects kernel_agent-owned
-        actions (REQUEST-only) before the action-catalogue lookup, which is
-        soft — unknown names are rejected only when a registry is wired.
-        Mirrors the delegate channel's sweep-singleton, per-action source,
-        GEMM-tuning ownership, phase, and external-tool collision gates so
-        an LLM cannot sidestep them by proposing instead of delegating.
+        actions (REQUEST-only). Mirrors the delegate channel's
+        sweep-singleton, per-action source, GEMM-tuning ownership, phase,
+        and external-tool collision gates so an LLM cannot sidestep them by
+        proposing instead of delegating.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -1036,8 +1010,7 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: if ``action_name`` is missing, kernel_agent-owned,
-                unknown (with a registry wired), or fails one of the
-                mirrored action gates.
+                or fails one of the mirrored action gates.
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
@@ -1050,12 +1023,6 @@ class PolicyGate:
                 f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
-            )
-        # Soft check — same unwired catalogue as the delegate twin above.
-        if self.action_registry is not None and self.action_registry.get(action_name) is None:
-            raise PolicyDenied(
-                f"propose_action: unknown action_name={action_name!r} (not in the action catalogue)",
-                rule="unknown_action",
             )
         # sweep_phase_singleton (defense in depth on the propose_action channel).
         # conc_sweep is Coordinator-internal (never LLM-proposed); _validate_phase_action
@@ -1183,13 +1150,12 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
-        # canonical owned action so the phase-action gate applies identically.
-        gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
-        if gated_kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+        # The wire kind and the action name are different vocabularies; resolve
+        # to the owned action so the phase-action gate sees a name it knows.
+        owned_action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
+        if kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
             raise PolicyDenied(
-                f"request kind {gated_kind!r} is a Coordinator-owned kernel lane "
-                f"and not LLM-requestable ({role.name})",
+                f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable ({role.name})",
                 rule="phase_incompatible",
                 hint=(
                     "run_fusion / run_collective are dispatched by the "
@@ -1201,11 +1167,11 @@ class PolicyGate:
                     "source-level kernel instead."
                 ),
             )
-        # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
+        # R1 phase_incompatible: gate the resolved action against the phase.
         if (
-            target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS
-        ) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
-            self._validate_phase_action(role, gated_kind, intent_kind="request")
+            target == "kernel_agent" and owned_action in KERNEL_AGENT_OWNED_ACTIONS
+        ) or owned_action in COORDINATOR_INTERNAL_ACTIONS:
+            self._validate_phase_action(role, owned_action, intent_kind="request")
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(
@@ -1336,12 +1302,12 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework_agent / "
-                    "conc_sweep are driven by the Coordinator (PRELUDE "
-                    "bootstrap, +10% watermark refresh, warm-recipe replay, "
-                    "FRAMEWORK pump, SWEEP-entry CONC ladder) and never appear "
-                    "in any phase's LLM-proposable set. Propose ``specialist`` "
-                    "or ``explore`` instead (or ``sweep`` for a full workload grid)."
+                    f"{' / '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are driven "
+                    "by the Coordinator — PRELUDE bootstrap, +10% watermark refresh, "
+                    "warm-recipe replay, FRAMEWORK pump, SWEEP-entry CONC ladder and "
+                    "off-loop component builds — and never appear in any phase's "
+                    "LLM-proposable set. Propose ``specialist`` or ``explore`` "
+                    "instead (or ``sweep`` for a full workload grid)."
                 ),
             )
         state = self.shared_state
@@ -1565,10 +1531,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
                 rule="enablement_round_in_flight",
-                hint=(
-                    "Wait for the enablement specialist to finish and rearm "
-                    "before re-running baseline."
-                ),
+                hint=("Wait for the enablement specialist to finish and rearm before re-running baseline."),
             )
         # Checked after the authoring round, which is a reason to wait whatever
         # the anchor says: a specialist rewriting the framework underneath a
@@ -1760,27 +1723,7 @@ class PolicyGate:
                 ),
             )
         max_turns_raw = params.get("max_turns")
-        if max_turns_raw is not None:
-            try:
-                max_turns = int(max_turns_raw)
-            except (TypeError, ValueError) as exc:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
-                    rule="specialist_dispatch_source",
-                ) from exc
-            # The in-process backend's turn loop has no wall-clock check, so this
-            # cap is the only bound on that path.
-            if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
-                    rule="specialist_dispatch_source",
-                    hint=(
-                        f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
-                        "(0 = unbounded; depth is bounded by the wall-clock "
-                        "budget, so omit max_turns unless capping a probe early)."
-                    ),
-                )
+        validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
 
@@ -1848,9 +1791,7 @@ class PolicyGate:
                 rule="specialist_gpu_request_invalid",
             )
         ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0 and not (
-            uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0
-        ):
+        if ceiling <= 0 and not (uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule="specialist_gpu_pool_disabled",
@@ -1986,9 +1927,9 @@ class PolicyGate:
             PolicyDenied: when the GPU request fails, the wave is too large, or
                 a task description is empty / too long.
         """
-        # Freeform skips the domain-anchored max_turns gate (bounded by the task
-        # timeout instead), but a GPU request must still clear the same pool
-        # ceiling as a domain specialist.
+        # Freeform applies the same max_turns contract as domain dispatches.
+        # Per-task overrides in a wave are checked per entry below.
+        validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
         # A malformed or empty wave falls through to the single-task path in the
@@ -2003,11 +1944,12 @@ class PolicyGate:
                     hint=(f"Split the wave into batches of at most {SPECIALIST_FREEFORM_WAVE_MAX} tasks."),
                 )
             for i, task in enumerate(wave):
-                if not isinstance(task, dict):
-                    continue
-                desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-                if desc:
-                    self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+                validate_freeform_wave_task(task, index=i)
+                if isinstance(task, dict):
+                    validate_specialist_max_turns_raw(
+                        task.get("max_turns"),
+                        where=f"tasks[{i}].max_turns",
+                    )
             return
         desc = str(params.get("task_description") or "").strip()
         self._check_freeform_task_description(desc, where="params")
@@ -2069,47 +2011,6 @@ class PolicyGate:
                 ),
             )
 
-    def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate a ``KILL_TASK`` intent.
-
-        Requires the source role to be on
-        :data:`KILL_TASK_SOURCE_ALLOWLIST`, a non-empty ``task_id`` and
-        ``reason``, and a ``scope`` within :data:`KILL_TASK_ALLOWED_SCOPES`
-        (``task`` only — server/process kills stay out).
-
-        Args:
-            role (AgentRole): the resolved role of the emitting agent.
-            payload (dict[str, Any]): the kill_task payload carrying
-                ``task_id``, ``reason`` and optional ``scope``.
-
-        Returns:
-            None: returns silently when the kill request is permitted.
-
-        Raises:
-            PolicyDenied: when the role is not allowed
-                (``kill_task_source``), ``task_id`` / ``reason`` is missing
-                (``payload``), or the scope is disallowed (``kill_scope``).
-        """
-        if role.name not in KILL_TASK_SOURCE_ALLOWLIST:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot emit kill_task (allowed: {sorted(KILL_TASK_SOURCE_ALLOWLIST)!r})",
-                rule="kill_task_source",
-            )
-        task_id = str(payload.get("task_id", "")).strip()
-        if not task_id:
-            raise PolicyDenied("kill_task missing task_id", rule="payload")
-        reason = str(payload.get("reason", "")).strip()
-        if not reason:
-            raise PolicyDenied("kill_task missing reason", rule="payload")
-        scope = str(payload.get("scope") or "task").strip()
-        if scope not in KILL_TASK_ALLOWED_SCOPES:
-            raise PolicyDenied(
-                f"kill_task scope={scope!r} not allowed "
-                f"(allowed: {sorted(KILL_TASK_ALLOWED_SCOPES)!r}; "
-                f"v0.6 keeps server/process kills out per IR-5)",
-                rule="kill_scope",
-            )
-
     def _path_under_session(self, value: str) -> bool:
         """Return whether a path resolves inside the active session_dir.
 
@@ -2140,7 +2041,7 @@ class PolicyGate:
             bool: True when ``value`` resolves to or under a configured editable
             source root, active site/dist-packages root, or ROCm source root.
         """
-        return any(_resolved_within(value, p) for p in resolve_source_file_allowlist())
+        return any(resolved_within(value, p) for p in resolve_source_file_allowlist())
 
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
@@ -2152,16 +2053,14 @@ class PolicyGate:
             bool: True when ``value`` resolves to or under any runtime-resolved
                 trace path root, else False.
         """
-        return any(_resolved_within(value, p) for p in _trace_path_allowlist())
+        return any(resolved_within(value, p) for p in _trace_path_allowlist())
 
     def _remote_recipe_files_root(self) -> Path | None:
         """Return the session-owned root containing downloaded KB artifacts."""
         if self.session_dir is None:
             return None
         try:
-            return self.session_dir.resolve().joinpath(
-                *_REMOTE_RECIPE_FILES_PARTS
-            )
+            return self.session_dir.resolve().joinpath(*_REMOTE_RECIPE_FILES_PARTS)
         except (OSError, RuntimeError):
             return None
 
@@ -2169,10 +2068,7 @@ class PolicyGate:
     def _patch_declared_targets(patch_path: Path) -> frozenset[str]:
         """Read safe relative targets from unified-diff headers."""
         try:
-            if (
-                not patch_path.is_file()
-                or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES
-            ):
+            if not patch_path.is_file() or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES:
                 return frozenset()
             text = patch_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -2197,11 +2093,7 @@ class PolicyGate:
         except ValueError:
             return frozenset()
         relative_posix = relative.as_posix()
-        return (
-            frozenset({relative_posix})
-            if relative_posix and relative_posix != "."
-            else frozenset()
-        )
+        return frozenset({relative_posix}) if relative_posix and relative_posix != "." else frozenset()
 
     def _validate_warm_replay_targets(
         self,
@@ -2237,8 +2129,7 @@ class PolicyGate:
             if not raw_targets:
                 continue
             if not isinstance(raw_targets, list) or not all(
-                isinstance(target, str) and target.strip()
-                for target in raw_targets
+                isinstance(target, str) and target.strip() for target in raw_targets
             ):
                 raise PolicyDenied(
                     f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets "
@@ -2249,14 +2140,12 @@ class PolicyGate:
             raw_patch = entry.get("patch_path")
             if not isinstance(raw_patch, str) or not raw_patch.strip():
                 raise PolicyDenied(
-                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} "
-                    "has no patch_path",
+                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
                     rule="warm_replay_patch_missing",
                 )
-            if kb_root is None or not _resolved_within(raw_patch, str(kb_root)):
+            if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
                 raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} is outside "
-                    f"the session KB download root={kb_root!s}",
+                    f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
                     rule="warm_replay_patch_outside_kb_download",
                 )
 
@@ -2279,16 +2168,13 @@ class PolicyGate:
                 )
             for raw_target in raw_targets:
                 active_root = resolve_session_framework_root()
-                if not active_root or not _resolved_within(raw_target, active_root):
+                if not active_root or not resolved_within(raw_target, active_root):
                     raise PolicyDenied(
-                        f"replay_warm_recipe target_file={raw_target!r} is outside "
-                        "the Session active framework root",
+                        f"replay_warm_recipe target_file={raw_target!r} is outside the Session active framework root",
                         rule="warm_replay_target_outside_framework_roots",
                     )
                 target_candidates = self._framework_relative_candidates(raw_target)
-                if not declared_targets or declared_targets.isdisjoint(
-                    target_candidates
-                ):
+                if not declared_targets or declared_targets.isdisjoint(target_candidates):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} does not "
                         f"match patch targets={sorted(declared_targets)!r}",
@@ -2365,9 +2251,19 @@ class PolicyGate:
                 return
             key = path_keys[-1] if path_keys else ""
             if key in SOURCE_LIKE_FIELDS:
+                if node.strip().lower() in _SOURCE_FILE_ABSENT_SENTINELS:
+                    log.info(
+                        "role=%r %s payload field %r=%r is an absent-value "
+                        "sentinel; treating as omitted and admitting the delegate",
+                        role.name,
+                        intent_type.value,
+                        key,
+                        node,
+                    )
+                    return
                 if any(
                     self._path_in_source_allowlist(c) or self._path_under_session(c)
-                    for c in _source_file_candidates(node)
+                    for c in source_file_candidates(node)
                 ):
                     return
                 raise PolicyDenied(
@@ -2439,8 +2335,7 @@ class PolicyGate:
             scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
             if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
                 raise PolicyDenied(
-                    f"prune_branch scope={scope!r} not allowed "
-                    f"(allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                    f"prune_branch scope={scope!r} not allowed (allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
                     rule="prune_scope",
                     hint=(
                         f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
@@ -2550,6 +2445,84 @@ def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
     return "\n".join(lines)
 
 
+def validate_specialist_max_turns_raw(
+    max_turns_raw: Any,
+    *,
+    where: str,
+) -> None:
+    """Validate an optional specialist ``max_turns`` dial.
+
+    Args:
+        max_turns_raw: Raw ``max_turns`` value from dispatch params, or ``None``.
+        where: Label used in error messages (e.g. ``params.max_turns``).
+
+    Raises:
+        PolicyDenied: When the value is not an int, is negative, or exceeds
+            :data:`SPECIALIST_MAX_TURNS_HARD_CAP`.
+    """
+    if max_turns_raw is None:
+        return
+    try:
+        max_turns = int(max_turns_raw)
+    except (TypeError, ValueError) as exc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns must be int, got {max_turns_raw!r}",
+            rule="specialist_dispatch_source",
+        ) from exc
+    if max_turns < 0:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} must be >= 0",
+            rule="specialist_dispatch_source",
+            hint=(
+                "Use a non-negative integer. "
+                "0 = unbounded (bounded by the wall-clock budget); "
+                "omit max_turns to use the default turn cap."
+            ),
+        )
+    if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} "
+            f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
+            rule="specialist_dispatch_source",
+            hint=(
+                f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
+                "(0 = unbounded; depth is bounded by the wall-clock "
+                "budget, so omit max_turns unless capping a probe early)."
+            ),
+        )
+
+
+def validate_freeform_wave_task(task: Any, *, index: int) -> str:
+    """Validate one entry in a freeform specialist ``tasks`` wave.
+
+    Args:
+        task: One wave entry; must be a dict with a non-empty description.
+        index: Zero-based index used in error messages.
+
+    Returns:
+        The normalized task description.
+
+    Raises:
+        PolicyDenied: When the entry is malformed or the description is
+            empty / too long.
+    """
+    if not isinstance(task, dict):
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] must be a dict",
+            rule="specialist_freeform_wave_invalid_task",
+            hint="Each wave entry must be an object with task_description.",
+        )
+    desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
+    if not desc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] task_description must be non-empty",
+            rule="specialist_freeform_empty_description",
+            hint=("Each freeform task needs a natural-language task_description (the whole mandate)."),
+        )
+    PolicyGate._check_freeform_task_description(desc, where=f"tasks[{index}]")
+    return desc
+
+
 __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
@@ -2558,14 +2531,14 @@ __all__ = [
     "BASELINE_ACTION_NAME",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
-    "KILL_TASK_ALLOWED_SCOPES",
-    "KILL_TASK_SOURCE_ALLOWLIST",
     "PATH_LIKE_FIELDS",
     "PRUNE_BRANCH_ALLOWED_SCOPES",
     "PRUNE_BRANCH_SCOPE_FAMILY",
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
+    "validate_freeform_wave_task",
+    "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",

@@ -1,33 +1,49 @@
-# Pre-commit: single local front door for the CI static-analysis gates.
+# Pre-commit: local front door for static analysis and hygiene checks.
 #
-# Scope note: this wires the *check-only* hooks (no ``ruff-format``). The
-# repo-wide ``ruff format`` reflow (~170 files) is deferred to its own
-# mechanical PR; enable the ``ruff-format`` hook here once that lands so
-# formatting is enforced at authoring time.
+# Install:
+#   pip install pre-commit && pre-commit install
 #
-# Install locally with::
+# Run everything once:
+#   pre-commit run --all-files
 #
-#     pip install pre-commit && pre-commit install
+# Hooks run on staged/changed files by default. CI remains authoritative for
+# pytest, coverage, CodeQL, and full-tree Bandit on push.
 #
-# Run against everything once (baseline) with::
-#
-#     pre-commit run --all-files
-#
-# Hooks default to changed files only, so the existing lint backlog does not
-# block commits while it is drained; new/changed lines are gated immediately.
+# Rollout notes (see CONTRIBUTING.md and docs/contributing/style-guide.md):
+#   - gitleaks: mirrors secret-scan.yml (Docker-backed hook).
+#   - Full pytest stays in CI only (tests-coverage.yml).
+
+default_language_version:
+  python: python3.11
+
 repos:
-  # Ruff: same rule set as ``[tool.ruff]`` / ``[tool.ruff.lint]`` and the
-  # ``lint.yml`` CI job (E/F/W). Check only -- formatting is deferred (see note).
+  # --- Universal hygiene (fast, low controversy) ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^docs/_build/
+      - id: end-of-file-fixer
+        exclude: ^docs/_build/
+      - id: check-merge-conflict
+      - id: check-yaml
+        exclude: ^docs/_build/
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # --- Python: Ruff (same rules as pyproject.toml and lint.yml) ---
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.20
     hooks:
       - id: ruff
         args: ["--force-exclude"]
+      - id: ruff-format
 
-  # Bandit: reads ``[tool.bandit]`` (skips B101, excludes test trees). The
-  # ``bandit[toml]`` extra is required to parse the config from pyproject.
-  # ``exclude`` re-applies the test-tree filter here because pre-commit passes
-  # explicit filenames, which bypasses ``[tool.bandit].exclude_dirs``.
+  # --- Python: security (production paths; tests excluded) ---
   - repo: https://github.com/PyCQA/bandit
     rev: 1.9.4
     hooks:
@@ -36,25 +52,55 @@ repos:
         additional_dependencies: ["bandit[toml]"]
         exclude: "^.*/tests?/"
 
-  # ShellCheck: most hits are SC2086 (unquoted expansions) -- fast to fix.
-  # ``shellcheck-py`` ships a pip wheel (no Docker), unlike the koalaman
-  # docker-image hook, so it runs in any local/CI environment.
+  # --- Shell ---
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
     hooks:
       - id: shellcheck
 
-  # yamllint: ``relaxed`` preset + line-length disabled keeps the existing
-  # backlog from blocking commits while still flagging genuine YAML errors.
+  # --- YAML / GitHub Actions ---
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:
       - id: yamllint
         args: ["-d", "{extends: relaxed, rules: {line-length: disable}}"]
 
-  # actionlint: lints ``.github/workflows`` -- run locally so the workflow-lint
-  # error the audit hit (actionlint did not complete in CI) surfaces early.
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
       - id: actionlint
+
+  # --- License compliance (mirrors reuse-lint.yml) ---
+  - repo: https://github.com/fsfe/reuse-tool
+    rev: v5.0.2
+    hooks:
+      - id: reuse
+        pass_filenames: false
+
+  # --- Secret scan (mirrors secret-scan.yml) ---
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  # --- Spelling (docs + comments) ---
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        additional_dependencies: ["tomli"]
+        args:
+          - --ignore-words-list=rocm,hip,aiter,vllm,sglang,triton,jsonl,kwargs,nd,te,ser,crate,assertin
+          - --skip=*.json,*.jsonl,*.svg,*.lock,docs/_build,.venv,_audit_artifacts
+        exclude: ^(LICENSES/|docs/_build/)
+
+  # Enable once the mypy backlog is manageable (config in pyproject.toml):
+  # - repo: local
+  #   hooks:
+  #     - id: mypy
+  #       name: mypy (src/hyperloom)
+  #       entry: mypy src/hyperloom
+  #       language: system
+  #       types: [python]
+  #       pass_filenames: false
+  #       require_serial: true

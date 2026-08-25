@@ -13,6 +13,7 @@ import types
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 from hyperloom.orchestrator.loop.coordinator import (
@@ -289,6 +290,9 @@ def _enqueue_self(**state_kw):
         ["research_lane"],
         base_ttl_sec,
     )
+    # Real catalogue resolution, so a row enqueued without a TTL is visible here.
+    fake.action_registry = ACTION_CATALOGUE
+    fake._registry_lanes_ttl = types.MethodType(Coordinator._registry_lanes_ttl, fake)
     fake._maybe_record_enablement_human_review = types.MethodType(
         Coordinator._maybe_record_enablement_human_review, fake
     )
@@ -297,9 +301,7 @@ def _enqueue_self(**state_kw):
         Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
     )
     fake._open_revalidation_row = types.MethodType(Coordinator._open_revalidation_row, fake)
-    fake._open_row_past_spent_generations = types.MethodType(
-        Coordinator._open_row_past_spent_generations, fake
-    )
+    fake._open_row_past_spent_generations = types.MethodType(Coordinator._open_row_past_spent_generations, fake)
     # Admission on the session wall-clock is exercised in test_coordinator_runtime
     # against a real coordinator; here nothing is ever denied for want of budget.
     fake._time_budget_denial_for_action = lambda _action: None
@@ -549,7 +551,9 @@ async def test_rearm_kept_is_terminal(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval", enablement_revalidation_generation=1)
+    fake = _enqueue_self(
+        enablement_inflight_task_id="spec-1", enablement_origin="eval", enablement_revalidation_generation=1
+    )
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
     assert fake.shared_state.enablement.validation_pending is True
@@ -1130,9 +1134,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    backends = {
-        name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")
-    }
+    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
     return Coordinator(session_dir, backends=backends)
 
 
