@@ -3777,21 +3777,34 @@ class WritebackCollaborator:
                             prov,
                         )
                 changed = True
-            # 4. Lift the best winner into current_best / optimization_stack.
-            if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
-                best_winner = dict(best_winner)
+            # 4. Lift every applied winner into current_best / optimization_stack in
+            # application order.  Winners are applied cumulatively inside the executor
+            # (running_base_tput advances with each in-batch KEEP), so output_throughput
+            # reflects the full stack.  Lifting only the highest-gain winner credited
+            # that stacked throughput to a config missing the others' args, and the
+            # missed winners' recipe_deltas never reached the ledger at all.
+            # Each winner carries its own tput from the decision or stack-rebench round.
+            # Because KEEP requires a positive gain over the advancing running base, each
+            # winner's tput is strictly greater than the previous one, so the anchor
+            # check inside _lift_to_current_best clears for every in-round winner.
+            explore_gap_cid = str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
+            for winner in winners:
+                if not isinstance(winner, dict):
+                    continue
+                winner_tput = winner.get("tput")
+                if not isinstance(winner_tput, (int, float)) or float(winner_tput) <= 0:
+                    continue
+                entry = dict(winner)
                 if task is not None:
-                    best_winner["task_id"] = str(task.task_id or "")
-                explore_gap_cid = (
-                    str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
-                )
-                promoted = self._lift_to_current_best(
+                    entry["task_id"] = str(task.task_id or "")
+                if self._lift_to_current_best(
                     "explore",
-                    float(best_tput),
-                    best_winner,
+                    float(winner_tput),
+                    entry,
                     gap_canonical_id=explore_gap_cid,
-                )
-                changed = True
+                ):
+                    promoted = True
+            changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
         except Exception:  # noqa: BLE001 — defensive
