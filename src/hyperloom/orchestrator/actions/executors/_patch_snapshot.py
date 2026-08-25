@@ -135,6 +135,35 @@ def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _index_entries(repo_path: str, paths: list[str]) -> dict[str, str]:
+    """Map each tracked path to its ``git ls-files -s`` record.
+
+    One call for the whole candidate set, which carries a path per strip level
+    and so grows with the depth of the diff headers. ``-z`` leaves paths with
+    unusual bytes unquoted, as the restore compares them verbatim.
+
+    Args:
+        repo_path: The git worktree root to query.
+        paths: Repo-relative candidate paths.
+
+    Returns:
+        Tracked path to its ``"<mode> <sha> <stage>\\t<path>"`` record; untracked
+        paths are absent.
+    """
+    result = subprocess.run(
+        ["git", *safe_directory_args(["ls-files", "-s", "-z", "--", *paths], cwd=repo_path)],
+        cwd=repo_path,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    entries: dict[str, str] = {}
+    for record in result.stdout.decode(errors="replace").split("\0"):
+        if record:
+            entries[record.partition("\t")[2]] = record
+    return entries
+
+
 def _create_patch_snapshot(
     repo_path: str,
     patch_contents: list[str],
@@ -168,6 +197,7 @@ def _create_patch_snapshot(
         shutil.rmtree(snapshot_dir)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     root = Path(repo_path).resolve()
+    index_entries = _index_entries(repo_path, touched)
     rows: list[dict[str, Any]] = []
     for index, rel in enumerate(touched):
         target = (root / rel).resolve()
@@ -179,20 +209,13 @@ def _create_patch_snapshot(
         mode = target.stat().st_mode & 0o7777 if existed else None
         if existed:
             backup.write_bytes(target.read_bytes())
-        index_result = subprocess.run(
-            ["git", *safe_directory_args(["ls-files", "-s", "--", rel], cwd=repo_path)],
-            cwd=repo_path,
-            capture_output=True,
-            timeout=15,
-            check=True,
-        )
         rows.append(
             {
                 "path": rel,
                 "existed": existed,
                 "mode": mode,
                 "backup": str(backup) if existed else "",
-                "index_entry": index_result.stdout.decode(errors="replace").strip(),
+                "index_entry": index_entries.get(rel, ""),
             }
         )
     manifest_path = snapshot_dir / "manifest.json"
