@@ -1519,10 +1519,31 @@ def untried_hot_reusable_kernels(
     ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
     seen_groups: set[str | tuple[str, ...]] = set()
     seen_identities: set[tuple[str, str, float]] = set()
+    # ``_batch_kernel_candidates`` collapses ungrouped rows that share a
+    # ``source_file`` into their highest-share representative and reports the
+    # rest as ``opfanout_merged_into=...``, which record_kernel_opt classifies as
+    # unattempted and writes no ledger row for. Both readers have to agree on
+    # that table, or a merged sibling stays in this queue forever:
+    # kernel_work_pending() never goes False, KERNEL redispatches the entry batch
+    # every tick, and the prompt forbids ``report`` while the queue is non-empty
+    # -- the same spin the identity dedup below was added to close, reached
+    # through the dispatcher rather than through synthetic ids. The identity key
+    # cannot catch it, because op fanout is by definition several *different*
+    # operations (distinct name and gpu_pct) over one file.
+    #
+    # Grouped rows are deliberately exempt: the batch filter routes those through
+    # their task_group, so two groups sharing a file are two units of work there
+    # and must stay two units here.
+    opfanout_dedup = _honest_flag("HL_KERNEL_OPFANOUT_DEDUP")
+    seen_sources: set[str] = set()
     for row in rows:
         dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
         if dedup_key in seen_groups:
             continue
+        if opfanout_dedup and not row[4] and row[2]:
+            if row[2] in seen_sources:
+                continue
+            seen_sources.add(row[2])
         # Fallback dedup: when the trace carries no ``task_groups`` metadata
         # every row degenerates to its own group, so the SAME kernel appearing
         # under several synthetic ids (identical source_file+name+gpu_pct, e.g.

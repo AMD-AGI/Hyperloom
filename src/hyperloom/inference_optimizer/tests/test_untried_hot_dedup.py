@@ -56,15 +56,19 @@ def test_twin_ids_collapse_when_one_is_rejected():
     assert untried == []
 
 
-def test_distinct_kernels_are_not_collapsed():
-    # Different name => different identity => NOT the same kernel. Rejecting k001
-    # must leave the genuinely-distinct k002 still owing an attempt.
-    hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="attention_fwd")]
+def test_distinct_kernels_in_distinct_files_are_not_collapsed():
+    # Different file and name => a genuinely distinct kernel. Rejecting k001
+    # must leave k002 still owing an attempt: the identity dedup exists to
+    # collapse one kernel wearing several synthetic ids, not to merge two.
+    hot = [
+        _hot("k001", name="gemm_a8w8", src="gemm.py"),
+        _hot("k002", name="attention_fwd", src="attention.py"),
+    ]
     attempts = {
         "k001": {
             "kernel_id": "k001",
             "current_kernel_id": "k001",
-            "last_source_file": "model.py",
+            "last_source_file": "gemm.py",
             "task_group_key": "",
             "rejected_reason": "slower than baseline",
         }
@@ -73,6 +77,37 @@ def test_distinct_kernels_are_not_collapsed():
 
     untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
     assert untried == ["k002"]
+
+
+def test_two_ops_in_one_file_collapse_because_the_dispatcher_merges_them():
+    # Op fanout: two different operations over one source file. The batch
+    # dispatcher collapses them into a single representative and reports the
+    # other as ``opfanout_merged_into``, which records no attempt -- so a queue
+    # that still lists it demands an attempt no dispatch can make, and KERNEL
+    # respins every tick. Parity with the dispatcher is asserted directly in
+    # test_kernel_request_handlers_helpers.py; this pins the queue side alone.
+    hot = [
+        _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
+        _hot("k002", name="attention_fwd", gpu_pct=7.0),
+    ]
+    state = _state(hot)
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == ["k001"]
+
+
+def test_the_collapse_follows_the_dispatcher_flag(monkeypatch):
+    # One flag gates both sides so they cannot disagree. With it off the
+    # dispatcher keeps both rows, so the queue must too.
+    monkeypatch.setenv("HL_KERNEL_OPFANOUT_DEDUP", "0")
+    hot = [
+        _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
+        _hot("k002", name="attention_fwd", gpu_pct=7.0),
+    ]
+    state = _state(hot)
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == ["k001", "k002"]
 
 
 def test_no_attempts_all_untried_but_deduped():

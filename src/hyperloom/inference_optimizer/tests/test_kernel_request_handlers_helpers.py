@@ -454,3 +454,76 @@ def test_a_real_failure_still_spends_its_attempt() -> None:
     )
     assert state.kernel_opt_task_attempts
     assert state.untried_hot_reusable_kernels() == []
+
+
+_OP_FANOUT_ROWS = [
+    {
+        "kernel_id": "k001",
+        "name": "gqa_prefill_kernel",
+        "gpu_pct": 9.0,
+        "reusable_native_kernel": True,
+        "source_file": "/pkg/aiter/gqa.py",
+    },
+    {
+        "kernel_id": "k002",
+        "name": "gqa_decode_kernel",
+        "gpu_pct": 7.0,
+        "reusable_native_kernel": True,
+        "source_file": "/pkg/aiter/gqa.py",
+    },
+]
+
+
+def test_op_fanout_merge_is_agreed_on_by_both_kernel_opt_gates(tmp_path: Path) -> None:
+    """The dispatcher and the work queue must select the same set.
+
+    ``_batch_kernel_candidates`` collapses ungrouped rows sharing a
+    ``source_file`` into one representative and reports the rest as
+    ``opfanout_merged_into=...``, which ``record_kernel_opt`` files as
+    unattempted and writes no ledger row for. If the queue does not collapse
+    them too, the merged sibling owes an attempt no dispatch can ever make:
+    ``kernel_work_pending()`` never goes False, KERNEL redispatches the entry
+    batch every tick, and the orchestration prompt forbids ``report`` while the
+    queue is non-empty -- a spin to the wall-clock cap.
+
+    The identity dedup cannot catch this: op fanout is by definition several
+    *different* operations over one file, so name and gpu_pct both differ.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    artifact = tmp_path / "kernel_candidates.json"
+    artifact.write_text(json.dumps({"hot_kernels": _OP_FANOUT_ROWS}), encoding="utf-8")
+
+    skipped: dict[str, str] = {}
+    selected = krh._batch_kernel_candidates(
+        {"candidates_path": str(artifact)},
+        skipped_out=skipped,
+    )
+    dispatchable = {str(row.get("kernel_id") or "") for row in selected}
+    assert dispatchable == {"k001"}
+    assert skipped["k002"] == "opfanout_merged_into=k001"
+
+    state = SharedState(session_id="op-fanout-parity")
+    state.last_trace_analyze = {"hot_kernels": _OP_FANOUT_ROWS, "task_groups": []}
+    # The dispatcher reports the merge, and nothing is recorded for it.
+    krh.record_kernel_opt(
+        state,
+        {"status": "skipped", "reason": skipped["k002"], "kernel_id": "k002"},
+    )
+    assert state.kernel_opt_task_attempts == {}
+
+    assert set(state.untried_hot_reusable_kernels()) == dispatchable
+
+
+def test_the_merge_parity_follows_the_flag_that_creates_it(monkeypatch) -> None:
+    """With op-fanout dedup off the dispatcher keeps both rows, so the queue must.
+
+    The two sides are gated by one flag precisely so they cannot disagree; this
+    pins the other half of it, and fails if the queue collapses unconditionally.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("HL_KERNEL_OPFANOUT_DEDUP", "0")
+    state = SharedState(session_id="op-fanout-parity-off")
+    state.last_trace_analyze = {"hot_kernels": _OP_FANOUT_ROWS, "task_groups": []}
+    assert set(state.untried_hot_reusable_kernels()) == {"k001", "k002"}
