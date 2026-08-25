@@ -1488,9 +1488,96 @@ def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
     )
 
     assert res.returncode == 0, res.stderr
-    assert "torch broke after the sync" in res.stderr
+    assert "torch did not come up after the sync" in res.stderr
     assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
     assert (torch_lib / "libroctracer64.so").read_bytes() == b"stock-tracer-bytes"
+
+
+def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_path: Path):
+    """A torch upgrade between runs left the snapshot describing the previous
+    install, so the new vendor libs were overwritten with no copy kept and a
+    rollback would have pushed the old ABI into the new torch."""
+    torch_lib = tmp_path / "torch" / "lib"
+    res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=(
+            f"{_SYNC_BODY}\n"
+            # Stand in for `pip install -U torch`: fresh vendor bytes in place.
+            f'printf vendor-hip-v2 > "{torch_lib}/libamdhip64.so"\n'
+            f'printf vendor-tracer-v2 > "{torch_lib}/libroctracer64.so"\n'
+            f"{_SYNC_BODY}"
+        ),
+        torch_hip=b"vendor-hip-v1",
+        torch_tracer=b"vendor-tracer-v1",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "refreshing" in res.stdout
+    backup = torch_lib / _BACKUP_DIRNAME
+    assert (backup / "libamdhip64.so").read_bytes() == b"vendor-hip-v2"
+    assert (backup / "libroctracer64.so").read_bytes() == b"vendor-tracer-v2"
+
+
+def test_hotfix_torch_lib_sync_rejects_a_partial_snapshot(tmp_path: Path):
+    """A snapshot missing a name is indistinguishable from one where torch never
+    shipped it, and restore would delete that real vendor file."""
+    torch_lib = tmp_path / "torch" / "lib"
+    backup = torch_lib / _BACKUP_DIRNAME
+    res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=_SYNC_BODY,
+        torch_hip=b"vendor-hip-bytes",
+        torch_tracer=b"vendor-tracer-bytes",
+        extra_lines=(
+            # An interrupted backup: directory present, one file copied.
+            f'install -d "{backup}"',
+            f'printf vendor-hip-bytes > "{backup}/libamdhip64.so"',
+        ),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "refreshing" in res.stdout
+    assert (backup / "libroctracer64.so").read_bytes() == b"vendor-tracer-bytes"
+
+
+def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path: Path):
+    """A busy GPU or HIP OOM fails the probe both before and after the restore.
+    Once the vendor bytes are back, that must degrade to "not applied", not die."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+    torch_lib = tmp_path / "torch" / "lib"
+    torch_lib.mkdir(parents=True)
+    (torch_lib / "libamdhip64.so").write_bytes(b"vendor-hip-bytes")
+    (torch_lib / "libroctracer64.so").write_bytes(b"vendor-tracer-bytes")
+    py = _fake_python_for_torch_lib(tmp_path / "fake-python-torch", torch_lib)
+
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                # Fails regardless of which bytes are in place.
+                "verify_torch_runtime() { return 1; }",
+                f"{_SYNC_BODY} || echo SYNC_REPORTED_FAILURE",
+                "echo REACHED_NEXT_PHASE",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+
+    assert "REACHED_NEXT_PHASE" in res.stdout, res.stderr
+    assert "SYNC_REPORTED_FAILURE" in res.stdout
+    assert "vendor libraries restored" in res.stderr
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"vendor-hip-bytes"
+    assert (torch_lib / "libroctracer64.so").read_bytes() == b"vendor-tracer-bytes"
 
 
 def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
@@ -1631,14 +1718,25 @@ def test_baremetal_hotfix_torch_lib_verification_passes_after_sync(tmp_path: Pat
     assert "TORCH_SYNC_OK" in res.stdout
 
 
-def _drive_hotfix_gate(tmp_path: Path, *, run_mode: str, importable: set[str]):
+def _drive_hotfix_gate(
+    tmp_path: Path,
+    *,
+    run_mode: str,
+    importable: set[str],
+    in_container: bool = False,
+):
     dotenv = tmp_path / ".env"
     dotenv.write_text(f"HYPERLOOM_RUN_MODE={run_mode}\n", encoding="utf-8")
     return _drive_installer(
         tmp_path,
         importable=importable,
         dotenv=dotenv,
-        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+        body=(
+            # Pinned so the result does not depend on whether the test host
+            # itself is a container.
+            f"running_in_container() {{ return {0 if in_container else 1}; }}\n"
+            "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
+        ),
     )
 
 
@@ -1648,7 +1746,7 @@ def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
     res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" not in res.stdout
-    assert "docker run mode without sglang" in res.stderr
+    assert "container run without sglang" in res.stderr
 
 
 def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
@@ -1671,10 +1769,28 @@ def test_hotfix_gate_ignores_run_mode_when_dotenv_is_absent(tmp_path: Path):
         tmp_path,
         importable={"vllm"},
         dotenv=tmp_path / "missing.env",
-        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+        body=("running_in_container() { return 1; }\nrocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"),
     )
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+
+
+def test_hotfix_gate_detects_a_container_declaring_baremetal(tmp_path: Path):
+    """The setup skill tells in-container operators to pick baremetal, so the
+    declared mode alone would hand a vLLM image the overlay."""
+    res = _drive_hotfix_gate(tmp_path, run_mode="baremetal", importable={"vllm"}, in_container=True)
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "container run without sglang" in res.stderr
+
+
+def test_hotfix_gate_tolerates_a_run_mode_with_trailing_whitespace(tmp_path: Path):
+    """A CR or trailing space used to make the exact match fail silently, which
+    let a vLLM container take the overlay."""
+    res = _drive_hotfix_gate(tmp_path, run_mode="docker\r", importable={"vllm"})
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "container run without sglang" in res.stderr
 
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):

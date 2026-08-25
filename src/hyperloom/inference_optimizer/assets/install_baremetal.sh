@@ -186,6 +186,11 @@ resolve_python() {
 # interpreter does not auto-load the util submodule.
 _py_has() { "$1" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$2') else 1)" 2>/dev/null; }
 
+# Backs up the declared HYPERLOOM_RUN_MODE: the setup skill tells operators who
+# run setup inside a container to pick baremetal, so the declaration alone would
+# hand a vLLM image the profiler overlay.
+running_in_container() { [ -f /.dockerenv ]; }
+
 # The interpreter that owns a given framework. vLLM lives in its own venv under
 # FRAMEWORK_ENV=isolated; every other engine uses the shared interpreter. Every
 # framework probe goes through here so preflight, framework resolution and the
@@ -927,9 +932,10 @@ PY
     *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
   esac
 
-  # The hotfix swaps the ROCm profiler libraries that torch.profiler loads, so
-  # it is engine-agnostic: gate it on "some serving framework is present", not
-  # on sglang/vllm specifically, or an atom-only host silently loses profiling.
+  # The /opt/rocm overlay swaps the ROCm profiler libraries that torch.profiler
+  # loads on any engine, so it is gated on "some serving framework is present",
+  # not on sglang/vllm specifically, or an atom-only host loses profiling. Only
+  # the torch/lib half narrows to $ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS.
   # Walks $FRAMEWORKS for the same reason resolve_installed_framework does.
   local found="" fw probe_py _hotfix_arr
   IFS=',' read -r -a _hotfix_arr <<< "$FRAMEWORKS"
@@ -942,12 +948,15 @@ PY
   log "framework imports: ${found}"
 
   # Container images own their profiler stack: only the sglang images need this
-  # overlay, vLLM ships its own kineto workaround. Probed rather than read from
-  # .env FRAMEWORK, which is still unset here (write_runtime_dotenv runs later).
-  if [ "$(read_dotenv_var HYPERLOOM_RUN_MODE)" = "docker" ]; then
+  # overlay, vLLM ships its own kineto workaround. The engine is probed rather
+  # than read from .env FRAMEWORK, which is still unset here
+  # (write_runtime_dotenv runs later).
+  local run_mode
+  run_mode="$(read_dotenv_var HYPERLOOM_RUN_MODE | tr -d '[:space:]')"
+  if running_in_container || [ "$run_mode" = "docker" ]; then
     case " ${found} " in
-      *" sglang "*) log "docker run mode with sglang; ROCm profiler hotfix is eligible" ;;
-      *) warn "docker run mode without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
+      *" sglang "*) log "container run with sglang; ROCm profiler hotfix is eligible" ;;
+      *) warn "container run without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
     esac
   fi
 }
@@ -1071,8 +1080,8 @@ PY
 # The wheel build strips SO versions and rewrites torch's NEEDED entries to the
 # bare names, so those are the only filenames worth overwriting.
 ROCM_PROFILER_HOTFIX_TORCH_LIBS="libamdhip64.so libroctracer64.so"
-# Kept out of $FRAMEWORKS on purpose: atom is not a supported demo engine, so
-# its torch install is not patched.
+# Narrower than $FRAMEWORKS on purpose: atom is not a supported demo engine, so
+# only the /opt/rocm half of the hotfix reaches an atom-only host.
 ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS="sglang vllm"
 # Fixed name, written once, so it always holds the pristine vendor state rather
 # than a previous hotfix, and re-runs cannot pile up copies of a large .so.
@@ -1119,16 +1128,43 @@ else:
 PY
 }
 
-# The backup is a snapshot of the two target names, taken once: which files it
-# holds is exactly which files torch shipped.
+# Same bytes, or neither path exists. "Neither exists" is a real match here:
+# torch does not always ship libroctracer64.so.
+same_file_state() {
+  if [ -e "$1" ] || [ -e "$2" ]; then
+    cmp -s "$1" "$2"
+  fi
+}
+
+# The snapshot has to describe the torch installed right now. A torch upgrade
+# after an earlier hotfix leaves one describing the previous install, and
+# restoring from it would push the old ABI into the new torch. A half-written
+# one is caught the same way: the missing name reads as a mismatch.
+torch_lib_snapshot_is_stale() {
+  local backup_dir="$1" torch_lib_dir="$2" rocm_lib_dir="$3" name src
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
+    # A file already carrying the hotfix says nothing about the vendor state.
+    cmp -s "$src" "${torch_lib_dir}/${name}" && continue
+    same_file_state "${backup_dir}/${name}" "${torch_lib_dir}/${name}" || return 0
+  done
+  return 1
+}
+
 backup_torch_libs() {
-  local backup_dir="$1" torch_lib_dir="$2" name
+  local backup_dir="$1" torch_lib_dir="$2" staging name
   [ -d "$backup_dir" ] && return 0
-  install -d "$backup_dir" || return 1
+  # Staged, then renamed into place, so "the directory exists" means "the
+  # snapshot is complete". A partial one would make restore delete a vendor
+  # file it simply never got around to copying.
+  staging="${backup_dir}.staging.$$"
+  rm -rf "$staging"
+  install -d "$staging" || return 1
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
     [ -e "${torch_lib_dir}/${name}" ] || continue
-    cp -a "${torch_lib_dir}/${name}" "${backup_dir}/${name}" || return 1
+    cp -a "${torch_lib_dir}/${name}" "${staging}/${name}" || { rm -rf "$staging"; return 1; }
   done
+  mv -T "$staging" "$backup_dir" || { rm -rf "$staging"; return 1; }
 }
 
 # A name missing from the snapshot is one torch never shipped, so it is removed
@@ -1144,10 +1180,17 @@ restore_torch_libs() {
   done
 }
 
+torch_libs_match_snapshot() {
+  local backup_dir="$1" torch_lib_dir="$2" name
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    same_file_state "${backup_dir}/${name}" "${torch_lib_dir}/${name}" || return 1
+  done
+}
+
 sync_one_torch_lib() {
   local rocm_lib_dir="$1" py="$2" torch_lib_dir="$3"
   local backup_dir="${torch_lib_dir}/${ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR}"
-  local name src dst tmp pending=""
+  local name src dst tmp mode pending=""
 
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
     src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
@@ -1161,6 +1204,11 @@ sync_one_torch_lib() {
     return 0
   fi
 
+  if [ -d "$backup_dir" ] \
+     && torch_lib_snapshot_is_stale "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir"; then
+    log "torch changed since the last hotfix; refreshing ${backup_dir}"
+    rm -rf "$backup_dir" || { warn "cannot drop the stale snapshot ${backup_dir}"; return 1; }
+  fi
   # Replacing vendor libraries with no recoverable copy is worse than not
   # replacing them, so the backup gates the overwrite.
   backup_torch_libs "$backup_dir" "$torch_lib_dir" \
@@ -1171,9 +1219,11 @@ sync_one_torch_lib() {
     src="$(readlink -f "${rocm_lib_dir}/${name}")"
     dst="${torch_lib_dir}/${name}"
     tmp="${torch_lib_dir}/.${name}.hotfix-tmp.$$"
+    mode=0644
+    if [ -e "$dst" ]; then mode="$(stat -c '%a' "$dst")"; fi
     # Atomic replace: an in-place O_TRUNC overwrite SIGBUSes any process holding
     # the old .so mmapped, and re-runs happen while a server may still be up.
-    if ! cp -f "$src" "$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$dst"; then
+    if ! cp -f "$src" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dst"; then
       rm -f "$tmp"
       warn "failed to write ${dst}"
       restore_torch_libs "$backup_dir" "$torch_lib_dir" \
@@ -1183,11 +1233,14 @@ sync_one_torch_lib() {
   done
 
   if ! verify_torch_runtime "$py" "$torch_lib_dir"; then
-    warn "torch broke after the sync; restoring ${torch_lib_dir} from ${backup_dir}"
+    warn "torch did not come up after the sync; restoring ${torch_lib_dir} from ${backup_dir}"
     restore_torch_libs "$backup_dir" "$torch_lib_dir" \
       || die "cannot restore ${torch_lib_dir} from ${backup_dir}; fix it by hand"
-    verify_torch_runtime "$py" "$torch_lib_dir" \
-      || die "torch is still broken after restoring ${torch_lib_dir} from ${backup_dir}"
+    # Confirmed by content: the probe can also fail for reasons unrelated to the
+    # swap (a busy GPU, HIP OOM), and re-running it would abort setup over one.
+    torch_libs_match_snapshot "$backup_dir" "$torch_lib_dir" \
+      || die "restored ${torch_lib_dir} does not match ${backup_dir}; fix it by hand"
+    warn "vendor libraries restored; continuing without the torch lib sync"
     return 1
   fi
   log "torch profiler libs synced from ${rocm_lib_dir} into ${torch_lib_dir}"
@@ -1202,7 +1255,9 @@ sync_rocm_profiler_libs_to_torch_lib() {
 
   default_py="$(resolve_python)" || { warn "cannot resolve Python"; return 1; }
   pairs="$(collect_framework_torch_lib_dirs "$default_py")"
-  [ -n "$pairs" ] || { warn "no framework torch/lib resolved; nothing to sync"; return 1; }
+  # Expected on a host running an engine outside the sync list (atom), where the
+  # /opt/rocm overlay is the whole hotfix.
+  [ -n "$pairs" ] || { log "no torch/lib to sync for ${ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS}"; return 0; }
 
   while IFS="$(printf '\t')" read -r py dir; do
     sync_one_torch_lib "$rocm_lib_dir" "$py" "$dir" || rc=1
@@ -1218,7 +1273,7 @@ verify_rocm_profiler_torch_lib_sync() {
 
   default_py="$(resolve_python)" || return 1
   pairs="$(collect_framework_torch_lib_dirs "$default_py")"
-  [ -n "$pairs" ] || return 1
+  [ -n "$pairs" ] || return 0
 
   while IFS="$(printf '\t')" read -r py dir; do
     for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
