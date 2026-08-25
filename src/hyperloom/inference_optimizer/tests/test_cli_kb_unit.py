@@ -105,20 +105,11 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(tmp_path)
-    state.kernel_optimizer = "native"
-    state.tp = 8
-    state.conc = 64
-    state.isl = 8192
-    state.osl = 1024
-    state.save(tmp_path)
-    reads: list[tuple[str, Path, object]] = []
+    reads: list[tuple[str, Path]] = []
 
     class _Remote:
-        def read(self, identity: str, destination: Path, scope):
-            reads.append((identity, destination, scope))
+        def read(self, identity: str, destination: Path):
+            reads.append((identity, destination))
             return {
                 "schema_version": 2,
                 "knowledge_schema_version": (remote_recipe.CURRENT_KNOWLEDGE_SCHEMA_VERSION),
@@ -159,6 +150,8 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
         )
         is None
     )
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
     persisted = SharedState.load_or_init(tmp_path)
     assert persisted.stack_fingerprint_meta["rocm"] == "6.2"
     assert persisted.stack_fingerprint_meta["image_digest"] == "img@sha"
@@ -168,13 +161,6 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
     assert "patch_timeline" not in persisted.warm_start_recipe["recipe"]
     assert len(reads) == 1
     assert reads[0][1] == tmp_path / "runtime" / "remote_recipe"
-    assert reads[0][2].as_dict() == {
-        "kernel_optimizer": "forge",
-        "tp": 8,
-        "conc": 64,
-        "isl": 8192,
-        "osl": 1024,
-    }
     assert "current Recipe warm replay" in capsys.readouterr().out
 
 
