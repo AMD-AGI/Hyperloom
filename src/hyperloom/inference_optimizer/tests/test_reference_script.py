@@ -331,7 +331,7 @@ def test_render_patches_emit_apply_function():
     text = render_reference_script(
         framework="sglang",
         server_args="",
-        patches=["patches/001_fix.patch"],
+        rounds=[{"patches": ["patches/001_fix.patch"], "artifacts": []}],
         framework_root="/sgl-workspace/sglang",
     )
     assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
@@ -346,7 +346,7 @@ def test_render_enablement_script_is_valid_bash(tmp_path):
         envs={"VLLM_ROCM_USE_AITER": "1"},
         model="/models/M",
         setup_commands=["pip install aiter==0.1.4"],
-        patches=["patches/001.patch"],
+        rounds=[{"patches": ["patches/001.patch"], "artifacts": []}],
         framework_root="/sgl-workspace/sglang",
         runtime="/session/enablement/stacks/sglang/s1/venv",
     )
@@ -390,7 +390,7 @@ def test_render_round_trip_with_enablement_params(tmp_path):
         envs={"VLLM_ROCM_USE_AITER": "1"},
         model="/models/M",
         setup_commands=["pip install vllm==0.24"],
-        patches=["patches/fix.patch"],
+        rounds=[{"patches": ["patches/fix.patch"], "artifacts": []}],
         framework_root="/sgl-workspace/sglang",
     )
     sh = tmp_path / "enablement_setting.sh"

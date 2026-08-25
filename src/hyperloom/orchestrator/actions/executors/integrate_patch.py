@@ -24,8 +24,15 @@ from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
-from ...specialists.patch_safety import patch_targets_missing
+from ...framework.paths import (
+    resolve_session_framework_root,
+    resolve_source_file_allowlist,
+    resolved_within,
+)
+from ...specialists.patch_safety import (
+    patch_targets_missing,
+    resolve_patch_apply_root,
+)
 from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
@@ -303,104 +310,133 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
-    """True when *every* supplied patch has all its modify/delete targets
-    present under ``root`` (at some ``-p`` strip level).
+def trusted_explicit_root(
+    explicit: str,
+    allowlist: tuple[str, ...] | None = None,
+) -> Path | None:
+    """Resolve a declared framework root, or ``None`` when it is not trusted.
 
-    Returns False if any patch is unreadable or has a missing target here.
+    A root outside the allowlisted source scope is refused whatever its tree
+    holds, so callers must ask this before blaming the patches for not
+    matching it.
+
+    Args:
+        explicit: The declared ``framework_source_root``.
+        allowlist: Pre-resolved allowlist, computed once by the caller when
+            available, to avoid a redundant ``resolve_source_file_allowlist()``
+            call.
+
+    Returns:
+        The resolved directory, or ``None`` when it is unreadable, absent, or
+        outside the trusted source scope.
     """
-    if not patch_paths:
-        return False
-    for patch in patch_paths:
+    try:
+        resolved = Path(explicit).resolve()
+    except (OSError, RuntimeError):
+        log.warning(
+            "integrate_patch: framework_source_root override %r could not be resolved",
+            explicit,
+        )
+        return None
+    if not resolved.is_dir():
+        log.warning(
+            "integrate_patch: framework_source_root override %r does not exist",
+            explicit,
+        )
+        return None
+    effective_allowlist = allowlist if allowlist is not None else resolve_source_file_allowlist()
+    if any(resolved_within(explicit, root) for root in effective_allowlist):
+        return resolved
+    log.warning(
+        "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
+        explicit,
+    )
+    return None
+
+
+def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
+    """Return the diff text of every patch that could be read.
+
+    Args:
+        patch_paths: Patch files to read.
+
+    Returns:
+        The texts that were readable; a shorter list than ``patch_paths`` means
+        some patch is missing or unreadable.
+    """
+    texts: list[str] = []
+    for patch in patch_paths or []:
         try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
+            texts.append(patch.read_text(encoding="utf-8", errors="replace"))
         except OSError:
-            return False
-        if patch_targets_missing(text, root):
-            return False
-    return True
+            continue
+    return texts
 
 
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
+    patch_texts: list[str] | None = None,
 ) -> Path | None:
-    """Pick the framework source root for patches.
+    """Pick one unambiguous framework root under the shared Patch rules.
 
-    Precedence: explicit param (must lie under a trusted installed source
-    scope) → first source root whose tree
-    actually contains the patch targets (target-aware: a ``vllm/...`` patch must
-    apply under the vllm root, not the first allowlist entry which is ``aiter``)
-    → the tree this session was pointed at → first existing git root → first
-    existing dir. None when nothing resolves.
-
-    The target-aware match is all-or-nothing across the patch set, so one path
-    that does not resolve sends the whole candidate to the next choice. That
-    used to be the head of the allowlist, which is ``aiter`` regardless of what
-    the session is optimising — patches naming the real tree's files then failed
-    to apply and the candidate was written off as ``rejected_apply_fail`` with no
-    hint that it had been aimed at an unrelated repository. Asking the session
-    which tree it is optimising keeps the failure honest: the patch is then
-    rejected by the tree it was written against, which is a fact about the patch.
+    With patches to place, the decision is
+    :func:`~...specialists.patch_safety.resolve_patch_apply_root`'s and it fails
+    closed. Without any, there is nothing to match a tree against, so the
+    session's declared root wins and the allowlist order is the last resort.
 
     Args:
-        explicit: Explicit framework-root override, or ``None`` to use the
-        source scope. Overrides outside the trusted scope are rejected.
-        patch_paths: Patch target paths used to pick the allowlist root whose
-            tree actually contains them.
+        explicit: Declared framework root. Rejected when it resolves outside
+            the trusted source scope.
+        patch_paths: Patch files to place; unreadable ones are skipped.
+        patch_texts: Patch diffs already in memory, placed alongside
+            ``patch_paths``.
 
     Returns:
-        The resolved framework source root, or ``None`` when nothing resolves.
+        The resolved root, or ``None`` when the patches name no single tree.
     """
+    allowlist = resolve_source_file_allowlist()
+    roots = [Path(root) for root in allowlist]
+    explicit_path: Path | None = None
     if explicit:
-        try:
-            p = Path(explicit).resolve()
-        except (OSError, RuntimeError):
-            log.warning(
-                "integrate_patch: framework_source_root override %r could not be resolved",
-                explicit,
-            )
+        explicit_path = trusted_explicit_root(explicit, allowlist=allowlist)
+        if explicit_path is None:
             return None
-        if not p.is_dir():
-            log.warning(
-                "integrate_patch: framework_source_root override %r does not exist",
-                explicit,
-            )
-            return None
-        for r in resolve_source_file_allowlist():
-            try:
-                root = Path(r).resolve()
-            except (OSError, RuntimeError):
-                continue
-            if _is_within(p, root):
-                return p
-        log.warning(
-            "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
-            explicit,
+
+    texts = [str(text) for text in (patch_texts or []) if str(text).strip()]
+    texts.extend(_read_patch_texts(patch_paths))
+    has_patch_input = bool(patch_paths or patch_texts)
+    if has_patch_input:
+        session_root = resolve_session_framework_root()
+        candidates = [
+            *roots,
+            *((Path(session_root),) if session_root else ()),
+        ]
+        resolution = resolve_patch_apply_root(
+            texts,
+            explicit_root=explicit_path,
+            candidate_roots=candidates,
+            default_root=Path(session_root) if session_root else None,
         )
-        return None
-    roots = [Path(r) for r in resolve_source_file_allowlist()]
-    # Target-aware: prefer the root that actually holds the patch's targets.
-    if patch_paths:
-        for p in roots:
-            if p.is_dir() and _root_contains_patch_targets(p, patch_paths):
-                return p
+        if resolution.root is None:
+            log.warning(
+                "integrate_patch: Patch root resolution rejected: %s%s",
+                resolution.reason,
+                (f" matches={[str(root) for root in resolution.matches]!r}" if resolution.matches else ""),
+            )
+        return resolution.root
+
+    if explicit_path is not None:
+        return explicit_path
     session_root = resolve_session_framework_root()
     if session_root and Path(session_root).is_dir():
-        if patch_paths:
-            log.warning(
-                "integrate_patch: no source root holds every patch target; "
-                "applying against the session's framework tree %s",
-                session_root,
-            )
         return Path(session_root)
-    for p in roots:
-        if p.is_dir() and (p / ".git").exists():
-            return p
-    # Last resort: a non-git dir.
-    for p in roots:
-        if p.is_dir():
-            return p
+    for root in roots:
+        if root.is_dir() and (root / ".git").exists():
+            return root
+    for root in roots:
+        if root.is_dir():
+            return root
     return None
 
 
@@ -1502,6 +1538,10 @@ class IntegratePatchExecutor:
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
+        # Both are set per round by _stage_apply and tell the revert the tree was
+        # written even when no patch landed in ``applied``.
+        self._apply_attempted: bool = False
+        self._ip_base_artifact_replayed = False
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
@@ -1950,6 +1990,7 @@ class IntegratePatchExecutor:
         Returns an early-exit result dict on failure/no-patches/apply_only,
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
+        self._ip_base_artifact_replayed = False
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -2134,6 +2175,7 @@ class IntegratePatchExecutor:
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
+                self._replay_base_artifacts(params)
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
                 ctx._ip_framework_root = None  # type: ignore[attr-defined]
@@ -2168,6 +2210,13 @@ class IntegratePatchExecutor:
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
+            # Forward grounding-drop details so framework.py can surface them in
+            # the next round's mandate.  The field lives on done_payload (written
+            # by runner.py) and must be forwarded here because _no_patches is the
+            # concrete dict framework.py reads via _maybe_rearm_enablement.
+            grounding_drops = (done_payload or {}).get("patches_dropped_by_grounding")
+            if isinstance(grounding_drops, list) and grounding_drops:
+                _no_patches["patches_dropped_by_grounding"] = grounding_drops
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
@@ -2178,11 +2227,30 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                _error_class = "framework_source_root_rejected"
-                _error = (
-                    f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured trusted source scope"
-                )
+                # An untrusted root is refused on that ground alone; only a
+                # trusted one that simply lacks the files is the patches' fault.
+                trusted_root = trusted_explicit_root(explicit_framework_root)
+                if trusted_root is not None:
+                    if not _read_patch_texts(patch_paths):
+                        _error_class = "patch_unreadable"
+                        _error = "no patch file could be read; verify paths and permissions"
+                    else:
+                        missing_records = _preflight_missing_targets(trusted_root, patch_paths)
+                        if missing_records:
+                            _error_class = "patch_target_missing"
+                            _error = missing_records
+                        else:
+                            _error_class = "framework_source_root_rejected"
+                            _error = (
+                                f"framework_source_root {explicit_framework_root!r} could not "
+                                "be unambiguously matched to the patch targets"
+                            )
+                else:
+                    _error_class = "framework_source_root_rejected"
+                    _error = (
+                        f"framework_source_root {explicit_framework_root!r} is not "
+                        "under the configured trusted source scope"
+                    )
             else:
                 _error_class = "no_framework_agent_root"
                 _error = (
@@ -2202,6 +2270,16 @@ class IntegratePatchExecutor:
                 "retry_feedback": [],
                 "prior_patches": [str(p) for p in patch_paths],
             }
+            if _error_class == "patch_target_missing":
+                _early["advisory"] = (
+                    "patch target file(s) absent from framework_source_root "
+                    f"{explicit_framework_root}; author patches only against files "
+                    "that exist in the installed framework tree."
+                )
+            # A set spanning two trees is exactly what fails root resolution here,
+            # so this is the result that has to carry the reason onward.
+            if (done_payload or {}).get("patches_span_multiple_roots"):
+                _early["patches_span_multiple_roots"] = True
             if params.get("enablement"):
                 _early["enablement"] = True
             return _early
@@ -2286,20 +2364,22 @@ class IntegratePatchExecutor:
                 "config_changes_applied": {},
             }
 
+        # The stash is on the stack and the tree is about to be mutated, so
+        # ``__call__``'s undo has to be able to see both before anything writes.
+        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
+        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
+        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
+
+        self._replay_base_artifacts(params)
+
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
-        self._apply_attempted: bool = False
 
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
-        # From here on the tree is mutable and the stash is on the stack, so
-        # ``__call__``'s undo has to be able to see both before this stage
-        # returns: ``applied`` is published by identity and appended to in place.
-        ctx._ip_framework_root = framework_root  # type: ignore[attr-defined]
-        ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
-        ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
+        # ``applied`` is published by identity and appended to in place.
         ctx._ip_applied = applied  # type: ignore[attr-defined]
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         self._apply_attempted = bool(patch_paths)
@@ -2704,6 +2784,7 @@ class IntegratePatchExecutor:
                         "specialist_task_id": specialist_task_id,
                         "patches_applied": stacked_patches,
                         "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_applied": applied_artifacts,
                         "artifacts_reverted": artifacts_reverted,
                         "config_changes_applied": config_changes_applied,
                         "extra_envs_applied": extra_envs_applied,
@@ -3781,9 +3862,10 @@ class IntegratePatchExecutor:
         """Reverse-apply the applied patches (best-effort); returns those
         actually reverted.
 
-        On non-git trees the backup ledger — not ``applied`` — decides whether a
-        restore is owed: a patch set that fails part-way through its first patch
-        has already mutated the tree while ``applied`` is still empty.
+        ``applied`` does not decide whether a restore is owed. On non-git trees
+        the backup ledger does; on git trees a patch set that fails part-way
+        through its first patch, or a round whose only write was the
+        base-artifact replay, has mutated the tree while ``applied`` is empty.
 
         Args:
             framework_root: The source root to revert in, or ``None`` (no-op).
@@ -3804,7 +3886,7 @@ class IntegratePatchExecutor:
                     log.error("integrate_patch: non-git revert incomplete in %s: %s", framework_root, errors)
                     return []
             return list(applied)
-        if not getattr(self, "_apply_attempted", False) and not applied:
+        if not self._apply_attempted and not applied and not self._ip_base_artifact_replayed:
             return reverted
         # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
         # committed, so HEAD is exactly the accepted stack: kept work is in
@@ -3837,6 +3919,66 @@ class IntegratePatchExecutor:
                 )
                 break
         return reverted
+
+    def _replay_base_artifacts(self, params: dict[str, Any]) -> None:
+        """Re-install artifacts that prior enablement rounds accepted.
+
+        Called twice per round: in launch-only mode (before the early return, so
+        the probe boots against the accepted stack) and after the framework stash
+        (so the re-install is not immediately swept up by ``_git_stash_if_dirty``).
+        The replay does not feed ``applied_artifacts``; base artifacts are the
+        stable base and must not be reverted when this round's candidate is rolled back.
+
+        Each entry is validated before installation:
+        - ``target`` must resolve inside an allowlisted framework root
+          (via :func:`_resolve_artifact_target`).
+        - ``source`` must resolve inside the session directory.
+
+        An entry failing either check is skipped with a warning. The install
+        itself is unguarded on purpose: a base artifact belongs to the accepted
+        stack, so a round that cannot restore it would benchmark a tree no round
+        asked for. The ``OSError`` propagates and ``__call__`` unwinds it.
+        """
+        if not bool(params.get("enablement")):
+            return
+        base_artifacts = params.get("enablement_base_artifacts")
+        if not isinstance(base_artifacts, list):
+            return
+        for art in base_artifacts:
+            if not isinstance(art, dict):
+                continue
+            source_str = str(art.get("source") or "").strip()
+            target_str = str(art.get("target") or "").strip()
+            if not source_str or not target_str:
+                continue
+            source = Path(source_str)
+            if not source.is_file():
+                log.warning("integrate_patch: base artifact source not found: %s", source)
+                continue
+            try:
+                source_resolved = source.resolve()
+            except (OSError, RuntimeError):
+                log.warning("integrate_patch: base artifact source unresolvable: %s", source)
+                continue
+            if not _is_within(source_resolved, self.session_dir.resolve()):
+                log.warning(
+                    "integrate_patch: base artifact source %s escapes session dir; skipping",
+                    source,
+                )
+                continue
+            resolved = _resolve_artifact_target(target_str)
+            if resolved is None:
+                log.warning(
+                    "integrate_patch: base artifact target %r not in allowlisted root; skipping",
+                    target_str,
+                )
+                continue
+            target, _ = resolved
+            # Set before the write so a copy that raises still counts as dirtying.
+            self._ip_base_artifact_replayed = True
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            log.info("integrate_patch: re-installed base artifact %s", target)
 
     def _apply_artifacts(
         self,
@@ -3878,6 +4020,9 @@ class IntegratePatchExecutor:
                         "kind": spec.kind,
                         "existed": existed,
                         "backup": backup_path,
+                        # Re-install source for the next round's base replay and
+                        # for the archived copy in enablement_setting.sh.
+                        "source": str(spec.source),
                     }
                 )
             except OSError as exc:
