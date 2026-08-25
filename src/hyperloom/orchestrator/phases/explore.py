@@ -1916,4 +1916,7 @@ class ExplorePhase(PhaseHandler):
             entry["allocated_gpu_ids"] = [
                 int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
             ]
+        specialist_notes = done_payload.get("_specialist_notes") or []
+        if isinstance(specialist_notes, list) and specialist_notes:
+            entry["notes"] = [str(n) for n in specialist_notes]
         return entry

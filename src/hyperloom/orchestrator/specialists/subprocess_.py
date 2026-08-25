@@ -50,6 +50,7 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 
+from ..actions.executors._git import _run_git_cp
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -613,6 +614,16 @@ class SpecialistSubprocessResult:
     roots are session-absolute). Consumers read and sandbox-check these
     directly — do not join them onto a base."""
 
+    worktree_capture_path: str = ""
+    """Absolute path of a patch file written by the orchestrator from
+    ``git diff`` of the specialist worktree, or ``""`` when capture did not
+    run or the worktree was clean."""
+
+    worktree_clean_with_patches: bool = False
+    """True when the worktree had no uncommitted edits but the specialist
+    wrote patch files to ``patches/``. This is the primary signal that the
+    agent authored patch text without editing the tracked tree."""
+
     usage: dict[str, Any] | None = None
     """Token usage recovered from the agent CLI's ``process.log``. Carries the
     four canonical counters (``input_tokens`` / ``output_tokens`` /
@@ -1092,6 +1103,12 @@ class SpecialistSubprocessDispatcher:
                 log_fh.close()
             clear_wall_budget_extension(task_id)
 
+        # Capture the worktree diff first so an authoritative root-known patch
+        # is available before the file-based patch scan.
+        worktree_capture_path, worktree_clean_with_patches = self._capture_worktree_diff(
+            worktree, worktree_base, workspace
+        )
+
         # Patches: scan worktree/patches/ (Arbor convention).
         patches = self._collect_patches(worktree, workspace)
 
@@ -1145,6 +1162,8 @@ class SpecialistSubprocessDispatcher:
             stale_heartbeat=outcome["stale_heartbeat"],
             process_log_path=str(process_log),
             patches=patches,
+            worktree_capture_path=worktree_capture_path,
+            worktree_clean_with_patches=worktree_clean_with_patches,
             usage=usage,
             response=response,
             tool_calls=tool_calls,
@@ -1591,6 +1610,61 @@ class SpecialistSubprocessDispatcher:
                 proc.kill()
             except Exception:  # noqa: BLE001
                 pass
+
+    @staticmethod
+    @staticmethod
+    def _capture_worktree_diff(
+        worktree: Path | None,
+        worktree_base: Path | None,
+        workspace: Path,
+    ) -> tuple[str, bool]:
+        """Run ``git diff`` on the worktree and write the result to a file.
+
+        Uses ``git add -N`` first so new untracked files appear in the diff
+        without being staged. The capture is skipped when there is no worktree
+        or the worktree is not a git checkout.
+
+        Args:
+            worktree: Per-task git worktree directory, or ``None``.
+            worktree_base: The checkout the worktree was cut from, used as the
+                root-known-by-construction for the captured diff.
+            workspace: Task workspace directory for writing the output file.
+
+        Returns:
+            A ``(capture_path, clean_with_patches)`` tuple:
+            - ``capture_path``: absolute path of the written patch file, or
+              ``""`` when the worktree was clean or capture failed.
+            - ``clean_with_patches``: ``True`` when the worktree had no
+              uncommitted edits but ``patches/`` already contains patch files.
+        """
+        if worktree is None or worktree_base is None:
+            return "", False
+        if not worktree.is_dir() or not (worktree / ".git").exists() and not (worktree / ".git").is_file():
+            return "", False
+        intent_cp = _run_git_cp(["-C", str(worktree), "add", "-N", "."], timeout=30.0)
+        if intent_cp is None or intent_cp.returncode != 0:
+            return "", False
+        diff_cp = _run_git_cp(["-C", str(worktree), "diff"], timeout=60.0)
+        if diff_cp is None:
+            return "", False
+        diff_text = diff_cp.stdout or ""
+        patches_dir = worktree / "patches"
+        has_patch_files = (
+            patches_dir.is_dir()
+            and any(True for _ in patches_dir.glob("*.patch"))
+            or any(True for _ in patches_dir.glob("*.diff"))
+            if patches_dir.is_dir()
+            else False
+        )
+        if not diff_text.strip():
+            return "", has_patch_files
+        capture_dest = workspace / "worktree_capture.patch"
+        try:
+            capture_dest.write_text(diff_text, encoding="utf-8")
+        except OSError as exc:
+            log.warning("specialist: could not write worktree capture: %s", exc)
+            return "", False
+        return str(capture_dest), False
 
     @staticmethod
     def _collect_patches(
