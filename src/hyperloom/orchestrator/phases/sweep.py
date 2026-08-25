@@ -13,6 +13,36 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
+#: Slack added to a conc_sweep lease on top of the task's own budget, covering
+#: server teardown and the report flush that happen after the last variant. The
+#: lease must outlive the work or the TTL watchdog fails a task that is still
+#: making progress.
+_CONC_SWEEP_LEASE_GRACE_SEC = 600
+
+
+def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
+    """Return the execution lease for a conc_sweep task, from its real budget.
+
+    The lease has to bound the task that actually runs, which is the *clamped*
+    budget — deriving it from the configured value reclaimed still-valid sweeps
+    whenever the clamp produced something larger (a non-positive configured
+    budget on a long session) or left the budget unbounded.
+
+    Args:
+        clamped_budget: The budget the task was enqueued with; ``None`` when the
+            sweep runs without a budget gate.
+
+    Returns:
+        The lease TTL in seconds, or ``0`` for an unbounded sweep. ``0`` is the
+        registry's "no lease" encoding (``reclaim_expired_running`` skips it):
+        an unbounded sweep has no deadline to expire against, so opting out
+        beats reclaiming it at an arbitrary one.
+    """
+    if clamped_budget is None or clamped_budget <= 0:
+        return 0
+    return int(clamped_budget) + _CONC_SWEEP_LEASE_GRACE_SEC
+
+
 class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -83,10 +113,14 @@ class SweepPhase(PhaseHandler):
             )
             return
         if task is None:
-            self._record_terminal_conc_sweep_skip(
-                skip_reason="enqueue_returned_none",
-                auto_conc_sweep_error="enqueue_returned_none",
-            )
+            # The enqueue helper declines with its own terminal skip when the
+            # session clock leaves nothing to spend; don't overwrite that reason.
+            last = getattr(state, "last_conc_sweep", None) or {}
+            if not str(last.get("status") or "").strip():
+                self._record_terminal_conc_sweep_skip(
+                    skip_reason="enqueue_returned_none",
+                    auto_conc_sweep_error="enqueue_returned_none",
+                )
             return
         log.info(
             "SWEEP entry (from=%s): auto-enqueued conc_sweep task=%s (concs=%s total_budget_sec=%s)",
@@ -121,19 +155,29 @@ class SweepPhase(PhaseHandler):
         configured_budget = int(state.conc_sweep_total_budget_sec or 0)
         # Clamp total_budget_sec to the remaining session wall-clock budget so
         # a long conc_sweep cannot outlive --max-hours.  A 120 s reserve is kept
-        # for the CLOSE phase.  When remaining_minutes() returns None (or the
-        # state stub lacks it) the session has no wall-clock cap and we use the
-        # configured value as-is.
+        # for the CLOSE phase.  ``None`` is the wire value for "no budget gate"
+        # (no wall-clock cap, or a non-positive configured budget); a clamp that
+        # leaves no time declines the task instead, because a 0 would read
+        # downstream as an unbounded budget and run the whole ladder.
         _CLOSE_RESERVE_SEC = 120
         _rem_fn = getattr(state, "remaining_minutes", None)
         session_rem = _rem_fn() if callable(_rem_fn) else None
+        clamped_budget: int | None
         if session_rem is not None:
             session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)
-            clamped_budget = (
-                min(configured_budget, max(0, session_rem_sec)) if configured_budget > 0 else max(0, session_rem_sec)
-            )
+            if session_rem_sec <= 0:
+                log.info(
+                    "conc_sweep: session clock leaves %ds after the %ds CLOSE reserve; not enqueueing.",
+                    session_rem_sec,
+                    _CLOSE_RESERVE_SEC,
+                )
+                self._record_session_budget_conc_sweep_skip(
+                    denied=f"remaining_after_close_reserve={session_rem_sec}s",
+                )
+                return None
+            clamped_budget = min(configured_budget, session_rem_sec) if configured_budget > 0 else session_rem_sec
         else:
-            clamped_budget = configured_budget
+            clamped_budget = configured_budget if configured_budget > 0 else None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
@@ -146,10 +190,7 @@ class SweepPhase(PhaseHandler):
                 kind="conc_sweep",
                 params=params,
                 idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                # lease_ttl uses the configured (unclamped) total_budget_sec, an upper
-                # bound on the clamped per-task budget, so a long conc_sweep doesn't
-                # expire mid-flight.
-                lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
+                lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(

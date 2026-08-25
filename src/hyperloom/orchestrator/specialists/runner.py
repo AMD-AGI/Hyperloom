@@ -822,6 +822,9 @@ class SpecialistRunner:
             record = ConversationRecord(
                 session_id=self.session_dir.name,
                 component="specialist",
+                # Same metadata dict as the token row for this turn, so both
+                # halves carry the backend's call_id when it stamped one.
+                call_id=md.get("call_id"),
                 task_id=task_id,
                 turn=turn,
                 tick=tick,

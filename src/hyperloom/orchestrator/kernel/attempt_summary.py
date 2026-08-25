@@ -363,6 +363,48 @@ def _relative_to_session(p: Path, session_dir: Path) -> str:
         return str(p)
 
 
+def _rejected_reason_of(entry: dict[str, Any]) -> str:
+    """Return the rejection reason recorded on a ledger row (``""`` when none).
+
+    A grouped kernel's rejection is stamped on the task row as
+    ``integration_rejected_reason``; a single-kernel rejection uses
+    ``rejected_reason``. Both are the same fact and the summary must read either.
+
+    Args:
+        entry: The kernel's attempts ledger row.
+
+    Returns:
+        The rejection reason, or ``""`` when the row records none.
+    """
+    return str(entry.get("rejected_reason") or entry.get("integration_rejected_reason") or "").strip()
+
+
+def _entry_integration_status(entry: dict[str, Any]) -> str:
+    """Return the row's terminal integration status, lowercased (``""`` when unset)."""
+    return str(entry.get("integration_status") or "").strip().lower()
+
+
+def _rejection_bucket(reason: str) -> str:
+    """Map a rejection reason onto a :data:`KNOWN_REJECTION_REASONS` bucket.
+
+    Threshold-encoding reasons (``max_partial_attempts_3``) collapse onto their
+    canonical key; anything unrecognised lands in ``other``.
+
+    Args:
+        reason: The recorded rejection reason.
+
+    Returns:
+        The breakdown key to increment.
+    """
+    if reason in KNOWN_REJECTION_REASONS:
+        return reason
+    if reason.startswith("max_partial_attempts_"):
+        return "max_partial_attempts_without_keep"
+    if reason.startswith("max_failures_"):
+        return "max_failures_without_keep"
+    return "other"
+
+
 def _classify_attempted(
     entry: dict[str, Any],
     *,
@@ -371,6 +413,11 @@ def _classify_attempted(
     kernel_id: str,
 ) -> str:
     """Decide the category for a kernel that has an attempts ledger row.
+
+    The row's own terminal decision is authoritative alongside the id sets: a
+    rejected *group* task deliberately stays out of ``rejected_kernel_ids`` (its
+    members can be re-dispatched under another task), so a summary keyed only on
+    that set reports a terminally rejected kernel as ``IN_FLIGHT``.
 
     Args:
         entry: The kernel's attempts ledger row.
@@ -382,9 +429,10 @@ def _classify_attempted(
         The outcome category constant.
     """
     last_decision = str(entry.get("last_decision") or "").upper()
-    if kernel_id in integrated_ids:
+    integration_status = _entry_integration_status(entry)
+    if kernel_id in integrated_ids or integration_status == "integrated":
         return CATEGORY_INTEGRATED
-    if kernel_id in rejected_ids:
+    if kernel_id in rejected_ids or integration_status == "rejected" or _rejected_reason_of(entry):
         return CATEGORY_ATTEMPTED_REJECTED
     if last_decision == "KEEP":
         return CATEGORY_KEEP_PENDING
@@ -557,7 +605,7 @@ def _summary_attempted_rejected(
             f"usable patch; verification: {artifact_error or 'no usable artifact'}"
         )
     decision = str(entry.get("last_decision") or "").upper() or "rejected"
-    return f"{decision}; rejected_reason={entry.get('rejected_reason') or 'n/a'}"
+    return f"{decision}; rejected_reason={_rejected_reason_of(entry) or 'n/a'}"
 
 
 def _summary_in_flight(
@@ -955,16 +1003,7 @@ def build_kernel_optimization_summary(
         )
         counts[_category_count_key(category)] += 1
         if category == CATEGORY_ATTEMPTED_REJECTED:
-            rej_reason = str(attempt.get("rejected_reason") or "").strip()
-            bucket = rej_reason if rej_reason in KNOWN_REJECTION_REASONS else None
-            if bucket is None:
-                # Collapse threshold-encoding reason strings onto canonical keys.
-                if rej_reason.startswith("max_partial_attempts_"):
-                    bucket = "max_partial_attempts_without_keep"
-                elif rej_reason.startswith("max_failures_"):
-                    bucket = "max_failures_without_keep"
-                else:
-                    bucket = "other"
+            bucket = _rejection_bucket(_rejected_reason_of(attempt))
             rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
         by_kernel.append(
             _render_attempted_row(
@@ -989,6 +1028,12 @@ def build_kernel_optimization_summary(
             kernel_id=kid,
         )
         counts[_category_count_key(category)] += 1
+        # Same accounting as the top15 loop above: a rejected kernel that only
+        # has a ledger row must land in the breakdown too, or the totals and the
+        # per-reason split disagree.
+        if category == CATEGORY_ATTEMPTED_REJECTED:
+            bucket = _rejection_bucket(_rejected_reason_of(attempt))
+            rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
         by_kernel.append(
             _render_attempted_row(
                 {"kernel_id": kid},
@@ -1155,7 +1200,7 @@ def _render_attempted_row(
         "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
         "category": category,
         "outcome_class": _kernel_outcome_class(category, ladder),
-        "rejected_reason": str(attempt.get("rejected_reason") or ""),
+        "rejected_reason": _rejected_reason_of(attempt),
         "summary": summary_text,
         "attempts_total": int(attempt.get("attempts") or 0),
         "partial_count": int(attempt.get("partial_count") or 0),

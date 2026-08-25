@@ -166,6 +166,33 @@ def _list_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+# Per-lock-file mutexes, shared across ``_CidLock`` instances. Every operation
+# builds its own ``_CidLock``, so a mutex owned by the instance would be a fresh
+# uncontended lock each time and give two threads no mutual exclusion at all;
+# the flock alone cannot serialise them either, since it would be taken on two
+# separate open file descriptions.
+_CID_MUTEXES: dict[str, threading.Lock] = {}
+_CID_MUTEX_REGISTRY_LOCK = threading.Lock()
+
+
+def _cid_mutex(path: Path) -> threading.Lock:
+    """Return the process-wide mutex for one ``.lock`` file path.
+
+    Args:
+        path (Path): The cid's ``.lock`` file path.
+
+    Returns:
+        threading.Lock: The mutex shared by every lock instance on that path.
+    """
+    key = os.path.abspath(str(path))
+    with _CID_MUTEX_REGISTRY_LOCK:
+        mutex = _CID_MUTEXES.get(key)
+        if mutex is None:
+            mutex = threading.Lock()
+            _CID_MUTEXES[key] = mutex
+        return mutex
+
+
 # Per-cid lock
 @dataclass
 class _CidLock:
@@ -173,38 +200,49 @@ class _CidLock:
 
     Lives on a dedicated ``.lock`` file (not ``recipe.json``) so a
     concurrent reader can ``open(recipe.json)`` without contending on the
-    writer's lock. Doubles as a process-local mutex via ``self._mutex`` so
-    two threads in the same process don't dead-lock on the same fcntl region
-    (advisory locks are per-process, not per-thread).
+    writer's lock. Serialises threads through the per-path mutex from
+    :func:`_cid_mutex` (advisory locks are per open file description, not
+    per-thread) and processes through ``fcntl.flock``.
     """
 
     path: Path
-    _mutex: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _mutex: threading.Lock | None = field(default=None, init=False, repr=False)
     _fd: int | None = field(default=None, init=False, repr=False)
 
     def __enter__(self) -> _CidLock:
         """Acquire the process mutex then the exclusive file lock.
 
-        Grabs the in-process ``threading.Lock`` first (so threads in
+        Grabs the per-path ``threading.Lock`` first (so threads in
         the same process serialise) and then takes an exclusive
         ``fcntl.flock`` on the ``.lock`` file (so processes serialise).
+
+        Every step after the mutex is taken runs under one handler: the mutex is
+        shared per path and process-lived, so leaking it on a failed ``mkdir`` /
+        ``os.open`` (a permission error, a transient NFS fault) would block
+        every later write to that cid for the life of the process.
 
         Returns:
             _CidLock: This lock instance, for use as a context manager.
 
         Raises:
-            OSError: If the underlying ``flock`` fails; the mutex and
-                file descriptor are released before propagating.
+            OSError: If the directory, the open, or the ``flock`` fails; the
+                mutex and file descriptor are released before propagating.
         """
+        self._mutex = _cid_mutex(self.path)
         self._mutex.acquire()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
-        except OSError:
-            os.close(self._fd)
-            self._fd = None
+        except BaseException:
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
             self._mutex.release()
+            self._mutex = None
             raise
         return self
 
@@ -228,7 +266,9 @@ class _CidLock:
                 except OSError:
                     pass
                 self._fd = None
-        self._mutex.release()
+        if self._mutex is not None:
+            self._mutex.release()
+            self._mutex = None
 
 
 # LocalRecipeStore

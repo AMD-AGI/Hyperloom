@@ -230,6 +230,116 @@ def test_emit_fact_creates_fence_when_absent() -> None:
     assert "## Facts" in mcp.pages["p"]
 
 
+class _LosingMcp(_FakeMcp):
+    """Fake MCP where a concurrent writer's page lands on top of the first put(s)."""
+
+    def __init__(self, pages: dict[str, str], *, drops: int = 1) -> None:
+        super().__init__(pages)
+        self.drops = drops
+        self.puts = 0
+
+    def call(self, tool: str, args: dict[str, Any]) -> Any:
+        if tool == "put_page":
+            self.puts += 1
+            self.calls.append((tool, dict(args)))
+            if self.puts <= self.drops:
+                # Someone else's page overwrote ours: our line is gone and the
+                # page is not what we wrote.
+                self.pages[args["slug"]] = _page(f"# Recipe\n\n## Facts\n- other_writer_{self.puts} IMPROVES x ()\n")
+                return {"ok": True}
+            self.pages[args["slug"]] = args["content"]
+            return {"ok": True}
+        return super().call(tool, args)
+
+
+def test_emit_fact_retries_a_lost_update() -> None:
+    """A write that a concurrent page overwrote is detected and retried."""
+    mcp = _LosingMcp({"recipe/x": _page(_RECIPE_BODY)})
+    kg = KGClient(mcp)
+    wrote = kg.emit_fact(
+        page_slug="recipe/x",
+        subject="torch_compile",
+        predicate="IMPROVES",
+        object="qwen2forcausallm",
+    )
+    assert wrote is True
+    assert mcp.puts == 2
+    facts = parse_facts_fence(mcp.pages["recipe/x"])
+    assert any(f.subject == "torch_compile" for f in facts)
+
+
+def test_emit_fact_reports_an_unconfirmable_write_as_failure() -> None:
+    """A put the reads never reflect is reported as not written, not as success."""
+
+    class _StaleReadMcp(_FakeMcp):
+        def call(self, tool: str, args: dict[str, Any]) -> Any:
+            if tool == "put_page":
+                self.calls.append((tool, dict(args)))
+                return {"ok": True}  # accepted, but reads keep the old page
+            return super().call(tool, args)
+
+    mcp = _StaleReadMcp({"recipe/x": _page(_RECIPE_BODY)})
+    kg = KGClient(mcp)
+    assert (
+        kg.emit_fact(
+            page_slug="recipe/x",
+            subject="torch_compile",
+            predicate="IMPROVES",
+            object="qwen2forcausallm",
+        )
+        is False
+    )
+    assert sum(1 for tool, _ in mcp.calls if tool == "put_page") == 3
+
+
+def test_emit_fact_retries_an_in_band_put_error() -> None:
+    """gbrain reports some write failures in-band; those are retried, not trusted."""
+
+    class _InBandErrorMcp(_FakeMcp):
+        def __init__(self, pages: dict[str, str]) -> None:
+            super().__init__(pages)
+            self.puts = 0
+
+        def call(self, tool: str, args: dict[str, Any]) -> Any:
+            if tool == "put_page":
+                self.puts += 1
+                self.calls.append((tool, dict(args)))
+                if self.puts == 1:
+                    return {"error": "page locked"}
+                self.pages[args["slug"]] = args["content"]
+                return {"ok": True}
+            return super().call(tool, args)
+
+    mcp = _InBandErrorMcp({"recipe/x": _page(_RECIPE_BODY)})
+    kg = KGClient(mcp)
+    assert (
+        kg.emit_fact(
+            page_slug="recipe/x",
+            subject="torch_compile",
+            predicate="IMPROVES",
+            object="qwen2forcausallm",
+        )
+        is True
+    )
+    assert mcp.puts == 2
+
+
+def test_emit_fact_reports_failure_when_every_write_is_lost() -> None:
+    """Exhausting the retries reports False instead of claiming a write."""
+    mcp = _LosingMcp({"recipe/x": _page(_RECIPE_BODY)}, drops=99)
+    kg = KGClient(mcp)
+    assert (
+        kg.emit_fact(
+            page_slug="recipe/x",
+            subject="torch_compile",
+            predicate="IMPROVES",
+            object="qwen2forcausallm",
+        )
+        is False
+    )
+    assert mcp.puts == 3
+
+
 class _StructuredMcp:
     """Fake MCP whose get_page returns parsed {frontmatter: dict, body}."""
 
@@ -252,6 +362,10 @@ class _StructuredMcp:
             return {"frontmatter": dict(self.frontmatter), "body": self.body}
         if tool == "put_page":
             self.put_content = args["content"]
+            # Reads reflect the write, so emit_fact can confirm it. The written
+            # page carries its own frontmatter block; keeping it in ``body`` is
+            # harmless here because only the fact fence is parsed back.
+            self.body = args["content"]
             return {"ok": True}
         return {}
 

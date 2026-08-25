@@ -638,8 +638,25 @@ Primary switch (default **off**) for live Langfuse trace push.
   live run re-emits the out-of-process children onto the same trace and can
   duplicate observations. Use one path per session, or treat backfill as a
   recovery tool only when live push did not run.
-* **`flush_session` is idempotent**: A second flush only re-writes the receipt
-  (no re-emit), so a duplicated CLOSE step won't double-push.
+* **`flush_session` is idempotent, and retries only what failed**: the
+  session-end reconcile runs as named steps (leftover halves, `ext/` shards,
+  recipe-KB audit, specialist intel, forge steps, GEMM tuning, decision scores,
+  span close, final SDK flush). Each step runs at most once **per process**, so
+  a duplicated CLOSE step won't double-push; a step that raised is retried by
+  the next call. The receipt reports `flush_steps_done` (the steps that
+  succeeded, for this process) and `counts_final`, which is `true` only once
+  *every* step has completed — a `false` there means the push is still
+  incomplete, not that the session was short-lived. Across processes (a crash
+  plus a `--resume`, or two shutdown paths racing), the durable unit is finer
+  than a step: `ext_rows_sent` records how far each `ext/*.jsonl` shard was
+  drained so its rows are never re-pushed while later ones still are, and the
+  one-shot `session_start` / `session_breakdown` pushes are claimed through an
+  exclusive marker file (`reports/trace/.session_start.claim`) rather than
+  through the receipt read. The audit backfills (recipe-KB, specialist intel,
+  forge steps, GEMM tuning, decision scores) are *not* cursor-tracked: a second
+  process that reaches CLOSE for the same session re-emits those spans. The receipt also carries `payload_sha256` over its own body; a
+  receipt whose hash does not match is ignored on read, so a torn file cannot
+  suppress or replay the one-shot `session_start` / breakdown pushes.
 * **Package truncation**: The bundle caps at 5000 files / 256 MB. On a very
   long session the cap can stop the bundle short; the `PACKAGE_MANIFEST` then
   sets `truncated: true` and lists `dropped_files`, so consumers must not treat
@@ -656,9 +673,14 @@ discoverable rollup of LLM token spend derived from the per-call ledger
 `decision_trace.token_rollup`, so it always reconciles with that section. No
 env var controls it; it is always present (zeroed on pre-trace sessions).
 
-* `session_total`: whole-session total across every call, with two
-  convenience figures: `total_in_out` (prompt + completion only) and
-  `grand_total` (in + out + all cache-creation + cache-read tokens).
+* `session_total`: whole-session total across every call. Three counter
+  families are kept apart because they are billed and interpreted differently:
+  visible tokens (`total_in` / `total_out`), cache tokens
+  (`total_cache_creation` / `total_cache_read`), and hidden reasoning output
+  (`total_reasoning_out` — reported by reasoning models, absent from the reply
+  text and therefore *not* part of `total_out`). Two convenience figures sit on
+  top: `total_in_out` (visible prompt + completion only) and `grand_total`
+  (visible + all cache tokens + reasoning output — the all-in figure).
 * `by_component`: per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
@@ -674,8 +696,10 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
   (rather than a zero bucket) to make the sparsity explicit.
 
 To get the single "total tokens for this run" number, read
-`token_usage.session_total.grand_total` (all-in) or `.total_in_out`
-(prompt+completion only).
+`token_usage.session_total.grand_total` (all-in: visible + cache + reasoning)
+or `.total_in_out` (visible prompt+completion only). Read
+`.total_reasoning_out` on its own when comparing a reasoning model against a
+non-reasoning one — the latter reports `0` there.
 
 ---
 
