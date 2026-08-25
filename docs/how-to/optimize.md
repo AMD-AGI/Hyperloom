@@ -22,8 +22,9 @@ idempotent, the second run is fast and safe.
 ```
 
 ```{note}
-Paths below follow the recommended `pip install --target .` layout. In a source
-checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
+Paths in the prompts on this page follow the recommended `pip install --target .`
+layout. In a source checkout, replace the `hyperloom/` prefix with
+`src/hyperloom/`.
 ```
 
 ```text
