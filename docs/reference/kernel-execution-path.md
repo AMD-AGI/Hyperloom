@@ -212,7 +212,10 @@ source "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh"
 ```
 
 `install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
-env file. Re-run it after a venv rebuild or before each session.
+env file. Re-run it after a venv rebuild or before each session. The paths above
+assume a source checkout; in a `pip install --target .` workspace the same
+script is at `hyperloom/agents/kernel/scripts/install.sh`, without the `src/`
+prefix.
 
 Required env vars:
 
