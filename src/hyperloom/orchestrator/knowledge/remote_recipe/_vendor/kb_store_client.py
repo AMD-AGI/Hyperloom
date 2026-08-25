@@ -164,6 +164,14 @@ class KBStoreClient:
     def _session_base(self, canonical_id: str, session_id: str) -> str:
         return f"/v1/kb/{self._quote(canonical_id)}/sessions/{self._quote(session_id)}"
 
+    @staticmethod
+    def _scope_query(scope: dict[str, Any] | None) -> str:
+        if not scope:
+            return ""
+        return "?" + urllib.parse.urlencode(
+            {key: scope[key] for key in ("kernel_optimizer", "tp", "conc", "isl", "osl")}
+        )
+
     # -- knowledge ----------------------------------------------------------
 
     def put_knowledge(
@@ -173,6 +181,7 @@ class KBStoreClient:
         *,
         session_id: str = "",
         mode: str = "merge",
+        scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record what this producer knows about an identity.
 
@@ -184,6 +193,8 @@ class KBStoreClient:
         payload: dict[str, Any] = {"knowledge": knowledge, "mode": mode}
         if session_id:
             payload["session_id"] = session_id
+        if scope:
+            payload["scope"] = dict(scope)
         return self._request("POST", f"/v1/kb/{self._quote(canonical_id)}", payload)
 
     def get_session(self, canonical_id: str, session_id: str) -> dict[str, Any] | None:
@@ -195,12 +206,17 @@ class KBStoreClient:
                 return None
             raise
 
-    def get_hyperloom_recipe_view(self, canonical_id: str) -> dict[str, Any] | None:
+    def get_hyperloom_recipe_view(
+        self,
+        canonical_id: str,
+        *,
+        scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """Read the selected record normalized for Hyperloom replay."""
         try:
             return self._request(
                 "GET",
-                f"/v1/kb/{self._quote(canonical_id)}/views/hyperloom-recipe",
+                f"/v1/kb/{self._quote(canonical_id)}/views/hyperloom-recipe{self._scope_query(scope)}",
             )
         except KBStoreError as exc:
             if "HTTP 404" in str(exc):
@@ -228,23 +244,42 @@ class KBStoreClient:
         result = self._request("POST", "/v1/kb/search", payload)
         return dict(result or {})
 
-    def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
+    def get_rollup(
+        self,
+        canonical_id: str,
+        *,
+        scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """Read the candidate index, or ``None`` when nothing is recorded."""
         try:
-            return self._request("GET", f"/v1/kb/{self._quote(canonical_id)}/sessions")
+            return self._request(
+                "GET",
+                f"/v1/kb/{self._quote(canonical_id)}/sessions{self._scope_query(scope)}",
+            )
         except KBStoreError as exc:
             if "HTTP 404" in str(exc):
                 return None
             raise
 
     def set_champion(
-        self, canonical_id: str, session_id: str, *, metric: str = "throughput", value: float = 0.0
+        self,
+        canonical_id: str,
+        session_id: str,
+        *,
+        metric: str = "throughput",
+        value: float = 0.0,
+        scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Promote a session as the identity's best result."""
         return self._request(
             "POST",
             f"/v1/kb/{self._quote(canonical_id)}/champion",
-            {"session_id": session_id, "metric": metric, "value": value},
+            {
+                "session_id": session_id,
+                "metric": metric,
+                "value": value,
+                **({"scope": dict(scope)} if scope else {}),
+            },
         )
 
     # -- upload -------------------------------------------------------------

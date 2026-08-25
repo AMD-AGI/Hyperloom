@@ -1189,12 +1189,9 @@ def _verify_three_way_clean(
     return True, ""
 
 
-def _patch_paths_from_warm_params(params: dict[str, Any]) -> list[Path]:
-    """Collect diff-header targets from warm-replay patch payloads."""
-    from ...specialists.patch_safety import patch_file_targets
-
-    patch_paths: list[Path] = []
-    seen: set[str] = set()
+def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
+    """Collect readable diff text from warm-replay patch payloads."""
+    patch_texts: list[str] = []
     for patch in params.get("patches") or []:
         if not isinstance(patch, dict):
             continue
@@ -1205,15 +1202,9 @@ def _patch_paths_from_warm_params(params: dict[str, Any]) -> list[Path]:
                 content = Path(patch_ref).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 content = ""
-        if not content:
-            continue
-        for old_raw, new_raw in patch_file_targets(content):
-            raw = new_raw if new_raw and new_raw not in {"/dev/null", ""} else old_raw
-            if not raw or raw == "/dev/null" or raw in seen:
-                continue
-            seen.add(raw)
-            patch_paths.append(Path(raw))
-    return patch_paths
+        if content:
+            patch_texts.append(content)
+    return patch_texts
 
 
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
@@ -1222,11 +1213,11 @@ def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
         return ""
     from .integrate_patch import _resolve_framework_root
 
-    patch_paths = _patch_paths_from_warm_params(params)
-    root = _resolve_framework_root(None, patch_paths=patch_paths or None)
-    if root is not None:
-        return str(root)
-    return resolve_session_framework_root()
+    root = _resolve_framework_root(
+        resolve_session_framework_root() or None,
+        patch_texts=_patch_texts_from_warm_params(params),
+    )
+    return str(root or "")
 
 
 def _revert_warm_patch_state(
@@ -3086,7 +3077,7 @@ class BaselineExecutor:
                 )
             return stopped_result
 
-        before_apply_sha = _git_head_sha(patch_target)
+        before_apply_sha = _git_head_sha(patch_target) if patch_target else ""
 
         def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
             if live_shared_state is None:
@@ -3111,12 +3102,20 @@ class BaselineExecutor:
                 return False
             return True
 
-        patch_application = _apply_warm_patches(
-            params,
-            patch_target,
-            output_dir,
-            before_mutation=_persist_recipe_snapshot,
-        )
+        if params.get("patches") and not patch_target:
+            patch_application = {
+                "status": "failed",
+                "failure": "missing_target_repo",
+                "patches": [],
+                "applied": [],
+            }
+        else:
+            patch_application = _apply_warm_patches(
+                params,
+                patch_target,
+                output_dir,
+                before_mutation=_persist_recipe_snapshot,
+            )
         if isinstance(patch_application, dict):
             applied_patches = list(patch_application.get("applied") or [])
             _pre_patch_sha = str(patch_application.get("pre_sha") or "")

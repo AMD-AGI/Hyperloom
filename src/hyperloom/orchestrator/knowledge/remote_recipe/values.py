@@ -22,6 +22,7 @@ from .models import (
     MAX_FILE_BYTES,
     Artifact,
     KnowledgeBundle,
+    RecipeScope,
     RemoteRecipeValidationError,
     extract_knowledge_artifact_refs,
     validate_relative_path,
@@ -101,7 +102,7 @@ def _workload_shape(state: Any) -> dict[str, int]:
     """Return the replay-sensitive workload dimensions."""
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
     shape: dict[str, int] = {}
-    for key in ("conc", "isl", "osl"):
+    for key in ("tp", "conc", "isl", "osl"):
         value = _positive_int(getattr(state, key, None))
         if value is None:
             value = _positive_int(extra.get(key))
@@ -733,7 +734,9 @@ def has_new_keep(state: Any) -> bool:
     individual rows therefore do not carry a redundant KEEP decision.
     Pre-baseline enablement KEEPs (``baseline_enablement``) establish a runnable
     anchor but are not performance optimizations; they alone do not qualify for
-    KB writeback.
+    KB writeback. ``recipe_publishable`` is deliberately not consulted: it filters
+    the config layer inside :func:`build_publishable_recipe_config`, and gating the
+    whole write on it would publish nothing for an enablement-only session.
     """
     for raw in getattr(state, "optimization_stack", []) or []:
         if not isinstance(raw, Mapping):
@@ -742,8 +745,6 @@ def has_new_keep(state: Any) -> bool:
         if action in _IGNORED_ACTIONS:
             continue
         if raw.get("baseline_enablement"):
-            continue
-        if raw.get("recipe_publishable") is False:
             continue
         return True
     return False
@@ -1059,6 +1060,7 @@ def build_remote_knowledge(
     sections: Any = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
+    scope = RecipeScope.from_state(state)
     pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
     blocking_sections = [
         row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
@@ -1118,19 +1120,29 @@ def build_remote_knowledge(
     else:
         explore_value = {"patches": [], "artifacts": []}
         framework_value = {"patches": [], "artifacts": []}
+    kernel_value = (
+        {
+            "gemm": {"optimizations": []},
+            "fusion": {"items": []},
+            "rewrite": {"items": []},
+        }
+        if scope.kernel_optimizer == "geak"
+        else {
+            "gemm": build_kernel_gemm_value(state, files),
+            "fusion": build_kernel_fusion_value(state, files),
+            "rewrite": build_kernel_rewrite_value(state, files),
+        }
+    )
     value = {
         "config": build_publishable_recipe_config(state),
         "explore": explore_value,
         "framework": framework_value,
-        "kernel": {
-            "gemm": build_kernel_gemm_value(state, files),
-            "fusion": build_kernel_fusion_value(state, files),
-            "rewrite": build_kernel_rewrite_value(state, files),
-        },
+        "kernel": kernel_value,
     }
     if sections is not None:
         _adopt_replayed_prior(state, sections, value, files, stack)
-        _adopt_prior_kernel(state, sections, value, files)
+        if scope.kernel_optimizer == "forge":
+            _adopt_prior_kernel(state, sections, value, files)
     staged_sections = (
         merge_staged_sections(
             value,
@@ -1163,6 +1175,7 @@ def build_remote_knowledge(
             "pitfalls": _experience(state, "warm_start_pitfalls"),
             "provenance": {
                 "producer": "hyperloom-inference-optimizer",
+                "kernel_optimizer": scope.kernel_optimizer,
                 "phase": "CLOSE",
                 "session_id": str(getattr(state, "recipe_kb_session_id", "") or getattr(state, "session_id", "")),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1199,9 +1212,10 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
         envs = section.get("extra_envs")
         if isinstance(envs, Mapping) and envs:
             return True
-        patches = section.get("patches")
-        if isinstance(patches, list) and patches:
-            return True
+        for material in ("patches", "artifacts"):
+            items = section.get(material)
+            if isinstance(items, list) and items:
+                return True
     timeline = value.get("patch_timeline")
     if isinstance(timeline, list) and timeline:
         return True
@@ -1265,7 +1279,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "replay_disabled_reason": str(view.get("replay_disabled_reason") or ""),
     }
     for key, value in _mapping(knowledge.get("workload_shape")).items():
-        if key in {"conc", "isl", "osl"}:
+        if key in {"tp", "conc", "isl", "osl"}:
             resolved = _positive_int(value)
             if resolved is not None:
                 row[key] = resolved

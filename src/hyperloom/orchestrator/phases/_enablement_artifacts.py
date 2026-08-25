@@ -115,11 +115,19 @@ def write_setting_script(
 ) -> str:
     """Write ``reports/enablement/enablement_setting.sh`` from accumulated enablement state.
 
-    Idempotently rewritten on every ``kept`` or ``advanced`` verdict.  Patches are
-    copied to ``reports/enablement/patches/`` under a stack-ordered name, since
-    specialists across rounds pick colliding file names, and are referenced only
-    once the copy lands.  Patches are dropped entirely without a framework root,
-    because ``git apply`` would have no target to run against.
+    Idempotently rewritten on every ``kept`` or ``advanced`` verdict. Deliverables
+    are emitted round by round from ``kept_rounds`` so the replay order matches the
+    order integrate_patch applied them in; a round's patches precede its artifacts,
+    which is what lets a round both patch and whole-file-replace the same file.
+
+    Patches are copied to ``reports/enablement/patches/`` under a stack-ordered
+    name, since specialists across rounds pick colliding file names, and are
+    referenced only once the copy lands. Patches are dropped entirely without a
+    framework root, because ``git apply`` would have no target to run against.
+
+    Whole-file artifacts are copied to ``reports/enablement/artifacts/`` and
+    become ``install -D`` lines. Each one's pre-image is copied alongside as
+    ``.orig``, which is what an upstream PR has to be written against.
 
     Args:
         session_dir: The session root directory.
@@ -136,15 +144,36 @@ def write_setting_script(
     from hyperloom.inference_optimizer.reference_script import render_reference_script
 
     framework_root = str(enablement.framework_root or "").strip()
+    patches_dest = enablement_dir(Path(session_dir)) / "patches"
+    artifacts_dest = enablement_dir(Path(session_dir)) / "artifacts"
 
-    script_patches: list[str] = []
-    if framework_root:
-        patches_dest = enablement_dir(Path(session_dir)) / "patches"
-        for idx, patch_str in enumerate(enablement.kept_patches or [], start=1):
-            src = Path(str(patch_str))
-            name = f"{idx:03d}_{src.name}"
-            if _copy(src, patches_dest / name):
-                script_patches.append(f"patches/{name}")
+    patch_counter = 0
+    artifact_counter = 0
+    script_rounds: list[dict] = []
+
+    for rnd in enablement.kept_rounds or []:
+        rnd_script_patches: list[str] = []
+        rnd_script_artifacts: list[dict[str, str]] = []
+
+        if framework_root:
+            for patch_str in rnd.get("patches") or []:
+                patch_counter += 1
+                src = Path(str(patch_str))
+                name = f"{patch_counter:03d}_{src.name}"
+                if _copy(src, patches_dest / name):
+                    rnd_script_patches.append(f"patches/{name}")
+
+        for art in rnd.get("artifacts") or []:
+            artifact_counter += 1
+            target = str(art.get("target") or "")
+            name = f"{artifact_counter:03d}_{Path(target).name}"
+            if not _copy(Path(str(art.get("source") or "")), artifacts_dest / name):
+                continue
+            _copy(Path(str(art.get("backup") or "")), artifacts_dest / f"{name}.orig")
+            rnd_script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
+
+        if rnd_script_patches or rnd_script_artifacts:
+            script_rounds.append({"patches": rnd_script_patches, "artifacts": rnd_script_artifacts})
 
     accepted_cfg = dict(enablement.accepted_config or {})
     extra_envs = {str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()}
@@ -162,9 +191,9 @@ def write_setting_script(
         max_model_len=max_model_len,
         gpu_type=gpu_type,
         setup_commands=list(enablement.setup_commands or []) or None,
-        patches=script_patches or None,
-        framework_root=framework_root if script_patches else None,
+        framework_root=framework_root if any(r.get("patches") for r in script_rounds) else None,
         runtime=runtime_path or None,
+        rounds=script_rounds or None,
     )
 
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"

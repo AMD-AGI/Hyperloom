@@ -89,14 +89,28 @@ export KB_STORE_TOKEN=...
 ```
 
 Both credentials are required; missing credentials fail at startup. Remote mode
-selects metadata through `GET /v1/kb/{canonical_id}/views/hyperloom-recipe` and
-uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads the selected
-session's exact file manifest and replays one combined Recipe: merged config,
-the ordered Explore/Framework overlay timeline, and Kernel GEMM/Fusion/Rewrite
-content. Remote mode does not construct the local Recipe dispatcher or fall
-back to local Recipe data. Runtime amendments are skipped and CLOSE performs
-one best-effort final write. Optional `GBRAIN_*` credentials remain available
-for Framework PR capabilities.
+selects metadata through
+`GET /v1/kb/{canonical_id}/views/hyperloom-recipe` with all five scope query
+parameters: `kernel_optimizer` (`forge` or `geak`), `tp`, `conc`, `isl`, and
+`osl`. For example:
+
+```text
+/v1/kb/{canonical_id}/views/hyperloom-recipe?kernel_optimizer=forge&tp=8&conc=64&isl=1024&osl=256
+```
+
+The same scope is required for scoped session rollup reads and is included in
+Recipe writes and champion updates. Hyperloom derives it from the current
+session state; if the optimizer is unsupported or a numeric dimension is not
+positive, remote warm-start is skipped with `recipe_scope_invalid` instead of
+failing the optimization run.
+
+Remote mode uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads
+the selected session's exact file manifest and replays one combined Recipe:
+merged config, the ordered Explore/Framework overlay timeline, and Kernel
+GEMM/Fusion/Rewrite content. Remote mode does not construct the local Recipe
+dispatcher or fall back to local Recipe data. Runtime amendments are skipped
+and CLOSE performs one best-effort final write. Optional `GBRAIN_*` credentials
+remain available for Framework PR capabilities.
 
 Configuration replay requires an exact precision match. A bf16 run does not
 select an fp16 record, or vice versa, during degraded warm-start search. If an
