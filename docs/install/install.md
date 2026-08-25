@@ -126,10 +126,8 @@ The backend runs `install_baremetal.sh` in five phases:
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
 2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **ROCm hotfix**: downloads the profiler hotfix release asset, overlays
-   `libamdhip64` / `libroctracer64` under `/opt/rocm/lib`, and copies the
-   resolved libraries into PyTorch's bundled `torch/lib/` so `torch.profiler`
-   records HIP-graph replay kernels on stock official images (see #747).
+3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible,
+   covering both `/opt/rocm/lib` and PyTorch's bundled `torch/lib/`.
 4. **Credentials**: resolves LLM gateway credentials into `.env`.
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
@@ -171,26 +169,10 @@ HYPERLOOM_DOCKER_TARGET_HOST=<hostname>
 The demo skill reads this value to target the chosen host.
 
 The demo skill runs the setup backend inside the container, so Phase 3 applies
-the ROCm profiler hotfix there too — but only for SGLang images. Official SGLang
-ROCm images ship stock rocclr/roctracer libraries that omit HIP-graph replay
-kernel events during decode profiling; vLLM ROCm images carry their own kineto
-profiler workaround, so the overlay is skipped for them rather than replacing a
-vendor-validated pair. The gate reads `HYPERLOOM_RUN_MODE` from `.env` and
-probes which engine is importable in the container. It is skipped unless the
-ROCm 7.2 stack is eligible, and a failure warns without aborting.
-
-The overlay is copied into `torch/lib` per framework, because torch's own copies
-carry `DT_RPATH=$ORIGIN` and outrank `LD_LIBRARY_PATH`. Bare-metal vLLM defaults
-to `--framework-env isolated` with its own torch under `$VLLM_VENV_ROOT`, so each
-importable framework's interpreter is resolved separately; SGLang and a shared
-vLLM land on the host torch. atom is not covered: it is not a supported demo
-engine. Before replacing anything, the original files are snapshotted to
-`torch/lib/.profiler_hotfix_backup`, the swap is atomic, and torch has to import
-and initialise HIP afterwards or the snapshot is restored.
-
-Selecting `baremetal` as the run mode while actually running setup inside a
-container bypasses this gate: a vLLM image would then get the overlay. Keep
-`HYPERLOOM_RUN_MODE=docker` for container runs driven by a demo skill.
+the ROCm profiler hotfix there too, but only for SGLang images: vLLM ROCm images
+ship their own profiler workaround. Setup reads the run mode from `.env`, so keep
+`HYPERLOOM_RUN_MODE=docker` for container runs even though the backend itself
+runs inside the container.
 
 ### Environment written by setup
 
