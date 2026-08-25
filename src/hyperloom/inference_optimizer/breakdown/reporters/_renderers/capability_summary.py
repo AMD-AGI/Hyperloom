@@ -64,6 +64,17 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             extras.append(f"validated_gain={fmt_pct(v['last_validated_gain_pct'])}")
         if "grid_size" in v and v["grid_size"] is not None:
             extras.append(f"grid={v['grid_size']}")
+        # Kernel-lane outcomes that ``keeps`` deliberately excludes. Without
+        # them a reader cannot tell a lane that failed from one whose wins are
+        # still waiting on integrate.
+        if v.get("micro_only_keeps"):
+            extras.append(f"micro_only={v['micro_only_keeps']}")
+        if v.get("pending_integrate"):
+            extras.append(f"pending_integrate={v['pending_integrate']}")
+        if v.get("reverts"):
+            extras.append(f"reverts={v['reverts']}")
+        if v.get("e2e_gain_pct") is not None:
+            extras.append(f"e2e_gain={fmt_pct(v['e2e_gain_pct'])}")
         # explore extras.
         if "keep_unstable_count" in v and v["keep_unstable_count"]:
             extras.append(f"keep_unstable={v['keep_unstable_count']}")

@@ -39,6 +39,7 @@ def coord(build_coord):
     for name in (
         "_enqueue_build_launch_probe",
         "_route_succeeded_build",
+        "_route_failed_build",
         "_build_routing_record",
         "_note_build_routed",
         "_build_probe_was_cancelled",
@@ -656,6 +657,58 @@ async def test_route_same_row_not_processed_twice(coord):
     await Coordinator._maybe_route_build_outcomes(coord)
 
     assert len(coord._rearm_calls) == 1  # only once
+
+
+@pytest.mark.asyncio
+async def test_route_failed_build_not_acked_when_rearm_raises(coord):
+    """Failed builds stay unrouted when rearm fails so the next tick can retry."""
+    action = TargetedBuildAction(
+        gap_id="g",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
+        ref="v1",
+    )
+    task_id = await _enqueue_and_transition(coord, action, "failed")
+    coord.shared_state.enablement.last_build_failure = {
+        "failure_class": "compile_error",
+        "failure_summary": "x",
+    }
+    attempts = {"n": 0}
+    real_rearm = coord._maybe_rearm_enablement
+
+    def _flaky_rearm(res):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("rearm failed")
+        real_rearm(res)
+
+    coord._maybe_rearm_enablement = _flaky_rearm
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+    assert Coordinator._build_routing_record(coord, task_id) is None
+    assert coord.shared_state.enablement.build_novelty == []
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+    assert Coordinator._build_routing_record(coord, task_id) is not None
+    assert attempts["n"] == 2
+    assert len(coord._rearm_calls) == 1
+    assert coord._rearm_calls[-1]["status"] == "advanced"
+
+
+@pytest.mark.asyncio
+async def test_route_oldest_unrouted_build_when_newer_already_routed(coord, tmp_path):
+    """Older unseen builds must still route when a newer build is already accounted for."""
+    older_tid = await _verified_build(coord, tmp_path / "attempt_older", gap_id="g_older", ref="v-older")
+    newer_tid = await _verified_build(coord, tmp_path / "attempt_newer", gap_id="g_newer", ref="v-newer")
+    Coordinator._note_build_routed(coord, newer_tid)
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    probes = await _queued_probes(coord)
+    assert len(probes) == 1
+    assert Coordinator._build_routing_record(coord, older_tid) is not None
+    assert Coordinator._build_routing_record(coord, newer_tid) is not None
 
 
 # ---------------------------------------------------------------------------

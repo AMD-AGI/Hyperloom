@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.timeutil import iso_z
+from hyperloom.orchestrator.phases.machine_state import (
+    is_phase_transition_row as _is_phase_transition_row,
+    phase_history_event_name,
+)
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
@@ -39,6 +43,50 @@ _AUDIT_ACTIONS = (
     "sweep",
     "roofline",
 )
+
+
+class TimelineDedup:
+    """Decide which timeline rows describe an event already seen.
+
+    Rows collide on ``(action, ts-to-second, change)``. Rows that also carry
+    distinct task ids are distinct events and are all kept -- but only while
+    every row seen for that triple was itself task-tagged. An untagged row is
+    the same event observed from another source (journal vs audit list vs
+    recorder fragment), so it keeps the legacy fold rather than duplicating.
+
+    The collector and the exporter merge different mixes of those sources.
+    Sharing this decision is what stops them disagreeing about what one event
+    is: an exporter with a weaker identity silently drops rows the collector
+    would have kept, and nothing downstream can tell that happened.
+    """
+
+    def __init__(self) -> None:
+        """Start with no events seen."""
+        self._seen: dict[tuple[str, str, str], set[str]] = {}
+
+    def is_new(self, ev: dict[str, Any]) -> bool:
+        """Record ``ev`` and report whether it is an event not seen before.
+
+        Args:
+            ev (dict[str, Any]): One timeline event row.
+
+        Returns:
+            bool: ``True`` when the row should be kept.
+        """
+        base = (
+            str(ev.get("action") or ""),
+            iso_z(ev.get("ts"))[:19],
+            str(ev.get("change") or ev.get("task_id") or ""),
+        )
+        task_id = str(ev.get("task_id") or "")
+        prior = self._seen.get(base)
+        if prior is None:
+            self._seen[base] = {task_id}
+            return True
+        if task_id and task_id not in prior and all(prior):
+            prior.add(task_id)
+            return True
+        return False
 
 
 def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
@@ -219,18 +267,8 @@ def collect_phase_timeline(
         ev["ts"] = iso_z(ev.get("ts"))
 
     # De-dup: journal rows are appended first and win on collision.
-    seen: set[tuple[str, str, str]] = set()
-    deduped: list[dict[str, Any]] = []
-    for ev in events:
-        key = (
-            str(ev.get("action") or ""),
-            (str(ev.get("ts") or ""))[:19],
-            str(ev.get("change") or ev.get("task_id") or ""),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(ev)
+    dedup = TimelineDedup()
+    deduped = [ev for ev in events if dedup.is_new(ev)]
 
     deduped.sort(key=lambda e: e.get("ts") or "")
     return deduped
@@ -296,6 +334,30 @@ def _fold_search_ledger_keeps(row: dict[str, Any], search: dict[str, Any]) -> No
     row["status"] = "kept"
 
 
+# How decided a verdict is. One kernel can carry several integrate rows (the
+# ledger is keyed ``<kernel_id>|<patch_path>|<extra_args>``), and folding them
+# by kernel must not hand the outcome to whichever row is iterated last: an
+# adopted patch is not undone by a reverted sibling. Anything unlisted --
+# ``NEEDS_REVIEW``, or no decision recorded yet -- ranks lowest, because it is
+# the absence of a verdict rather than a verdict.
+_VERDICT_RANK = {"KEEP": 3, "REVERT": 2, "REJECT": 2}
+
+
+def _stronger_verdict(current: str, candidate: str) -> str:
+    """Return whichever of two integrate verdicts is more decided.
+
+    Args:
+        current (str): The verdict folded so far.
+        candidate (str): The verdict being folded in.
+
+    Returns:
+        str: The verdict that should represent the kernel.
+    """
+    if _VERDICT_RANK.get(candidate, 1) > _VERDICT_RANK.get(current, 1):
+        return candidate
+    return current
+
+
 def collect_capability_summary(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
@@ -324,10 +386,17 @@ def collect_capability_summary(
             kid = str(ent.get("kernel_id") or "")
             if not kid:
                 continue
-            integ_by_kid[kid] = {
-                "decision": str(ent.get("last_decision") or "").upper(),
-                "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
-            }
+            decision = str(ent.get("last_decision") or "").upper()
+            gain = _to_float(ent.get("best_gain_pct"))
+            prior = integ_by_kid.get(kid)
+            if prior is None:
+                integ_by_kid[kid] = {"decision": decision, "e2e_gain_pct": gain}
+                continue
+            # Fold, never overwrite: several patches for one kernel each get
+            # their own row here.
+            prior["decision"] = _stronger_verdict(prior["decision"], decision)
+            if gain is not None and (prior["e2e_gain_pct"] is None or gain > prior["e2e_gain_pct"]):
+                prior["e2e_gain_pct"] = gain
 
     # Kernel backends from on-disk invocations, reconciled against the integrate verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -337,28 +406,55 @@ def collect_capability_summary(
             invs (list[dict[str, Any]]): A lane's invocation records.
 
         Returns:
-            dict[str, Any]: ``{"status", "attempts", "keeps"}`` where
-            ``keeps`` counts ``decision == "KEEP"`` entries.
+            dict[str, Any]: ``{"status", "attempts", "keeps"}`` where ``keeps``
+            counts distinct kernels an integrate verdict adopted, plus optional
+            ``reverts`` / ``micro_only_keeps`` / ``e2e_gain_pct``.
         """
         attempts = len(invs)
-        adopted = 0
-        reverted = 0
+        # Tally distinct kernels, not invocation rows: one kernel re-tried
+        # across runs is still one kernel.
+        adopted_kids: set[str] = set()
+        reverted_kids: set[str] = set()
+        pending_kids: set[str] = set()
+        micro_only_kids: set[str] = set()
         best_e2e: float | None = None
-        for v in invs:
+        for i, v in enumerate(invs):
             if v.get("decision") != "KEEP":
                 continue
-            outcome = integ_by_kid.get(str(v.get("kernel_id") or ""))
+            kid = str(v.get("kernel_id") or "")
+            # A row without a kernel id cannot be folded with any other row.
+            ident = kid or f"__row_{i}"
+            outcome = integ_by_kid.get(kid) if kid else None
             if outcome is None:
-                # micro-KEEP with no integrate record stands as kept.
-                adopted += 1
+                # A KEEP that never reached integrate cleared the micro
+                # benchmark only. It is not an adoption (see CapabilityEntry:
+                # ``keeps`` is "kernels adopted at integrate").
+                micro_only_kids.add(ident)
                 continue
-            g = outcome["e2e_gain_pct"]
-            if g is not None and (best_e2e is None or g > best_e2e):
-                best_e2e = g
-            if outcome["decision"] in ("REVERT", "REJECT"):
-                reverted += 1
+            decision = outcome["decision"]
+            if decision == "KEEP":
+                adopted_kids.add(ident)
+                # Only an adoption contributes to "best gain": a reverted
+                # patch's number describes a regression, and an undecided
+                # one describes a measurement nobody has ruled on.
+                g = outcome["e2e_gain_pct"]
+                if g is not None and (best_e2e is None or g > best_e2e):
+                    best_e2e = g
+            elif decision in ("REVERT", "REJECT"):
+                reverted_kids.add(ident)
             else:
-                adopted += 1
+                # NEEDS_REVIEW, or no decision recorded. The verdict is not in,
+                # and a gain <= 0 NEEDS_REVIEW never gets retried, so calling
+                # this an adoption misreports it for the rest of the session.
+                pending_kids.add(ident)
+        # A decided outcome outranks an undecided one for the same kernel.
+        reverted_kids -= adopted_kids
+        pending_kids -= adopted_kids | reverted_kids
+        micro_only_kids -= adopted_kids | reverted_kids | pending_kids
+        adopted = len(adopted_kids)
+        reverted = len(reverted_kids)
+        pending = len(pending_kids)
+        micro_only = len(micro_only_kids)
         status = (
             "kept" if adopted > 0 else "reverted" if reverted > 0 else "attempted" if attempts > 0 else "not_attempted"
         )
@@ -369,6 +465,10 @@ def collect_capability_summary(
         }
         if reverted:
             row["reverts"] = reverted
+        if pending:
+            row["pending_integrate"] = pending
+        if micro_only:
+            row["micro_only_keeps"] = micro_only
         if best_e2e is not None:
             row["e2e_gain_pct"] = best_e2e
         return row
@@ -593,8 +693,9 @@ def collect_phase_segments(
 ) -> list[dict[str, Any]]:
     """Group action events into phase segments using ``phase_history`` boundaries.
 
-    Only rows with a non-empty ``to_phase`` are transitions (segment
-    boundaries); other rows are folded in as sub-events. Each segment's
+    Only rows with a real phase change (``to_phase != from_phase``) are
+    transitions (segment boundaries); marker rows and legacy rows without
+    ``to_phase`` are folded in as sub-events. Each segment's
     exit comes from the next transition. Actions are attributed by their
     own ``phase`` when present, else by the ``[entered_ts, exit_ts)``
     window. Empty when ``phase_history`` is missing (readers fall back to
@@ -617,8 +718,8 @@ def collect_phase_segments(
         return []
 
     rows = [r for r in history if isinstance(r, dict)]
-    transitions = [r for r in rows if str(r.get("to_phase") or "")]
-    sub_events = [r for r in rows if not str(r.get("to_phase") or "")]
+    transitions = [r for r in rows if _is_phase_transition_row(r)]
+    sub_events = [r for r in rows if not _is_phase_transition_row(r)]
 
     def _unix(row: dict[str, Any]) -> float | None:
         """Return a row's timestamp as a Unix epoch float.
@@ -700,7 +801,7 @@ def collect_phase_segments(
         if s is not None:
             s["events"].append(
                 {
-                    "event": str(ev.get("event") or ev.get("reason") or ""),
+                    "event": phase_history_event_name(ev),
                     "reason": str(ev.get("reason") or ""),
                     "ts": ev_ts,
                     "evidence": ev_evidence,

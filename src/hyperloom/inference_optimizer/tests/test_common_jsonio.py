@@ -8,7 +8,13 @@ import re
 
 import pytest
 
-from hyperloom.common.jsonio import coerce_dict, extract_first_json_with_key, read_json, read_jsonl
+from hyperloom.common.jsonio import (
+    coerce_dict,
+    extract_first_json_with_key,
+    extract_last_json_with_key,
+    read_json,
+    read_jsonl,
+)
 
 _BARE = re.compile(r"(\{.*\})", re.DOTALL)
 
@@ -160,3 +166,27 @@ class TestExtractFirstJson:
         text = 'bare {"k": 1} no fence'
         # bare_re None -> only fenced blocks considered
         assert extract_first_json_with_key(text, "k") is None
+
+
+class TestExtractLastJson:
+    def test_meta_prefix_scores(self):
+        text = '{"meta": "draft", "scores": {"proposal_0": {"score": 9, "reason": "ok"}}}'
+        out = extract_last_json_with_key(text, "scores")
+        assert out["scores"]["proposal_0"]["score"] == 9
+
+    def test_bare_then_fenced_prefers_later_offset(self):
+        text = (
+            '{"scores": {"proposal_0": {"score": 1, "reason": "old"}}} '
+            '```json\n{"meta": "final", "scores": {"proposal_0": {"score": 8, "reason": "new"}}}\n```'
+        )
+        out = extract_last_json_with_key(text, "scores")
+        assert out["scores"]["proposal_0"]["score"] == 8
+
+    def test_many_braces_and_braces_inside_strings(self):
+        drafts = " ".join(f'{{"meta": {index}, "reason": "literal {{ brace }}"}}' for index in range(800))
+        final = '{"meta": "final", "scores": {"proposal_0": {"score": 7}}}'
+
+        assert extract_last_json_with_key(f"{drafts} {final}", "scores") == {
+            "meta": "final",
+            "scores": {"proposal_0": {"score": 7}},
+        }

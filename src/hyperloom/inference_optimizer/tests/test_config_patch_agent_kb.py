@@ -276,7 +276,7 @@ def test_current_contract_persists_one_final_config(
     )
     state.current_best = {
         "tput": 150.0,
-        "extra_server_args": "--framework-final",
+        "extra_server_args": "--explore-old --framework-final",
         "extra_envs": {"VLLM_OWNER": "framework"},
     }
     bundle = build_remote_knowledge(
@@ -287,7 +287,7 @@ def test_current_contract_persists_one_final_config(
 
     assert "replay_config" not in bundle.knowledge["value"]
     assert bundle.knowledge["value"]["config"] == {
-        "extra_server_args": "--framework-final",
+        "extra_server_args": "--explore-old --framework-final",
         "extra_envs": {"VLLM_OWNER": "framework"},
     }
     assert set(bundle.knowledge["value"]["explore"]) == {"patches", "artifacts"}

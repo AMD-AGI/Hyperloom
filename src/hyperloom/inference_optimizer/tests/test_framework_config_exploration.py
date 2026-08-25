@@ -453,6 +453,7 @@ def test_dispatch_generation_specialist_params_and_marker():
     assert p["framework_config_generation"] is True
     assert p["mode"] == "research"
     assert p["gap_layer"] == "framework"
+    assert p["source_phase"] == "FRAMEWORK_AGENT"
     assert p["framework"] == "sglang"
 
 

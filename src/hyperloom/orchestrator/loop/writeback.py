@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_owner_phase,
+)
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
@@ -2228,8 +2231,15 @@ class WritebackCollaborator:
                     tick=int(getattr(self.shared_state, "tick", 0) or 0),
                     phase=(getattr(self.shared_state, "phase", "") or "") or None,
                 )
-                if scores and scores.get("models"):
+                if scores and (scores.get("models") or scores.get("errors")):
                     round_entry["ensemble_scores"] = scores
+                    input_err = (scores.get("errors") or {}).get("input")
+                    if input_err and not scores.get("models"):
+                        log.warning(
+                            "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
+                            task.task_id,
+                            input_err,
+                        )
             except Exception:  # noqa: BLE001 — advisory; never block
                 log.exception(
                     "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
@@ -2675,24 +2685,6 @@ class WritebackCollaborator:
                             "unset_envs": to_str_list(recipe_delta.get("unset_envs")),
                             "args_mode": str(recipe_delta.get("args_mode") or "append").strip().lower(),
                         }
-                    else:
-                        # A promoted variant need not carry recipe_delta, but the
-                        # candidate_* fields are the increment that was measured,
-                        # so the delta is reconstructed rather than left absent for
-                        # the publishable-config builder to reject.
-                        _delta_args = str(bv.get("candidate_extra_server_args") or "").strip()
-                        _delta_envs = dict(bv.get("candidate_extra_envs") or {})
-                        _delta_mode = str(bv.get("args_mode") or "append").strip().lower()
-                        _delta_rm = to_str_list(bv.get("remove_args"))
-                        _delta_unset = to_str_list(bv.get("unset_envs"))
-                        if _delta_args or _delta_envs or _delta_rm or _delta_unset or _delta_mode == "replace":
-                            stack_entry["recipe_delta"] = {
-                                "extra_server_args": _delta_args,
-                                "extra_envs": _delta_envs,
-                                "remove_args": _delta_rm,
-                                "unset_envs": _delta_unset,
-                                "args_mode": _delta_mode,
-                            }
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
@@ -4549,10 +4541,12 @@ class WritebackCollaborator:
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
-            source_phase = str(result.get("source_phase") or "").strip()
+            source_phase = patch_owner_phase(result)
             gap_layer = str(result.get("gap_layer") or "").strip()
             if source_phase:
                 bv["source_phase"] = source_phase
+            else:
+                bv["recipe_publishable"] = False
             if domain:
                 bv["domain"] = domain
             if gap_layer:
