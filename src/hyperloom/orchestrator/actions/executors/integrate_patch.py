@@ -1538,8 +1538,9 @@ class IntegratePatchExecutor:
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
-        # Set per round by _stage_apply; the revert needs it to know the tree was
-        # written even when no patch was applied.
+        # Both are set per round by _stage_apply and tell the revert the tree was
+        # written even when no patch landed in ``applied``.
+        self._apply_attempted: bool = False
         self._ip_base_artifact_replayed = False
 
     async def __call__(self, ctx) -> dict[str, Any]:
@@ -2373,7 +2374,6 @@ class IntegratePatchExecutor:
 
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
-        self._apply_attempted: bool = False
 
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
