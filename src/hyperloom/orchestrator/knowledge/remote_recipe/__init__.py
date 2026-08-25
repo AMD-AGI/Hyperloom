@@ -21,6 +21,7 @@ from .client import (
     _deactivate_destination,
 )
 from .models import (
+    RecipeScope,
     RemoteRecipeValidationError,
     RemoteWriteResult,
 )
@@ -39,13 +40,14 @@ def read_remote_recipe(
     canonical_id: str,
     destination: str | Path,
     *,
+    scope: RecipeScope,
     client: RemoteRecipeClient | None = None,
 ) -> dict[str, Any] | None:
     """Download the exact record and validate it against the current Recipe View."""
     resolved = client or RemoteRecipeClient.from_env_optional()
     if resolved is None:
         return None
-    document = resolved.read(canonical_id, destination)
+    document = resolved.read(canonical_id, destination, scope=scope)
     if document is not None:
         try:
             knowledge_to_warm_recipe(document)
@@ -82,13 +84,22 @@ def write_final_remote_recipe(
         )
     if throughput <= 0:
         return RemoteWriteResult("skipped", "missing_optimized_throughput", canonical_id, session_id)
+    try:
+        scope = RecipeScope.from_state(state)
+    except RemoteRecipeValidationError:
+        return RemoteWriteResult("skipped", "invalid_recipe_scope", canonical_id, session_id)
     with tempfile.TemporaryDirectory(prefix="hyperloom-remote-recipe-") as temporary:
         files_dir = Path(temporary) / "files"
-        bundle = build_remote_knowledge(state, files_dir, sections=KnowledgeSections.from_env())
+        bundle = build_remote_knowledge(
+            state,
+            files_dir,
+            sections=KnowledgeSections.from_env(),
+        )
         return resolved.write_if_better(
             canonical_id,
             session_id,
             bundle,
+            scope=scope,
             optimized_throughput=throughput,
             files_dir=files_dir,
         )
@@ -112,24 +123,36 @@ class HyperloomRemoteKB:
         self,
         identity: str,
         destination: str | Path,
+        scope: RecipeScope,
     ) -> dict[str, Any] | None:
         """Download the selected Recipe View for an inference identity."""
-        return read_remote_recipe(identity, destination, client=self._client)
+        return read_remote_recipe(
+            identity,
+            destination,
+            scope=scope,
+            client=self._client,
+        )
 
-    def get_view(self, identity: str) -> dict[str, Any] | None:
+    def get_view(
+        self,
+        identity: str,
+        scope: RecipeScope,
+    ) -> dict[str, Any] | None:
         """Read normalized metadata without downloading its artifact bundle."""
-        return self._client.get_view(identity)
+        return self._client.get_view(identity, scope)
 
     def materialize_view(
         self,
         identity: str,
         destination: str | Path,
         envelope: dict[str, Any],
+        scope: RecipeScope,
     ) -> dict[str, Any] | None:
         """Download and activate the exact previously selected View."""
         return self._client.read(
             identity,
             destination,
+            scope=scope,
             envelope=envelope,
         )
 
@@ -190,9 +213,11 @@ class RemoteWarmRecipeAdapter:
         self,
         remote_kb: HyperloomRemoteKB,
         destination: str | Path,
+        scope: RecipeScope,
     ) -> None:
         self._remote_kb = remote_kb
         self._destination = Path(destination)
+        self._scope = scope
         self._cache: dict[str, dict[str, Any] | None] = {}
         self._materialized_identity = ""
         self._candidate_views: dict[str, dict[str, Any]] = {}
@@ -212,6 +237,7 @@ class RemoteWarmRecipeAdapter:
                 document = self._remote_kb.read(
                     canonical_id,
                     self._destination,
+                    self._scope,
                 )
             except Exception:  # noqa: BLE001 — deactivate before propagating
                 self._deactivate_path(self._destination)
@@ -372,7 +398,10 @@ class RemoteWarmRecipeAdapter:
                     break
                 self._scanned_candidate_ids.add(canonical_id)
                 try:
-                    envelope = self._remote_kb.get_view(canonical_id)
+                    envelope = self._remote_kb.get_view(
+                        canonical_id,
+                        self._scope,
+                    )
                     if envelope is None:
                         continue
                     row = knowledge_to_warm_recipe(envelope)
@@ -429,6 +458,7 @@ class RemoteWarmRecipeAdapter:
             canonical_id,
             self._destination,
             envelope,
+            self._scope,
         )
         if document is None:
             self._deactivate_path(self._destination)
@@ -476,6 +506,7 @@ __all__ = [
     "KnowledgeSections",
     "RemoteRecipeClient",
     "RemoteRecipeConfigurationError",
+    "RecipeScope",
     "RemoteWarmRecipeAdapter",
     "SectionContent",
     "build_remote_knowledge",

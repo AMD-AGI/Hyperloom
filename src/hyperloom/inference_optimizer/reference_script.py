@@ -18,6 +18,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
 
@@ -299,17 +300,17 @@ def render_reference_script(
     max_model_len: int | None = None,
     gpu_type: str | None = None,
     setup_commands: list[str] | None = None,
-    patches: list[str] | None = None,
     framework_root: str | None = None,
     runtime: str | None = None,
+    rounds: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a runnable ``*.sh`` artifact from a launch recipe.
 
     With only the base parameters, renders the ``current_setting.sh`` summary
-    for the current optimization best.  When ``setup_commands``, ``patches``,
-    or ``framework_root`` are supplied, renders an ``enablement_setting.sh``
-    that additionally installs dependencies, applies patches, and launches the
-    server.
+    for the current optimization best. When ``setup_commands``, ``framework_root``
+    or ``rounds`` are supplied, renders an ``enablement_setting.sh`` that
+    additionally installs dependencies, replays the accepted enablement rounds,
+    and launches the server.
 
     Args:
         framework: Framework identifier (``sglang``, ``vllm``, ``atom``, …).
@@ -324,20 +325,22 @@ def render_reference_script(
         gpu_type: GPU type string, emitted as ``export GPU_TYPE=<s>``.
         setup_commands: Ordered install commands to run before launching.
             Only emit when generating an enablement artifact.
-        patches: Ordered patch file paths, relative to the script directory, to
-            apply via ``git apply``.  Requires ``framework_root``.
         framework_root: Framework source tree root where patches are applied.
             Emitted as ``export FRAMEWORK_ROOT=<path>`` and used in the
-            ``apply_patch`` helper.
+            ``apply_patch`` helper. Required for a round carrying patches.
         runtime: If non-empty, a note is appended warning that this enablement
             round relied on an isolated attempt venv at the given path and the
             script does not reproduce that layer.
+        rounds: Accepted enablement rounds in order, each
+            ``{"patches": [...], "artifacts": [...]}`` with script-relative
+            paths. A round's patches precede its artifacts, matching the order
+            integrate_patch applied them.
 
     Returns:
         The script text, always terminated by a newline.
     """
     fw = str(framework or "sglang").strip().lower()
-    has_enablement = bool(setup_commands or patches or framework_root)
+    has_enablement = bool(setup_commands or framework_root or rounds)
 
     lines: list[str] = ["#!/usr/bin/env bash"]
     if has_enablement:
@@ -387,12 +390,21 @@ def render_reference_script(
         for cmd in setup_commands:
             lines.append(cmd)
 
-    if patches:
-        lines.append("")
-        lines.append(_APPLY_PATCH_FUNC)
-        lines.append("")
-        for patch in patches:
-            lines.append(f"apply_patch {shlex.quote(str(patch))}")
+    if rounds:
+        if any(rnd.get("patches") for rnd in rounds):
+            lines.append("")
+            lines.append(_APPLY_PATCH_FUNC)
+        for rnd in rounds:
+            if rnd.get("patches"):
+                lines.append("")
+                for patch in rnd["patches"]:
+                    lines.append(f"apply_patch {shlex.quote(str(patch))}")
+            if rnd.get("artifacts"):
+                lines.append("")
+                for art in rnd["artifacts"]:
+                    # $SCRIPT_DIR stays outside the quotes so the shell still expands it.
+                    src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
+                    lines.append(f"install -D {src} {shlex.quote(art['target'])}")
 
     args = str(server_args or "").strip()
     lines.append("")
