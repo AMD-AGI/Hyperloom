@@ -1193,7 +1193,10 @@ migrate_legacy_deepseek_env() {
     */v1)         anthropic_url="${base%/*}/anthropic"; openai_url="$base" ;;
     https://api.deepseek.com|http://api.deepseek.com)
                   anthropic_url="${base}/anthropic"; openai_url="${base}/v1" ;;
-    *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
+    # Unknown host with no protocol suffix: both sides get the URL as given.
+    # Appending /v1 here would invent a route only known gateways are known
+    # to serve.
+    *)            anthropic_url="$base"; openai_url="$base" ;;
   esac
   model="${model:-deepseek-v4-pro}"
 
