@@ -5,8 +5,8 @@
 
 Sibling of :mod:`.llm_trace`; this module owns the full, redacted prompt +
 completion for every in-process LLM call, sharing the same identity / join keys
-(``session_id`` / ``component`` / ``role`` / ``tick`` / ``phase`` / ``turn``)
-so the two streams line up against ``decision_trace``.
+(``call_id`` / ``session_id`` / ``component`` / ``role`` / ``tick`` / ``phase``
+/ ``turn``) so the two streams line up against ``decision_trace``.
 
 Design contract:
 
@@ -47,6 +47,7 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "session_id",
         "ts",
         "component",
+        "call_id",
         "role",
         "task_id",
         "dyn_id",
@@ -137,6 +138,9 @@ class ConversationRecord:
 
     session_id: str
     component: str
+    # Same per-call id as the token row for this call (see ``llm_trace``); the
+    # Langfuse emitter pairs the two halves on it when both carry one.
+    call_id: str | None = None
     role: str | None = None
     task_id: str | None = None
     dyn_id: str | None = None
@@ -158,6 +162,7 @@ class ConversationRecord:
             "session_id": str(self.session_id),
             "ts": _now_iso(),
             "component": str(self.component),
+            "call_id": _coerce_optional_str(self.call_id),
             "role": _coerce_optional_str(self.role),
             "task_id": _coerce_optional_str(self.task_id),
             "dyn_id": _coerce_optional_str(self.dyn_id),

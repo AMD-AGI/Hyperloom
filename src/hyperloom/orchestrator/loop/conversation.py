@@ -417,6 +417,9 @@ class ConversationCollaborator:
             record = ConversationRecord(
                 session_id=self.session_dir.name,
                 component=agent_name,
+                # Same turn metadata the token row is built from, so both halves
+                # carry the backend's call_id when it stamped one.
+                call_id=metadata.get("call_id"),
                 role=agent_name,
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,

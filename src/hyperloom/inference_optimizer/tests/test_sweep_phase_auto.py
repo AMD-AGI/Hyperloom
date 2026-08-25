@@ -85,6 +85,7 @@ class _StubTaskRegistry:
     ):
         from hyperloom.orchestrator.state.task_registry import Task
 
+        self.last_lease_ttl_sec = lease_ttl_sec
         existing = self._tasks.get(idempotency_key)
         if existing is not None:
             return existing, True
@@ -920,6 +921,86 @@ async def test_on_enter_sweep_none_records_terminal_skip(coord, monkeypatch):
     assert coord.tasks._tasks == {}
     assert coord.shared_state.last_conc_sweep["status"] == "skipped"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_returned_none"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
+    """A clamp that leaves nothing declines: a 0 budget would read as unbounded."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    # 1 minute left, minus the 120 s CLOSE reserve, is a negative budget.
+    coord.shared_state.remaining_minutes = lambda: 1.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is None
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+
+
+@pytest.mark.asyncio
+async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
+    """The lease must bound the task that runs, not the configured value.
+
+    With no configured budget and a long session the clamp produces a budget
+    larger than the old 9000 s default, and the watchdog would have failed a
+    sweep that was still making progress.
+    """
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 0
+    coord.shared_state.remaining_minutes = lambda: 300.0  # 5 h
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    expected_budget = 300 * 60 - 120
+    assert task.params["total_budget_sec"] == expected_budget
+    assert coord.tasks.last_lease_ttl_sec == expected_budget + 600
+
+
+@pytest.mark.asyncio
+async def test_conc_sweep_unbounded_budget_opts_out_of_the_lease(coord):
+    """An unbounded sweep has no deadline, so it must not carry a finite lease."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task.params["total_budget_sec"] is None
+    assert coord.tasks.last_lease_ttl_sec == 0
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_unbounded_budget_is_none(coord):
+    """A non-positive configured budget means "no gate" and travels as None."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is not None
+    assert task.params["total_budget_sec"] is None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_clamps_to_remaining_session_time(coord):
+    """With a session cap, the budget is the remaining time minus the CLOSE reserve."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_total_budget_sec = 9000
+    coord.shared_state.remaining_minutes = lambda: 5.0
+
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+
+    assert task is not None
+    assert task.params["total_budget_sec"] == 180  # 5 min - 120 s reserve
 
 
 @pytest.mark.asyncio
