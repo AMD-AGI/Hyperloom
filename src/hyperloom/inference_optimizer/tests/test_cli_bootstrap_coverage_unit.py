@@ -578,9 +578,7 @@ def test_detect_checkpoint_precision_bf16_from_torch_dtype(tmp_path):
 def test_detect_checkpoint_precision_fp8_from_quant_method(tmp_path):
     from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
 
-    (tmp_path / "config.json").write_text(
-        '{"quantization_config": {"quant_method": "fp8"}}', encoding="utf-8"
-    )
+    (tmp_path / "config.json").write_text('{"quantization_config": {"quant_method": "fp8"}}', encoding="utf-8")
     assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
 
 

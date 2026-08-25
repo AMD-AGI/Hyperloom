@@ -393,9 +393,7 @@ def resolve_forge_llm_model(
             or default
         )
     return (
-        str(source.get("FORGE_CLAUDE_MODEL") or "").strip()
-        or str(source.get("CLAUDE_MODEL") or "").strip()
-        or default
+        str(source.get("FORGE_CLAUDE_MODEL") or "").strip() or str(source.get("CLAUDE_MODEL") or "").strip() or default
     )
 
 

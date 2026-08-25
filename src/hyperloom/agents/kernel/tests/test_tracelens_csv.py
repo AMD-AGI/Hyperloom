@@ -305,9 +305,7 @@ def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
     result = _json.loads(capsys.readouterr().out)
     resolution_path = Path(result["artifact_paths"]["kernel_source_resolution"])
     assert resolution_path.is_file()
-    assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0][
-        "source_file"
-    ] == str(source)
+    assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -784,9 +782,7 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     )
     assert out[0]["shapes"] == []
     assert out[1]["shapes"] == ["(99,99) bf16"]
-    assert out[1]["invocation_cases"][0]["input_shapes"] == [
-        "(99,99) bf16"
-    ]
+    assert out[1]["invocation_cases"][0]["input_shapes"] == ["(99,99) bf16"]
 
 
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
@@ -1870,18 +1866,13 @@ def _xdit_roofline_capture(trace_dir: Path) -> Path:
     trace_dir.mkdir(parents=True, exist_ok=True)
     raw = trace_dir / "rank_0.trace.json.gz"
     with gzip.open(raw, "wt") as fh:
-        json.dump({"traceEvents": [
-            {"cat": "kernel", "name": "void flash_fwd<...>", "dur": 40}
-            for _ in range(64)
-        ]}, fh)
+        json.dump({"traceEvents": [{"cat": "kernel", "name": "void flash_fwd<...>", "dur": 40} for _ in range(64)]}, fh)
 
     split = trace_dir / "trace_split"
     split.mkdir()
     for name in (
-        "decode_only_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1"
-        "_rank_0.trace.json.gz",
-        "mixed_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1"
-        "_rank_0.trace.json.gz",
+        "decode_only_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1_rank_0.trace.json.gz",
+        "mixed_steady_state_prefill_0_prefilldecode_0_decode_1_bs1_conc1_rank_0.trace.json.gz",
     ):
         with gzip.open(split / name, "wt") as fh:
             json.dump({"traceEvents": []}, fh)
@@ -1956,8 +1947,8 @@ def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
     trace_dir.mkdir()
     raw = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=40)
     flat_fragment = _rank_trace(
-        trace_dir / "decode_only_steady_state_prefill_0_decode_1_bs1_conc1"
-                    "_rank_0.trace.json.gz", kernels=0)
+        trace_dir / "decode_only_steady_state_prefill_0_decode_1_bs1_conc1_rank_0.trace.json.gz", kernels=0
+    )
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
 
@@ -1975,20 +1966,14 @@ def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     for rank in range(8):
-        _rank_trace(
-            trace_dir / f"decode_only_steady_state_x_rank_{rank}.trace.json.gz",
-            kernels=0)
-        _rank_trace(
-            trace_dir / f"mixed_steady_state_x_rank_{rank}.trace.json.gz",
-            kernels=0)
-    captures = [_rank_trace(trace_dir / f"rank_{r}.trace.json.gz", kernels=25)
-                for r in range(8)]
+        _rank_trace(trace_dir / f"decode_only_steady_state_x_rank_{rank}.trace.json.gz", kernels=0)
+        _rank_trace(trace_dir / f"mixed_steady_state_x_rank_{rank}.trace.json.gz", kernels=0)
+    captures = [_rank_trace(trace_dir / f"rank_{r}.trace.json.gz", kernels=25) for r in range(8)]
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
 
-    leading = traces[:tla._KERNEL_PROBE_LIMIT]
-    assert any(p in captures for p in leading), (
-        "a real capture must be reachable inside the probe budget")
+    leading = traces[: tla._KERNEL_PROBE_LIMIT]
+    assert any(p in captures for p in leading), "a real capture must be reachable inside the probe budget"
     assert tla.count_gpu_kernel_events(traces[0]) > 0
 
 
@@ -2262,20 +2247,25 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
 
     argv = [
         "tracelens_analysis.py",
-        "--trace-input", str(trace_dir),
-        "--workspace-path", str(workspace),
-        "--tracelens-root", str(tl_root),
-        "--target-platform", "MI300X",
-        "--top-k", "5",
-        "--budget-minutes", "1",
+        "--trace-input",
+        str(trace_dir),
+        "--workspace-path",
+        str(workspace),
+        "--tracelens-root",
+        str(tl_root),
+        "--target-platform",
+        "MI300X",
+        "--top-k",
+        "5",
+        "--budget-minutes",
+        "1",
         "--no-llm-orchestrator",
     ]
     argv += list(extra_argv or [])
 
     env_backup = dict(_os.environ)
     try:
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), \
-                patch.object(tla.sys, "argv", argv):
+        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit:
@@ -2292,10 +2282,8 @@ def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
     ``cpu_events`` pads with host-side events, which is what a CPU-only capture
     actually looks like: a large file with no kernels in it.
     """
-    events = [{"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0}
-              for _ in range(kernels)]
-    events += [{"cat": "cpu_op", "name": f"aten::some_host_op_{i}", "dur": 1.0}
-               for i in range(cpu_events)]
+    events = [{"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0} for _ in range(kernels)]
+    events += [{"cat": "cpu_op", "name": f"aten::some_host_op_{i}", "dur": 1.0} for i in range(cpu_events)]
     with gzip.open(path, "wt") as fh:
         json.dump({"traceEvents": events}, fh)
     return path
@@ -2313,8 +2301,7 @@ def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path
     trace_dir.mkdir()
     # A CPU-only rank is a big file with no kernels in it, so size ordering puts
     # it first on merit. Ordering cannot help here; only the promotion can.
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz",
-                        kernels=0, cpu_events=400)
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
     assert empty.stat().st_size > populated.stat().st_size
 
@@ -2566,8 +2553,7 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
 
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz",
-                        kernels=0, cpu_events=400)
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
 
     # This route runs the deterministic pipeline in-process, so the trace path
@@ -2579,8 +2565,7 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
         seen.append(trace_path)
         return 0
 
-    with patch.object(tla, "_run_deterministic_tracelens_steps",
-                      side_effect=fake_steps):
+    with patch.object(tla, "_run_deterministic_tracelens_steps", side_effect=fake_steps):
         captured = _drive_main_over_capture_dir(
             tmp_path,
             trace_dir,
@@ -2605,8 +2590,7 @@ def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_
     """
     trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
     trace_dir.mkdir(parents=True)
-    fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz",
-                           kernels=0)
+    fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz", kernels=0)
     capture = _rank_trace(trace_dir / "zzz_rank_0.trace.json.gz", kernels=30)
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
@@ -2636,9 +2620,7 @@ def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
 
     assert readable is False, "a truncated gzip must report as unreadable"
     assert count == 0
-    populated_readable, populated_count = tla._count_kernels_if_readable(
-        trace_dir / "rank_1.trace.json.gz"
-    )
+    populated_readable, populated_count = tla._count_kernels_if_readable(trace_dir / "rank_1.trace.json.gz")
     assert populated_readable is True
     assert populated_count == 7
 
@@ -2661,13 +2643,10 @@ def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
 
     result = json.loads(capsys.readouterr().out)
     promoted = [
-        w
-        for w in (result.get("trace_health_warnings") or [])
-        if w.get("code") == "trace_analysis_input_promoted"
+        w for w in (result.get("trace_health_warnings") or []) if w.get("code") == "trace_analysis_input_promoted"
     ]
     assert promoted, (
-        "promotion was not surfaced in trace_health_warnings; "
-        f"warnings seen: {result.get('trace_health_warnings')}"
+        f"promotion was not surfaced in trace_health_warnings; warnings seen: {result.get('trace_health_warnings')}"
     )
     assert promoted[0]["analysed"] == populated.name
     assert promoted[0]["leading_candidate"] == "rank_0.trace.json.gz"
@@ -3164,24 +3143,14 @@ def test_unified_attention_fixture_emits_semantic_workload_selectors():
         "KVHEADS": 4,
         "HEADSIZE": 128,
     }
-    assert {
-        key: value
-        for key, value in selector.items()
-        if key != "CASE_ID"
-    } == {
+    assert {key: value for key, value in selector.items() if key != "CASE_ID"} == {
         "QTOKENS": 1087,
         "QHEADS": 32,
         "KVHEADS": 4,
         "HEADSIZE": 128,
     }
-    canonical_workload = "_".join(
-        f"{key}{selector[key]}"
-        for key in sorted(selector)
-        if key != "CASE_ID"
-    )
-    assert canonical_workload == (
-        "HEADSIZE128_KVHEADS4_QHEADS32_QTOKENS1087"
-    )
+    canonical_workload = "_".join(f"{key}{selector[key]}" for key in sorted(selector) if key != "CASE_ID")
+    assert canonical_workload == ("HEADSIZE128_KVHEADS4_QHEADS32_QTOKENS1087")
 
     grouped_candidate = dict(candidate)
     grouped_candidate["task_group"] = {
@@ -3826,15 +3795,11 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
         "duration_us": 100.0,
         "tracelens_launcher_path": f"{src}(1): forward",
     }
-    first_key = tlr.aggregate_by_source_function([candidate])[0][
-        "task_group_key"
-    ]
+    first_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     src.write_text("\n\n\ndef forward(x):\n    return x\n", encoding="utf-8")
     candidate["tracelens_launcher_path"] = f"{src}(4): forward"
-    second_key = tlr.aggregate_by_source_function([candidate])[0][
-        "task_group_key"
-    ]
+    second_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     assert first_key == second_key
 
@@ -3871,10 +3836,7 @@ def test_trace_routes_generate_compatible_operator_identities(tmp_path):
     )[0]
 
     assert bypass_group["task_group_key"] != skill_group["task_group_key"]
-    assert (
-        set(bypass_group["legacy_task_group_keys"])
-        & set(skill_group["legacy_task_group_keys"])
-    )
+    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
     assert bypass_group["task_group_key"].startswith('{"function":')
 
 
@@ -3910,10 +3872,7 @@ def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
     )[0]
 
     assert bypass_group["task_group_key"] != skill_group["task_group_key"]
-    assert (
-        set(bypass_group["legacy_task_group_keys"])
-        & set(skill_group["legacy_task_group_keys"])
-    )
+    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
     legacy_skill_key = json.dumps(
         (
             "native",
@@ -3980,8 +3939,7 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
 ):
     src = tmp_path / "operator.py"
     src.write_text(
-        "def first(x):\n    return x\n\n"
-        "def second(x):\n    return x\n",
+        "def first(x):\n    return x\n\ndef second(x):\n    return x\n",
         encoding="utf-8",
     )
     candidates = [
@@ -4357,8 +4315,7 @@ def test_aggregate_merges_native_template_instances_by_source(tmp_path):
 def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
     src = tmp_path / "quant_kernels.cu"
     src.write_text(
-        "__global__ void quantize_kernel() {}\n"
-        "__global__ void dequantize_kernel() {}\n",
+        "__global__ void quantize_kernel() {}\n__global__ void dequantize_kernel() {}\n",
         encoding="utf-8",
     )
     cands = [
@@ -5444,6 +5401,7 @@ def test_deterministic_extract_tolerates_null_efficiency_and_impact(tmp_path):
 # so idle% is inflated. The bypass route already skips its idle gate in that
 # case; the TraceLens route must do the same instead of suppressing every hot
 # kernel on a workload that is actually compute-bound.
+
 
 def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
     monkeypatch.setattr(

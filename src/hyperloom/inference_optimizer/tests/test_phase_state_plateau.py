@@ -120,8 +120,7 @@ def test_plateau_explore_ignores_prior_macro_cycle_rows():
         macro_cycle=1,
         explore_search={"winners_history": [{"gain_pct": 0.0, "cycle": 0}]},
         specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0, "cycle": 0}
-            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+            {"proposals_total": 0, "proposals_kept": 0, "cycle": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
     )
     triggered, ev = compute_plateau_explore(state)

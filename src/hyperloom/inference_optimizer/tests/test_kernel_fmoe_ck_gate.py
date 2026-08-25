@@ -96,9 +96,7 @@ def tuned_csv(tmp_path: Path, monkeypatch) -> str:
 
 
 @pytest.mark.asyncio
-async def test_unsupported_shape_is_skipped_before_the_restart(
-    tmp_path: Path, integrate_spy, tuned_csv
-):
+async def test_unsupported_shape_is_skipped_before_the_restart(tmp_path: Path, integrate_spy, tuned_csv):
     """TP 8 on a 768 intermediate size: skipped, and no server was started."""
     model = _qwen3_moe_model(tmp_path / "Qwen3-30B-A3B")
     result = _fmoe_ck_result(tuned_csv)
@@ -113,9 +111,7 @@ async def test_unsupported_shape_is_skipped_before_the_restart(
 
 
 @pytest.mark.asyncio
-async def test_supported_shape_still_reaches_validation(
-    tmp_path: Path, integrate_spy, tuned_csv
-):
+async def test_supported_shape_still_reaches_validation(tmp_path: Path, integrate_spy, tuned_csv):
     """TP 2 leaves 384, which is 128-aligned, so the candidate must run."""
     model = _qwen3_moe_model(tmp_path / "Qwen3-30B-A3B")
     result = _fmoe_ck_result(tuned_csv)

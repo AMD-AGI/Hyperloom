@@ -94,8 +94,7 @@ _MINIMAX_SHAPE_ROW = (
 
 # Malformed fused-MoE line: marker present but tuple does not parse.
 UNPARSEABLE_FMOE_MARKER = (
-    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage "
-    "(kernelName1='broken') for (incomplete tuple"
+    "(Worker_TP0 pid=1) [aiter] [fused_moe] using 2stage (kernelName1='broken') for (incomplete tuple"
 )
 
 
@@ -112,13 +111,7 @@ def _phase(tmp_path: Path) -> KernelPhase:
 
 
 def _integrate_log(tmp_path: Path, text: str) -> Path:
-    run_dir = (
-        tmp_path
-        / "runs"
-        / "integrate"
-        / "integrate-gemm_tune_fmoe_ck"
-        / "attempt-1"
-    )
+    run_dir = tmp_path / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck" / "attempt-1"
     run_dir.mkdir(parents=True)
     log_path = run_dir / "server.log"
     log_path.write_text(text, encoding="utf-8")

@@ -221,11 +221,7 @@ def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
         "kernel_kind": "triton",
         "device_kernel_names": ["unified_attention_kernel"],
         "runtime_backend": "ROCM_ATTN",
-        "task_group": {
-            "operator_identity": {
-                "operation": "vllm :: unified_attention_with_output"
-            }
-        },
+        "task_group": {"operator_identity": {"operation": "vllm :: unified_attention_with_output"}},
     }
 
     spec = invocation_spec.build_invocation_spec(candidate)
@@ -719,9 +715,10 @@ def test_group_cases_expand_csv_invocation_boundaries():
 
 
 def test_native_operation_key_normalizes_graph_wrapped_mangled_symbols():
-    assert native_operation_key(
-        "hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd"
-    ) == "aiter::add_rmsnorm_quant_kernel"
+    assert (
+        native_operation_key("hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd")
+        == "aiter::add_rmsnorm_quant_kernel"
+    )
 
 
 def _rewrite_candidate(rows: list[dict], **extra) -> dict:

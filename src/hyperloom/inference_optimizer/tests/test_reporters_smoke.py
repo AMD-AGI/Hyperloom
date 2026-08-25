@@ -391,16 +391,10 @@ def test_v5_attribution_method_and_notes_render_from_validation() -> None:
     r = render_session_report(bd)
 
     assert r.global_facts.attribution_method == "reconstructed"
-    assert any(
-        "gain ledger reconstructed from throughput" in flag
-        for flag in r.global_facts.data_quality_flags
-    )
+    assert any("gain ledger reconstructed from throughput" in flag for flag in r.global_facts.data_quality_flags)
     sec = next(s for s in r.sections if s.section_id == "attribution")
     assert any("reconstructed" in fact for fact in sec.key_facts)
-    assert any(
-        "gain ledger reconstructed from throughput" in fact
-        for fact in sec.key_facts
-    )
+    assert any("gain ledger reconstructed from throughput" in fact for fact in sec.key_facts)
 
 
 def test_invocation_section_renders_when_present() -> None:

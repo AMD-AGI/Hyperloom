@@ -29,8 +29,7 @@ from _nccl_summary_candidates import (  # type: ignore[import-not-found]
 
 
 AITER_2STAGE = (
-    "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEvPNS_8RankDataES2_"
-    "NS_11RankSignalsEPNS_6SignalEPT_ii"
+    "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEvPNS_8RankDataES2_NS_11RankSignalsEPNS_6SignalEPT_ii"
 )
 
 
@@ -133,8 +132,7 @@ class SymbolLocationTests(unittest.TestCase):
         """One index pass must not reread a file for each requested symbol."""
         source = self._write(
             "include/two.cuh",
-            "__global__ void first_collective(int* p) {}\n"
-            "__global__ void second_collective(int* p) {}\n",
+            "__global__ void first_collective(int* p) {}\n__global__ void second_collective(int* p) {}\n",
         )
         original_read_text = Path.read_text
         source_reads = 0
@@ -268,21 +266,15 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self.assertIn("prorated", cand["duration_provenance"])
 
     def test_unresolvable_symbol_is_dropped_and_logged(self) -> None:
-        self._write_metrics(
-            self._summary(top_ops=[{"name": "ncclDevKernel_Generic_1", "duration_us": 10.0}])
-        )
+        self._write_metrics(self._summary(top_ops=[{"name": "ncclDevKernel_Generic_1", "duration_us": 10.0}]))
         messages: list[str] = []
-        out = extract_collective_candidates(
-            self.tl, [str(self.src_root)], log_fn=messages.append
-        )
+        out = extract_collective_candidates(self.tl, [str(self.src_root)], log_fn=messages.append)
         self.assertEqual(out, [])
         self.assertEqual(len(messages), 1)
         self.assertIn("ncclDevKernel_Generic_1", messages[0])
 
     def test_candidates_sorted_by_duration(self) -> None:
-        (self.src_root / "include" / "other.cuh").write_text(
-            "__global__ void small_collective(int* p) {}\n"
-        )
+        (self.src_root / "include" / "other.cuh").write_text("__global__ void small_collective(int* p) {}\n")
         self._write_metrics(
             self._summary(
                 top_ops=[
@@ -362,9 +354,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         """A resolved row must not hide that another symbol exceeded the cap."""
         from tracelens_analysis import _inject_collective_candidates
 
-        (self.src_root / "include" / "late.cuh").write_text(
-            "__global__ void late_collective(int* p) {}\n"
-        )
+        (self.src_root / "include" / "late.cuh").write_text("__global__ void late_collective(int* p) {}\n")
         self._write_metrics(
             self._summary(
                 top_ops=[
@@ -483,19 +473,13 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self._write_metrics(self._summary())
         donors = [
             {
-                "name": (
-                    "sglang_profiler::tensor_model_parallel_allreduce"
-                    "->_Z_prefill (Synthetic Op) (prefill)"
-                ),
+                "name": ("sglang_profiler::tensor_model_parallel_allreduce->_Z_prefill (Synthetic Op) (prefill)"),
                 "duration_us": 900.0,
                 "call_count": 40,
                 "shapes": ["(1024,5120) bf16", "(5120,) bf16"],
             },
             {
-                "name": (
-                    "sglang_profiler::tensor_model_parallel_allreduce"
-                    "->_Z_decode (Synthetic Op) (decode)"
-                ),
+                "name": ("sglang_profiler::tensor_model_parallel_allreduce->_Z_decode (Synthetic Op) (decode)"),
                 "duration_us": 100.0,
                 "call_count": 40,
                 "shapes": ["(64,5120) bf16", "(5120,) bf16"],
@@ -562,9 +546,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         """Invalid NCCL metrics must not abort the full trace analysis."""
         from tracelens_analysis import _inject_collective_candidates
 
-        (self.tl / "category_data" / "multi_kernel_metrics.json").write_text(
-            "{not json"
-        )
+        (self.tl / "category_data" / "multi_kernel_metrics.json").write_text("{not json")
         existing = [{"name": "compute_kernel", "duration_us": 1000.0}]
         log_path = self.tl / "analysis.log"
 

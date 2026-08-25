@@ -621,7 +621,7 @@ def test_targeted_build_candidate_none_signature() -> None:
 def test_extract_offending_file_falls_back_to_last_traceback_frame() -> None:
     """With no ``near`` offset, the last traceback ``File "..."`` frame wins."""
     text = (
-        'Traceback (most recent call last):\n'
+        "Traceback (most recent call last):\n"
         '  File "/opt/vllm/first.py", line 10, in boot\n'
         '  File "/opt/vllm/last.py", line 42, in load_model\n'
         "RuntimeError: boom"

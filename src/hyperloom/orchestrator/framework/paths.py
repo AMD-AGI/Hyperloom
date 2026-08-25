@@ -425,11 +425,7 @@ def _discover_installed_package_roots() -> tuple[str, ...]:
         value = sysconfig.get_path(key)
         if value:
             candidates.append(Path(value))
-    candidates.extend(
-        Path(p)
-        for p in sys.path
-        if p and Path(p).name in {"site-packages", "dist-packages"}
-    )
+    candidates.extend(Path(p) for p in sys.path if p and Path(p).name in {"site-packages", "dist-packages"})
     for env_name in ("VIRTUAL_ENV", "VLLM_VENV_ROOT"):
         root = Path(os.environ.get(env_name, "").strip())
         lib = root / "lib"

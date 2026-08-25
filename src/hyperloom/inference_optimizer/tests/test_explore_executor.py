@@ -2464,9 +2464,7 @@ def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
         _report_errors_summary,
     )
 
-    (tmp_path / "benchmark_stderr.log").write_text(
-        "bench_fps.py: error: unrecognized arguments: --use_cache teacache"
-    )
+    (tmp_path / "benchmark_stderr.log").write_text("bench_fps.py: error: unrecognized arguments: --use_cache teacache")
     tail = _on_disk_stderr_tail(tmp_path)
     assert "unrecognized arguments" in tail
     # Empty dir → empty string (caller keeps its original blank error).
@@ -2474,9 +2472,7 @@ def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
     assert _report_errors_summary(None) == ""
     assert _report_errors_summary({"errors": []}) == ""
     assert (
-        _report_errors_summary(
-            {"errors": ["scriptable benchmark script not found for custom_mi355x.sh"]}
-        )
+        _report_errors_summary({"errors": ["scriptable benchmark script not found for custom_mi355x.sh"]})
         == "scriptable benchmark script not found for custom_mi355x.sh"
     )
 

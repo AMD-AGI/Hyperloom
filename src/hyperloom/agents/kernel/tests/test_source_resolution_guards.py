@@ -105,10 +105,7 @@ def test_materialized_runtime_args_are_sanitized_before_prompting(tmp_path):
     """Production YAML selectors reach context without their adjacent secret."""
     config = tmp_path / "baseline.yaml"
     config.write_text(
-        "benchmark:\n"
-        "  envs:\n"
-        "    EXTRA_SGLANG_ARGS: '--api-key sk-secret "
-        "--moe-runner-backend triton'\n",
+        "benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--api-key sk-secret --moe-runner-backend triton'\n",
         encoding="utf-8",
     )
     raw = tl._runtime_server_args_from_config(str(config))
@@ -413,14 +410,17 @@ _WIRING_FRAME = "/repo/pkg/kernels/moe.py(124): _grouped_gemm"
 def _wiring_trace(tmp_path, frame: str = _WIRING_FRAME):
     """Minimal trace where a Python frame launches ``_WIRING_KERNEL``."""
     events = [
-        {"cat": "python_function", "name": "/repo/serve/runner.py(10): forward",
-         "tid": 7, "ts": 100.0, "dur": 200.0},
-        {"cat": "python_function", "name": frame,
-         "tid": 7, "ts": 101.0, "dur": 198.0},
-        {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "tid": 7,
-         "ts": 150.0, "dur": 5.0, "args": {"correlation": 1}},
-        {"cat": "kernel", "name": _WIRING_KERNEL, "ts": 200.0, "dur": 10.0,
-         "args": {"correlation": 1}},
+        {"cat": "python_function", "name": "/repo/serve/runner.py(10): forward", "tid": 7, "ts": 100.0, "dur": 200.0},
+        {"cat": "python_function", "name": frame, "tid": 7, "ts": 101.0, "dur": 198.0},
+        {
+            "cat": "cuda_runtime",
+            "name": "hipModuleLaunchKernel",
+            "tid": 7,
+            "ts": 150.0,
+            "dur": 5.0,
+            "args": {"correlation": 1},
+        },
+        {"cat": "kernel", "name": _WIRING_KERNEL, "ts": 200.0, "dur": 10.0, "args": {"correlation": 1}},
     ]
     path = tmp_path / "wiring.json"
     path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
@@ -445,9 +445,7 @@ def test_sentinel_candidate_gets_trace_derived_source(monkeypatch, tmp_path):
         "locate_source_via_grep",
         lambda _name: "/repo/pkg/kernels/moe.py",
     )
-    got = tl._finalize_candidates(
-        [_wiring_candidate()], trace_files=[_wiring_trace(tmp_path)]
-    )[0]
+    got = tl._finalize_candidates([_wiring_candidate()], trace_files=[_wiring_trace(tmp_path)])[0]
     assert got["source_file"] == "/repo/pkg/kernels/moe.py"
     assert got["source_line"] == 124
     assert got["source_function"] == "_grouped_gemm"
@@ -562,9 +560,7 @@ def test_unreadable_trace_records_a_reason(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tl, "_resolve_trace_launchers", tl._resolve_trace_launchers)
     monkeypatch.setattr("_trace_launcher_resolver.resolve_launchers_from_trace", _boom)
-    got = tl._finalize_candidates(
-        [_wiring_candidate()], trace_files=[_wiring_trace(tmp_path)]
-    )[0]
+    got = tl._finalize_candidates([_wiring_candidate()], trace_files=[_wiring_trace(tmp_path)])[0]
     reason = str(got.get("source_resolution_reason", ""))
     assert reason.startswith("trace_resolver_error: RuntimeError")
     assert got.get("source_resolution_method") != "trace_python_stack"
