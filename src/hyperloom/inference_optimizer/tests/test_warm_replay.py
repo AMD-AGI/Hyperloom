@@ -534,7 +534,7 @@ async def test_current_recipe_patch_skips_without_active_framework_root(
     assert task is None
     assert prepared == 0
     assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
-    assert coord.shared_state.warm_replay_outcome["reason"] == "patch_targets_invalid"
+    assert coord.shared_state.warm_replay_outcome["reason"] == "framework_patch_root_not_in_allowlist"
     assert coord.shared_state.warm_replay_outcome["framework_patch_root_allowlist"]
 
 
@@ -1283,7 +1283,7 @@ def test_create_only_kernel_target_requires_known_kernel_root(tmp_path, monkeypa
 
     entry = {"patch_path": str(patch)}
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
-    assert entry["resolution_reason"] == "pure_create_requires_explicit_root"
+    assert entry["resolution_reason"] == "kernel_patch_root_not_in_allowlist"
     assert "allowlist=" in entry["resolution_error"]
 
 
@@ -1302,7 +1302,7 @@ def test_restored_kernel_plan_reresolves_root_before_blocking(
     coord.shared_state.warm_kernel_kb_plan = [entry]
     calls = []
 
-    def _resolve(*, patch_entries):
+    def _resolve(*, patch_entries, precomputed_allowlist=None):
         calls.append(patch_entries)
         return WarmReplayRootResolution(
             root=str(tmp_path / "restored-framework"),
@@ -1331,7 +1331,7 @@ def test_kernel_plan_blocks_on_any_unresolved_patch_root(tmp_path, monkeypatch):
     coord.shared_state.warm_kernel_kb_plan = [entry]
     monkeypatch.setattr(
         "hyperloom.orchestrator.framework.paths.resolve_warm_replay_kernel_root",
-        lambda **_kwargs: WarmReplayRootResolution(
+        lambda *, patch_entries=None, precomputed_allowlist=None: WarmReplayRootResolution(
             root="",
             source="",
             reason="ambiguous_root",

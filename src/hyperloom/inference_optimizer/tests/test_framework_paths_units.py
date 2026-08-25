@@ -856,7 +856,7 @@ class TestWarmReplayPatchRootResolution:
 
         assert resolution.root == ""
         assert resolution.source == ""
-        assert resolution.reason == "explicit_root_target_mismatch"
+        assert resolution.reason == "framework_patch_root_not_in_allowlist"
 
     def test_inline_patch_content_matches_allowlist_root(self, monkeypatch, tmp_path):
         """A legacy entry carrying only an inline diff still resolves a root."""

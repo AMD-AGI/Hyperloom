@@ -819,8 +819,9 @@ class PreludePhase(PhaseHandler):
         state: Any,
     ) -> dict[str, Any] | None:
         """Skip combined warm replay when a kernel patch root cannot be resolved."""
-        from ..framework.paths import resolve_warm_replay_kernel_root
+        from ..framework.paths import _warm_replay_kernel_patch_roots, resolve_warm_replay_kernel_root
 
+        allowlist = _warm_replay_kernel_patch_roots()
         for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
             if not isinstance(entry, dict):
                 continue
@@ -833,7 +834,7 @@ class PreludePhase(PhaseHandler):
             # environment, and inline patch material may also have changed
             # since the reason was recorded. Re-resolve every patch and only
             # allow the combined replay when a safe root is explicit.
-            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
+            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry], precomputed_allowlist=allowlist)
             if resolution.root:
                 continue
             return self._warm_replay_root_skip_outcome(
