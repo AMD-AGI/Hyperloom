@@ -101,7 +101,6 @@ runtime-env/
 # framework-specific; not part of the product). Keep them out of the repo.
 run_kernel_forge.sh
 resume_kernel_forge.sh
-vllm_mi355x_kimik3.sh
 
 # Sky-segmentation model HY-World-2.0 downloads at run time. inference_utils
 # resolves it by relative path, so it lands in whatever CWD the bench ran from.
@@ -109,11 +108,6 @@ skyseg.onnx
 # Local prompt-audit scratch (rendered prompts, session dumps, audit notes)
 .prompt-audit/
 # Scratch plan and revision files
-*.plan.md
+revise.plan.md
 # Experiment and repro artefacts
 /prefix_cache_repro/
-# Operator analysis output written at the repo root: session/cost/tuning exports
-# and rendered reports. Anchored so the same extensions stay tracked elsewhere.
-/*.csv
-/*.pptx
-/*.html

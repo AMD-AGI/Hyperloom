@@ -650,10 +650,7 @@ async def test_postbaseline_enablement_config_is_not_recipe_publishable(
     )
 
     assert state.optimization_stack[-1]["recipe_publishable"] is False
-    # recipe_publishable is a config-layer filter applied inside
-    # build_publishable_recipe_config; has_new_keep counts an enablement
-    # KEEP as "new work" so the KB write proceeds and publishes patches.
-    assert has_new_keep(state) is True
+    assert has_new_keep(state) is False
 
 
 @pytest.mark.asyncio
