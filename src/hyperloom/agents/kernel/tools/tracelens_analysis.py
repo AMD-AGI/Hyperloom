@@ -8533,7 +8533,14 @@ def main() -> int:
                 )
             if source_resolution_path.is_file():
                 artifacts["kernel_source_resolution"] = str(source_resolution_path)
-        if not use_deterministic:
+        if use_deterministic:
+            pass
+        elif args.dry_run:
+            # A dry run plans; it must not spend an agent session, wait out the
+            # session timeout, or read the framework tree to audit a table
+            # nobody will dispatch from.
+            append_log(log_path, "candidate review skipped: --dry-run")
+        else:
             artifacts.update(
                 run_candidate_review_stage(
                     run_dir,
