@@ -26,11 +26,11 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     KnowledgeSections,
     RemoteRecipeClient,
     RemoteRecipeConfigurationError,
-    RemoteWarmRecipeAdapter as _RemoteWarmRecipeAdapter,
+    RemoteWarmRecipeAdapter,
     build_remote_knowledge,
     has_new_keep,
     knowledge_to_warm_recipe,
-    read_remote_recipe as _read_remote_recipe,
+    read_remote_recipe,
     write_final_remote_recipe,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
@@ -45,7 +45,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     MAX_PATH_BYTES,
     Artifact,
     KnowledgeBundle,
-    RecipeScope,
     RemoteRecipeValidationError,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
@@ -56,23 +55,11 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     _Files,
     build_publishable_recipe_config,
-    has_replay_material,
 )
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 _DOWNLOAD_BYTES = b"verified artifact"
 _DOWNLOAD_SHA256 = hashlib.sha256(_DOWNLOAD_BYTES).hexdigest()
-_SCOPE = RecipeScope("forge", 8, 64, 1024, 256)
-
-
-def read_remote_recipe(*args, **kwargs):
-    kwargs.setdefault("scope", _SCOPE)
-    return _read_remote_recipe(*args, **kwargs)
-
-
-class RemoteWarmRecipeAdapter(_RemoteWarmRecipeAdapter):
-    def __init__(self, *args, scope=_SCOPE, **kwargs):
-        super().__init__(*args, scope=scope, **kwargs)
 
 
 def _state(tmp_path: Path) -> SimpleNamespace:
@@ -107,11 +94,6 @@ def _state(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         session_id="session-1",
         recipe_kb_session_id="session-1",
-        kernel_optimizer="native",
-        tp=8,
-        conc=64,
-        isl=1024,
-        osl=256,
         baseline_tput=100.0,
         current_best={
             "tput": 130.0,
@@ -402,22 +384,6 @@ def test_publishable_config_rejects_unstructured_framework_args_env() -> None:
         build_publishable_recipe_config(state)
 
 
-def test_geak_recipe_keeps_kernel_partition_empty(tmp_path: Path) -> None:
-    state = _state(tmp_path)
-    state.kernel_optimizer = "geak"
-
-    bundle = build_remote_knowledge(state, tmp_path / "files-geak")
-
-    assert bundle.knowledge["provenance"]["kernel_optimizer"] == "geak"
-    assert bundle.knowledge["workload_shape"]["tp"] == 8
-    assert bundle.knowledge["value"]["kernel"] == {
-        "gemm": {"optimizations": []},
-        "fusion": {"items": []},
-        "rewrite": {"items": []},
-    }
-    assert not any(item.path.startswith("kernel/") for item in bundle.artifacts)
-
-
 def test_fusion_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
     state = _state(tmp_path)
     patch = Path(state.last_fusion["patch"])
@@ -486,13 +452,11 @@ def test_remote_recipe_projects_workload_shape_for_donor_gating(
     )
 
     assert bundle.knowledge["workload_shape"] == {
-        "tp": 8,
         "conc": 64,
         "isl": 1024,
         "osl": 256,
     }
-    assert {key: row[key] for key in ("tp", "conc", "isl", "osl")} == {
-        "tp": 8,
+    assert {key: row[key] for key in ("conc", "isl", "osl")} == {
         "conc": 64,
         "isl": 1024,
         "osl": 256,
@@ -915,7 +879,7 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
         def __init__(self, envelope=None) -> None:
             self.envelope = envelope
 
-        def get_hyperloom_recipe_view(self, _canonical_id, *, scope=None):
+        def get_hyperloom_recipe_view(self, _canonical_id):
             return self.envelope
 
     identity = "inference:m:h:f:mt:a:v:p"
@@ -925,14 +889,7 @@ def test_remote_client_internal_validation_error_paths(tmp_path: Path) -> None:
     stale_generation = tmp_path / ".miss.generation-abandoned"
     stale_generation.mkdir()
     (stale_generation / "partial").write_text("old", encoding="utf-8")
-    assert (
-        RemoteRecipeClient(_ReadStore()).read(  # type: ignore[arg-type]
-            identity,
-            miss,
-            scope=_SCOPE,
-        )
-        is None
-    )
+    assert RemoteRecipeClient(_ReadStore()).read(identity, miss) is None  # type: ignore[arg-type]
     assert not miss.exists()
     assert not stale_generation.exists()
 
@@ -1022,18 +979,13 @@ def test_facade_delegates_read_and_write_with_session_fallback(
     state = SimpleNamespace(
         recipe_kb_session_id=recipe_session_id,
         session_id=state_session_id,
-        kernel_optimizer="native",
-        tp=8,
-        conc=64,
-        isl=1024,
-        osl=256,
     )
     read_result = {"canonical_id": "inference:m:h:f:mt:a:v:p"}
     write_result = SimpleNamespace(status="written", session_id=expected)
     calls: list[tuple] = []
 
-    def _read(identity, destination, *, scope, client):
-        calls.append(("read", identity, destination, scope, client))
+    def _read(identity, destination, *, client):
+        calls.append(("read", identity, destination, client))
         return read_result
 
     def _write(state_arg, identity, session_id, *, client):
@@ -1045,12 +997,12 @@ def test_facade_delegates_read_and_write_with_session_fallback(
 
     identity = "inference:m:h:f:mt:a:v:p"
     destination = tmp_path / "download"
-    actual_read_result = facade.read(identity, destination, _SCOPE)
+    actual_read_result = facade.read(identity, destination)
     actual_write_result = facade.write(identity, state)
     assert actual_read_result is read_result
     assert actual_write_result is write_result
     assert calls == [
-        ("read", identity, destination, _SCOPE, client),
+        ("read", identity, destination, client),
         ("write", state, identity, expected, client),
     ]
 
@@ -1298,7 +1250,6 @@ class _FakeStore:
             "revision": 7,
             "canonical_id": "inference:m:h:f:mt:a:v:p",
             "session_id": "champion-session",
-            "scope": _SCOPE.as_dict(),
             "view": {
                 "source": "current",
                 "replayable": True,
@@ -1319,13 +1270,6 @@ class _FakeStore:
                 "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
                 "optimized_throughput": 125.0,
                 "validated_e2e_gain": 25.0,
-                "workload_shape": {
-                    "tp": 8,
-                    "conc": 64,
-                    "isl": 1024,
-                    "osl": 256,
-                },
-                "provenance": {"kernel_optimizer": "forge"},
                 "value": {
                     "patch_timeline": [],
                     "kernel": {
@@ -1343,15 +1287,15 @@ class _FakeStore:
             },
         }
 
-    def get_rollup(self, canonical_id, *, scope=None):
-        self.calls.append(("get_rollup", canonical_id, scope))
+    def get_rollup(self, canonical_id):
+        self.calls.append(("get_rollup", canonical_id))
         champion = {"session_id": "champion-session", "value": self.champion}
         if self.metric is not None:
             champion["metric"] = self.metric
         return {"champion": champion}
 
-    def get_hyperloom_recipe_view(self, canonical_id, *, scope=None):
-        self.calls.append(("get_hyperloom_recipe_view", canonical_id, scope))
+    def get_hyperloom_recipe_view(self, canonical_id):
+        self.calls.append(("get_hyperloom_recipe_view", canonical_id))
         return self.envelope
 
     def put_dir(self, canonical_id, session_id, files_dir):
@@ -1364,20 +1308,12 @@ class _FakeStore:
             if path.is_file()
         }
 
-    def put_knowledge(
-        self,
-        canonical_id,
-        knowledge,
-        *,
-        session_id="",
-        mode="merge",
-        scope=None,
-    ):
-        self.calls.append(("put_knowledge", canonical_id, session_id, mode, scope))
+    def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
+        self.calls.append(("put_knowledge", canonical_id, session_id, mode))
         self.published_knowledge = json.loads(json.dumps(knowledge))
 
-    def set_champion(self, canonical_id, session_id, *, metric, value, scope=None):
-        self.calls.append(("set_champion", canonical_id, session_id, metric, value, scope))
+    def set_champion(self, canonical_id, session_id, *, metric, value):
+        self.calls.append(("set_champion", canonical_id, session_id, metric, value))
         if self.conflict:
             self.conflict = False
             self.champion = value - 1
@@ -1411,32 +1347,6 @@ class _FakeStore:
         return []
 
 
-def test_view_rejects_a_different_recipe_scope() -> None:
-    store = _FakeStore()
-    store.envelope["scope"] = {**_SCOPE.as_dict(), "conc": 128}
-
-    with pytest.raises(RemoteRecipeValidationError, match="requested scope"):
-        RemoteRecipeClient(store).get_view(  # type: ignore[arg-type]
-            "inference:m:h:f:mt:a:v:p",
-            _SCOPE,
-        )
-
-
-def test_view_accepts_scope_dimensions_echoed_as_strings() -> None:
-    store = _FakeStore()
-    store.envelope["scope"] = {
-        key: str(value) if key != "kernel_optimizer" else value for key, value in _SCOPE.as_dict().items()
-    }
-    store.envelope["knowledge"]["workload_shape"] = {
-        key: str(value) for key, value in store.envelope["knowledge"]["workload_shape"].items()
-    }
-
-    assert RemoteRecipeClient(store).get_view(  # type: ignore[arg-type]
-        "inference:m:h:f:mt:a:v:p",
-        _SCOPE,
-    )
-
-
 def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     store = _FakeStore(champion=100.0, conflict=True)
     client = RemoteRecipeClient(store)  # type: ignore[arg-type]
@@ -1449,11 +1359,8 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     names = [call[0] for call in store.calls]
     assert names[:4] == ["get_rollup", "put_dir", "put_knowledge", "set_champion"]
     assert names[-2:] == ["get_rollup", "set_champion"]
-    assert store.calls[2][-2] == "replace"
-    assert store.calls[3][-3:-1] == ("optimized_throughput", 130.0)
-    assert store.calls[0][-1] == _SCOPE.as_dict()
-    assert store.calls[2][-1] == _SCOPE.as_dict()
-    assert store.calls[3][-1] == _SCOPE.as_dict()
+    assert store.calls[2][-1] == "replace"
+    assert store.calls[3][-2:] == ("optimized_throughput", 130.0)
     assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
     assert all(not str(call[1]).startswith("kernel:") for call in store.calls if len(call) > 1)
     assert store.published_knowledge is not None
@@ -1483,7 +1390,6 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
         optimized_throughput=130.0,
         files_dir=tmp_path,
     )
@@ -1509,49 +1415,6 @@ def test_weaker_session_skips_before_upload(tmp_path: Path) -> None:
     assert [call[0] for call in store.calls] == ["get_rollup"]
 
 
-def test_empty_replay_material_skips_even_when_throughput_beats_champion(
-    tmp_path: Path,
-) -> None:
-    store = _FakeStore(champion=100.0)
-    bundle = KnowledgeBundle(
-        {
-            "knowledge_schema_version": 1,
-            "record_kind": "hyperloom_recipe",
-            "value": {
-                "config": {"extra_server_args": "", "extra_envs": {}},
-                "explore": {"extra_server_args": "", "extra_envs": {}, "patches": []},
-                "framework": {"extra_server_args": "", "extra_envs": {}, "patches": []},
-                "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
-                "patch_timeline": [],
-            },
-        }
-    )
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
-        "inference:m:h:f:mt:a:v:p",
-        "session-1",
-        bundle,
-        scope=_SCOPE,
-        optimized_throughput=200.0,
-        files_dir=tmp_path,
-    )
-    assert result.status == "skipped"
-    assert result.reason == "empty_replay_material"
-    assert store.calls == []
-
-
-def test_artifact_only_recipe_has_replay_material() -> None:
-    assert has_replay_material(
-        {
-            "value": {
-                "config": {},
-                "explore": {"artifacts": ["explore/fix.py"]},
-                "framework": {},
-                "kernel": {},
-            }
-        }
-    )
-
-
 @pytest.mark.parametrize(
     "rollup,match",
     [
@@ -1569,8 +1432,8 @@ def test_malformed_rollup_fails_closed_before_write(
     match: str,
 ) -> None:
     class _MalformedRollupStore(_FakeStore):
-        def get_rollup(self, canonical_id, *, scope=None):
-            self.calls.append(("get_rollup", canonical_id, scope))
+        def get_rollup(self, canonical_id):
+            self.calls.append(("get_rollup", canonical_id))
             return rollup
 
     store = _MalformedRollupStore()
@@ -1586,8 +1449,8 @@ def test_malformed_rollup_fails_closed_before_write(
 
 def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
     class _FirstWriteStore(_FakeStore):
-        def get_rollup(self, canonical_id, *, scope=None):
-            self.calls.append(("get_rollup", canonical_id, scope))
+        def get_rollup(self, canonical_id):
+            self.calls.append(("get_rollup", canonical_id))
             return None
 
     store = _FirstWriteStore()
@@ -2262,7 +2125,7 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
     second_ref = "explore/overlays/000003/00-followup.patch"
 
     class _Remote:
-        def read(self, identity: str, destination: Path, scope: RecipeScope):
+        def read(self, identity: str, destination: Path):
             for item, content in (
                 (ref, "diff --git a/a b/a\n"),
                 (second_ref, "diff --git a/b b/b\n"),
@@ -2378,7 +2241,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
                 },
             }
 
-        def get_view(self, identity: str, scope: RecipeScope):
+        def get_view(self, identity: str):
             self.view_calls.append(identity)
             return self._document(identity)
 
@@ -2396,7 +2259,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
             )
             return document
 
-        def read(self, identity: str, destination: Path, scope: RecipeScope):
+        def read(self, identity: str, destination: Path):
             return self._write(
                 identity,
                 destination,
@@ -2408,7 +2271,6 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
             identity: str,
             destination: Path,
             envelope: dict,
-            scope: RecipeScope,
         ):
             self.materialized.append(identity)
             return self._write(identity, destination, envelope)
@@ -2523,7 +2385,7 @@ def test_remote_adapter_caps_metadata_scan_without_downloading(
                 "next_offset": None,
             }
 
-        def get_view(self, identity: str, scope: RecipeScope):
+        def get_view(self, identity: str):
             self.view_calls.append(identity)
             return {
                 "schema_version": 2,
@@ -2605,7 +2467,7 @@ def test_current_warm_adapter_rejects_unsafe_timeline_refs(
     ref: str,
 ) -> None:
     class _Remote:
-        def read(self, identity: str, destination: Path, scope: RecipeScope):
+        def read(self, identity: str, destination: Path):
             return {
                 "canonical_id": identity,
                 **_current_knowledge(timeline=[ref]),
@@ -2674,7 +2536,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "3402092b4cac1e85e9ad9baae77b8b0020259158"
+    assert digest == "d8a790bf5bd17db1bb616bb223fc51d1b797bd7f"
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
@@ -2686,8 +2548,7 @@ def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
         return {"items": [], "total": 0, "next_offset": None}
 
     client._request = _request  # type: ignore[method-assign]
-    scope = _SCOPE.as_dict()
-    assert client.get_hyperloom_recipe_view("inference:m:h", scope=scope) == {
+    assert client.get_hyperloom_recipe_view("inference:m:h") == {
         "items": [],
         "total": 0,
         "next_offset": None,
@@ -2699,26 +2560,11 @@ def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
         offset=10,
         limit=5,
     )
-    client.get_rollup("inference:m:h", scope=scope)
-    client.put_knowledge(
-        "inference:m:h",
-        {"value": {}},
-        session_id="session-1",
-        mode="replace",
-        scope=scope,
-    )
-    client.set_champion(
-        "inference:m:h",
-        "session-1",
-        metric="optimized_throughput",
-        value=10.0,
-        scope=scope,
-    )
 
     assert calls == [
         (
             "GET",
-            "/v1/kb/inference:m:h/views/hyperloom-recipe?kernel_optimizer=forge&tp=8&conc=64&isl=1024&osl=256",
+            "/v1/kb/inference:m:h/views/hyperloom-recipe",
             None,
         ),
         (
@@ -2730,31 +2576,6 @@ def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
                 "offset": 10,
                 "limit": 5,
                 "hardware_in": ["mi300x"],
-            },
-        ),
-        (
-            "GET",
-            "/v1/kb/inference:m:h/sessions?kernel_optimizer=forge&tp=8&conc=64&isl=1024&osl=256",
-            None,
-        ),
-        (
-            "POST",
-            "/v1/kb/inference:m:h",
-            {
-                "knowledge": {"value": {}},
-                "mode": "replace",
-                "session_id": "session-1",
-                "scope": scope,
-            },
-        ),
-        (
-            "POST",
-            "/v1/kb/inference:m:h/champion",
-            {
-                "session_id": "session-1",
-                "metric": "optimized_throughput",
-                "value": 10.0,
-                "scope": scope,
             },
         ),
     ]

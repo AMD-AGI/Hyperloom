@@ -166,36 +166,6 @@ def _framework_checkout(framework: str) -> str:
     return ""
 
 
-def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the allowlisted source trees other than ``base``.
-
-    Grounding falls back to these when the worktree base does not hold a
-    patch's targets, which is the normal case for a specialist that patches a
-    framework other than the one its worktree was cut from.
-
-    A tree does not have to be a git checkout to be a candidate: target
-    matching only stats files, and ``git apply --check`` runs against a plain
-    directory. Requiring ``.git`` here left a pip-installed framework with no
-    candidate at all, so every patch it wrote was dropped for a target that was
-    on disk the whole time.
-
-    Args:
-        roots: The configured framework source roots.
-        base: The checkout the specialist worktree branched off, if any.
-
-    Returns:
-        The remaining roots that exist, in allowlist order.
-    """
-    base_resolved = base.resolve() if base else None
-    out: list[Path] = []
-    for raw in roots:
-        root = Path(raw)
-        if not root.is_dir() or root.resolve() == base_resolved:
-            continue
-        out.append(root)
-    return tuple(out)
-
-
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
@@ -593,10 +563,6 @@ class SpecialistRunner:
                 enablement_candidate_refs=tuple(
                     str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
                 ),
-                enablement_accepted_config={
-                    "extra_envs": dict(params.get("base_extra_envs") or {}),
-                    "extra_server_args": str(params.get("base_extra_args") or "").strip(),
-                },
                 gpu_type=str(params.get("gpu_type") or ""),
                 allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),
@@ -1376,24 +1342,10 @@ class SpecialistRunner:
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
         # the rest against the clean base checkout, and scan for smuggled claims.
-        # The worktree base names one framework tree, but a specialist may target
-        # another allowlisted one, so the rest are offered as candidate roots.
         base_checkout = prep.worktree_base or prep.worktree
-        candidate_roots = _sibling_checkouts(
-            tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
-            base_checkout,
-        )
-        explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
-        kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
+        kept, dropped, grounding = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
-            candidate_roots=candidate_roots,
-            explicit_root=Path(explicit_value) if explicit_value else None,
-        )
-        # A set dropped for targets no tree holds is a distinct outcome from
-        # "the specialist wrote none", and the next round has to be told which.
-        all_dropped_by_grounding = bool(
-            deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
@@ -1409,13 +1361,11 @@ class SpecialistRunner:
         )
         done_payload["patches_written"] = kept
         done_payload["patch_grounding"] = grounding
-        if all_dropped_by_grounding:
-            done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
-        if spans_roots:
-            done_payload["patches_span_multiple_roots"] = True
         if not kept:
             done_payload["empty"] = not bool(done_payload.get("proposal_set"))
         notes.extend(safety.notes())
+
+        self._write_specialist_done(workspace, done_payload)
         recovered = bool(done_payload.get("_recovered_from_partial"))
         # ``partial`` keeps an infra failure visible without making the attempt
         # retry-eligible, which would discard whatever was salvaged.
@@ -1427,10 +1377,6 @@ class SpecialistRunner:
             status = "partial"
         if recovered:
             notes.append("recovered_from_partial")
-        if notes:
-            done_payload["_specialist_notes"] = list(notes)
-
-        self._write_specialist_done(workspace, done_payload)
 
         return SpecialistRunResult(
             task_id=ctx.task.task_id,

@@ -40,12 +40,8 @@ class EnablementRound:
     inflight_task_id: str = ""
     # Task id of the most recently completed enablement specialist round.
     last_specialist_task_id: str = ""
-    # Authoritative per-round record: list of {"patches": [...], "artifacts": [...]}
-    # dicts, one entry per accepted round in order. kept_patches and kept_artifacts
-    # are derived from this list and kept for downstream compatibility.
-    kept_rounds: list = field(default_factory=list)
-    # Flat ordered deduped patch paths derived from kept_rounds; re-applied as a
-    # base before the next round's patch.
+    # Ordered, deduped patch paths from prior enablement rounds that made forward
+    # progress; re-applied as a base before the next round's patch.
     kept_patches: list = field(default_factory=list)
     # Framework source tree the kept patches were applied against. Persisted so a
     # phase-synthesised round, which carries no framework_root, does not drop it.
@@ -78,15 +74,6 @@ class EnablementRound:
     last_build_failure: dict = field(default_factory=dict)
     build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
-    # Why the last round's patches were all dropped for absent targets; injected
-    # into the next round's mandate so it stops writing diffs that cannot apply.
-    last_grounding_drop_reason: list = field(default_factory=list)
-    # Whether the last round's kept patches targeted more than one source tree;
-    # injected into the next mandate so the specialist splits them per round.
-    patches_span_multiple_roots: bool = False
-    # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
-    # target); re-installed as a base before the next round's patch.
-    kept_artifacts: list = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":
