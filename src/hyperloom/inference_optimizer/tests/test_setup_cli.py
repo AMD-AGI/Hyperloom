@@ -1290,6 +1290,152 @@ def test_baremetal_profiler_hotfix_still_skipped_without_any_framework(tmp_path:
     assert "no serving framework importable" in res.stderr
 
 
+_HOTFIX_HIP_SONAME = "libamdhip64.so.7.2.53211-35e8c7bf89"
+_HOTFIX_TRACER_SONAME = "libroctracer64.so.4.1.70202"
+
+
+def _fake_python_for_torch_lib(tmp_path: Path, torch_lib: Path) -> Path:
+    """A python stub answering both the torch.version.hip and torch/lib probes.
+
+    The two probes differ only by heredoc body, so the stub reads stdin instead
+    of matching argv.
+    """
+    stub = tmp_path / "fake-python-torch"
+    stub.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'case "$*" in *find_spec*) exit 0 ;; esac',
+                'probe="$(cat)"',
+                'case "$probe" in',
+                f'  *__file__*) printf "%s\\n" "{torch_lib}" ;;',
+                '  *) printf "7.2.0\\n" ;;',
+                "esac",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _drive_torch_lib_sync(
+    tmp_path: Path,
+    *,
+    body: str,
+    torch_hip: bytes | None = None,
+    torch_tracer: bytes | None = None,
+) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    """Drive the torch-lib helpers against a fake /opt/rocm and a fake torch/lib."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+
+    rocm_lib = tmp_path / "rocm" / "lib"
+    torch_lib = tmp_path / "torch" / "lib"
+    rocm_lib.mkdir(parents=True)
+    torch_lib.mkdir(parents=True)
+    (rocm_lib / _HOTFIX_HIP_SONAME).write_bytes(b"hotfix-hip-bytes")
+    (rocm_lib / _HOTFIX_TRACER_SONAME).write_bytes(b"hotfix-tracer-bytes")
+    (rocm_lib / "libamdhip64.so").symlink_to(_HOTFIX_HIP_SONAME)
+    (rocm_lib / "libroctracer64.so").symlink_to(_HOTFIX_TRACER_SONAME)
+    if torch_hip is not None:
+        (torch_lib / "libamdhip64.so").write_bytes(torch_hip)
+    if torch_tracer is not None:
+        (torch_lib / "libroctracer64.so").write_bytes(torch_tracer)
+
+    py = _fake_python_for_torch_lib(tmp_path, torch_lib)
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"source {lib}",
+                "DRY_RUN=0",
+                "CHECK_ONLY=0",
+                f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
+                f'resolve_python() {{ printf "%s" "{py}"; }}',
+                body,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(["bash", str(runner)], text=True, capture_output=True)
+    return res, rocm_lib, torch_lib
+
+
+def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
+    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is
+    invisible to torch.profiler and decode traces stay empty."""
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body='sync_rocm_profiler_libs_to_torch_lib "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR"',
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-bytes"
+    assert (torch_lib / "libroctracer64.so").read_bytes() == b"hotfix-tracer-bytes"
+    backups = sorted(torch_lib.glob(".profiler_hotfix_backup_*/libamdhip64.so"))
+    assert backups, "the replaced torch copy must be recoverable"
+    assert backups[0].read_bytes() == b"stock-hip-bytes"
+
+
+def test_baremetal_hotfix_torch_lib_verification_rejects_a_stale_torch_copy(tmp_path: Path):
+    """Verifying only /opt/rocm reported success while torch kept the stock lib."""
+    res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body='verify_rocm_profiler_torch_lib_sync "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR" && echo TORCH_SYNC_OK',
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+    )
+
+    assert "TORCH_SYNC_OK" not in res.stdout
+    assert "libamdhip64.so differs" in res.stderr
+
+
+def test_baremetal_hotfix_torch_lib_verification_passes_after_sync(tmp_path: Path):
+    res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=(
+            'sync_rocm_profiler_libs_to_torch_lib "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR"\n'
+            'verify_rocm_profiler_torch_lib_sync "$ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR" && echo TORCH_SYNC_OK'
+        ),
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "TORCH_SYNC_OK" in res.stdout
+
+
+def test_baremetal_rocm_hotfix_only_skips_setup_phases(tmp_path: Path):
+    """install.sh drives this flag, so it must not touch the container's .env."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    res = subprocess.run(
+        ["bash", str(install_script), "--rocm-hotfix-only"],
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "REPO_ROOT": str(repo_root),
+            "USER_DATA_PATH": str(tmp_path / "data"),
+            "ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR": str(tmp_path / "absent-rocm-lib"),
+        },
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "applying ROCm profiler hotfix" in res.stdout
+    assert "Phase 3" not in res.stdout
+    assert not (repo_root / ".env").exists()
+    assert "Next steps" not in res.stdout
+
+
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")

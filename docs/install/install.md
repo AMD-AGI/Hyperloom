@@ -172,11 +172,13 @@ The demo skill reads this value to target the chosen host.
 
 Inside the container, run
 `src/hyperloom/inference_optimizer/assets/install.sh` (or let the demo skill
-chain to it). That installer applies the same ROCm profiler hotfix as bare-metal
-setup: official SGLang/vLLM ROCm images ship stock rocclr/roctracer libraries
-that omit HIP-graph replay kernel events during decode profiling; `install.sh`
-overlays the hotfix libraries and syncs them into `torch/lib/` automatically when
-the ROCm 7.2 stack is eligible.
+chain to it). Official SGLang/vLLM ROCm images ship stock rocclr/roctracer
+libraries that omit HIP-graph replay kernel events during decode profiling, so
+`install.sh` applies the same ROCm profiler hotfix as bare-metal setup by
+invoking `install_baremetal.sh --rocm-hotfix-only`. That flag runs the hotfix
+alone: no preflight, framework install, credential resolution, or `.env` write.
+The step is skipped unless the ROCm 7.2 stack is eligible, and a failure warns
+without aborting the install.
 
 ### Environment written by setup
 
