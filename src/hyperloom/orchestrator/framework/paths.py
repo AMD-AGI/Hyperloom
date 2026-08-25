@@ -824,12 +824,20 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
     session's framework tree rather than the process CWD, or every citation is
     denied. Each candidate is still bounded by :func:`resolved_within`.
 
+    A pip-installed framework names no checkout, so
+    :func:`resolve_session_framework_root` is empty and that join never fires --
+    while the frame's file does sit under an allowlist root. Those roots are
+    tried too, but only where the join names a file that exists: a root is a
+    permission set, not evidence that the frame belongs to it, and admitting
+    every root would turn one unresolvable frame into a path in each of them.
+
     Args:
         value (str): The raw field value.
 
     Returns:
         tuple[str, ...]: ``value`` first, then the de-annotated form, then that
-            form resolved against the tree this session is optimizing.
+            form resolved against the tree this session is optimizing, then
+            against each allowlist root that holds the named file.
     """
     raw = str(value).strip()
     out: list[str] = [raw]
@@ -840,6 +848,16 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
         root = resolve_session_framework_root()
         if root:
             out.append(str(Path(root) / bare))
+        for allow_root in resolve_source_file_allowlist():
+            joined = Path(allow_root) / bare
+            try:
+                exists = joined.is_file()
+            except OSError:
+                continue
+            if exists:
+                candidate = str(joined)
+                if candidate not in out:
+                    out.append(candidate)
     return tuple(out)
 
 
