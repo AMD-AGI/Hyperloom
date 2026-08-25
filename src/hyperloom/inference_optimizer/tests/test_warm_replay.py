@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 
 @dataclass
@@ -2335,8 +2336,6 @@ def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
     for it -- ``optimizations.entries`` came back empty on a session that had
     measurably gained. The verdict-aware mirror closes that gap.
     """
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
-
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -2352,8 +2351,6 @@ def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
     result = {"status": "succeeded", "output_throughput": 660.0}
     coord._promote_warm_replay(result, task=task)
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
-    # The anchor the gain was measured against is stamped for the mirror.
-    assert coord.shared_state.warm_replay_outcome["baseline_tput_anchor"] == 600.0
 
     WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
 
@@ -2361,19 +2358,21 @@ def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
     entry = ledger["entries"][0]
     assert entry["source"] == "warm_replay"
     assert entry["optimization_kind"] == "replay_warm_recipe"
+    # The gain chains from the recorded session baseline, not the enqueue anchor.
     assert entry["gain_pct"] == pytest.approx(10.0, abs=0.01)
     assert ledger["validation"]["ledger_total_gain_pct"] == pytest.approx(10.0, abs=0.01)
     assert ledger["validation"]["keep_count"] == 1
+    # The executor's real status survives; the keep rides on the decision.
+    assert ledger["attempts"][0]["status"] == "succeeded"
 
 
 def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
     """A replay that missed the bar must not be credited any gain.
 
     The fix for the discarded-reproduced replay must not reach the other way
-    and let a drift claim a keep it never earned.
+    and let a drift claim a keep it never earned. The rejected attempt must
+    still carry the evidence that explains the rejection.
     """
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
-
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -2395,7 +2394,15 @@ def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
     ledger = _warm_replay_ledger(tmp_path)
     assert ledger["entries"] == []
     assert ledger["validation"]["ledger_total_gain_pct"] == 0.0
-    assert ledger["attempts"][0]["adopted"] is False
+    attempt = ledger["attempts"][0]
+    assert attempt["adopted"] is False
+    # The rejected replay carries why it was dropped: the measured gain, the bar
+    # it missed, and the reason -- not a blank row.
+    assert attempt["local_gain_pct"] == pytest.approx(0.0, abs=0.01)
+    assert attempt["keep_threshold_pct"] == pytest.approx(0.0, abs=0.01)
+    assert "below keep threshold" in attempt["decision_reason"]
+    # Its status is normalized outside the executor-adoption verdict set.
+    assert attempt["status"] not in ("kept", "kept_inert", "promoted", "adopted")
 
 
 def test_replay_admitted_without_a_score_is_unscored_not_validated(tmp_path):
@@ -2407,14 +2414,11 @@ def test_replay_admitted_without_a_score_is_unscored_not_validated(tmp_path):
     verdict alone and has to record ``keep_verdict_unscored`` rather than dress
     up an absent score as ``accuracy_pass``.
     """
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
-
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     # Reproduced, but the accuracy eval ran without yielding a score.
     coord.shared_state.warm_replay_outcome = {
         "status": "reproduced",
         "actual_gain_pct": 10.0,
-        "baseline_tput_anchor": 600.0,
         "throughput_after": 660.0,
         "keep_threshold_pct": 0.0,
         "eval_ran": True,
@@ -2440,13 +2444,10 @@ def test_replay_with_a_passing_score_is_accuracy_validated(tmp_path):
     numeric ``replay_accuracy`` that reached ``reproduced`` cleared the gate and
     has to read as validated.
     """
-    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
-
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "reproduced",
         "actual_gain_pct": 10.0,
-        "baseline_tput_anchor": 600.0,
         "throughput_after": 660.0,
         "keep_threshold_pct": 0.0,
         "eval_ran": True,
@@ -2454,6 +2455,42 @@ def test_replay_with_a_passing_score_is_accuracy_validated(tmp_path):
     }
     task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
     result = {"status": "succeeded", "output_throughput": 660.0}
+
+    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
+
+    ledger = _warm_replay_ledger(tmp_path)
+    attempt = ledger["attempts"][0]
+    assert attempt["adopted"] is True
+    assert attempt["validation_basis"] == "accuracy_pass"
+    assert ledger["validation"]["unscored_keep_count"] == 0
+
+
+def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_path):
+    """The accuracy provenance must ride on what the run actually stamped.
+
+    The unscored/scored pair above hand-build ``warm_replay_outcome``; on their
+    own they would stay green even if ``_promote_warm_replay`` stopped stamping
+    ``replay_accuracy`` and every replay silently degraded to unscored. This
+    drives the real promote path so the ``replay_accuracy`` (not ``eval_ran``)
+    keying is anchored to a genuine producer.
+    """
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "exact",
+    }
+    task = _StubTask(
+        params={
+            "extra_server_args": "--attention-backend AITER",
+            "baseline_tput_anchor": 600.0,
+        }
+    )
+    # A numeric accuracy makes _warm_replay_accuracy_ok stamp replay_accuracy.
+    result = {"status": "succeeded", "output_throughput": 660.0, "accuracy": 0.9}
+    coord._promote_warm_replay(result, task=task)
+    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
+    assert coord.shared_state.warm_replay_outcome["replay_accuracy"] == 0.9
 
     WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
 

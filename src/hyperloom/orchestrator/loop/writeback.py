@@ -819,19 +819,7 @@ class WritebackCollaborator:
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
-                result_payload.setdefault(
-                    "workload",
-                    {
-                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
-                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
-                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
-                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
-                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
-                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
-                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
-                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
-                    },
-                )
+                result_payload.setdefault("workload", self._v4_workload())
                 instrument.record_action_operation(
                     self.session_dir,
                     action=task.kind,
@@ -3225,50 +3213,65 @@ class WritebackCollaborator:
         state = self.shared_state
         outcome = dict(getattr(state, "warm_replay_outcome", None) or {})
         reproduced = str(outcome.get("status") or "") == "reproduced"
-        result_status = str(result.get("status") or "succeeded")
         mirrored = dict(result)
         mirrored.setdefault("workload", self._v4_workload())
+
+        # Evidence that explains the verdict on either side: the measured gain,
+        # the bar it was judged against, and why it landed there. Kept outside
+        # the reproduced branch so a rejected replay's attempt row can still
+        # state why it was dropped -- the case that most needs an audit trail.
+        gain = to_float(outcome.get("actual_gain_pct"))
+        keep_threshold = to_float(outcome.get("keep_threshold_pct"))
+        reason = str(outcome.get("reason") or "")
+        if gain is not None:
+            mirrored.setdefault("delta_pct", gain)
+        if keep_threshold is not None:
+            mirrored.setdefault("keep_threshold_pct", keep_threshold)
+        if reason:
+            mirrored.setdefault("decision_reason", reason)
+
         if reproduced:
-            gain = to_float(outcome.get("actual_gain_pct"))
-            before = to_float(outcome.get("baseline_tput_anchor"))
-            after = to_float(outcome.get("throughput_after"))
-            mirrored.update(
-                {
-                    # The verdict the adoption is keyed off. "succeeded" only
-                    # says the benchmark ran.
-                    "status": "kept",
-                    "provenance": "warm_replay",
-                    "decision_reason": (
-                        f"warm replay reproduced {gain:+.2f}% over baseline"
-                        if gain is not None
-                        else "warm replay reproduced"
-                    ),
-                    # A replayed recipe is measured against the session
-                    # baseline, so the gain it moved is its own to claim.
-                    "attribution_eligible": True,
-                    # Only a scored, passing verdict is "validated". A replay
-                    # can be admitted when its eval ran but returned no usable
-                    # score (``eval_ran`` true, ``replay_accuracy`` None); that
-                    # is adopted on the keep verdict alone and must record
-                    # ``keep_verdict_unscored``, not a passed accuracy gate.
-                    "validated": (True if outcome.get("replay_accuracy") is not None else None),
-                }
+            mirrored["provenance"] = "warm_replay"
+            mirrored.setdefault(
+                "decision_reason",
+                f"warm replay reproduced {gain:+.2f}% over baseline" if gain is not None else "warm replay reproduced",
             )
-            if gain is not None:
-                mirrored["delta_pct"] = gain
-            if before is not None:
-                mirrored["base_tput"] = before
-            if after is not None:
-                mirrored["output_throughput"] = after
-            keep_threshold = to_float(outcome.get("keep_threshold_pct"))
-            if keep_threshold is not None:
-                mirrored["keep_threshold_pct"] = keep_threshold
+            # Only a scored, passing verdict is "validated". A replay admitted
+            # when its eval ran but returned no usable score (``eval_ran`` true,
+            # ``replay_accuracy`` None) is adopted on the keep verdict alone and
+            # must read ``keep_verdict_unscored``, not a passed accuracy gate.
+            accuracy = outcome.get("replay_accuracy")
+            mirrored["validated"] = True if accuracy is not None else None
+            if accuracy is not None:
+                # Carry the score into the measurement stream so accuracy_pass
+                # has evidence standing behind it.
+                mirrored.setdefault("accuracy", accuracy)
+            # ``attribution_eligible`` is intentionally left to the recorder
+            # default (instrument excludes enablement / inert keeps), so an
+            # enablement replay is not force-credited its delta as its own gain.
+            # The ledger chains this keep from the recorded session baseline,
+            # not an enqueue-time anchor, keeping the ledger and
+            # ``cumulative_gain_validated`` a single number.
+            #
+            # The executor's real status is preserved: the keep rides on
+            # ``decision``, not on rewriting the status to "kept".
+            status = str(result.get("status") or "succeeded")
+            decision = "promoted"
+        else:
+            # A non-reproduced replay is not adopted. Force the recorded status
+            # outside the executor-adoption verdict set so a shared executor
+            # that ever reports "kept" cannot lift a drifted replay into an
+            # adoption.
+            status = str(outcome.get("status") or "discarded")
+            decision = "discarded"
+        mirrored["status"] = status
+
         instrument.record_action_operation(
             self.session_dir,
             action="replay_warm_recipe",
             task_id=str(getattr(task, "task_id", "") or "") if task is not None else "",
-            status="kept" if reproduced else result_status,
-            decision="promoted" if reproduced else "discarded",
+            status=status,
+            decision=decision,
             result=mirrored,
             phase=str(getattr(state, "phase", "") or ""),
             macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
@@ -3287,11 +3290,13 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("warm-replay promote failed")
         # Mirrored after the ruling, so the canonical streams carry the verdict
-        # the run actually acted on.
+        # the run actually acted on. This record is the whole point of the fix,
+        # so a failure here is surfaced rather than swallowed at debug: the
+        # original bug was found only by hand-scanning sessions.
         try:
             self._mirror_warm_replay_verdict(result, task)
         except Exception:  # noqa: BLE001 — best-effort recording
-            log.debug("warm-replay v4 verdict capture failed", exc_info=True)
+            log.exception("warm-replay v4 verdict capture failed")
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
