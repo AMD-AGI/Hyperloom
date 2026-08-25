@@ -153,11 +153,7 @@ def _create_patch_snapshot(
         subprocess.CalledProcessError: When ``git ls-files`` fails (not a git tree).
     """
     touched = list(
-        dict.fromkeys(
-            path
-            for content in patch_contents
-            for path in _patch_touched_paths_from_text(content)
-        )
+        dict.fromkeys(path for content in patch_contents for path in _patch_touched_paths_from_text(content))
     )
     if not touched:
         raise ValueError("patch has no touched text paths")
@@ -266,13 +262,17 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
                     raise OSError("worktree restore verification failed")
             elif target.exists() or target.is_symlink():
                 raise OSError("removed path still exists after restore")
-            actual_index = subprocess.run(
-                ["git", *safe_directory_args(["ls-files", "-s", "--", rel], cwd=repo)],
-                cwd=repo,
-                capture_output=True,
-                timeout=15,
-                check=True,
-            ).stdout.decode(errors="replace").strip()
+            actual_index = (
+                subprocess.run(
+                    ["git", *safe_directory_args(["ls-files", "-s", "--", rel], cwd=repo)],
+                    cwd=repo,
+                    capture_output=True,
+                    timeout=15,
+                    check=True,
+                )
+                .stdout.decode(errors="replace")
+                .strip()
+            )
             if actual_index != entry:
                 raise OSError("index restore verification failed")
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:

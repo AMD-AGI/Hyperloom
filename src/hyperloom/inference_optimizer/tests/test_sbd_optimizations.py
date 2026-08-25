@@ -36,12 +36,8 @@ def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
     parts = assemble_parts(tmp_path)
     operations = list(parts.get("operations") or [])
     measurements = list(parts.get("measurements") or [])
-    operations.append(
-        {"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]}
-    )
-    measurements.append(
-        {"measurement_id": "m-base", "name": "throughput", "value": 100.0}
-    )
+    operations.append({"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]})
+    measurements.append({"measurement_id": "m-base", "name": "throughput", "value": 100.0})
     warnings: list[str] = []
 
     result = collect_recorded_optimizations(
@@ -92,8 +88,6 @@ def test_collective_stack_entry_keeps_campaign_evidence():
     assert entry["collective_attempt_id"] == "attempt-1"
     assert entry["integration_id"] == "integration-1"
     assert entry["validated"] is True
-
-
 
 
 def test_phase_breakdown_schema_declares_every_emitted_bucket():
@@ -164,10 +158,7 @@ def test_a_session_whose_records_never_arrived_says_so(tmp_path):
     assert optimizations["available"] is False
     assert optimizations["entries"] == []
     assert optimizations["attempts"] == []
-    assert any(
-        "state.json carries 1 adopted optimization" in warning
-        for warning in result["warnings"]
-    )
+    assert any("state.json carries 1 adopted optimization" in warning for warning in result["warnings"])
     assert "optimization_stack" not in result
     assert "attribution" not in result
     assert "geak_invocations" not in result
@@ -220,9 +211,7 @@ def test_a_session_that_adopted_nothing_is_not_reported_as_a_gap(tmp_path):
     result = exporter.build(tmp_path)
 
     assert result["optimizations"]["available"] is False
-    assert not any(
-        "state.json carries" in warning for warning in result["warnings"]
-    )
+    assert not any("state.json carries" in warning for warning in result["warnings"])
 
 
 def _recorded_fixture():
@@ -336,9 +325,7 @@ def test_recorded_optimizations_keep_rejected_attempts_with_their_reason():
     operations, measurements, adoptions, artifacts = _recorded_fixture()
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, artifacts, [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], warnings)
 
     assert result["source_of_truth"] == "recorder"
     rejected = next(row for row in result["attempts"] if row["name"] == "k002")
@@ -354,9 +341,7 @@ def test_recorded_optimizations_keep_rejected_attempts_with_their_reason():
 def test_recorded_optimizations_bucket_attempts_by_recorded_agent():
     operations, measurements, adoptions, artifacts = _recorded_fixture()
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, artifacts, [], [], []
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], [])
 
     by_agent = result["summary_by_agent"]
     assert by_agent["kernel_agent"]["attempts"] == 2
@@ -377,9 +362,7 @@ def test_recorded_optimizations_bucket_attempts_by_recorded_agent():
 def test_recorded_optimizations_exclude_ineligible_keeps_from_entries():
     operations, measurements, adoptions, artifacts = _recorded_fixture()
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, artifacts, [], [], []
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], [])
 
     assert [entry["name"] for entry in result["entries"]] == ["k001"]
     assert result["entries"][0]["source_method"] == "recorded"
@@ -397,16 +380,10 @@ def test_entries_are_a_gain_ledger_that_points_back_at_its_attempt():
     """
     operations, measurements, adoptions, artifacts = _recorded_fixture()
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, artifacts, [], [], []
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], [])
 
     entry = result["entries"][0]
-    attempt = next(
-        row
-        for row in result["attempts"]
-        if row["attempt_id"] == entry["adopted_attempt_id"]
-    )
+    attempt = next(row for row in result["attempts"] if row["attempt_id"] == entry["adopted_attempt_id"])
     for restated in (
         "kernel_id",
         "source_phase",
@@ -424,9 +401,7 @@ def test_attempt_gain_is_never_named_like_the_baseline_relative_one():
     """The two gains are different numbers and must not share a field name."""
     operations, measurements, adoptions, artifacts = _recorded_fixture()
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, artifacts, [], [], []
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, artifacts, [], [], [])
 
     for attempt in result["attempts"]:
         assert "gain_pct" not in attempt
@@ -496,9 +471,7 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
     ]
 
     warnings: list[str] = []
-    result = collect_recorded_optimizations(
-        "gemma", operations, measurements, adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("gemma", operations, measurements, adoptions, [], [], [], warnings)
 
     first, second = result["entries"]
     assert first["gain_method"] == "baseline_chain"
@@ -511,9 +484,7 @@ def test_recorded_optimizations_report_gain_against_the_session_baseline():
     # end-to-end move; the difference is stated instead of being handed to the
     # kernel that happened to run next.
     assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 7.116912
-    assert (
-        result["summary_by_agent"]["framework_agent"]["attributable_gain_pct"] == 11.769809
-    )
+    assert result["summary_by_agent"]["framework_agent"]["attributable_gain_pct"] == 11.769809
     validation = result["validation"]
     assert validation["validated_total_gain_pct"] == 19.260175
     assert validation["attributed_total_gain_pct"] == 18.886722
@@ -564,9 +535,7 @@ def test_gain_before_the_first_adopted_step_is_not_handed_to_it():
     ]
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
 
     entry = result["entries"][0]
     # It started at 1100 and left at 1210, so it added 11pp of the baseline —
@@ -644,9 +613,7 @@ def test_a_step_that_recorded_only_a_percentage_is_not_counted_twice():
     ]
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
 
     first, middle, last = result["entries"]
     assert first["gain_pct"] == 10.0
@@ -709,9 +676,7 @@ def test_the_session_total_prefers_what_the_run_measured_over_its_own_sum():
     ]
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
 
     validation = result["validation"]
     assert validation["method"] == "recorded_session_validation"
@@ -744,9 +709,7 @@ def test_each_promotion_leaves_its_own_checkpoint(tmp_path):
         )
 
     operations = [
-        row
-        for row in assemble_parts(tmp_path).get("operations") or []
-        if row.get("kind") == "session_validation"
+        row for row in assemble_parts(tmp_path).get("operations") or [] if row.get("kind") == "session_validation"
     ]
 
     assert len(operations) == 2
@@ -776,9 +739,7 @@ def test_a_session_with_no_promoted_figure_falls_back_to_its_own_sum():
     ]
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, [], adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], warnings)
 
     validation = result["validation"]
     assert validation["method"] == "ledger_sum"
@@ -885,9 +846,7 @@ def test_a_value_says_which_of_its_possible_sources_it_came_from():
         }
     ]
 
-    attempts = collect_recorded_optimizations(
-        "s1", operations, [], adoptions, [], [], [], []
-    )["attempts"]
+    attempts = collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], [])["attempts"]
     stated = next(row for row in attempts if row["name"] == "stated")
     inferred = next(row for row in attempts if row["name"] == "inferred")
 
@@ -950,10 +909,7 @@ def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_
 
     assemble_parts(tmp_path, warnings=warnings)
 
-    assert any(
-        "more than one producer" in warning and "dropped whole" in warning
-        for warning in warnings
-    )
+    assert any("more than one producer" in warning and "dropped whole" in warning for warning in warnings)
 
 
 def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_path):
@@ -975,10 +931,7 @@ def test_two_producers_disagreeing_on_one_entity_do_not_settle_it_silently(tmp_p
 
     assemble_parts(tmp_path, warnings=warnings)
 
-    assert any(
-        "conflicting values" in warning and "ad-1.decision" in warning
-        for warning in warnings
-    )
+    assert any("conflicting values" in warning and "ad-1.decision" in warning for warning in warnings)
 
 
 def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
@@ -1024,18 +977,13 @@ def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
     ]
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
 
     validation = result["validation"]
     assert validation["unclaimed_integration_count"] == 1
     # The 10pp the lost step earned is sitting in the unattributed bucket.
     assert validation["unattributed_gain_pct"] == 10.0
-    assert any(
-        "no adoption crediting it" in warning and "op-lost" in warning
-        for warning in warnings
-    )
+    assert any("no adoption crediting it" in warning and "op-lost" in warning for warning in warnings)
 
 
 def test_a_threshold_says_which_of_its_four_homes_it_came_from():
@@ -1058,9 +1006,7 @@ def test_a_threshold_says_which_of_its_four_homes_it_came_from():
         },
     ]
 
-    attempts = collect_recorded_optimizations(
-        "s1", operations, [], [], [], [], [], []
-    )["attempts"]
+    attempts = collect_recorded_optimizations("s1", operations, [], [], [], [], [], [])["attempts"]
     gated = next(row for row in attempts if row["name"] == "gated")
     configured = next(row for row in attempts if row["name"] == "configured")
 
@@ -1095,9 +1041,7 @@ def test_two_names_for_one_reading_do_not_quietly_pick_one():
     ]
     warnings: list[str] = []
 
-    attempts = collect_recorded_optimizations(
-        "s1", operations, measurements, [], [], [], [], warnings
-    )["attempts"]
+    attempts = collect_recorded_optimizations("s1", operations, measurements, [], [], [], [], warnings)["attempts"]
 
     assert attempts[0]["throughput_after"] == 120.0
     assert attempts[0]["throughput_after_source"] == "measurement.final_throughput"
@@ -1126,15 +1070,10 @@ def test_an_adoption_on_a_kind_the_ledger_ignores_is_reported():
     ]
     warnings: list[str] = []
 
-    result = collect_recorded_optimizations(
-        "s1", operations, [], adoptions, [], [], [], warnings
-    )
+    result = collect_recorded_optimizations("s1", operations, [], adoptions, [], [], [], warnings)
 
     assert result["entries"] == []
-    assert any(
-        "does not count as attempts" in warning and "profile" in warning
-        for warning in warnings
-    )
+    assert any("does not count as attempts" in warning and "profile" in warning for warning in warnings)
 
 
 def test_adoption_throughput_outranks_overwritten_measurements():
@@ -1163,9 +1102,7 @@ def test_adoption_throughput_outranks_overwritten_measurements():
         }
     ]
 
-    result = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], []
-    )
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])
 
     assert result["attempts"][0]["throughput_after"] == 5081.01
 
@@ -1204,9 +1141,7 @@ def test_an_adoption_citing_overwritten_evidence_says_so():
         }
     ]
 
-    attempt = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], []
-    )["attempts"][0]
+    attempt = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])["attempts"][0]
 
     assert attempt["measurement_source"] == "adoption_pinned_stale"
     assert attempt["throughput_after"] == 5081.01
@@ -1239,9 +1174,7 @@ def test_intact_pinned_evidence_is_not_called_stale():
         }
     ]
 
-    attempt = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], []
-    )["attempts"][0]
+    attempt = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])["attempts"][0]
 
     assert attempt["measurement_source"] == "adoption_pinned"
 
@@ -1296,9 +1229,7 @@ def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
         }
     ]
 
-    attempt = collect_recorded_optimizations(
-        "s1", operations, measurements, adoptions, [], [], [], []
-    )["attempts"][0]
+    attempt = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])["attempts"][0]
     numbered = {row["value"]: row for row in attempt["measurements"]}
 
     # The reading the decision was made on is the first of its name, even
@@ -1309,4 +1240,3 @@ def test_repeated_readings_of_a_metric_are_numbered_oldest_first():
     # A name measured once is numbered too, rather than left to be guessed at.
     assert numbered[4744.6]["occurrence"] == 0
     assert numbered[4744.6]["occurrences_of_name"] == 1
-

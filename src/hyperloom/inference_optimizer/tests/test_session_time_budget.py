@@ -573,7 +573,6 @@ class TestPreDispatchBackstop:
         assert task.task_id in exclude
         await coord.dispatcher.cancel_inflight_actions(reason="test_teardown")
 
-
     @pytest.mark.asyncio
     async def test_a_queued_conc_sweep_the_budget_outlived_is_recorded_as_skipped(
         self,
@@ -1426,9 +1425,7 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert stamped == pytest.approx(start + 3600.0, abs=2.0)
 
     @pytest.mark.asyncio
-    async def test_run_stamps_a_fractional_budget_before_int_truncation(
-        self, coord: Coordinator
-    ):
+    async def test_run_stamps_a_fractional_budget_before_int_truncation(self, coord: Coordinator):
         from hyperloom.common.coerce import to_unix
 
         try:
@@ -1454,9 +1451,7 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert coord.shared_state.deadline_unix == pytest.approx(original)
 
     @pytest.mark.asyncio
-    async def test_a_spent_session_stops_instead_of_reissuing_the_budget(
-        self, coord: Coordinator
-    ):
+    async def test_a_spent_session_stops_instead_of_reissuing_the_budget(self, coord: Coordinator):
         from datetime import datetime, timedelta, timezone
 
         start = datetime.now(timezone.utc) - timedelta(hours=3)

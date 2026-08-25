@@ -402,9 +402,7 @@ def resolve_forge_llm_model(
             or default
         )
     return (
-        str(source.get("FORGE_CLAUDE_MODEL") or "").strip()
-        or str(source.get("CLAUDE_MODEL") or "").strip()
-        or default
+        str(source.get("FORGE_CLAUDE_MODEL") or "").strip() or str(source.get("CLAUDE_MODEL") or "").strip() or default
     )
 
 
@@ -1084,9 +1082,7 @@ def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
     except ValueError as exc:
         raise RuntimeError(f"anthropic messages returned a non-JSON body: {exc!r}") from exc
     if not isinstance(body, dict):
-        raise RuntimeError(
-            f"anthropic messages returned a non-object JSON body: {type(body).__name__}"
-        )
+        raise RuntimeError(f"anthropic messages returned a non-object JSON body: {type(body).__name__}")
     payload = body
     return AnthropicMessageResult(
         text=_anthropic_text_from_content(payload.get("content")),

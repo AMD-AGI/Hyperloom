@@ -49,6 +49,7 @@ def conc_pair_comparison(
     Returns:
         A tuple of ``(per_conc_rows, summary_dict)``.
     """
+
     def _norm_conc(p: dict[str, Any]) -> int | float | str:
         raw = p.get("conc")
         if isinstance(raw, bool):
@@ -61,7 +62,9 @@ def conc_pair_comparison(
     speedups: list[float] = []
     successful_pairs = 0
     failed_pairs = 0
-    for c in sorted(set(by_conc_b) | set(by_conc_o), key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x))):
+    for c in sorted(
+        set(by_conc_b) | set(by_conc_o), key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x))
+    ):
         b = by_conc_b.get(c) or {}
         o = by_conc_o.get(c) or {}
         bt = to_float(b.get("output_throughput"))

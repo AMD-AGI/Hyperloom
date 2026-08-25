@@ -777,7 +777,8 @@ def _run_client_and_eval(
             base_url=base_url,
             conc=conc,
             out_dir=str(workspace / "lm_eval"),
-            tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip() or "gsm8k",
+            tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
+            or "gsm8k",
             limit=(str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip() or None),
         )
         eval_rc = _run_subprocess(eval_cmd, timeout_s, workspace, "eval")

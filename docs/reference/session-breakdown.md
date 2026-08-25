@@ -226,7 +226,7 @@ through `adopted_attempt_id`.
 | `optimization_kind` | The attempt's `kind`. |
 | `name` | Operation name, typically the kernel or variant. |
 | `backend` | Producing engine, e.g. `geak` or `forge`. |
-| `gain_pct` | Gain against the **session baseline**. The only figure that may be summed. |
+| `gain_pct` | Gain against the **session baseline**. The only figure that can be summed. |
 | `gain_method` | How `gain_pct` was arrived at; see below. |
 | `chain_continuous` | `false` when this step recorded no finishing throughput, so the drift across it could not be measured. |
 | `local_gain_pct` | The executor's own figure, kept beside `gain_pct` so the two are visibly different numbers. Not summable. |
@@ -445,10 +445,27 @@ T+90 min" charts.
 ## `capability_summary` — `CapabilitySummary`
 
 One card per live capability (`geak`, `forge`, `explore`, `sweep`,
-`specialist`) with: `status`, `attempts`, `keeps`, `tested`,
-`best_gain_pct`, `reason`. Legacy `backends`, `params`, and
-`validate_stack` rows can appear when archived sessions are rebuilt.
-Drives the per-session UI cards in Primus-Claw.
+`specialist`) with: `status`, `attempts`, `keeps`, `micro_only_keeps`,
+`pending_integrate`, `reverts`, `e2e_gain_pct`, `tested`, `best_gain_pct`,
+`reason`. Legacy `backends`, `params`, and `validate_stack` rows can appear
+when archived sessions are rebuilt. Drives the per-session UI cards in
+Primus-Claw.
+
+For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
+
+- `keeps` — **distinct kernels adopted at integrate**, i.e. end-to-end
+  verified. A kernel re-tried across runs counts once.
+- `micro_only_keeps` — kernels that cleared the micro benchmark but never
+  reached integrate. Not adoptions: a faster kernel in isolation does not
+  imply a faster service.
+- `pending_integrate` — kernels whose integrate verdict is `NEEDS_REVIEW` or
+  not yet recorded. Undecided, not successful.
+- `reverts` — kernels integrate rejected (end-to-end regression).
+- `attempts` — **invocation rows**, not distinct kernels: how many tries the
+  lane made. Deliberately a different unit from `keeps`.
+
+The `specialist` row uses `keeps` / `attempts` differently: see
+`CapabilitySummary` in `schema.py`.
 
 ---
 
@@ -624,7 +641,7 @@ Eval-origin trigger (present when `origin` is `eval`):
 | `probe_config_path`         | string | Materialized config re-run to reproduce the contract.                                        |
 | `trigger_evidence_excerpt`  | string | Tail (2000 chars) of the captured eval-failure evidence.                                     |
 
-Stack actions, runtimes and builds:
+Stack actions, runtimes, and builds:
 
 | Field                 | Type                          | Description                                                                                     |
 |-----------------------|-------------------------------|-------------------------------------------------------------------------------------------------|

@@ -172,10 +172,7 @@ def validate_document(doc: Any) -> list[str]:
             problems.append(f"document missing required key {key!r}")
     version = str(doc.get("schema_version") or "")
     if version and version.split(".")[0] != SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0]:
-        problems.append(
-            f"schema_version {version!r} has a different major than "
-            f"{SOURCE_RESOLUTION_SCHEMA_VERSION!r}"
-        )
+        problems.append(f"schema_version {version!r} has a different major than {SOURCE_RESOLUTION_SCHEMA_VERSION!r}")
     entries = doc.get("entries")
     if not isinstance(entries, list):
         problems.append(f"entries is {type(entries).__name__}, expected list")
@@ -197,29 +194,17 @@ def validate_document(doc: Any) -> list[str]:
             seen_ids.add(kernel_id)
         gpu_pct = entry.get("gpu_pct")
         if gpu_pct is not None:
-            if (
-                isinstance(gpu_pct, bool)
-                or not isinstance(gpu_pct, (int, float))
-                or not math.isfinite(float(gpu_pct))
-            ):
-                problems.append(
-                    f"entries[{i}] has invalid gpu_pct {gpu_pct!r}; "
-                    "expected a finite number"
-                )
+            if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
+                problems.append(f"entries[{i}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
         source_line = entry.get("source_line")
         if source_line is not None and not isinstance(source_line, int):
-            problems.append(
-                f"entries[{i}] has invalid source_line {source_line!r}; "
-                "expected int or null"
-            )
+            problems.append(f"entries[{i}] has invalid source_line {source_line!r}; expected int or null")
         method = str(entry.get("method") or "")
         if method and method not in KNOWN_METHODS:
             problems.append(f"entries[{i}] has unknown method {method!r}")
         src = str(entry.get("source_file") or "")
         if src and method in {METHOD_UNRESOLVED, METHOD_REJECTED}:
-            problems.append(
-                f"entries[{i}] has a source_file but method is {method}"
-            )
+            problems.append(f"entries[{i}] has a source_file but method is {method}")
         if not src and method not in {METHOD_UNRESOLVED, METHOD_REJECTED}:
             problems.append(f"entries[{i}] has method {method!r} but no source_file")
         confidence = entry.get("confidence")
@@ -231,17 +216,14 @@ def validate_document(doc: Any) -> list[str]:
                 or not 0.0 <= float(confidence) <= 1.0
             ):
                 problems.append(
-                    f"entries[{i}] has invalid confidence {confidence!r}; "
-                    "expected a finite number in [0, 1]"
+                    f"entries[{i}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]"
                 )
     return problems
 
 
 #: TraceLens reports a call site as "path.py(247): fn_name"; the line and
 #: function ride along in the same string.
-_LINE_SUFFIX_RE = re.compile(
-    r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$"
-)
+_LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$")
 
 
 def split_line_suffix(path: str) -> tuple[str, int | None, str]:
@@ -303,4 +285,3 @@ def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
 def path_is_acceptable(path: str, roots: tuple[str, ...]) -> bool:
     """Whether a rewriting tier may write ``path`` as a resolved location."""
     return bool(canonical_source_path(path, roots))
-

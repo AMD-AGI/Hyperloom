@@ -38,10 +38,7 @@ _HIT = (
     "found padded_M: {m}, N:4096, K:4096 is tuned on cu_num = 256 in "
     "/tmp/aiter_configs/bf16_tuned_gemm.csv, libtype is asm, kernel name is knl"
 )
-_MERGE = (
-    "[aiter] merge tuned file under model_configs/ and configs/ "
-    "/srv/cfg/bf16_tuned_gemm.csv:/srv/cfg/other.csv"
-)
+_MERGE = "[aiter] merge tuned file under model_configs/ and configs/ /srv/cfg/bf16_tuned_gemm.csv:/srv/cfg/other.csv"
 _BF16 = ["bf16_tuned_gemm.csv"]
 
 
@@ -65,9 +62,7 @@ def parser(request, monkeypatch):
         # ``evidence`` in it, and then the top-level check passes, the parser
         # comes back None, every verdict is "unknown", and eleven cases fail on
         # a developer machine for a reason that has nothing to do with them.
-        pytest.importorskip(
-            "forge_gemm_tune.evidence", reason="real parser unavailable"
-        )
+        pytest.importorskip("forge_gemm_tune.evidence", reason="real parser unavailable")
         return None
 
     import re
@@ -113,19 +108,18 @@ class TestServed:
 
 
 class TestArtifactArrival:
-    def test_an_override_run_prints_no_merge_line_and_still_counts_as_arrived(
-        self, tmp_path, parser
-    ):
+    def test_an_override_run_prints_no_merge_line_and_still_counts_as_arrived(self, tmp_path, parser):
         # Setting AITER_CONFIG_* makes aiter skip the merge step: no merge line
         # at all, and the lookups name our own file. Reading that as "not
         # merged" would revert every candidate, which is what the merge-list
         # comparison used to do.
         ours = "/work/run/merged_tuned_dense_bf16.csv"
-        p = _log(tmp_path, [
-            _MISS.format(m=15).replace(
-                "/tmp/aiter_configs/bf16_tuned_gemm.csv", ours
-            ),
-        ])
+        p = _log(
+            tmp_path,
+            [
+                _MISS.format(m=15).replace("/tmp/aiter_configs/bf16_tuned_gemm.csv", ours),
+            ],
+        )
         v = verify_applied(p, [ours], runtime_table_names=_BF16)
         assert v.verdict != "not_merged"
 
@@ -133,9 +127,7 @@ class TestArtifactArrival:
         # The deployed file is named after the candidate; the server resolves it
         # under the canonical table name. Both are the same artifact.
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
-        v = verify_applied(
-            p, ["/work/run/merged_tuned_dense_bf16.csv"], runtime_table_names=_BF16
-        )
+        v = verify_applied(p, ["/work/run/merged_tuned_dense_bf16.csv"], runtime_table_names=_BF16)
         assert v.verdict == "served"
 
     def test_a_genuinely_absent_artifact_still_blocks(self, tmp_path, parser):
@@ -151,9 +143,7 @@ class TestArtifactArrival:
 
     def test_match_is_by_basename(self, tmp_path, parser):
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
-        v = verify_applied(
-            p, ["/some/other/dir/bf16_tuned_gemm.csv"], runtime_table_names=_BF16
-        )
+        v = verify_applied(p, ["/some/other/dir/bf16_tuned_gemm.csv"], runtime_table_names=_BF16)
         assert v.verdict == "served"
 
 
@@ -162,7 +152,9 @@ class TestHitLoggingTrap:
         # No hit lines because the flag was off -- must NOT block.
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15), _MISS.format(m=17)])
         v = verify_applied(
-            p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16,
+            p,
+            ["/work/bf16_tuned_gemm.csv"],
+            runtime_table_names=_BF16,
             hit_logging=False,
         )
         assert v.verdict == "inconclusive_no_hit_logging"
@@ -182,7 +174,9 @@ class TestHitLoggingTrap:
         # N misses" is a genuine zero and has to block.
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15), _MISS.format(m=17)])
         v = verify_applied(
-            p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16,
+            p,
+            ["/work/bf16_tuned_gemm.csv"],
+            runtime_table_names=_BF16,
             hit_logging=True,
         )
         assert v.verdict == "zero_hit"
@@ -195,13 +189,16 @@ class TestHitLoggingTrap:
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15)])
         reached.add(
             verify_applied(
-                p, ["/work/a8w8_tuned_gemm.csv"],
+                p,
+                ["/work/a8w8_tuned_gemm.csv"],
                 runtime_table_names=["a8w8_tuned_gemm.csv"],
             ).verdict
         )
         reached.add(
             verify_applied(
-                p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16,
+                p,
+                ["/work/bf16_tuned_gemm.csv"],
+                runtime_table_names=_BF16,
                 hit_logging=True,
             ).verdict
         )
@@ -224,9 +221,7 @@ class TestDegraded:
 
     def test_to_dict_is_serialisable(self, tmp_path, parser):
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
-        d = verify_applied(
-            p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16
-        ).to_dict()
+        d = verify_applied(p, ["/work/bf16_tuned_gemm.csv"], runtime_table_names=_BF16).to_dict()
         assert d["verdict"] == "served" and d["blocks_keep"] is False
 
 
@@ -240,9 +235,7 @@ class TestTheEnvToTableMapDoesNotDrift:
     """
 
     def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
-        forge_utils = pytest.importorskip(
-            "forge_gemm_tune.utils", reason="KernelForge not installed here"
-        )
+        forge_utils = pytest.importorskip("forge_gemm_tune.utils", reason="KernelForge not installed here")
         from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
 
         forge_env_vars = set(getattr(forge_utils, "TUNER_ENV_VARS", {}).values())

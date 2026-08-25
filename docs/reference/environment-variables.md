@@ -125,7 +125,7 @@ that degraded path.
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
 `src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py` is a fixed
-`0.05`, i.e. a candidate must stay within 5 percentage points of the recorded
+`0.05`, that is, a candidate must stay within 5 percentage points of the recorded
 baseline accuracy.
 
 Note that the score is measured once per candidate, not averaged over repeats.
@@ -223,7 +223,7 @@ symbols are opaque binaries and never qualify.
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_SKIP_COLLECTIVE`    | Unset (lane enabled)          | Truthy (`1` / `true` / `yes` / `on`) disables the collective lane outright, before any gate is evaluated.                                                                                          |
-| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
+| `HYPERLOOM_COLLECTIVE_ONLY`    | Unset                         | Truthy runs ONLY the collective lane at KERNEL entry — GEAK, fusion, and per-kernel `kernel_opt` are all skipped — and hints `skip_to_sweep` once the lane settles. Also the way to reach the lane while `KERNEL_OPT_BACKEND_ORDER` selects `geak`, which otherwise owns the whole phase. Mirrored into the `collective_only_mode` SharedState field. |
 | `HYPERLOOM_COLLECTIVE_KEEP_PCT` | `1.0`                        | E2E `KEEP` threshold in percent for the collective integrate. Must parse as a finite, non-negative float, otherwise the integrate fails loudly rather than defaulting.                             |
 | `HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES` | Unset (disabled) | Truthy allows a source-resolved collective to borrow shapes from the trace's sole all-reduce workload family. The default rejects this inference because those shapes were not observed on that device symbol. |
 | `FORGE_COLLECTIVE_TIMEOUT`     | `14400` (4h)                  | Wrapper timeout in seconds for one forge-collective campaign; a collective iterates over N ranks per benchmark, hence the wide default. A payload `timeout` takes precedence over the env.          |
@@ -236,18 +236,18 @@ symbols are opaque binaries and never qualify.
 A kernel candidate must resolve to a real source file before any backend can
 rewrite it. Resolution runs as a ladder: curated dictionary, then the
 trace-derived launcher frame, then a name grep. All three are deterministic and
-require no configuration. Agent analysis may add the model-backed tiers below.
+require no configuration. Agent analysis might add the model-backed tiers below.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
 decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
 consumers and triage read a contract rather than candidate internals.
 
-Two model-backed tiers may sit on top of the deterministic ladder when
+Two model-backed tiers might sit on top of the deterministic ladder when
 `--analysis-route agent` is used. The `deterministic` route never invokes either
 tier. Agent-route network calls require an explicit
 `HYPERLOOM_LLM_SOURCE_PROVIDER`; a model name alone never implies a provider or
-endpoint. The tiers differ in scope, authority and data exposure; the
+endpoint. The tiers differ in scope, authority, and data exposure; the
 constraints of one do not apply to the other.
 
 Neither can fail a run: no model configured, a gateway error, a timeout or an
@@ -270,7 +270,7 @@ retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
 setting. Claude uses `CLAUDE_MODEL`, then the project-wide
 `DEFAULT_CLAUDE_MODEL`. Model settings are never borrowed across providers.
 
-**Authority: selection only.** The model may return one of the exact shortlist
+**Authority: selection only.** The model might return one of the exact shortlist
 strings and nothing else. An invented path is rejected, as is any answer below
 0.7 confidence. This is deliberate — an LLM-produced sentinel written into
 `source_file` is what broke this pipeline originally.
@@ -302,7 +302,7 @@ complete review.
 
 <div class="callout warn">
 
-**Authority: it may rewrite, and it has no confidence threshold.** Unlike the
+**Authority: it might rewrite, and it has no confidence threshold.** Unlike the
 fallback tier, this one is not restricted to a shortlist — it can replace any
 entry's path with any path, or drop a resolved entry back to unresolved. There
 is no 0.7 confidence gate. The mechanical limit is that a rewritten path must
@@ -333,7 +333,7 @@ deliberate boundary rather than a side effect of building a useful prompt.
 
 **Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
 `claude_agent_sdk`. Claude requests use the native Claude
-Agent SDK with all repository, shell and web tools denied.
+Agent SDK with all repository, shell, and web tools denied.
 `kernel_source_resolution.json` records the provider, model, source-preview
 decision, outcome and endpoint hostname. It never records keys, custom
 headers, URL userinfo, query parameters or the full prompt.
@@ -435,7 +435,7 @@ multi-node runs or when the Ray backend is disabled.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serialises execution on the physical GPU(s) via `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
+| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serializes execution on the physical GPU(s) using `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
 | `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
 
 ---
@@ -449,7 +449,7 @@ Use CLI flags for multi-node topology and prefill-decode configuration:
 `--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
 
 `optimize` never creates or releases a multi-node cluster. The provisioning
-platform (e.g. Primus-Claw) creates the RayJob or InferaDeployment and hands it
+platform (for example, Primus-Claw) creates the RayJob or InferaDeployment and hands it
 over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 
 ### Cluster hand-off variables

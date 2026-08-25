@@ -26,9 +26,7 @@ def test_allows_speculative_draft_model_path():
     # Regression: a legitimate tuning flag ending in ``-path`` must not be
     # rejected by the broad suffix guard (eagle3 speculative-decoding sweep).
     sas.validate_server_args(
-        "--speculative-algorithm EAGLE3 "
-        "--speculative-draft-model-path /wekafs/models/draft "
-        "--speculative-num-steps 3"
+        "--speculative-algorithm EAGLE3 --speculative-draft-model-path /wekafs/models/draft --speculative-num-steps 3"
     )
     assert not sas.is_denied_server_flag("--speculative-draft-model-path")
 

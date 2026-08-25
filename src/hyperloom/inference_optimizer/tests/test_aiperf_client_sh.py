@@ -230,8 +230,12 @@ _UPSTREAM_FLAGS = (
     ("--slice-duration", "1.0"),
 )
 
-_UPSTREAM_BARE_FLAGS = ("--streaming", "--use-server-token-count", "--no-gpu-telemetry",
-                        "--tokenizer-trust-remote-code")
+_UPSTREAM_BARE_FLAGS = (
+    "--streaming",
+    "--use-server-token-count",
+    "--no-gpu-telemetry",
+    "--tokenizer-trust-remote-code",
+)
 
 
 def test_upstream_flag_contract(tmp_path):
@@ -539,7 +543,10 @@ def test_canonical_pin_can_be_declared(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     full = "semianalysis_cc_traces_weka_062126"
     r = _run(
-        bench, bind, res, tmp_path,
+        bench,
+        bind,
+        res,
+        tmp_path,
         WEKA_LOADER_OVERRIDE=full,
         AGENTX_CANONICAL_DATASET=full,
     )
@@ -554,7 +561,10 @@ def test_declaring_canonical_does_not_excuse_a_different_pin(tmp_path):
     """Declaring one corpus canonical must not bless replaying another."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(
-        bench, bind, res, tmp_path,
+        bench,
+        bind,
+        res,
+        tmp_path,
         AGENTX_CANONICAL_DATASET="semianalysis_cc_traces_weka_062126",
         WEKA_LOADER_OVERRIDE="semianalysis_cc_traces_weka_with_subagents_256k",
     )

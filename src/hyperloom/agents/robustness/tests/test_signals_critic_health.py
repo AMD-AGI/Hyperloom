@@ -253,7 +253,12 @@ def _rv(seq: int, source: str) -> dict:
 
 
 def test_streak_fires_when_outage_is_current():
-    coord_events = [_rv(1, "ok"), _rv(2, "critic_unavailable"), _rv(3, "critic_unavailable"), _rv(4, "critic_unavailable")]
+    coord_events = [
+        _rv(1, "ok"),
+        _rv(2, "critic_unavailable"),
+        _rv(3, "critic_unavailable"),
+        _rv(4, "critic_unavailable"),
+    ]
     out = evaluate_critic_health_signals(
         _ctx(),
         SourceData(coordinator_events=coord_events),
@@ -263,7 +268,12 @@ def test_streak_fires_when_outage_is_current():
 
 
 def test_streak_silent_when_outage_already_resolved():
-    coord_events = [_rv(1, "critic_unavailable"), _rv(2, "critic_unavailable"), _rv(3, "critic_unavailable"), _rv(4, "ok")]
+    coord_events = [
+        _rv(1, "critic_unavailable"),
+        _rv(2, "critic_unavailable"),
+        _rv(3, "critic_unavailable"),
+        _rv(4, "ok"),
+    ]
     out = evaluate_critic_health_signals(
         _ctx(),
         SourceData(coordinator_events=coord_events),

@@ -59,9 +59,7 @@ def test_extend_lease_accepts_valid_payload() -> None:
 @pytest.mark.parametrize("verdict", [12345, None, "APPROVE", "maybe"])
 def test_review_verdict_rejects_invalid_verdict(verdict) -> None:
     with pytest.raises(IntentValidationError, match="verdict"):
-        validate_envelope(
-            _envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": verdict})
-        )
+        validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": verdict}))
 
 
 def test_review_verdict_rejects_invalid_verdict_in_map() -> None:
@@ -75,7 +73,5 @@ def test_review_verdict_rejects_invalid_verdict_in_map() -> None:
 
 
 def test_review_verdict_accepts_valid_payload() -> None:
-    intents = validate_envelope(
-        _envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": "approve"})
-    )
+    intents = validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": "approve"}))
     assert intents[0].payload["verdict"] == "approve"

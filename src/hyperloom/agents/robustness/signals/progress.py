@@ -247,8 +247,7 @@ class ProgressDetector:
             subject={},
             source="local",
             suggestion=(
-                "consider `escalate_strategy_change(skip_to_close)` or "
-                "`report` to surface the attempted candidates"
+                "consider `escalate_strategy_change(skip_to_close)` or `report` to surface the attempted candidates"
             ),
         )
 

@@ -832,9 +832,7 @@ async def test_a_cancel_at_the_kb_writeback_still_hands_the_stash_back(
     assert _stash_list(repo) == "", "the auto-stash was never popped"
     # A KEEP that is cancelled before its result reaches the Coordinator is a
     # KEEP the session does not record, so the commit must not survive either.
-    assert (repo / "src.py").read_text().endswith("return 1\n"), (
-        "the ungraded candidate was left in the framework tree"
-    )
+    assert (repo / "src.py").read_text().endswith("return 1\n"), "the ungraded candidate was left in the framework tree"
 
 
 _PATCH_B_ADDS_FILE = """\

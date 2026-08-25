@@ -471,6 +471,7 @@ def test_recorder_snapshot_leaves_the_sweep_variants_intact(tmp_path):
 
     assert "all_variants" in ex.build(tmp_path)["sweep"]
 
+
 # ---- session_meta duration ----
 
 

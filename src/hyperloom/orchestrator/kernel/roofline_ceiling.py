@@ -1038,7 +1038,6 @@ def _read_baseline_yaml_conc(state: Any) -> int:
     )
 
 
-
 @dataclass(frozen=True)
 class RooflineBreakdown:
     """Decode roofline ceiling plus memory/compute side projections (PerfModel peak sums per-op max(t_mem,t_cmp), may differ from min(T_mem,T_cmp)). ``bound_kind`` ∈ {memory, compute, unknown} (unknown ⇒ peak 0)."""

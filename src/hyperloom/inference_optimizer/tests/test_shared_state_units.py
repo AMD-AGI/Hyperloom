@@ -752,9 +752,7 @@ def test_profile_workload_context_prefers_effective_profile_params():
     assert context["remove_args"] == ["--effective-remove"]
     assert context["unset_envs"] == ["EFFECTIVE_ENV"]
     assert context["args_mode"] == "replace"
-    assert state.current_profile_workload_context()["server_args"] == (
-        "--attention-backend TRITON"
-    )
+    assert state.current_profile_workload_context()["server_args"] == ("--attention-backend TRITON")
 
 
 def test_baseline_current_best_reuses_recorded_profile_runtime():
@@ -849,9 +847,7 @@ def test_legacy_session_without_recorded_arm_still_reuses_profile_runtime():
         model_path="/models/qwen",
         current_best={"action": "baseline", "tput": 100.0},
     )
-    state.last_profile_workload = state.profile_workload_context(
-        {"base_extra_args": "--attention-backend AITER"}
-    )
+    state.last_profile_workload = state.profile_workload_context({"base_extra_args": "--attention-backend AITER"})
 
     assert state.last_profile_workload_action == ""
     assert state.current_profile_workload_context() == state.last_profile_workload
@@ -935,7 +931,7 @@ def test_to_prompt_summary_shows_last_three_failures_with_suffix():
     txt = s.to_prompt_summary()
     assert "last_action_failures=" in txt
     # All 5 fit within the 10-entry window; each renders on its own lines.
-    failures_block = txt[txt.index("last_action_failures="):]
+    failures_block = txt[txt.index("last_action_failures=") :]
     assert "[baseline/no_report" in failures_block
     assert "[explore/no_report" in failures_block
     # No suffix when all entries fit.

@@ -1,4 +1,11 @@
-# KnowledgePlane Phase 1
+---
+myst:
+    html_meta:
+        "robots": "noindex"
+orphan: true
+---
+
+# KnowledgePlane phase 1
 
 Phase 1 puts Recipe KB and the KernelForge knowledge control-plane behind one
 Hyperloom `KnowledgePlane`. PR Monitor remains available through its existing

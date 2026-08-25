@@ -589,7 +589,7 @@ the catalog probe is the sole gate; see
 critic-agent runtime probe (`## Critic Backend Selection`).
 
 Don't manually pip-install SDKs, start Ray,
-or `curl /v1/models` — `_preflight()` owns these. See `docs/conceptual/kernel-execution-path.md`
+or `curl /v1/models` — `_preflight()` owns these. See `docs/reference/kernel-execution-path.md`
 for the kernel dispatch and artifact layout.
 
 ### Recovery

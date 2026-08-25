@@ -5,6 +5,7 @@ Regression: a clean no-kernel run closes with stop_reason ``conc_sweep_done``
 closed normally, yet the CLI used to return exit code 1 for them, so CI (with
 backoffLimit: 0) flagged a successful run as failed.
 """
+
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.cli import _exit_code_for_stop_reason

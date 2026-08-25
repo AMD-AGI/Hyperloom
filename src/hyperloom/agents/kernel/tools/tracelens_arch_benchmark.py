@@ -462,9 +462,7 @@ def populate_gpu_arch_json(
 
         payload = json.loads(out_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
-            raise RuntimeError(
-                f"gpu arch microbenchmark output is not a JSON object: {out_path}"
-            )
+            raise RuntimeError(f"gpu arch microbenchmark output is not a JSON object: {out_path}")
         changed = False
         if payload.get("name") != canonical:
             payload["name"] = canonical

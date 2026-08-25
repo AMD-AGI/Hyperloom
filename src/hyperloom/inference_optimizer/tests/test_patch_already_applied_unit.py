@@ -41,7 +41,9 @@ _SUBSET = """\
 """
 
 # Superset: the subset's hunk plus a second file the subset never touches.
-_SUPERSET = _SUBSET + """\
+_SUPERSET = (
+    _SUBSET
+    + """\
 --- a/mod/beta.py
 +++ b/mod/beta.py
 @@ -1,3 +1,3 @@
@@ -50,6 +52,7 @@ _SUPERSET = _SUBSET + """\
 +new_beta
  footer
 """
+)
 
 _UNRELATED = """\
 --- a/mod/alpha.py

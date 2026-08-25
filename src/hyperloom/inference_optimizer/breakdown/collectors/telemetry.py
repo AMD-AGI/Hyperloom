@@ -622,12 +622,8 @@ def collect_kb_provenance(
         "warm_replay_attempted": bool(state.get("warm_replay_attempted")),
         "warm_history_injected": bool(state.get("warm_history_injected")),
         "recipe_finalize": dict(state.get("recipe_finalize_outcome") or {}),
-        "recipe_finalize_status": str(
-            state.get("recipe_finalize_status") or ""
-        ),
-        "recipe_finalize_attempts": int(
-            state.get("recipe_finalize_attempts") or 0
-        ),
+        "recipe_finalize_status": str(state.get("recipe_finalize_status") or ""),
+        "recipe_finalize_attempts": int(state.get("recipe_finalize_attempts") or 0),
         "stack_fingerprint": manifest.get("stack_fingerprint") or {},
         "queue": {
             "pending_lines": _count_lines(pending_path),

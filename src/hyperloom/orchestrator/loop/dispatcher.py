@@ -1300,18 +1300,15 @@ class DispatcherCollaborator:
             # that handler owns rollback of pre-applied framework patches and
             # clears the PRELUDE ``in_flight`` gate.
             result_payload = dict(result.result or {})
-            replay_needs_cleanup = (
-                task.kind == "replay_warm_recipe"
-                and result.state != "succeeded"
-            )
+            replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state != "succeeded"
             if replay_needs_cleanup:
                 result_payload.setdefault("status", "failed")
                 result_payload.setdefault("error_class", "dispatch_failed")
                 if result.error:
                     result_payload.setdefault("error", str(result.error))
-            kept = (
-                result.state == "succeeded" or replay_needs_cleanup
-            ) and self._is_promotable_result(task.kind, result_payload)
+            kept = (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
+                task.kind, result_payload
+            )
             try:
                 if kept:
                     await self._promote_to_shared_state(

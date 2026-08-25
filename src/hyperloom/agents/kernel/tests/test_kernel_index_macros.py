@@ -65,10 +65,7 @@ def test_template_kernel_with_launch_bounds() -> None:
 
 # --- __attribute__((...)) with nested parens -------------------------------
 def test_attribute_nested_parens_is_skipped() -> None:
-    text = (
-        "__global__ __attribute__((amdgpu_flat_work_group_size(256, 256))) "
-        "void fused_kernel(int* p) {}"
-    )
+    text = "__global__ __attribute__((amdgpu_flat_work_group_size(256, 256))) void fused_kernel(int* p) {}"
     assert _names(text) == ["fused_kernel"]
 
 
@@ -117,10 +114,7 @@ def test_forward_declaration_is_not_indexed() -> None:
 
 def test_commented_and_stringified_defs_are_ignored() -> None:
     """A ``__global__`` inside a comment or string literal is not a definition."""
-    text = (
-        "// __global__ void dead_kernel(int*);\n"
-        'const char* s = "__global__ void str_kernel(int*)";\n'
-    )
+    text = '// __global__ void dead_kernel(int*);\nconst char* s = "__global__ void str_kernel(int*)";\n'
     assert _names(text) == []
 
 

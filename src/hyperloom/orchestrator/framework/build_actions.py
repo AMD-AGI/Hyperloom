@@ -208,9 +208,7 @@ class BuildResult:
         """Rehydrate from a plain dict."""
         d = d or {}
         raw_versions = d.get("installed_versions")
-        versions = (
-            {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
-        )
+        versions = {str(k): str(v) for k, v in raw_versions.items()} if isinstance(raw_versions, dict) else {}
         raw_probes = d.get("build_probes")
         probes = tuple(str(x) for x in raw_probes) if isinstance(raw_probes, (list, tuple)) else ()
         return cls(

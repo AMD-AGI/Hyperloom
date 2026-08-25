@@ -210,8 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="specialist_rebench",
         description=(
-            "Optional gate-comparable rebench on the specialist's leased "
-            "cards using the Magpie serving path."
+            "Optional gate-comparable rebench on the specialist's leased cards using the Magpie serving path."
         ),
     )
     parser.add_argument("--config", default=None, help="Base Magpie YAML (defaults to packaged baseline).")

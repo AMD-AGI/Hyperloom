@@ -252,18 +252,33 @@ def test_freeform_wave_too_large_rejected(gate, orchestration_role):
     assert exc.value.rule == "specialist_freeform_wave_too_large"
 
 
-def test_freeform_wave_non_dict_task_skipped(gate, orchestration_role):
-    gate._validate_specialist_dispatch(
-        orchestration_role,
-        _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
-    )
+def test_freeform_wave_non_dict_task_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
+        )
+    assert exc.value.rule == "specialist_freeform_wave_invalid_task"
+    assert "tasks[0]" in str(exc.value)
 
 
-def test_freeform_wave_empty_task_description_skipped(gate, orchestration_role):
-    gate._validate_specialist_dispatch(
-        orchestration_role,
-        _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
-    )
+def test_freeform_wave_empty_task_description_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
+        )
+    assert exc.value.rule == "specialist_freeform_empty_description"
+    assert "tasks[0]" in str(exc.value)
+
+
+def test_freeform_wave_all_invalid_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "tasks": ["bad", {"task_description": ""}]}),
+        )
+    assert exc.value.rule == "specialist_freeform_wave_invalid_task"
 
 
 # --------------------------------------------------------------------------- #
@@ -470,8 +485,7 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
     therefore pinned empty -- otherwise the pool is resolved from the host's real
     GPUs and the test only passes on a GPU-less machine.
     """
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP",
-                 "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
     gate = _gate_with_gpu_capacity(0)
@@ -572,6 +586,84 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
             }
         ),
     )
+
+
+def test_freeform_wave_mixed_valid_and_invalid_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "tasks": [
+                        {"task_description": "valid task"},
+                        {"task_description": ""},
+                    ],
+                }
+            ),
+        )
+    assert exc.value.rule == "specialist_freeform_empty_description"
+    assert "tasks[1]" in str(exc.value)
+
+
+def test_freeform_negative_max_turns_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"scope": "freeform", "task_description": "probe", "max_turns": -1}),
+        )
+    assert "max_turns" in str(exc.value)
+
+
+def test_freeform_wave_task_negative_max_turns_rejected(gate, orchestration_role):
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "tasks": [{"task_description": "probe", "max_turns": -1}],
+                }
+            ),
+        )
+    assert "tasks[0].max_turns" in str(exc.value)
+
+
+def test_freeform_max_turns_above_cap_rejected(gate, orchestration_role):
+    from hyperloom.orchestrator.specialists.domains import SPECIALIST_MAX_TURNS_HARD_CAP
+
+    with pytest.raises(PolicyDenied):
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch(
+                {
+                    "scope": "freeform",
+                    "task_description": "probe",
+                    "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
+                }
+            ),
+        )
+
+
+def test_prepare_scoring_proposals_preserves_output_name_whitespace():
+    from hyperloom.orchestrator.scoring.proposal_scorer import (
+        _normalise_model_scores,
+        _prepare_scoring_proposals,
+    )
+
+    entries = _prepare_scoring_proposals([{"name": " x "}])
+    parsed = {"scores": {"proposal_0": {"score": 5, "reason": "ok"}}}
+    out = _normalise_model_scores(parsed, scoring_entries=entries)
+    assert " x " in out
+    assert "x" not in out
+
+
+def test_resolve_specialist_max_turns_zero_uses_default():
+    from hyperloom.orchestrator.specialists.runner import resolve_specialist_max_turns
+
+    assert resolve_specialist_max_turns(0, default=1000) == 1000
+    assert resolve_specialist_max_turns(None, default=42) == 42
+    assert resolve_specialist_max_turns(5, default=1000) == 5
 
 
 # --------------------------------------------------------------------------- #

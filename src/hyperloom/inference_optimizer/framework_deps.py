@@ -179,9 +179,7 @@ def parse_manifest(text: str) -> tuple[list[Requirement], list[str], list[str]]:
 
 
 def _run(python_exe: str, script: str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [python_exe, "-c", script, *args], capture_output=True, text=True, check=False
-    )
+    return subprocess.run([python_exe, "-c", script, *args], capture_output=True, text=True, check=False)
 
 
 def _missing(python_exe: str, requirements: list[Requirement]) -> list[Requirement]:
@@ -261,9 +259,7 @@ def ensure(
 
     python_exe = python_exe or sys.executable
     missing = _missing(python_exe, requirements)
-    outcome.already_present = [
-        r.spec for r in requirements if r not in missing
-    ]
+    outcome.already_present = [r.spec for r in requirements if r not in missing]
     if not missing:
         return outcome
     if check_only or dry_run:
@@ -278,8 +274,16 @@ def ensure(
         for req in missing:
             completed = subprocess.run(
                 [
-                    python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir",
-                    "-c", str(constraints), *pip_extra, req.spec,
+                    python_exe,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--no-cache-dir",
+                    "-c",
+                    str(constraints),
+                    *pip_extra,
+                    req.spec,
                 ],
                 check=False,
             )

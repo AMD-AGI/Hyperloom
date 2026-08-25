@@ -133,9 +133,7 @@ def synthesize_vendor_diff(files: list[tuple[str, str, str]]) -> str:
         is_del = not new_s
         from_label = "/dev/null" if is_add else f"a/{rel_s}"
         to_label = "/dev/null" if is_del else f"b/{rel_s}"
-        body = difflib.unified_diff(
-            old_lines, new_lines, fromfile=from_label, tofile=to_label, lineterm="\n"
-        )
+        body = difflib.unified_diff(old_lines, new_lines, fromfile=from_label, tofile=to_label, lineterm="\n")
         hunk = "".join(body)
         if not hunk:
             continue

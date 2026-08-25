@@ -40,11 +40,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     method_display = "unknown attribution method" if method in ("", "missing") else method
 
     summary = optimizations.get("summary_by_source") or {}
-    claimed = [
-        [source, bucket.get("total_gain_pct")]
-        for source, bucket in summary.items()
-        if isinstance(bucket, dict)
-    ]
+    claimed = [[source, bucket.get("total_gain_pct")] for source, bucket in summary.items() if isinstance(bucket, dict)]
     total_v = validation.get("validated_total_gain_pct")
     unattributed = validation.get("unattributed_gain_pct")
     if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
@@ -52,18 +48,12 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     share_total = total_v
     if not isinstance(share_total, (int, float)) or not share_total:
-        share_total = sum(
-            float(gain) for _source, gain in claimed if isinstance(gain, (int, float))
-        )
+        share_total = sum(float(gain) for _source, gain in claimed if isinstance(gain, (int, float)))
     rows = [
         [
             source,
             gain,
-            (
-                float(gain) / float(share_total) * 100.0
-                if isinstance(gain, (int, float)) and share_total
-                else None
-            ),
+            (float(gain) / float(share_total) * 100.0 if isinstance(gain, (int, float)) and share_total else None),
         ]
         for source, gain in claimed
     ]

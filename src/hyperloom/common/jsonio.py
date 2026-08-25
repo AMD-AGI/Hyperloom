@@ -214,6 +214,54 @@ def extract_first_json_with_key(
     return found
 
 
+def extract_last_json_with_key(
+    text: str,
+    required_key: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the last JSON object in *text* (by start offset) that qualifies.
+
+    Scans fenced blocks and every bare ``{`` opener in document order so a
+    trailing fenced envelope wins over an earlier bare draft, and objects
+    whose first field is not *required_key* (e.g. ``{"meta": ..., "scores": ...}``)
+    still qualify when the key is present. Both scans decode with
+    :func:`json.JSONDecoder.raw_decode`, so a fence carrying trailing prose or a
+    second object still yields its object.
+
+    Args:
+        text: Raw model reply that may contain fenced or bare JSON objects.
+        required_key: Top-level key the returned dict must contain. When
+            ``None``, any parsed JSON object qualifies.
+
+    Returns:
+        The last qualifying dict by start offset, or ``None`` when none parses.
+    """
+    if not text:
+        return None
+
+    def _qualifies(data: Any) -> bool:
+        return isinstance(data, dict) and (required_key is None or required_key in data)
+
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for m in _FENCED_BLOCK_RE.finditer(text):
+        data = _first_json_object(m.group(1))
+        if data is not None and _qualifies(data):
+            candidates.append((m.start(), data))
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            data, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            data = None
+        if _qualifies(data):
+            candidates.append((idx, data))
+        idx = text.find("{", idx + 1)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
+
+
 def iter_sse_objects(raw: str) -> Iterator[Any]:
     """Yield JSON objects decoded from an MCP HTTP response body.
 
@@ -261,6 +309,7 @@ def iter_sse_objects(raw: str) -> Iterator[Any]:
 __all__ = [
     "coerce_dict",
     "extract_first_json_with_key",
+    "extract_last_json_with_key",
     "iter_sse_objects",
     "read_json",
     "read_jsonl",

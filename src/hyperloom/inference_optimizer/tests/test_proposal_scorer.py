@@ -19,6 +19,7 @@ from hyperloom.orchestrator.scoring.proposal_scorer import (
     DEFAULT_SCORER_MODELS,
     ProposalScorer,
     _extract_scores_json,
+    _prepare_scoring_proposals,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -130,7 +131,7 @@ _PROPOSALS = [
 
 
 def _scores_json(*pairs: tuple[str, float, str]) -> str:
-    body = ", ".join(f'"{name}": {{"score": {score}, "reason": "{reason}"}}' for name, score, reason in pairs)
+    body = ", ".join(f'"{stable_id}": {{"score": {score}, "reason": "{reason}"}}' for stable_id, score, reason in pairs)
     return f'```json\n{{"scores": {{{body}}}}}\n```'
 
 
@@ -139,12 +140,12 @@ def _scores_json(*pairs: tuple[str, float, str]) -> str:
 async def test_score_two_models_happy_path():
     behaviour = {
         "claude-opus-4-7": _scores_json(
-            ("cuda_graph_bs_512", 8.0, "strong fit"),
-            ("disable_radix", 4.0, "marginal"),
+            ("proposal_0", 8.0, "strong fit"),
+            ("proposal_1", 4.0, "marginal"),
         ),
         "gpt-5.4": _scores_json(
-            ("cuda_graph_bs_512", 6.5, "plausible"),
-            ("disable_radix", 5.0, "ok"),
+            ("proposal_0", 6.5, "plausible"),
+            ("proposal_1", 5.0, "ok"),
         ),
     }
     scorer = _make_scorer(behaviour)
@@ -171,7 +172,7 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
     session_dir.mkdir()
     client = _FakeClient(
         {
-            "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+            "claude-opus-4-7": _scores_json(("proposal_0", 8.0, "fit")),
         }
     )
     scorer = ProposalScorer(
@@ -189,7 +190,7 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
     assert row["model"] == "claude-opus-4-7"
     assert row["task_id"] == "spec-7"
     assert "cuda_graph_bs_512" in row["prompt"]
-    assert "cuda_graph_bs_512" in row["response"]
+    assert "proposal_0" in row["response"]
 
     token_rows = _read_jsonl(llm_calls_path(session_dir))
     scorer_rows = [r for r in token_rows if r["component"] == "proposal_scorer"]
@@ -244,14 +245,14 @@ async def test_failed_scoring_call_writes_an_error_row(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
     """The default (tests / no full-trace) path writes no conversation file."""
-    scorer = _make_scorer({"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))})
+    scorer = _make_scorer({"m1": _scores_json(("proposal_0", 7.0, "x"))})
     await scorer.score(gap=_GAP, proposals=_PROPOSALS)
     assert scorer.session_dir is None
 
 
 @pytest.mark.asyncio
 async def test_group_prompt_contains_all_proposals_and_gap():
-    behaviour = {"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))}
+    behaviour = {"m1": _scores_json(("proposal_0", 7.0, "x"))}
     scorer = _make_scorer(behaviour)
     await scorer.score(gap=_GAP, proposals=_PROPOSALS)
     client = scorer._client
@@ -265,7 +266,7 @@ async def test_group_prompt_contains_all_proposals_and_gap():
 @pytest.mark.asyncio
 async def test_per_model_degrade_one_raises_other_survives():
     behaviour = {
-        "good": _scores_json(("cuda_graph_bs_512", 9.0, "great")),
+        "good": _scores_json(("proposal_0", 9.0, "great")),
         "bad": RuntimeError("gateway 404 unknown model"),
     }
     scorer = _make_scorer(behaviour)
@@ -289,8 +290,8 @@ async def test_unparseable_reply_recorded_as_error():
 async def test_scores_clamped_and_unknown_names_dropped():
     behaviour = {
         "m1": _scores_json(
-            ("cuda_graph_bs_512", 99.0, "over"),  # clamp to 10
-            ("disable_radix", -3.0, "under"),  # clamp to 0
+            ("proposal_0", 99.0, "over"),  # clamp to 10
+            ("proposal_1", -3.0, "under"),  # clamp to 0
             ("ghost_variant", 5.0, "not in set"),  # dropped
         ),
     }
@@ -312,11 +313,13 @@ async def test_empty_proposals_returns_empty_envelope():
 
 
 def test_extract_scores_json_bare_and_fenced():
-    fenced = _scores_json(("a", 1.0, "x"))
-    assert _extract_scores_json(fenced)["scores"]["a"]["score"] == 1.0
-    bare = '{"scores": {"a": {"score": 2, "reason": "y"}}}'
-    assert _extract_scores_json(bare)["scores"]["a"]["score"] == 2
+    fenced = _scores_json(("proposal_0", 1.0, "x"))
+    assert _extract_scores_json(fenced)["scores"]["proposal_0"]["score"] == 1.0
+    bare = '{"scores": {"proposal_0": {"score": 2, "reason": "y"}}}'
+    assert _extract_scores_json(bare)["scores"]["proposal_0"]["score"] == 2
     assert _extract_scores_json("no json here") is None
+    meta = '```json\n{"meta": "draft", "scores": {"proposal_0": {"score": 9, "reason": "final"}}}\n```'
+    assert _extract_scores_json(meta)["scores"]["proposal_0"]["score"] == 9
 
 
 def test_default_models_constant():
@@ -387,7 +390,7 @@ def _done():
 async def test_coordinator_attaches_ensemble_scores(tmp_path):
     scorer = _make_scorer(
         {
-            "claude-opus-4-7": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+            "claude-opus-4-7": _scores_json(("proposal_0", 8.0, "fit")),
         }
     )
     c = _coord(tmp_path, scorer)
@@ -433,7 +436,7 @@ async def test_coordinator_scorer_exception_still_records(tmp_path):
 
 @pytest.mark.asyncio
 async def test_coordinator_empty_proposals_not_scored(tmp_path):
-    scorer = _make_scorer({"m1": _scores_json(("x", 1.0, "y"))})
+    scorer = _make_scorer({"m1": _scores_json(("proposal_0", 1.0, "y"))})
     c = _coord(tmp_path, scorer)
     payload = _done()
     payload["proposal_set"] = []
@@ -563,7 +566,7 @@ def test_render_rater_labels_stable_across_rounds():
 async def test_resume_idempotent_on_round_id(tmp_path):
     scorer = _make_scorer(
         {
-            "m1": _scores_json(("cuda_graph_bs_512", 8.0, "fit")),
+            "m1": _scores_json(("proposal_0", 8.0, "fit")),
         }
     )
     c = _coord(tmp_path, scorer)
@@ -639,9 +642,10 @@ def _scripted_scorer(chunks: list[Any], *, stall: bool = False, call_timeout_s: 
 
 @pytest.mark.asyncio
 async def test_stream_flag_is_passed():
-    chunks = [_content_chunk(_scores_json(("p", 5, "ok"))), _usage_chunk(_FakeUsage(10, 20))]
+    chunks = [_content_chunk(_scores_json(("proposal_0", 5, "ok"))), _usage_chunk(_FakeUsage(10, 20))]
     scorer, client = _scripted_scorer(chunks)
-    await scorer._score_one_model("m", "prompt", ["p"])
+    entries = _prepare_scoring_proposals([{"name": "p"}])
+    await scorer._score_one_model("m", "prompt", entries)
     call = client.chat.completions.calls[0]
     assert call["stream"] is True
     assert call["stream_options"] == {"include_usage": True}
@@ -650,7 +654,7 @@ async def test_stream_flag_is_passed():
 @pytest.mark.asyncio
 async def test_multiple_content_chunks_are_accumulated():
     # Split a valid scores JSON across content deltas.
-    body = _scores_json(("p", 7, "good"))
+    body = _scores_json(("proposal_0", 7, "good"))
     third = len(body) // 3
     chunks = [
         _content_chunk(body[:third]),
@@ -659,7 +663,8 @@ async def test_multiple_content_chunks_are_accumulated():
         _usage_chunk(_FakeUsage(11, 22)),
     ]
     scorer, _ = _scripted_scorer(chunks)
-    out = await scorer._score_one_model("m", "prompt", ["p"])
+    entries = _prepare_scoring_proposals([{"name": "p"}])
+    out = await scorer._score_one_model("m", "prompt", entries)
     assert out["p"]["score"] == 7.0
 
 
@@ -668,14 +673,16 @@ async def test_stalled_stream_body_times_out():
     # Stream stalls after one chunk: the deadline must cover the consumption loop.
     chunks = [_content_chunk('{"scores": {')]
     scorer, _ = _scripted_scorer(chunks, stall=True, call_timeout_s=0.05)
+    entries = _prepare_scoring_proposals([{"name": "p"}])
     with pytest.raises(RuntimeError, match="timed out"):
-        await scorer._score_one_model("m", "prompt", ["p"])
+        await scorer._score_one_model("m", "prompt", entries)
 
 
 @pytest.mark.asyncio
 async def test_missing_usage_chunk_degrades_cleanly():
     # No usage-bearing chunk: scoring still succeeds.
-    chunks = [_content_chunk(_scores_json(("p", 4, "fine")))]
+    chunks = [_content_chunk(_scores_json(("proposal_0", 4, "fine")))]
     scorer, _ = _scripted_scorer(chunks)
-    out = await scorer._score_one_model("m", "prompt", ["p"])
+    entries = _prepare_scoring_proposals([{"name": "p"}])
+    out = await scorer._score_one_model("m", "prompt", entries)
     assert out["p"]["score"] == 4.0
