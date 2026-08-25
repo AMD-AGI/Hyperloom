@@ -740,9 +740,7 @@ def test_collect_gemm_tuning_marks_a_kept_run_adopted() -> None:
     """
     from hyperloom.inference_optimizer.breakdown.collectors.kernels import collect_gemm_tuning
 
-    out = collect_gemm_tuning(
-        _gemm_state_with_keep(attempt_tuned_file="/ws/merged_tuned_fmoe.csv")
-    )
+    out = collect_gemm_tuning(_gemm_state_with_keep(attempt_tuned_file="/ws/merged_tuned_fmoe.csv"))
 
     run = out["runs"][0]
     assert run["adopted"] is True
@@ -1089,9 +1087,7 @@ def test_collect_geak_backfill_keeps_authored_after_collapse(tmp_path: Path) -> 
         "geak_result": {
             "status": "ok",
             "accepted_kernels": [],
-            "accepted_heads": [
-                {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
-            ],
+            "accepted_heads": [{"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}],
             "eval_dir": str(eval_dir),
         },
     }
@@ -1162,9 +1158,7 @@ def test_collect_geak_backfill_stack_kind_is_labelled_as_from_the_stack(
         "optimization_stack": [
             {
                 "action": "geak_e2e",
-                "accepted_kernels": [
-                    {"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}
-                ],
+                "accepted_kernels": [{"short_name": "dsa_sparse_attn_prefill_main_kernel", "kind": "authored"}],
                 "accepted_heads": [],
             }
         ],

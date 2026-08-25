@@ -105,9 +105,7 @@ def test_discover_auto_enumerates_new_library() -> None:
         site = Path(raw) / "site-packages"
         site.mkdir()
         _kernel_pkg(site, "atom")
-        with _on_syspath(site), _env(
-            HYPERLOOM_DISCOVER_ONLY="atom", HYPERLOOM_FRAMEWORK_SOURCE_ROOTS=None
-        ):
+        with _on_syspath(site), _env(HYPERLOOM_DISCOVER_ONLY="atom", HYPERLOOM_FRAMEWORK_SOURCE_ROOTS=None):
             fw = source_env.discover_frameworks()
         assert "atom" in fw, fw
         assert any(str(p).endswith("atom/csrc") for p in fw["atom"].csrc_roots)
@@ -121,9 +119,12 @@ def test_discover_merges_meta_sibling_into_base() -> None:
         (site / "aiter").mkdir()
         (site / "aiter" / "_version.py").write_text("__version__='0.1.99'\n", encoding="utf-8")
         _kernel_pkg(site, "aiter_meta")
-        with _on_syspath(site), _env(
-            HYPERLOOM_DISCOVER_ONLY="aiter",
-            HYPERLOOM_FRAMEWORK_SOURCE_ROOTS=f"aiter={site / 'aiter'}",
+        with (
+            _on_syspath(site),
+            _env(
+                HYPERLOOM_DISCOVER_ONLY="aiter",
+                HYPERLOOM_FRAMEWORK_SOURCE_ROOTS=f"aiter={site / 'aiter'}",
+            ),
         ):
             fw = source_env.discover_frameworks()
         assert "aiter" in fw and "aiter_meta" not in fw, fw
@@ -138,9 +139,7 @@ def test_discover_only_filters_out_others() -> None:
         site.mkdir()
         _kernel_pkg(site, "atom")
         _kernel_pkg(site, "flydsl")
-        with _on_syspath(site), _env(
-            HYPERLOOM_DISCOVER_ONLY="atom", HYPERLOOM_FRAMEWORK_SOURCE_ROOTS=None
-        ):
+        with _on_syspath(site), _env(HYPERLOOM_DISCOVER_ONLY="atom", HYPERLOOM_FRAMEWORK_SOURCE_ROOTS=None):
             fw = source_env.discover_frameworks()
         assert "atom" in fw and "flydsl" not in fw, fw
 

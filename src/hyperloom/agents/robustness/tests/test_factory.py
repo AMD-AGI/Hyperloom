@@ -280,9 +280,7 @@ async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_factory_falls_back_to_noop_when_the_anthropic_transport_is_unusable(
-    tmp_path: Path, monkeypatch
-):
+async def test_factory_falls_back_to_noop_when_the_anthropic_transport_is_unusable(tmp_path: Path, monkeypatch):
     """A subscription token with no claude CLI, or no Anthropic credential at
     all, must degrade at build time instead of failing on every tick."""
     from hyperloom.agents.robustness.decision.rca_engine import NoopRcaEngine

@@ -1851,7 +1851,13 @@ def test_openai_only_deploy_walks_the_codex_ladder_before_deriving_claude(monkey
     """
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"):
+    for var in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     # A gateway that has not picked up the new default yet.
@@ -1869,7 +1875,13 @@ def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
     """The ladder cannot be gated on the critic here: codex_model drives orchestration."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"):
+    for var in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
@@ -1947,8 +1959,15 @@ def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch)
     would leave ``args.claude_model`` on the AMD default.
     """
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
-    for name in ("DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
-                 "CLAUDE_MODEL", "CODEX_MODEL", "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"):
+    for name in (
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "CLAUDE_MODEL",
+        "CODEX_MODEL",
+        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
@@ -1967,8 +1986,13 @@ def test_parser_standard_dual_protocol_config_defaults_to_gateway_model(monkeypa
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-deepseek")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "sk-deepseek")
-    for name in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "CLAUDE_MODEL", "CODEX_MODEL",
-                 "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX"):
+    for name in (
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "CLAUDE_MODEL",
+        "CODEX_MODEL",
+        "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])

@@ -126,7 +126,7 @@ class CodexAgentBackend:
         user_prompt = prompt
         compatibility_prefix = f"{system_prompt}\n---\n" if system_prompt else ""
         if compatibility_prefix and user_prompt.startswith(compatibility_prefix):
-            user_prompt = user_prompt[len(compatibility_prefix):]
+            user_prompt = user_prompt[len(compatibility_prefix) :]
         try:
             sdk_result = await run_codex_turn(
                 prompt=user_prompt,

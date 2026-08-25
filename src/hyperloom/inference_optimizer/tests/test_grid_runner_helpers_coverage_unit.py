@@ -366,9 +366,7 @@ def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
     args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
     out = gr._shell_safe_dedupe(args)
     assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
-    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {
-        "rope_scaling": None
-    }
+    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {"rope_scaling": None}
 
 
 def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:

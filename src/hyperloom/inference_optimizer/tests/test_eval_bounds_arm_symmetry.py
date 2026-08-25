@@ -202,8 +202,7 @@ def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_p
         patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(
             f"{_PATCHER}.run_with_session_kill",
-            side_effect=lambda cmd, *a, **k: launched.append(cmd)
-            or subprocess.CompletedProcess(cmd, 0, "ok", ""),
+            side_effect=lambda cmd, *a, **k: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "ok", ""),
         ),
     ):
         rc, _out, err = _run_magpie(

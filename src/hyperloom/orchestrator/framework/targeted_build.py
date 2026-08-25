@@ -372,6 +372,7 @@ def run_aiter_build(
                 DiskPreflightError,
                 disk_preflight,
             )
+
             try:
                 disk_preflight(root, 1, per_candidate_gb=_AITER_DISK_PER_CANDIDATE_GB)
             except DiskPreflightError as exc:
@@ -457,10 +458,16 @@ def run_aiter_build(
     installed_ok = False
 
     pip_base = [
-        attempt_py, "-m", "pip", "install",
-        "--constraint", str(constraint_path),
-        "--config-settings", "editable_mode=compat",
-        "-e", str(worktree_dir),
+        attempt_py,
+        "-m",
+        "pip",
+        "install",
+        "--constraint",
+        str(constraint_path),
+        "--config-settings",
+        "editable_mode=compat",
+        "-e",
+        str(worktree_dir),
     ]
 
     if ref:
@@ -471,7 +478,10 @@ def run_aiter_build(
             return _fail("compile_error", f"pip install failed for ref={ref!r}: rc={res.returncode}")
         probe = run_argv(
             [attempt_py, "-c", "import aiter"],
-            cwd=str(root), env=install_env, timeout_sec=60, run=_run,
+            cwd=str(root),
+            env=install_env,
+            timeout_sec=60,
+            run=_run,
         )
         if probe.returncode != 0:
             return _fail(
@@ -483,7 +493,9 @@ def run_aiter_build(
         # Tag-descending autoselect
         tags_res = git_run(
             ["git", *safe_directory_args(["-C", str(worktree_dir), "tag", "-l", "v*"])],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         raw_tags = (getattr(tags_res, "stdout", "") or "").strip().splitlines()
         tags = sort_tags_desc([t.strip() for t in raw_tags if t.strip()])
@@ -493,7 +505,9 @@ def run_aiter_build(
         for tag in tags:
             checkout_res = git_run(
                 ["git", *safe_directory_args(["-C", str(worktree_dir), "checkout", tag])],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             if getattr(checkout_res, "returncode", 1) != 0:
                 continue
@@ -501,7 +515,10 @@ def run_aiter_build(
             if res.returncode == 0:
                 probe = run_argv(
                     [attempt_py, "-c", "import aiter"],
-                    cwd=str(root), env=install_env, timeout_sec=60, run=_run,
+                    cwd=str(root),
+                    env=install_env,
+                    timeout_sec=60,
+                    run=_run,
                 )
                 if probe.returncode == 0:
                     installed_ok = True
@@ -513,7 +530,9 @@ def run_aiter_build(
     # 6. Collect installed_versions + return BuildResult -----------------------
     sha_res = git_run(
         ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
 
@@ -689,9 +708,14 @@ def run_sgl_kernel_build(
 
     # Install SGLang python package
     pip_cmd = [
-        attempt_py, "-m", "pip", "install",
-        "--constraint", str(constraint_path),
-        "-e", str(worktree_dir / "python[srt_hip]"),
+        attempt_py,
+        "-m",
+        "pip",
+        "install",
+        "--constraint",
+        str(constraint_path),
+        "-e",
+        str(worktree_dir / "python[srt_hip]"),
     ]
     pip_res = run_argv(pip_cmd, cwd=str(root), env=dict(_os.environ), timeout_sec=3600, run=_run)
     if pip_res.returncode != 0:
@@ -700,7 +724,10 @@ def run_sgl_kernel_build(
 
     probe = run_argv(
         [attempt_py, "-c", "import sgl_kernel"],
-        cwd=str(root), env=dict(_os.environ), timeout_sec=60, run=_run,
+        cwd=str(root),
+        env=dict(_os.environ),
+        timeout_sec=60,
+        run=_run,
     )
     if probe.returncode != 0:
         return _fail(
@@ -709,8 +736,12 @@ def run_sgl_kernel_build(
         )
 
     git_run = git if git is not None else _run
-    sha_res = git_run(["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
-                      capture_output=True, text=True, timeout=30)
+    sha_res = git_run(
+        ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
 
     installed_versions = {
@@ -855,6 +886,7 @@ def run_vllm_source_build(
     abi_pyver = str(abi.get("python_version") or "").strip()
     if abi_pyver and not abi_pyver.startswith(host_pyver):
         import logging as _log
+
         _log.getLogger(__name__).info(
             "vLLM source build: torch ABI python %s != host %s; "
             "runtime_python_exe will be set to the attempt venv interpreter",
@@ -929,22 +961,29 @@ def run_vllm_source_build(
         if build_requires:
             run_argv(
                 [attempt_py, "-m", "pip", "install", *build_requires],
-                cwd=str(worktree_dir), env=install_env, timeout_sec=1800, run=_run,
+                cwd=str(worktree_dir),
+                env=install_env,
+                timeout_sec=1800,
+                run=_run,
             )
     except Exception:  # noqa: BLE001 — best-effort; the editable install still runs
         import logging as _logmod
-        _logmod.getLogger(__name__).debug(
-            "vLLM source build: build-requires pre-install skipped", exc_info=True
-        )
+
+        _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
 
     # pip install -e triggers CMake build_ext. ``--no-build-isolation`` keeps the
     # build in the attempt venv (which has the pinned ROCm torch + numpy) so
     # setup.py sees torch/numpy and the exported CUDA_HOME/ROCM_HOME.
     pip_cmd = [
-        attempt_py, "-m", "pip", "install",
+        attempt_py,
+        "-m",
+        "pip",
+        "install",
         "--no-build-isolation",
-        "--constraint", str(constraint_path),
-        "-e", str(worktree_dir),
+        "--constraint",
+        str(constraint_path),
+        "-e",
+        str(worktree_dir),
     ]
     pip_res = run_argv(pip_cmd, cwd=str(worktree_dir), env=install_env, timeout_sec=5400, run=_run)
     if pip_res.returncode != 0:
@@ -954,7 +993,10 @@ def run_vllm_source_build(
     # ROCm platform verify (port of verify_vllm_rocm from installer)
     vllm_verify = run_argv(
         [attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
-        cwd=str(root), env=dict(_os.environ), timeout_sec=120, run=_run,
+        cwd=str(root),
+        env=dict(_os.environ),
+        timeout_sec=120,
+        run=_run,
     )
     if vllm_verify.returncode != 0:
         return _fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
@@ -966,7 +1008,10 @@ def run_vllm_source_build(
     )
     load_probe = run_argv(
         [attempt_py, "-c", load_probe_script],
-        cwd=str(root), env=dict(_os.environ), timeout_sec=60, run=_run,
+        cwd=str(root),
+        env=dict(_os.environ),
+        timeout_sec=60,
+        run=_run,
     )
     if load_probe.returncode != 0:
         return _fail(
@@ -976,8 +1021,12 @@ def run_vllm_source_build(
         )
 
     git_run = git if git is not None else _run
-    sha_res = git_run(["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
-                      capture_output=True, text=True, timeout=30)
+    sha_res = git_run(
+        ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
 
     installed_versions = {
@@ -1013,6 +1062,7 @@ def run_vllm_source_build(
 # Off-loop driver entrypoint
 # ---------------------------------------------------------------------------
 
+
 def _driver_main(argv: list[str] | None = None) -> int:
     """Driver subprocess entry: load plan.json, call run_aiter_build, write result.json."""
     import argparse
@@ -1027,9 +1077,7 @@ def _driver_main(argv: list[str] | None = None) -> int:
     result_path = root / "result.json"
 
     try:
-        action = TargetedBuildAction.from_state(
-            json.loads(plan_path.read_text(encoding="utf-8"))
-        )
+        action = TargetedBuildAction.from_state(json.loads(plan_path.read_text(encoding="utf-8")))
     except Exception as exc:  # noqa: BLE001
         result_path.write_text(
             json.dumps(

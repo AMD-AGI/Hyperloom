@@ -472,6 +472,7 @@ class RecoverExecutor:
         except (ProcessLookupError, PermissionError):
             return False
 
+
 # Module-level callable for ``register_executor("recover", recover_executor)``.
 recover_executor = RecoverExecutor()
 

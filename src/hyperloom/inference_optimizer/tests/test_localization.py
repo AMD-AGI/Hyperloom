@@ -30,6 +30,7 @@ def _gap(kind: str = MISSING_MODEL_ARCH) -> CapabilityGap:
 # classify_closure — compiled-closure gate
 # ---------------------------------------------------------------------------
 
+
 def test_closure_empty():
     assert loc.classify_closure([]).kind == loc.EMPTY
 
@@ -57,6 +58,7 @@ def test_closure_file_cap_defers_rung5():
 # synthesize_vendor_diff + parse_diff_paths
 # ---------------------------------------------------------------------------
 
+
 def test_synthesize_vendor_add():
     d = loc.synthesize_vendor_diff([("vllm/new.py", "", "def f():\n    return 1\n")])
     assert "diff --git a/vllm/new.py b/vllm/new.py" in d
@@ -78,6 +80,7 @@ def test_synthesize_vendor_skips_identical():
 # ---------------------------------------------------------------------------
 # build_localization_diff (injected shims)
 # ---------------------------------------------------------------------------
+
 
 def _pr_action() -> EnablementStackAction:
     return EnablementStackAction.from_state(
@@ -141,6 +144,7 @@ def test_build_vendor_files_synthesizes():
 # Applies to a temp git tree (end-to-end diff validity)
 # ---------------------------------------------------------------------------
 
+
 def test_synthesized_add_applies_to_git_tree(tmp_path):
     repo = tmp_path / "repo"
     init_git_repo(repo)
@@ -157,6 +161,7 @@ def test_synthesized_add_applies_to_git_tree(tmp_path):
 # ---------------------------------------------------------------------------
 # adapter localization hooks
 # ---------------------------------------------------------------------------
+
 
 def test_vllm_localization_action_and_refresh(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)

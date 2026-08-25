@@ -994,10 +994,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         )
         deliverable_line = "(Section 8) carrying ``proposal_set`` + ``patches_written``. The hard"
     else:
-        capability_line = (
-            "probe the host via Bash, and use as many of your ``max_turns`` LLM"
-            " turns as you need"
-        )
+        capability_line = "probe the host via Bash, and use as many of your ``max_turns`` LLM turns as you need"
         deliverable_line = "(Section 8) carrying ``proposal_set``. The hard"
     if inp.allocated_gpu_ids:
         leaf_examples = "bench N candidates of one lever at once, or read several subsystems"
@@ -1129,8 +1126,7 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "- Write and run arbitrary scripts — autotune harnesses, "
         + "microbenchmarks, profilers (rocprof / torch.profiler / your own "
         + "breakdown).",
-        "- Start / restart a real server on your own cards and benchmark it "
-        + "however you see fit.",
+        "- Start / restart a real server on your own cards and benchmark it " + "however you see fit.",
         "- Profile freely to get a fresh trace after a change — don't rely only "
         + "on the static roofline snapshot you were handed.",
         "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
@@ -1233,7 +1229,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     # Deliverable line based on scope × mode.
     scope = (inp.scope or "domain").lower()
     if scope == "freeform":
-        anchor = (inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else "")
+        anchor = inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else ""
         deliverable = "freeform investigation — see task description"
     else:
         anchor = inp.gap_canonical_id or ""
@@ -1267,17 +1263,18 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
         if inp.applied_stack:
             stack_items = ", ".join(
-                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)"
-                for e in inp.applied_stack[:6]
+                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)" for e in inp.applied_stack[:6]
             )
             rows.append(f"- applied stack: {stack_items}")
 
-    rows.extend([
-        "",
-        "Judged by: the Coordinator benches your proposals end-to-end against",
-        "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
-        "alongside. You are not asked to prove the number.",
-    ])
+    rows.extend(
+        [
+            "",
+            "Judged by: the Coordinator benches your proposals end-to-end against",
+            "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
+            "alongside. You are not asked to prove the number.",
+        ]
+    )
 
     kind = (inp.task_kind or "").strip()
     brief = _TASK_KIND_BRIEFS.get(kind, "")
@@ -1297,10 +1294,12 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"Diff: {diff_url} (fetch with WebFetch)")
 
     if inp.prior_attempts:
-        rows.extend([
-            "",
-            "Already tried this session — avoid the same or equivalent change:",
-        ])
+        rows.extend(
+            [
+                "",
+                "Already tried this session — avoid the same or equivalent change:",
+            ]
+        )
         for att in inp.prior_attempts[:20]:
             if not isinstance(att, dict):
                 continue
@@ -2002,18 +2001,22 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
     exit_lines: list[str] = []
     if channel == "A" or channel == "":
-        exit_lines.extend([
-            "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
-            "with intent type ``specialist_done`` and the payload schema below.",
-        ])
+        exit_lines.extend(
+            [
+                "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
+                "with intent type ``specialist_done`` and the payload schema below.",
+            ]
+        )
     if channel == "B" or channel == "":
         if channel == "":
             exit_lines.append("")
-        exit_lines.extend([
-            "**Exit — file write (subprocess runtime):** write the same payload to",
-            f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
-            "The dispatcher polls for that file as the exit signal; stop after writing.",
-        ])
+        exit_lines.extend(
+            [
+                "**Exit — file write (subprocess runtime):** write the same payload to",
+                f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+                "The dispatcher polls for that file as the exit signal; stop after writing.",
+            ]
+        )
 
     if authors_patches:
         patch_fields = [

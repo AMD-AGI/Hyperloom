@@ -117,11 +117,7 @@ _TORCH_HIP_PROBE = (
     "hip = getattr(torch.version, 'hip', None); "
     "sys.exit(0 if hip else 2); "
 )
-_VERSION_PROBE = (
-    "import sys, importlib.metadata; "
-    "pkg=sys.argv[1]; "
-    "print(importlib.metadata.version(pkg))"
-)
+_VERSION_PROBE = "import sys, importlib.metadata; pkg=sys.argv[1]; print(importlib.metadata.version(pkg))"
 
 
 class AbiMismatchError(RuntimeError):
@@ -146,17 +142,19 @@ def write_rocm_torch_constraints(
     # Check ROCm
     hip_res = run(
         [python_exe, "-c", _TORCH_HIP_PROBE],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     rc = int(getattr(hip_res, "returncode", -1))
     if rc != 0:
-        raise AbiMismatchError(
-            f"installed torch at {python_exe!r} is not a ROCm build (probe rc={rc})"
-        )
+        raise AbiMismatchError(f"installed torch at {python_exe!r} is not a ROCm build (probe rc={rc})")
     # torch version
     tv_res = run(
         [python_exe, "-c", _VERSION_PROBE, "torch"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     torch_ver = (getattr(tv_res, "stdout", "") or "").strip()
     if not torch_ver:
@@ -165,7 +163,9 @@ def write_rocm_torch_constraints(
     # triton version (optional)
     tri_res = run(
         [python_exe, "-c", _VERSION_PROBE, "triton"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     triton_ver = (getattr(tri_res, "stdout", "") or "").strip()
     if triton_ver:
@@ -177,6 +177,7 @@ def write_rocm_torch_constraints(
 # ---------------------------------------------------------------------------
 # ROCm toolchain alignment check
 # ---------------------------------------------------------------------------
+
 
 def check_rocm_toolchain_alignment(
     *,
@@ -203,7 +204,10 @@ def check_rocm_toolchain_alignment(
 
     hipcc_res = run(
         ["which", "hipcc"],
-        capture_output=True, text=True, timeout=10, env=effective_env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=effective_env,
     )
     hipcc_path = (getattr(hipcc_res, "stdout", "") or "").strip()
     if not hipcc_path or getattr(hipcc_res, "returncode", 1) != 0:
@@ -211,7 +215,10 @@ def check_rocm_toolchain_alignment(
 
     hipcc_root_res = run(
         ["sh", "-c", f"cd $(dirname {hipcc_path!r})/.. && pwd"],
-        capture_output=True, text=True, timeout=10, env=effective_env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=effective_env,
     )
     hipcc_root = (getattr(hipcc_root_res, "stdout", "") or "").strip()
 
@@ -219,7 +226,10 @@ def check_rocm_toolchain_alignment(
     if rocm_path and hipcc_root:
         rocm_real_res = run(
             ["sh", "-c", f"cd {rocm_path!r} 2>/dev/null && pwd"],
-            capture_output=True, text=True, timeout=10, env=effective_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=effective_env,
         )
         rocm_real = (getattr(rocm_real_res, "stdout", "") or "").strip()
         if rocm_real and hipcc_root != rocm_real:
@@ -282,6 +292,7 @@ def probe_torch_abi(
 # ---------------------------------------------------------------------------
 # Version-sorted tag list (sort -V -r equivalent for autoselect)
 # ---------------------------------------------------------------------------
+
 
 def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
     """Return *tags* in descending version order (newest first).

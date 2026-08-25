@@ -98,7 +98,6 @@ def _leak_data() -> SourceData:
             ],
         },
         local_processes=[],
-        
     )
 
 
@@ -108,7 +107,6 @@ def _ray_pending_data(pending: int = 7) -> SourceData:
             "healthy": True,
             "pending_tasks": pending,
         },
-        
     )
 
 
@@ -144,7 +142,6 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
         local_processes=[
             {"pid": 4242, "cmd": "python -m sglang.launch_server"},
         ],
-        
     )
     # Rebuild with a matching owner pattern to exercise reset.
     c2, store2 = _fresh_classifier(tmp_path)

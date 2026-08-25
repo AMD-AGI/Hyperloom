@@ -1437,10 +1437,7 @@ def test_task_progress_is_empty_when_nothing_is_running(tmp_path):
 
 def test_a_ray_serving_actor_is_a_process_the_probe_can_see(monkeypatch):
     """``ray::IDLE`` only names a parked worker; a busy one is renamed."""
-    ps_out = (
-        "  1 1048576 ray::ServingActor.__call__\n"
-        "  2 2097152 python -m sglang.launch_server --model x\n"
-    )
+    ps_out = "  1 1048576 ray::ServingActor.__call__\n  2 2097152 python -m sglang.launch_server --model x\n"
     monkeypatch.setattr(
         local_probe.subprocess,
         "run",

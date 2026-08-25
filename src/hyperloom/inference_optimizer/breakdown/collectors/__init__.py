@@ -75,6 +75,7 @@ from .sessions import (
 from .timeline import (
     _AUDIT_ACTIONS as _AUDIT_ACTIONS,
     _journal_entry_to_event as _journal_entry_to_event,
+    TimelineDedup as TimelineDedup,
     collect_phase_timeline as collect_phase_timeline,
     _capability_for_action as _capability_for_action,
     collect_capability_summary as collect_capability_summary,
@@ -200,6 +201,7 @@ __all__ = [
     "collect_collective",
     "collect_geak",
     "collect_phase_segments",
+    "TimelineDedup",
     "collect_phase_timeline",
     "collect_session",
     "collect_source_files",

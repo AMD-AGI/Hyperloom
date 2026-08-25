@@ -307,9 +307,7 @@ class TestKeepGoingAsymmetry:
                     {
                         "success": False,
                         "framework": "sglang",
-                        "errors": [
-                            "scriptable benchmark script not found for custom_mi355x.sh"
-                        ],
+                        "errors": ["scriptable benchmark script not found for custom_mi355x.sh"],
                     }
                 )
             )
@@ -476,9 +474,7 @@ class TestResolveMnEffectiveServerArgs:
     def _base(self, tmp_path: Path, *, args: str = "--tp 8") -> Path:
         base = tmp_path / "base.yaml"
         base.write_text(
-            yaml.safe_dump(
-                {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": args}}}
-            ),
+            yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": args}}}),
             encoding="utf-8",
         )
         return base
@@ -511,9 +507,7 @@ class TestResolveMnEffectiveServerArgs:
         cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}), encoding="utf-8")
         variant = GridVariant(name="v1")
 
-        out = gr._resolve_mn_effective_server_args(
-            cfg, base, variant, base_extra_args="", base_args_mode="append"
-        )
+        out = gr._resolve_mn_effective_server_args(cfg, base, variant, base_extra_args="", base_args_mode="append")
         assert out == ""
 
     def test_falls_back_to_base_compose_when_variant_missing(self, tmp_path):

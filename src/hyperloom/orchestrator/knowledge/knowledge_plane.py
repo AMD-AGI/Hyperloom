@@ -62,9 +62,7 @@ class KnowledgePlane:
             pr_monitor_mcp_url=(pr_monitor_mcp_url or DEFAULT_PR_MONITOR_MCP_URL).strip(),
             recipe_kb=recipe_kb,
             config=resolved,
-            kernel_experience=(
-                None if kb_disabled else KernelExperienceBridge(resolved)
-            ),
+            kernel_experience=(None if kb_disabled else KernelExperienceBridge(resolved)),
             kb_disabled=kb_disabled,
         )
 
@@ -77,18 +75,10 @@ class KnowledgePlane:
             "recipe": {
                 **config.public_dict(),
                 "enabled": (
-                    not self.kb_disabled
-                    and (
-                        self.recipe_kb is not None
-                        or config.mode is KnowledgeStoreMode.REMOTE
-                    )
+                    not self.kb_disabled and (self.recipe_kb is not None or config.mode is KnowledgeStoreMode.REMOTE)
                 ),
-                "read_enabled": (
-                    not self.kb_disabled and self.recipe_kb is not None
-                ),
-                "disabled_reason": (
-                    "degraded_kb" if self.kb_disabled else ""
-                ),
+                "read_enabled": (not self.kb_disabled and self.recipe_kb is not None),
+                "disabled_reason": ("degraded_kb" if self.kb_disabled else ""),
             },
             "kernel_experience": (
                 self.kernel_experience.status.to_dict()

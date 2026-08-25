@@ -112,6 +112,4 @@ class TargetedBuildExecutor:
             }
             from ._aiter_jit import sweep_stale_aiter_locks_if_dead
 
-            sweep_stale_aiter_locks_if_dead(
-                aiter_jit_dir=Path(str(result.attempt_root or "")) / "aiter_jit"
-            )
+            sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(str(result.attempt_root or "")) / "aiter_jit")

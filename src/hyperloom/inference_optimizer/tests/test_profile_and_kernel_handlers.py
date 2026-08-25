@@ -635,9 +635,7 @@ def test_materialize_profile_annotation_flag_wins_over_a_stale_yaml_value(
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
-    assert extra.rindex("detailed_trace_annotation True") > extra.rindex(
-        "detailed_trace_annotation False"
-    ), extra
+    assert extra.rindex("detailed_trace_annotation True") > extra.rindex("detailed_trace_annotation False"), extra
 
 
 def test_materialize_profile_restore_rejects_a_zero_max_iterations(
@@ -4629,9 +4627,7 @@ def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tm
     trace_dir = tmp_path / "torch_trace"
     chunk = _gz_trace(trace_dir / "trace_split" / "aaa_mixed_0.trace.json.gz", 32)
     capture = _gz_trace(trace_dir / "zzz_rank_0.trace.json.gz", 40_000)
-    sidecar = _gz_trace(
-        trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32
-    )
+    sidecar = _gz_trace(trace_dir / "capture_traces" / "aaa_graph_capture_0.pt.trace.json.gz", 32)
 
     found = _trace_files_for_dir(trace_dir)
 

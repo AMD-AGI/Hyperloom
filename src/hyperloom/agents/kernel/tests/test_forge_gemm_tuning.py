@@ -101,12 +101,32 @@ def test_build_cmd_asserts_every_option_it_can_emit():
     """
     emitted = {tok for tok in forge_gemm_tuning._build_cmd(_payload()) if tok.startswith("--")}
     declared = {
-        "--model-path", "--framework", "--precision", "--quant-type", "--gpu-type",
-        "--tp", "--conc", "--mp", "--output-dir", "--iters", "--warmup",
-        "--min-improvement-pct", "--timeout", "--global-timeout", "--tuner",
-        "--untuned-csv", "--moe-untuned-csv", "--shapes-json", "--tunableop-input",
-        "--kernel-signature-log", "--gpu-ids", "--skip-gpu-check", "--verbose",
-        "--thorough", "--tokens", "--kb-current-lib",
+        "--model-path",
+        "--framework",
+        "--precision",
+        "--quant-type",
+        "--gpu-type",
+        "--tp",
+        "--conc",
+        "--mp",
+        "--output-dir",
+        "--iters",
+        "--warmup",
+        "--min-improvement-pct",
+        "--timeout",
+        "--global-timeout",
+        "--tuner",
+        "--untuned-csv",
+        "--moe-untuned-csv",
+        "--shapes-json",
+        "--tunableop-input",
+        "--kernel-signature-log",
+        "--gpu-ids",
+        "--skip-gpu-check",
+        "--verbose",
+        "--thorough",
+        "--tokens",
+        "--kb-current-lib",
     }
     assert emitted <= declared, f"option(s) not declared here: {sorted(emitted - declared)}"
 

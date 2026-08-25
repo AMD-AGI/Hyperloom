@@ -686,22 +686,24 @@ def test_R2_max_turns_zero_allowed_unbounded(gate):
     )
 
 
-def test_R2_max_turns_negative_allowed(gate):
-    """A negative max_turns is self-limiting (empty turn range), so it is not denied."""
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": {
-                    "domain": "serving_specialist",
-                    "gap_canonical_id": "gap.x",
-                    "max_turns": -1,
+def test_R2_max_turns_negative_denied(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.x",
+                        "max_turns": -1,
+                    },
                 },
-            },
-        ),
-    )
+            ),
+        )
+    assert exc.value.rule == "specialist_dispatch_source"
+    assert "max_turns" in str(exc.value)
 
 
 # research_lane lane registration.
@@ -769,7 +771,7 @@ def test_pr_monitor_section_lists_all_granted_tools():
     _sys, usr_p = _build_serving_prompt(task_id="tool-drift", pr_monitor_available=True)
     prefix = "mcp__pr_monitor__"
     for tool_full in PR_MONITOR_TOOL_NAMES:
-        short = tool_full[len(prefix):]
+        short = tool_full[len(prefix) :]
         assert short in usr_p, (
             f"Granted PR Monitor tool '{short}' is not advertised in §6 PR MONITOR. "
             "Update _section_pr_feed in specialist_prompt_builder.py."

@@ -251,6 +251,7 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
         pass
     return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
 
+
 # Invariants every enablement deliverable must respect.
 ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "If the fix requires a source edit, the patch MUST be a valid unified diff "

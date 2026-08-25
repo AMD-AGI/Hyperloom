@@ -53,6 +53,11 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
         "Kernel Optimization",
         [
             "kernel_lifecycle",
+            # The per-backend invocation logs behind the capability-summary
+            # counts. Without them the report states how many kernels a lane
+            # adopted while showing none of the attempts behind the number.
+            "geak_invocations",
+            "forge_invocations",
             "kernel_profiling",
             "kernel_decision_path",
             "critic_robustness",
@@ -207,6 +212,14 @@ def _stitch(
     parts.append("## Executive Summary")
     if used_llm and llm_exec_summary:
         parts.append(llm_exec_summary)
+        # The system prompt asks the model to surface every data-quality flag,
+        # but a prompt is a request. These flags are where a skipped section's
+        # evidence ends up, so leaving them to the narrative is how "this was
+        # never measured" silently becomes "this came back clean".
+        flag_lines = _data_quality_flag_lines(global_facts)
+        if flag_lines:
+            parts.append("")
+            parts.extend(flag_lines)
     else:
         parts.append(_deterministic_exec_summary(global_facts))
     parts.append("")
@@ -268,11 +281,27 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
     )
     if g.capabilities_not_attempted:
         out.append("- Capabilities never invoked: " + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
-    if g.data_quality_flags:
-        out.append("- **Data quality flags**:")
-        for f in g.data_quality_flags:
-            out.append(f"  - {f}")
+    out.extend(_data_quality_flag_lines(g))
     return "\n".join(out)
+
+
+def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
+    """Render the data-quality flags as markdown bullets.
+
+    Shared by the deterministic summary and the LLM path so both report the
+    same facts in the same shape.
+
+    Args:
+        g (GlobalFacts): Global facts carrying the flags.
+
+    Returns:
+        list[str]: Markdown lines, empty when there are no flags.
+    """
+    if not g.data_quality_flags:
+        return []
+    lines = ["- **Data quality flags**:"]
+    lines.extend(f"  - {flag}" for flag in g.data_quality_flags)
+    return lines
 
 
 def _render_global_facts_block(g: GlobalFacts) -> str:

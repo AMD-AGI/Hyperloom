@@ -260,8 +260,7 @@ def _framework_config_levers_from_done(
             arg_tokens = [str(a) for a in args if str(a).strip()]
             if any(any(ch.isspace() for ch in token) for token in arg_tokens):
                 log.warning(
-                    "FRAMEWORK config lever %r has a whitespace-bearing argv "
-                    "token; dropping the args%s",
+                    "FRAMEWORK config lever %r has a whitespace-bearing argv token; dropping the args%s",
                     entry.get("name"),
                     " while preserving its environment overrides" if extra_envs else "",
                 )
@@ -271,8 +270,7 @@ def _framework_config_levers_from_done(
                 parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
                 if parsed_args is None:
                     log.warning(
-                        "FRAMEWORK config lever %r has unparseable server args; "
-                        "dropping the args%s",
+                        "FRAMEWORK config lever %r has unparseable server args; dropping the args%s",
                         entry.get("name"),
                         " while preserving its environment overrides" if extra_envs else "",
                     )
@@ -345,7 +343,6 @@ def _defang_alert_payload(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_defang_alert_payload(v) for v in value]
     return value
-
 
 
 def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
@@ -936,7 +933,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_prelude_arm_dropped": "phase_prelude",
         "_warm_recipe_proven_items": "phase_prelude",
         "_inject_warm_recipe_history_into_ledger": "phase_prelude",
-        "_filter_warm_patches_with_kg": "phase_prelude",
         "_maybe_enqueue_warm_replay": "phase_prelude",
         "_promote_warm_replay": "phase_prelude",
         "_maybe_enqueue_prelude_initial_analysis_after_baseline": "phase_prelude",
@@ -1063,6 +1059,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_enqueue_specialist_requested_build": "phase_framework",
         "_maybe_route_build_outcomes": "phase_framework",
         "_route_succeeded_build": "phase_framework",
+        "_route_failed_build": "phase_framework",
         "_build_routing_record": "phase_framework",
         "_note_build_routed": "phase_framework",
         "_build_probe_was_cancelled": "phase_framework",
@@ -1497,13 +1494,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
             return
-        finalize_status = str(
-            getattr(self.shared_state, "recipe_finalize_status", "") or ""
-        )
-        if (
-            getattr(self.shared_state, "close_sequence_done", False)
-            and finalize_status in {"written", "skipped", "disabled"}
-        ):
+        finalize_status = str(getattr(self.shared_state, "recipe_finalize_status", "") or "")
+        if getattr(self.shared_state, "close_sequence_done", False) and finalize_status in {
+            "written",
+            "skipped",
+            "disabled",
+        }:
             return
         try:
             config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
@@ -1549,9 +1545,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # optimization_stack actions warranting a post-opt roofline; pure
     # param-search (explore/sweep) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
-        {"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
-    )
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.

@@ -1010,9 +1010,7 @@ def _row_to_candidate(
     device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
     # Store only the path in source_file; line/function annotations have their
     # own fields and otherwise make extension-based routing see an unknown file.
-    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(
-        kernel_path
-    )
+    resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(kernel_path)
     if kernel_path:
         resolved = _resolve_launcher_to_abs_source(kernel_path)
         if resolved is not None:
