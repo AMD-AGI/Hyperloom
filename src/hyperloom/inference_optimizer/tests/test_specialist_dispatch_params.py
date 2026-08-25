@@ -663,6 +663,7 @@ def test_resolve_specialist_max_turns_zero_uses_default():
 
     assert resolve_specialist_max_turns(0, default=1000) == 1000
     assert resolve_specialist_max_turns(None, default=42) == 42
+    assert resolve_specialist_max_turns("", default=42) == 42
     assert resolve_specialist_max_turns(5, default=1000) == 5
 
 

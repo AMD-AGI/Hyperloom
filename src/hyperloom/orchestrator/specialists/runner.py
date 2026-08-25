@@ -72,7 +72,7 @@ def resolve_specialist_max_turns(raw: Any, *, default: int) -> int:
     Returns:
         The resolved non-negative turn budget.
     """
-    if raw is None:
+    if raw in (None, ""):
         return int(default)
     max_turns = int(raw)
     if max_turns == 0:

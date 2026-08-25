@@ -181,3 +181,12 @@ class TestExtractLastJson:
         )
         out = extract_last_json_with_key(text, "scores")
         assert out["scores"]["proposal_0"]["score"] == 8
+
+    def test_many_braces_and_braces_inside_strings(self):
+        drafts = " ".join(f'{{"meta": {index}, "reason": "literal {{ brace }}"}}' for index in range(800))
+        final = '{"meta": "final", "scores": {"proposal_0": {"score": 7}}}'
+
+        assert extract_last_json_with_key(f"{drafts} {final}", "scores") == {
+            "meta": "final",
+            "scores": {"proposal_0": {"score": 7}},
+        }

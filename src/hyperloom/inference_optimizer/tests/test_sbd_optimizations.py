@@ -785,9 +785,17 @@ def test_both_sides_of_the_record_name_a_patch_author_the_same_way():
 
     cases = [
         ({"framework_agent_authoring": True, "source_phase": "KERNEL_AGENT"}, "framework_agent"),
-        ({"provenance": "specialist:latency", "source_phase": "KERNEL_AGENT"}, "explore"),
-        ({"domain": "attention"}, "explore"),
-        ({"source_phase": "KERNEL_AGENT"}, "kernel_agent"),
+        (
+            {
+                "provenance": "specialist:serving",
+                "domain": "serving_specialist",
+                "source_phase": "FRAMEWORK_AGENT",
+            },
+            "framework_agent",
+        ),
+        ({"provenance": "specialist:latency", "source_phase": "KERNEL_AGENT"}, "unattributed"),
+        ({"domain": "attention"}, "unattributed"),
+        ({"source_phase": "KERNEL_AGENT"}, "unattributed"),
         ({}, "unattributed"),
     ]
     for evidence, expected in cases:

@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-
+from ..agent_ownership import patch_author
 from ._common import (
     _to_float,
     phase_at,
@@ -322,16 +322,10 @@ def _entry_family(entry: dict[str, Any]) -> str:
         return _action_family(action)
     if entry.get("attribution_eligible") is False or entry.get("baseline_enablement"):
         return "unattributed"
-    if entry.get("framework_agent_authoring"):
-        return "framework"
-    phase = str(entry.get("source_phase") or entry.get("phase") or "").strip().upper()
-    provenance = str(entry.get("provenance") or "").strip().lower()
-    specialist_owned = bool(entry.get("domain")) or provenance.startswith("specialist:")
-    if phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
-        return "framework"
-    if phase == "EXPLORE" or specialist_owned:
-        return "explore"
-    return "unattributed"
+    return {
+        "framework_agent": "framework",
+        "explore": "explore",
+    }.get(patch_author(entry), "unattributed")
 
 
 def _promote_legacy_gain_entries(
