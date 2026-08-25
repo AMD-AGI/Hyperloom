@@ -73,7 +73,6 @@ REQUIRE_FRAMEWORKS=0
 SKIP_BASE_CHECK=0
 DRY_RUN=0
 CHECK_ONLY=0
-ROCM_HOTFIX_ONLY=0
 ASSUME_YES=0
 USER_DATA_PATH_ARG=""
 DEPS_ROOT_ARG=""
@@ -104,9 +103,6 @@ Options:
   --skip-base-check      Skip Phase 1 base preflight
   --check-only           Verify only; do not clone/install/mutate
   --dry-run              Print planned actions without cloning/installing/writing
-  --rocm-hotfix-only     Run only the ROCm profiler hotfix (no preflight,
-                         framework install, credentials, or .env write). Used by
-                         install.sh so container setup applies the same hotfix.
   --yes, -y              Non-interactive; fail fast on missing credentials
   -h, --help             Show this help
 
@@ -156,7 +152,6 @@ while [ "$#" -gt 0 ]; do
     --skip-base-check)  SKIP_BASE_CHECK=1 ;;
     --check-only)       CHECK_ONLY=1 ;;
     --dry-run)          DRY_RUN=1 ;;
-    --rocm-hotfix-only) ROCM_HOTFIX_ONLY=1 ;;
     --yes|-y)           ASSUME_YES=1 ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "[install-baremetal] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
@@ -945,6 +940,16 @@ PY
   done
   [ -n "$found" ] || { warn "no serving framework importable from '${FRAMEWORKS}'; skipping ROCm profiler hotfix"; return 1; }
   log "framework imports: ${found}"
+
+  # Container images own their profiler stack: only the sglang images need this
+  # overlay, vLLM ships its own kineto workaround. Probed rather than read from
+  # .env FRAMEWORK, which is still unset here (write_runtime_dotenv runs later).
+  if [ "$(read_dotenv_var HYPERLOOM_RUN_MODE)" = "docker" ]; then
+    case " ${found} " in
+      *" sglang "*) log "docker run mode with sglang; ROCm profiler hotfix is eligible" ;;
+      *) warn "docker run mode without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
+    esac
+  fi
 }
 
 download_rocm_profiler_hotfix_libs() {
@@ -1143,12 +1148,8 @@ verify_rocm_profiler_torch_lib_sync() {
 apply_rocm_profiler_hotfix() {
   local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}"
   local extract_dir backup_dir hip_lib tracer_lib
-  # Container runs reach this through --rocm-hotfix-only, where the bare-metal
-  # phase numbering does not apply.
-  local phase_label=""
-  [ "$ROCM_HOTFIX_ONLY" -eq 1 ] || phase_label="Phase 3: "
 
-  log "${phase_label}applying ROCm profiler hotfix"
+  log "Phase 3: applying ROCm profiler hotfix"
   log "ROCM_PROFILER_HOTFIX_ASSET=${ROCM_PROFILER_HOTFIX_ASSET}"
 
   [ -d "$target_dir" ] || { warn "ROCm library directory not found (${target_dir}); skipping profiler hotfix"; return 0; }
@@ -1631,13 +1632,6 @@ _default_workspace_root() {
   local py_for_env
   if py_for_env="$(resolve_python 2>/dev/null)"; then
     export_virtualenv_for_python "$py_for_env"
-  fi
-
-  # install.sh drives this path so a container gets the same hotfix without
-  # re-running preflight, credential resolution, or the bare-metal .env write.
-  if [ "$ROCM_HOTFIX_ONLY" -eq 1 ]; then
-    apply_rocm_profiler_hotfix
-    return 0
   fi
 
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then

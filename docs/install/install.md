@@ -170,15 +170,19 @@ HYPERLOOM_DOCKER_TARGET_HOST=<hostname>
 
 The demo skill reads this value to target the chosen host.
 
-Inside the container, run
-`src/hyperloom/inference_optimizer/assets/install.sh` (or let the demo skill
-chain to it). Official SGLang/vLLM ROCm images ship stock rocclr/roctracer
-libraries that omit HIP-graph replay kernel events during decode profiling, so
-`install.sh` applies the same ROCm profiler hotfix as bare-metal setup by
-invoking `install_baremetal.sh --rocm-hotfix-only`. That flag runs the hotfix
-alone: no preflight, framework install, credential resolution, or `.env` write.
-The step is skipped unless the ROCm 7.2 stack is eligible, and a failure warns
-without aborting the install.
+The demo skill runs the setup backend inside the container, so Phase 3 applies
+the ROCm profiler hotfix there too — but only for SGLang images. Official SGLang
+ROCm images ship stock rocclr/roctracer libraries that omit HIP-graph replay
+kernel events during decode profiling; vLLM ROCm images carry their own kineto
+profiler workaround, so the overlay is skipped for them rather than replacing a
+vendor-validated pair. The gate reads `HYPERLOOM_RUN_MODE` from `.env` and
+probes which engine is importable in the container. On bare metal the hotfix
+stays engine-agnostic and applies to SGLang, vLLM, and atom alike. It is skipped
+unless the ROCm 7.2 stack is eligible, and a failure warns without aborting.
+
+Selecting `baremetal` as the run mode while actually running setup inside a
+container bypasses this gate: a vLLM image would then get the overlay. Keep
+`HYPERLOOM_RUN_MODE=docker` for container runs driven by a demo skill.
 
 ### Environment written by setup
 

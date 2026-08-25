@@ -1411,29 +1411,50 @@ def test_baremetal_hotfix_torch_lib_verification_passes_after_sync(tmp_path: Pat
     assert "TORCH_SYNC_OK" in res.stdout
 
 
-def test_baremetal_rocm_hotfix_only_skips_setup_phases(tmp_path: Path):
-    """install.sh drives this flag, so it must not touch the container's .env."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-
-    res = subprocess.run(
-        ["bash", str(install_script), "--rocm-hotfix-only"],
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "REPO_ROOT": str(repo_root),
-            "USER_DATA_PATH": str(tmp_path / "data"),
-            "ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR": str(tmp_path / "absent-rocm-lib"),
-        },
+def _drive_hotfix_gate(tmp_path: Path, *, run_mode: str, importable: set[str]):
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"HYPERLOOM_RUN_MODE={run_mode}\n", encoding="utf-8")
+    return _drive_installer(
+        tmp_path,
+        importable=importable,
+        dotenv=dotenv,
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
     )
 
-    assert res.returncode == 0, res.stderr
-    assert "applying ROCm profiler hotfix" in res.stdout
-    assert "Phase 3" not in res.stdout
-    assert not (repo_root / ".env").exists()
-    assert "Next steps" not in res.stdout
+
+def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
+    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying
+    /opt/rocm into their torch/lib trades a vendor-validated pair for an untested one."""
+    res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"vllm"})
+
+    assert "HOTFIX_ELIGIBLE" not in res.stdout
+    assert "docker run mode without sglang" in res.stderr
+
+
+def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
+    res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"sglang"})
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+
+
+def test_baremetal_run_mode_keeps_the_hotfix_for_vllm(tmp_path: Path):
+    """The framework split is docker-only: a bare-metal vLLM host profiles through
+    the same ROCm libs the overlay fixes, so gating it there would lose profiling."""
+    res = _drive_hotfix_gate(tmp_path, run_mode="baremetal", importable={"vllm"})
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+
+
+def test_hotfix_gate_ignores_run_mode_when_dotenv_is_absent(tmp_path: Path):
+    """A direct script run has no .env; that must not be read as docker mode."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"vllm"},
+        dotenv=tmp_path / "missing.env",
+        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+    )
+
+    assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
 
 
 def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):

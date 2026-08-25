@@ -1727,24 +1727,6 @@ chain_kernel_agent
 # Gated on the KernelForge checkout (not the backend): the default-geak install a
 # later forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
-apply_rocm_profiler_hotfix() {
-  local script="${_script_dir}/install_baremetal.sh"
-  [ -f "$script" ] || {
-    warn "install_baremetal.sh not found next to install.sh; skipping ROCm profiler hotfix"
-    return 0
-  }
-  local args=(--rocm-hotfix-only)
-  if [ "$CHECK_ONLY" -eq 1 ]; then args+=(--check-only); fi
-  if [ "$DRY_RUN" -eq 1 ]; then args+=(--dry-run); fi
-  # Subprocess, not source: both installers define log/warn/resolve_python and
-  # install_baremetal.sh runs main at the end of the file.
-  REPO_ROOT="$REPO_ROOT" bash "$script" "${args[@]}" \
-    || warn "ROCm profiler hotfix reported issues; continuing without it"
-}
-
-# Overlay rocclr/roctracer and sync them into torch's lib/ so torch.profiler
-# records HIP-graph replay kernels (Hyperloom #747).
-apply_rocm_profiler_hotfix
 # tree-reform.MD P2.5: framework-agent was promoted into
 # src/hyperloom/agents/framework/ (single hyperloom distribution), so the
 # `fa` CLI is already installed by ensure_inference_optimizer() above; no
