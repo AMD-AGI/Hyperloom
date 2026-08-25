@@ -87,13 +87,17 @@ def resolve_auto_kernel_opt(args: argparse.Namespace) -> bool:
     current = getattr(args, "auto_kernel_opt", None)
     legacy = getattr(args, "continue_kernel_after_gemm", None)
     if legacy is not None:
-        warnings.warn(
+        message = (
             "--continue-kernel-after-gemm is deprecated; use --auto-kernel-opt "
             "(the switch gates the KERNEL-entry kernel_opt dispatch on both "
-            "routes, not only after GEMM tuning)",
-            DeprecationWarning,
-            stacklevel=2,
+            "routes, not only after GEMM tuning)"
         )
+        # Logged as well as warned. DeprecationWarning is silent under the
+        # default filter unless the caller is __main__, and the old flag is
+        # hidden from --help by SUPPRESS, so a launcher still passing it had no
+        # way to learn the transition had started.
+        log.warning("%s", message)
+        warnings.warn(message, DeprecationWarning, stacklevel=2)
     if current is not None:
         return bool(current)
     if legacy is not None:

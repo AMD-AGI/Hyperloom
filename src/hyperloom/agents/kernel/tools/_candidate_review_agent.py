@@ -750,7 +750,10 @@ async def _run_claude_session(
                 if aclose is not None:
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    # Teardown of a stream that already failed: nothing it raises
+                    # can improve on the timeout being reported, and letting it
+                    # through would replace that cause with a transport error.
+                    except Exception:  # noqa: BLE001
                         pass
                 break
             transition = _tool_call_transition(message)
