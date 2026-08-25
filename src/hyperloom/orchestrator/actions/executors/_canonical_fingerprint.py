@@ -45,11 +45,27 @@ def _coerce_list(value: Any) -> list[str]:
     return [str(value)] if str(value).strip() else []
 
 
+def _is_flag(token: str) -> bool:
+    """True when ``token`` looks like a CLI flag rather than a value.
+
+    Both ``--long`` and ``-short`` forms are flags. A token starting with a
+    dash followed immediately by a digit is a numeric literal (e.g. ``-1``,
+    ``-0.5``), not a flag.
+    """
+    if not token.startswith("-"):
+        return False
+    stripped = token.lstrip("-")
+    if not stripped:
+        return False
+    return not stripped[0].isdigit()
+
+
 def _args_pairs(args_text: str) -> list[list[str]]:
     """Return sorted last-wins ``[flag, value]`` / ``[flag]`` pairs for args.
 
     Sorting by flag name keeps the hash independent of the order distinct flags
-    appear in, while keeping each value bound to its own flag.
+    appear in, while keeping each value bound to its own flag. Both ``--long``
+    and ``-short`` flag forms are paired with their following value.
     """
     try:
         tokens = shlex.split(args_text)
@@ -61,12 +77,12 @@ def _args_pairs(args_text: str) -> list[list[str]]:
     while i < len(tokens):
         token = tokens[i]
         i += 1
-        if not token.startswith("--"):
+        if not _is_flag(token):
             last[token] = [token]
         elif "=" in token:
             flag, _, value = token.partition("=")
             last[flag] = [flag, value]
-        elif i < len(tokens) and not tokens[i].startswith("--"):
+        elif i < len(tokens) and not _is_flag(tokens[i]):
             last[token] = [token, tokens[i]]
             i += 1
         else:
