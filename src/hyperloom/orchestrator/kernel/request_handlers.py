@@ -6623,9 +6623,23 @@ def _stamp_task_group_result(
     *,
     fallback_kernel_id: str = "",
 ) -> HandlerResult:
-    """Attach task-group identity to every single or batched result path."""
+    """Attach the dispatch grouping to every single or batched result path.
+
+    Two groupings arrive here, and only one of them has a ``task_group``. An
+    op-fanout representative carries ``opfanout_collapsed_ids``: the siblings the
+    batch filter merged into it, which no backend will be handed separately. The
+    ledger has to record them for the same reason it records a task_group's
+    members -- ``untried_hot_reusable_kernels`` resolves a member to whichever
+    ledger row covers it, and a sibling that resolves to none owes an attempt
+    that can never happen.
+    """
     if not isinstance(result, dict) or not isinstance(candidate, dict):
         return result
+
+    collapsed = [str(item) for item in (candidate.get("opfanout_collapsed_ids") or []) if str(item)]
+    if collapsed:
+        result = {**result, "opfanout_collapsed_ids": collapsed}
+
     task_group = candidate.get("task_group")
     if not isinstance(task_group, dict):
         return result

@@ -850,6 +850,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         source_file=source_file,
     )
     task_group_kernel_ids = [str(item) for item in (result.get("task_group_kernel_ids") or []) if str(item)]
+    # Siblings the batch filter merged into this representative. Recorded for the
+    # same reason a task_group's members are: the work queue resolves a member to
+    # whichever ledger row covers it, and one that resolves to none keeps owing an
+    # attempt no dispatch will ever make.
+    opfanout_collapsed_ids = [str(item) for item in (result.get("opfanout_collapsed_ids") or []) if str(item)]
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
     # Pure infra failure = backend ladder with no verdict; kept distinct from
@@ -1086,6 +1091,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             )
         )
 
+    if opfanout_collapsed_ids:
+        entry["opfanout_collapsed_ids"] = opfanout_collapsed_ids
     if task_group_id:
         entry["task_group_id"] = task_group_id
         entry["task_group_key"] = task_group_key
@@ -1519,31 +1526,10 @@ def untried_hot_reusable_kernels(
     ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
     seen_groups: set[str | tuple[str, ...]] = set()
     seen_identities: set[tuple[str, str, float]] = set()
-    # ``_batch_kernel_candidates`` collapses ungrouped rows that share a
-    # ``source_file`` into their highest-share representative and reports the
-    # rest as ``opfanout_merged_into=...``, which record_kernel_opt classifies as
-    # unattempted and writes no ledger row for. Both readers have to agree on
-    # that table, or a merged sibling stays in this queue forever:
-    # kernel_work_pending() never goes False, KERNEL redispatches the entry batch
-    # every tick, and the prompt forbids ``report`` while the queue is non-empty
-    # -- the same spin the identity dedup below was added to close, reached
-    # through the dispatcher rather than through synthetic ids. The identity key
-    # cannot catch it, because op fanout is by definition several *different*
-    # operations (distinct name and gpu_pct) over one file.
-    #
-    # Grouped rows are deliberately exempt: the batch filter routes those through
-    # their task_group, so two groups sharing a file are two units of work there
-    # and must stay two units here.
-    opfanout_dedup = _honest_flag("HL_KERNEL_OPFANOUT_DEDUP")
-    seen_sources: set[str] = set()
     for row in rows:
         dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
         if dedup_key in seen_groups:
             continue
-        if opfanout_dedup and not row[4] and row[2]:
-            if row[2] in seen_sources:
-                continue
-            seen_sources.add(row[2])
         # Fallback dedup: when the trace carries no ``task_groups`` metadata
         # every row degenerates to its own group, so the SAME kernel appearing
         # under several synthetic ids (identical source_file+name+gpu_pct, e.g.
@@ -1570,8 +1556,12 @@ def untried_hot_reusable_kernels(
         asked for, so for a kernel that shows up under several ids (k001/k002
         for one CK GEMM) it flip-flops. Matching on it alone makes the entry
         invisible under the *other* id, which is exactly how a rejected kernel
-        gets re-reported as untried forever. Fall back to the group membership
-        the ledger itself records.
+        gets re-reported as untried forever. Fall back to the membership the
+        ledger itself records -- a task_group's members, and the op-fanout
+        siblings the batch filter merged into the row's representative. The
+        latter matters because the merge is reported as an unattempted skip,
+        which writes no row of its own: without it the sibling resolves to no
+        entry at all and stays in this queue for a dispatch that cannot happen.
         """
         for value in attempts.values():
             if not isinstance(value, dict):
@@ -1582,8 +1572,9 @@ def untried_hot_reusable_kernels(
                 str(value.get("task_group_primary_kernel_id") or ""),
             }:
                 return value
-            if member_id in {str(m) for m in (value.get("task_group_kernel_ids") or []) if m}:
-                return value
+            for key in ("task_group_kernel_ids", "opfanout_collapsed_ids"):
+                if member_id in {str(m) for m in (value.get(key) or []) if m}:
+                    return value
         return {}
 
     def _member_is_rejected(member_id: str) -> bool:
@@ -1652,14 +1643,15 @@ def untried_hot_reusable_kernels(
         )
         if stable_attempt is not None and int(stable_attempt.get("attempts", 0)) > 0:
             continue
+        # Resolve through ``_attempt_for_member`` rather than comparing ids
+        # inline: a row's own id is not the only id it covers. An op-fanout
+        # representative covers the siblings the batch filter merged into it,
+        # and those merges are reported as unattempted skips that write no row
+        # of their own -- so a sibling compared by id alone finds nothing and
+        # keeps owing an attempt no dispatch will make.
         if not group_key and any(
             _matches_current_task(member, group_key, src)
-            and any(
-                isinstance(attempt, dict)
-                and str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or "") == member
-                and int(attempt.get("attempts", 0)) > 0
-                for attempt in attempts.values()
-            )
+            and int((_attempt_for_member(member) or {}).get("attempts", 0)) > 0
             for member in members
         ):
             continue

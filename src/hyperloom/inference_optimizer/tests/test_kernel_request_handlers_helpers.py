@@ -474,23 +474,13 @@ _OP_FANOUT_ROWS = [
 ]
 
 
-def test_op_fanout_merge_is_agreed_on_by_both_kernel_opt_gates(tmp_path: Path) -> None:
-    """The dispatcher and the work queue must select the same set.
+def test_the_dispatcher_publishes_the_merge_it_performed(tmp_path: Path) -> None:
+    """The representative carries the ids it absorbed, and the result says so.
 
-    ``_batch_kernel_candidates`` collapses ungrouped rows sharing a
-    ``source_file`` into one representative and reports the rest as
-    ``opfanout_merged_into=...``, which ``record_kernel_opt`` files as
-    unattempted and writes no ledger row for. If the queue does not collapse
-    them too, the merged sibling owes an attempt no dispatch can ever make:
-    ``kernel_work_pending()`` never goes False, KERNEL redispatches the entry
-    batch every tick, and the orchestration prompt forbids ``report`` while the
-    queue is non-empty -- a spin to the wall-clock cap.
-
-    The identity dedup cannot catch this: op fanout is by definition several
-    *different* operations over one file, so name and gpu_pct both differ.
+    Nothing in production read ``opfanout_collapsed_ids`` before: the batch
+    filter stamped it and no consumer existed, so the merge was invisible to
+    everything downstream of the dispatch.
     """
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
     artifact = tmp_path / "kernel_candidates.json"
     artifact.write_text(json.dumps({"hot_kernels": _OP_FANOUT_ROWS}), encoding="utf-8")
 
@@ -499,31 +489,51 @@ def test_op_fanout_merge_is_agreed_on_by_both_kernel_opt_gates(tmp_path: Path) -
         {"candidates_path": str(artifact)},
         skipped_out=skipped,
     )
-    dispatchable = {str(row.get("kernel_id") or "") for row in selected}
-    assert dispatchable == {"k001"}
+    assert [str(row.get("kernel_id") or "") for row in selected] == ["k001"]
     assert skipped["k002"] == "opfanout_merged_into=k001"
+    assert set(selected[0]["opfanout_collapsed_ids"]) == {"k001", "k002"}
 
-    state = SharedState(session_id="op-fanout-parity")
-    state.last_trace_analyze = {"hot_kernels": _OP_FANOUT_ROWS, "task_groups": []}
-    # The dispatcher reports the merge, and nothing is recorded for it.
-    krh.record_kernel_opt(
-        state,
-        {"status": "skipped", "reason": skipped["k002"], "kernel_id": "k002"},
-    )
-    assert state.kernel_opt_task_attempts == {}
-
-    assert set(state.untried_hot_reusable_kernels()) == dispatchable
+    stamped = krh._stamp_task_group_result({"status": "ok"}, selected[0])
+    assert set(stamped["opfanout_collapsed_ids"]) == {"k001", "k002"}
 
 
-def test_the_merge_parity_follows_the_flag_that_creates_it(monkeypatch) -> None:
-    """With op-fanout dedup off the dispatcher keeps both rows, so the queue must.
+def test_an_op_fanout_merge_does_not_leave_the_sibling_owing_an_attempt() -> None:
+    """The merge is reported as unattempted, so it writes no row of its own.
 
-    The two sides are gated by one flag precisely so they cannot disagree; this
-    pins the other half of it, and fails if the queue collapses unconditionally.
+    The representative's row is therefore the only record that the sibling was
+    handled at all. Without it the sibling stays in the work queue for a dispatch
+    that cannot happen: ``kernel_work_pending()`` never goes False, KERNEL
+    redispatches the entry batch every tick, and the orchestration prompt forbids
+    ``report`` while the queue is non-empty -- a spin to the wall clock.
+
+    Retirement follows the recorded merge, not the shared file: two ops in one
+    file the dispatcher never merged stay two units of work, which several
+    real-session regressions in test_shared_state_kernel_opt.py depend on.
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    monkeypatch.setenv("HL_KERNEL_OPFANOUT_DEDUP", "0")
-    state = SharedState(session_id="op-fanout-parity-off")
+    state = SharedState(session_id="op-fanout-ledger")
     state.last_trace_analyze = {"hot_kernels": _OP_FANOUT_ROWS, "task_groups": []}
+
+    # The merged sibling is reported, and deliberately records nothing.
+    krh.record_kernel_opt(
+        state,
+        {"status": "skipped", "reason": "opfanout_merged_into=k001", "kernel_id": "k002"},
+    )
+    assert state.kernel_opt_task_attempts == {}
     assert set(state.untried_hot_reusable_kernels()) == {"k001", "k002"}
+
+    # The representative runs, and its row carries what it absorbed.
+    krh.record_kernel_opt(
+        state,
+        {
+            "status": "failed",
+            "kernel_id": "k001",
+            "error_class": "CompileError",
+            "source_file": "/pkg/aiter/gqa.py",
+            "opfanout_collapsed_ids": ["k001", "k002"],
+        },
+    )
+    entry = next(iter(state.kernel_opt_task_attempts.values()))
+    assert set(entry["opfanout_collapsed_ids"]) == {"k001", "k002"}
+    assert state.untried_hot_reusable_kernels() == []
