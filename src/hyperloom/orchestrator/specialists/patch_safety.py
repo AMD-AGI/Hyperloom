@@ -74,11 +74,18 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     re.M,
 )
 
-# Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``).
+# Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``). The ``a/``
+# / ``b/`` prefix is conventional, not required: a diff produced without it
+# writes the bare path, and matching only the prefixed form left an absolute
+# header like ``--- /etc/passwd`` invisible to :func:`patch_escapes_tree`.
 _PATCH_PATH_RE: re.Pattern[str] = re.compile(
-    r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$",
+    r"^(?:---|\+\+\+) (?:(?:a|b)/)?(?P<path>.+)$",
     re.M,
 )
+
+#: The one absolute header a legitimate diff carries: the missing side of an
+#: add or delete. Never treated as an escape.
+_DEV_NULL_PATHS: frozenset[str] = frozenset({"/dev/null", "dev/null"})
 
 
 # Candidate ``-p`` strip levels for resolving a diff header path to a real file.
@@ -619,6 +626,10 @@ def patch_escapes_tree(patch_text: str) -> str | None:
     """
     for hit in _PATCH_PATH_RE.finditer(patch_text or ""):
         cand = hit.group("path").strip()
+        # Trailing timestamp columns are legal in a unified-diff header.
+        cand = cand.split("\t", 1)[0].strip()
+        if cand in _DEV_NULL_PATHS:
+            continue
         if cand.startswith("/") or ".." in Path(cand).parts:
             return cand
     return None
