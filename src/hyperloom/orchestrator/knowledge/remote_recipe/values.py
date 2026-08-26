@@ -282,9 +282,15 @@ def _entry_origin(entry: Mapping[str, Any]) -> str:
         if action.startswith("integrate_patch")
         else str(entry.get("source_phase") or "").strip().upper()
     )
-    if phase == "FRAMEWORK_AGENT" or action == "framework":
+    # Action before phase: both levers run inside FRAMEWORK_AGENT, so the
+    # phase alone would file every config win under ``framework``.
+    if action == "framework":
         return "framework"
-    if phase == "EXPLORE" or action == "explore":
+    if action == "explore":
+        return "explore"
+    if phase == "FRAMEWORK_AGENT":
+        return "framework"
+    if phase == "EXPLORE":
         return "explore"
     if phase in ("KERNEL", "KERNEL_AGENT") or action in (
         "geak_e2e",

@@ -135,7 +135,7 @@ def test_unbounded_explore_exits_when_cap_exceeded():
     )
     out = ps.exit_normal_optimize(st, now_unix=now)
     assert out is not None
-    assert out[0] == "explore_budget_cap"
+    assert out[0] == "optimize_budget_cap"
 
 
 def test_bounded_explore_does_not_hit_absolute_cap():
@@ -151,10 +151,10 @@ def test_bounded_explore_does_not_hit_absolute_cap():
 
 # Vocab: renamed reasons are phase-exit only, never terminal stop reasons
 def test_renamed_leverage_reasons_are_phase_exit_not_stop_reason():
-    assert ps.is_valid_phase_exit_reason("explore_no_more_leverage")
+    assert ps.is_valid_phase_exit_reason("optimize_no_more_leverage")
     assert ps.is_valid_phase_exit_reason("kernel_no_more_leverage")
     assert not ps.is_valid_stop_reason("no_more_leverage")
-    assert not ps.is_valid_stop_reason("explore_no_more_leverage")
+    assert not ps.is_valid_stop_reason("optimize_no_more_leverage")
 
 
 # Trailing-window crash rate

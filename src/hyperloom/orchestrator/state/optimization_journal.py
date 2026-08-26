@@ -367,8 +367,8 @@ def derive_journal_outcome(
 ) -> str:
     """Derive the journal ``outcome`` for a settled per-task result.
 
-    For source-patch kinds (``integrate_patch`` / ``framework_agent``) the
-    outcome follows the executor's authoritative per-status verdict:
+    For ``integrate_patch`` the outcome follows the executor's authoritative
+    per-status verdict:
 
     - ``status == "kept"`` → ``OUTCOME_KEEP``, unless the promote path stamped
       :data:`PROMOTION_REFUSED_KEY` because the anchor gate declined to lift it

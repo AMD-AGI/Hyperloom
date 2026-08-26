@@ -234,6 +234,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "signal",
         # Construction sentinel — first phase_history entry on fresh session.
         "phase_entered",
+        # Marker row: the source arm has nothing left to dispatch. Not a
+        # transition -- the config arm may still be paying.
+        "no_candidates_and_discovery_exhausted",
     }
 )
 
@@ -317,8 +320,9 @@ def is_valid_stop_reason(value: str) -> bool:
 def is_valid_phase_exit_reason(value: str) -> bool:
     """Return True when ``value`` is a member of :data:`PHASE_EXIT_REASONS`.
 
-    PolicyGate cross-checks any ``phase_history.reason`` write against this
-    closed vocabulary. The value is stripped before comparison.
+    Every ``phase_history.reason`` write is checked against this closed
+    vocabulary, so an unrecognised reason is a bug in the writer, not a value
+    the reader must interpret. The value is stripped before comparison.
 
     Args:
         value (str): Candidate phase-exit reason string.
@@ -329,7 +333,8 @@ def is_valid_phase_exit_reason(value: str) -> bool:
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
-# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
+# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard backstop
+# for the optimisation phase; KERNEL_AGENT uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share. Rotation between them
@@ -3330,6 +3335,11 @@ def append_phase_history_event(
         ts_unix=now_unix,
         cycle=int(getattr(state, "macro_cycle", 0) or 0),
     )
+    if not is_valid_phase_exit_reason(row["reason"]):
+        # A reason outside the vocabulary reaches the report and the recipe KB
+        # as an uninterpretable string. Loud, not fatal: losing the marker row
+        # would cost more than carrying an unknown one.
+        log.warning("phase_history: marker row carries unrecognised reason=%r", row["reason"])
     history = list(state.phase_history or [])
     history.append(row)
     if len(history) > _PHASE_HISTORY_CAP:

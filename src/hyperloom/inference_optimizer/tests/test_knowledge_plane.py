@@ -33,14 +33,15 @@ def test_plane_enabled_pr_returns_mcp_url():
 
 
 @pytest.mark.asyncio
-async def test_on_enter_explore_runs_without_plane(tmp_path: Path):
+async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path):
     """plane=None must not raise."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = None
     coord.shared_state = _make_bare_shared_state()
-    await coord._on_enter_explore(from_phase="PRELUDE")
+    coord.session_dir = tmp_path
+    await coord._on_enter_framework(from_phase="PRELUDE")
 
 
 def _make_bare_shared_state():
