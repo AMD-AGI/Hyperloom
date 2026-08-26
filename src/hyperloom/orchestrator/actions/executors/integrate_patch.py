@@ -16,6 +16,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
@@ -48,6 +49,11 @@ from ._accuracy_gate import (
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
+from ._patch_source_pr import (
+    DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
+    _candidate_slug,
+    materialize_candidate_patches,
+)
 from ._nogit_patch import (
     _P_LEVELS,
     _apply_patch_no_git,
@@ -119,6 +125,28 @@ _SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 # spread well under 1%, so a band this wide clears noise by a comfortable margin
 # while still catching a patch that is not actually inert when disabled.
 DEFAULT_SWITCH_OFF_PARITY_BAND_PCT = 2.0
+
+
+#: Where the patches this action applies came from. Every source lands through
+#: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
+#: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted
+#: it (see :meth:`IntegratePatchExecutor._stage_resolve`).
+PATCH_SOURCE_SPECIALIST = "specialist_authored"
+PATCH_SOURCE_UPSTREAM_PR = "upstream_pr"
+PATCH_SOURCES = (PATCH_SOURCE_SPECIALIST, PATCH_SOURCE_UPSTREAM_PR)
+
+
+def resolve_patch_source(params: Mapping[str, Any]) -> str:
+    """Return the declared patch source, defaulting to the specialist lane.
+
+    Args:
+        params: Task params.
+
+    Returns:
+        One of :data:`PATCH_SOURCES`.
+    """
+    declared = str(params.get("patch_source") or "").strip().lower()
+    return declared if declared in PATCH_SOURCES else PATCH_SOURCE_SPECIALIST
 
 
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
@@ -1721,6 +1749,18 @@ class IntegratePatchExecutor:
             ctx._ip_done_payload = {}  # type: ignore[attr-defined]
             return None
 
+        # Upstream-PR mode: the diff comes from a candidate row, not from a
+        # specialist worktree, so there is no specialist id to look up and no
+        # specialist verdict to enforce. The gate that admitted this work is the
+        # Critic verdict on the ``integrate_patch`` proposal itself, recorded
+        # before the task was created -- one action, one gate. Same shape as the
+        # launch-only branch above, which likewise runs with no specialist.
+        if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
+            early = self._stage_resolve_upstream_pr(ctx, params, shared_state)
+            if early is not None:
+                return early
+            return None
+
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
             return {
@@ -1767,6 +1807,83 @@ class IntegratePatchExecutor:
         ctx._ip_shared_state = shared_state  # type: ignore[attr-defined]
         ctx._ip_specialist_workspace = specialist_workspace  # type: ignore[attr-defined]
         ctx._ip_done_payload = done_payload  # type: ignore[attr-defined]
+        return None
+
+    def _stage_resolve_upstream_pr(
+        self,
+        ctx,
+        params: dict[str, Any],
+        shared_state: Any,
+    ) -> dict[str, Any] | None:
+        """Resolve an upstream-PR candidate into patches on the task's own scratch.
+
+        Sets ``params['patches']`` so the shared apply stage below sees the same
+        explicit-paths input a specialist lane produces, and points the
+        workspace at this task's scratch dir since there is no specialist one.
+
+        Args:
+            ctx: The runner context; stage state is published onto it.
+            params: Task params, mutated with the resolved patch paths.
+            shared_state: SharedState, or ``None``.
+
+        Returns:
+            A terminal result when the candidate could not be materialised,
+            else ``None``.
+        """
+        candidate = params.get("candidate") or {}
+        if not isinstance(candidate, dict) or not candidate:
+            return {
+                "status": "failed",
+                "error_class": "missing_param",
+                "error": "patch_source=upstream_pr requires params.candidate (the discovered PR row)",
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+            }
+        if shared_state is not None:
+            # Same rebind the specialist lane does: a task queued before a KEEP
+            # landed must still measure against the real stack top.
+            inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
+
+        task_id = ctx.task.task_id
+        scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
+        scratch.mkdir(parents=True, exist_ok=True)
+        framework_root = _resolve_framework_root(str(params.get("framework_source_root") or "").strip() or None)
+        if framework_root is None:
+            return {
+                "status": "failed",
+                "error_class": "framework_root_unresolved",
+                "error": "cannot resolve a framework source root to apply the candidate to",
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+            }
+
+        materialized = materialize_candidate_patches(
+            candidate=candidate,
+            params=params,
+            framework_root=framework_root,
+            output_root=scratch,
+            slug=_candidate_slug(candidate),
+            diff_fetch_timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
+        )
+        if materialized.failure is not None:
+            return {
+                **materialized.failure,
+                "candidate": candidate,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+                "patch_source_mode": materialized.mode,
+                "workspace": str(scratch),
+            }
+        params["patches"] = [str(p) for p in materialized.patches]
+        params["patch_source_mode"] = materialized.mode
+
+        ctx._ip_specialist_task_id = task_id  # type: ignore[attr-defined]
+        ctx._ip_shared_state = shared_state  # type: ignore[attr-defined]
+        ctx._ip_specialist_workspace = scratch  # type: ignore[attr-defined]
+        ctx._ip_done_payload = {}  # type: ignore[attr-defined]
         return None
 
     async def _stage_provision_attempt_runtime(

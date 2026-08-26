@@ -27,6 +27,10 @@ from ._git import _run_git, _run_git_cp
 
 log = logging.getLogger(__name__)
 
+#: Timeout for fetching a served diff. The worktree route is given four times
+#: this, because it clones and diffs rather than downloading one file.
+DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
+
 
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
