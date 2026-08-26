@@ -153,7 +153,7 @@ def _section_session_context(
         "Shared session state, KB hints, inbox tail) is appended below the",
         "system prompt every tick by the Coordinator.",
         "The Time-budget block carries `remaining=X.Xmin`.",
-        "See PHASE CONTRACT below for the 6-phase chain, per-phase allowed",
+        "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
     ]
 
@@ -166,8 +166,8 @@ def _section_phase_semantics(
     """Render the per-phase LLM-proposable action contract (current phase
     injected dynamically by the Coordinator).
 
-    Phases switched off by ``--no-explore`` / ``--no-kernel`` /
-    ``--no-framework-agent`` keep their row in the 6-phase chain but are annotated
+    Phases switched off by ``--no-framework-agent`` / ``--no-kernel`` keep
+    their row in the chain but are annotated
     ``(DISABLED: --no-xxx — phase skipped)`` so Orchestration plans against the
     phases the run will actually enter.
 
@@ -190,7 +190,7 @@ def _section_phase_semantics(
     lines: list[str] = [
         "## 3a. PHASE CONTRACT",
         "",
-        "The Coordinator runs the optimization in a 6-phase linear pipeline.",
+        "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
         "",
@@ -214,8 +214,9 @@ def _section_phase_semantics(
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
-            "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL_AGENT",
-            "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "phase budget cap, or a terminal stop_reason exit FRAMEWORK_AGENT /",
+            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
+            "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
             "(no longer robustness-only) when you judge the current phase",
