@@ -374,3 +374,62 @@ def test_vet_patches_unreadable(tmp_path):
     assert kept == []
     assert dropped[0]["verdict"] == "unreadable"
     assert not spans_roots
+
+
+# ---- nested root collapse + GROUND_AMBIGUOUS_ROOT -------------------------
+def _make_git_repo(root: "Path", files: dict) -> "Path":
+    import subprocess as _sp
+    root.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    _sp.run(["git", "init", "-q", str(root)], check=True)
+    _sp.run(["git", "-C", str(root), "add", "-A"], check=True)
+    _sp.run(
+        ["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+    return root
+
+
+def test_nested_root_collapse_picks_outer(tmp_path):
+    outer = _make_git_repo(tmp_path / "sglang", {"python/sglang/srt/foo.py": "old\n"})
+    inner = outer / "python"
+    inner.mkdir(exist_ok=True)
+    diff = "--- a/python/sglang/srt/foo.py\n+++ b/python/sglang/srt/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    res = ps.resolve_patch_apply_root([diff], explicit_root=None, candidate_roots=[outer, inner])
+    assert res.root is not None
+    assert res.root.resolve() == outer.resolve()
+    assert res.reason == ""
+
+
+def test_disjoint_ambiguity_still_fails(tmp_path):
+    tree_a = _make_git_repo(tmp_path / "a", {"srt/foo.py": "old\n"})
+    tree_b = _make_git_repo(tmp_path / "b", {"srt/foo.py": "old\n"})
+    diff = "--- a/srt/foo.py\n+++ b/srt/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    res = ps.resolve_patch_apply_root([diff], explicit_root=None, candidate_roots=[tree_a, tree_b])
+    assert res.root is None
+    assert res.reason == "ambiguous_root"
+
+
+def test_ground_patch_text_returns_ambiguous_root_verdict(tmp_path):
+    tree_a = _make_git_repo(tmp_path / "a", {"foo.py": "old\n"})
+    tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
+    diff = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    res = ps.ground_patch_text(diff, base_checkout=tree_a, candidate_roots=(tree_b,))
+    assert res.verdict == ps.GROUND_AMBIGUOUS_ROOT
+    assert res.is_garbage
+
+
+def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):
+    tree_a = _make_git_repo(tmp_path / "a", {"foo.py": "old\n"})
+    tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
+    diff_file = tmp_path / "p.patch"
+    diff_file.write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
+    _, dropped, grounding, _ = ps.vet_patches(
+        [str(diff_file)], base_checkout=tree_a, candidate_roots=(tree_b,)
+    )
+    assert len(dropped) == 1
+    assert dropped[0]["verdict"] == ps.GROUND_AMBIGUOUS_ROOT
+    assert grounding[str(diff_file)] == ps.GROUND_AMBIGUOUS_ROOT

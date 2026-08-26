@@ -252,3 +252,54 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
     assert out["domain"] == "kernel_switch_specialist"
     assert out["proposal_set"] == [{"name": "v1"}]
     assert "intent_type" not in out and "payload" not in out
+
+
+# ---- ensure_authoring_checkout --------------------------------------------
+from hyperloom.orchestrator.specialists.subprocess_ import ensure_authoring_checkout
+
+
+def _init_git_repo(p: Path) -> Path:
+    import subprocess as _sp
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    _sp.run(["git", "init", "-q", str(p)], check=True)
+    _sp.run(["git", "-C", str(p), "add", "-A"], check=True)
+    _sp.run(
+        ["git", "-C", str(p), "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "init"],
+        check=True,
+    )
+    return p
+
+
+def test_ensure_authoring_checkout_uses_existing_git_repo(tmp_path: Path, monkeypatch) -> None:
+    repo = _init_git_repo(tmp_path / "myfw")
+    monkeypatch.setenv("MYFW_REPO_PATH", str(repo))
+    result, err = ensure_authoring_checkout("myfw", tmp_path / "session")
+    assert err == ""
+    assert result is not None
+    assert result.resolve() == repo.resolve()
+
+
+def test_ensure_authoring_checkout_creates_shadow_repo_for_non_git(tmp_path: Path, monkeypatch) -> None:
+    plain = tmp_path / "plain_pkg"
+    plain.mkdir()
+    (plain / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setenv("MYFW2_REPO_PATH", str(plain))
+    session_dir = tmp_path / "session"
+    result, err = ensure_authoring_checkout("myfw2", session_dir)
+    assert err == "", f"unexpected error: {err!r}"
+    assert result is not None
+    shadow_git = result / ".git"
+    assert shadow_git.exists(), "shadow repo should have a .git marker"
+    assert result.is_relative_to(session_dir), "shadow repo should live under session_dir"
+
+
+def test_ensure_authoring_checkout_reuses_existing_shadow_repo(tmp_path: Path, monkeypatch) -> None:
+    plain = tmp_path / "fw"
+    plain.mkdir()
+    (plain / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setenv("FW3_REPO_PATH", str(plain))
+    session_dir = tmp_path / "sess"
+    result1, _ = ensure_authoring_checkout("fw3", session_dir)
+    result2, _ = ensure_authoring_checkout("fw3", session_dir)
+    assert result1 == result2

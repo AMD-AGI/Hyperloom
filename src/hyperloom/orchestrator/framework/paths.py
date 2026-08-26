@@ -507,6 +507,48 @@ def resolve_session_framework_root() -> str:
     return generic[0] if generic else ""
 
 
+def resolve_framework_tree(framework: str) -> str:
+    """Return the source tree for the named framework, or ``""``.
+
+    Consults only name-keyed sources in order:
+      1. ``$<FRAMEWORK>_REPO_PATH`` / ``$<FRAMEWORK>_DIR``
+      2. ``$FRAMEWORK_REPO_PATH`` (generic fallback)
+      3. The importlib spec origin of the framework's Python package
+      4. The known static default checkout path
+
+    Never consults allowlist order. The allowlist is a permission set; this
+    function answers "where is this framework's source tree".
+
+    Args:
+        framework: Framework name, e.g. ``"sglang"`` or ``"vllm"``.
+
+    Returns:
+        str: The normalised tree root, or ``""`` when none is found.
+    """
+    name = str(framework or "").strip().upper()
+    pkg = str(framework or "").strip().lower()
+    if name:
+        for key in (f"{name}_REPO_PATH", f"{name}_DIR"):
+            candidate = os.environ.get(key, "").strip()
+            if candidate and Path(candidate).is_dir():
+                return _normalize_root(candidate)
+    generic = os.environ.get(GENERIC_FRAMEWORK_ROOT_ENV, "").strip()
+    if generic and Path(generic).is_dir():
+        return _normalize_root(generic)
+    if pkg:
+        origin = _find_spec_origin(pkg)
+        if origin is not None:
+            root = _normalize_root(str(origin))
+            if root:
+                return root
+    for default in _DEFAULT_SOURCE_ROOTS:
+        stripped = default.rstrip("/")
+        if stripped.endswith(f"/{pkg}") or stripped.endswith(f"/{name.lower()}"):
+            if Path(stripped).is_dir():
+                return _normalize_root(stripped)
+    return ""
+
+
 def resolve_patch_target_roots() -> tuple[str, ...]:
     """Roots for substring matching in patch apply + kernel classifiers.
 
@@ -865,6 +907,7 @@ __all__ = [
     "WarmReplayPatchSource",
     "WarmReplayRootResolution",
     "probe_framework_source_roots_for_env",
+    "resolve_framework_tree",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
     "resolve_session_framework_root",

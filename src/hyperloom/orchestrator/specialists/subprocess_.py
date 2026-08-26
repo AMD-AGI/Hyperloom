@@ -740,6 +740,90 @@ def _setup_worktree(
     return worktree_path, ""
 
 
+def ensure_authoring_checkout(framework: str, session_dir: Path) -> tuple[Path | None, str]:
+    """Return a git checkout of ``framework``'s source tree, creating one if needed.
+
+    The fast path: when the framework already has a git checkout (discovered via
+    ``resolve_framework_tree``), return it directly with no I/O cost.
+
+    The slow path: when the framework is pip-installed (no ``.git``), create a
+    shadow repo at ``<session>/runtime/authoring_repo/<framework>`` by
+    hardlink-copying the full tree, running ``git init``, and making one commit.
+    This gives the specialist an isolated, revisionable workspace whose ``git diff``
+    produces canonical ``-p1`` relative paths against the correct tree root.
+
+    Args:
+        framework: Framework name, e.g. ``"sglang"`` or ``"vllm"``.
+        session_dir: The session directory; shadow repos are created beneath it.
+
+    Returns:
+        ``(checkout_path, "")`` on success, ``(None, error_reason)`` on failure.
+    """
+    from hyperloom.orchestrator.framework.paths import resolve_framework_tree
+
+    tree = resolve_framework_tree(framework)
+    if not tree:
+        return None, f"no_source_tree_for_{framework}"
+
+    tree_path = Path(tree.rstrip("/"))
+    if not tree_path.is_dir():
+        return None, f"source_tree_missing:{tree}"
+
+    if (tree_path / ".git").exists():
+        return tree_path, ""
+
+    shadow_root = session_dir / "runtime" / "authoring_repo" / (framework or "framework")
+    if shadow_root.exists() and (shadow_root / ".git").exists():
+        log.info("reusing existing shadow repo at %s", shadow_root)
+        return shadow_root, ""
+
+    shadow_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        cp = subprocess.run(
+            ["cp", "-al", f"{tree_path}/.", str(shadow_root)],
+            capture_output=True,
+            text=True,
+            timeout=300.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, f"shadow_repo_copy_failed:{exc!r}"
+    if cp.returncode != 0:
+        return None, f"shadow_repo_copy_rc={cp.returncode}:{cp.stderr.strip()[:200]!r}"
+
+    for cmd, timeout in [
+        (["git", "-C", str(shadow_root), "init", "-q"], 30.0),
+        (["git", "-C", str(shadow_root), "add", "-A"], 120.0),
+        (
+            [
+                "git",
+                "-C",
+                str(shadow_root),
+                "-c",
+                "user.email=hyperloom@local",
+                "-c",
+                "user.name=hyperloom",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "shadow base",
+            ],
+            60.0,
+        ),
+    ]:
+        try:
+            cp2 = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return None, f"shadow_repo_git_failed:{exc!r}"
+        if cp2.returncode != 0:
+            return None, f"shadow_repo_git_rc={cp2.returncode}:{cp2.stderr.strip()[:200]!r}"
+
+    log.info("created shadow repo for %s at %s", framework, shadow_root)
+    return shadow_root, ""
+
+
 # §3.3: how often to poll a PENDING GPU-specialist Ray actor for its pid.
 _RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
 
@@ -1684,6 +1768,7 @@ __all__ = [
     "SpecialistSubprocessResult",
     "_pick_worktree_base",
     "_setup_worktree",
+    "ensure_authoring_checkout",
     "resolve_codex_executable",
     "resolve_specialist_agent_backend",
 ]

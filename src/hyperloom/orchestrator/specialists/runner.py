@@ -46,6 +46,7 @@ from .subprocess_ import (
     SpecialistSubprocessResult,
     _pick_worktree_base,
     _setup_worktree,
+    ensure_authoring_checkout,
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
@@ -1473,12 +1474,16 @@ class SpecialistRunner:
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        base = _pick_worktree_base(
-            self.subprocess_config.framework_source_roots,
-            preferred=_framework_checkout(str((ctx.task.params or {}).get("framework") or "")),
-        )
+        framework = str((ctx.task.params or {}).get("framework") or "")
+        session_dir = self.session_dir if hasattr(self, "session_dir") and self.session_dir else workspace.parent
+        base, shadow_err = ensure_authoring_checkout(framework, session_dir)
         if base is None:
-            return None, None, "no_git_framework_source_root"
+            base = _pick_worktree_base(
+                self.subprocess_config.framework_source_roots,
+                preferred=_framework_checkout(framework),
+            )
+        if base is None:
+            return None, None, shadow_err or "no_git_framework_source_root"
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)
