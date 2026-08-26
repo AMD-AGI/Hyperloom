@@ -82,7 +82,6 @@ def test_orchestration_prompt_no_explore_trims_catalogue_and_marks_skipped(regis
         enabled_actions=default_enabled_actions(no_kernel=False, no_explore=True),
         framework="sglang",
         kernel_enabled=True,
-        explore_enabled=False,
         max_minutes=120,
     )
     assert "(DISABLED: --no-explore — phase skipped)" in text
@@ -113,7 +112,6 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
         enabled_actions=default_enabled_actions(no_kernel=False),
         framework="sglang",
         kernel_enabled=True,
-        explore_enabled=True,
         framework_agent_phase_enabled=True,
         max_minutes=120,
     )

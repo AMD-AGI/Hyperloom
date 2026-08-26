@@ -364,7 +364,7 @@ def _atom_default_grid(
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
-    """Atom EXPLORE default grid, seeded from atom's known perf knobs.
+    """Atom default explore grid, seeded from atom's known perf knobs.
 
     Covers the atom CLI surface (compile/cudagraph bracket, prefix cache,
     KV fp8, MoE EP, MLA DP-attention, MTP), each gated on model_class.
@@ -452,7 +452,7 @@ def _xdit_default_grid(
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
-    """xDiT (diffusion) EXPLORE default grid, seeded from the empirical KB.
+    """xDiT (diffusion) default explore grid, seeded from the empirical KB.
 
     Only BF16-safe knobs are emitted (precision is locked). Known-regression /
     crash knobs are omitted here, and ``xdit_blacklist_reason`` drops them from

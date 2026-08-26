@@ -6,7 +6,7 @@
 Fetches matching reference rows live from the InferenceX benchmarks API into a
 ``BaselineSummary`` and persists ``target_analysis/target_baseline.json`` +
 report MD. On a successful, dimension-aligned match it also writes a measured
-``competitor_target.json`` (``source`` = the API URL) that the EXPLORE gap
+``competitor_target.json`` (``source`` = the API URL) that the gap
 advisory consumes as *direction, not a gate*. It never writes SharedState, the
 Objective, or scoring, and never gates any KEEP/REVERT decision — so any
 reference number reaching a prompt is API-measured, never LLM-authored.

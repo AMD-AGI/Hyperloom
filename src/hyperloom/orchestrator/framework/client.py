@@ -35,7 +35,7 @@ def _resolve_fa_command() -> list[str]:
 
 
 DEFAULT_FA_PHASE_TIMEOUT_SEC: float = 180.0
-# Consecutive ``fa phase-discover`` failures tolerated before advancing to EXPLORE.
+# Consecutive ``fa phase-discover`` failures tolerated before giving up.
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 

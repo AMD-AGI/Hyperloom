@@ -143,7 +143,7 @@ class MachinePhase(PhaseHandler):
         return bool(self.shared_state.kernel_enabled)
 
     def _optimize_enabled(self) -> bool:
-        """Whether the EXPLORE phase is enabled for this run.
+        """Whether the optimisation phase is enabled for this run.
 
         Returns:
             ``True`` unless ``--no-explore`` disabled it (collapsing to
@@ -270,15 +270,9 @@ class MachinePhase(PhaseHandler):
             # it as if it were still unclaimed.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
-            # A phase change fired for a reason unrelated to the hint while one
-            # was still pending (set by an agent turn and never claimed).
-            # ``exit_normal_optimize`` is the only consumer, so once the
-            # transition leaves the optimisation phase the hint can no longer be
-            # claimed and would otherwise be re-evaluated by a phase it was
-            # never meant for. This used to need a reachability test, because
-            # EXPLORE sat one hop past FRAMEWORK_AGENT and a hint set in the
-            # first was still legitimately in flight for the second; with one
-            # phase there is no hop left to be in flight across.
+            # ``exit_normal_optimize`` is the hint's only consumer, so a
+            # transition away from that phase leaves it unclaimable; keeping it
+            # would let an unrelated phase re-evaluate it.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",

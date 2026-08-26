@@ -1753,12 +1753,8 @@ class IntegratePatchExecutor:
             ctx._ip_done_payload = {}  # type: ignore[attr-defined]
             return None
 
-        # Upstream-PR mode: the diff comes from a candidate row, not from a
-        # specialist worktree, so there is no specialist id to look up and no
-        # specialist verdict to enforce. The gate that admitted this work is the
-        # Critic verdict on the ``integrate_patch`` proposal itself, recorded
-        # before the task was created -- one action, one gate. Same shape as the
-        # launch-only branch above, which likewise runs with no specialist.
+        # Upstream-PR mode has no specialist to look up and no specialist
+        # verdict to enforce: the Critic verdict on this proposal is the gate.
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
             early = self._stage_resolve_upstream_pr(ctx, params, shared_state)
             if early is not None:
@@ -2545,13 +2541,9 @@ class IntegratePatchExecutor:
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         self._apply_attempted = bool(patch_paths)
         for patch in patch_paths:
-            # Structural gate on the diff BEFORE it reaches ``git apply``.
-            # ``specialists.patch_safety.vet_patches`` runs at authoring time,
-            # inside the specialist runner -- so a patch that did not come from
-            # a specialist (``params.patches``, and every ``upstream_pr``
-            # candidate, whose diff is curled from a remote host) has never been
-            # vetted by the time it gets here. Without this, ``git apply``'s own
-            # refusal is the only thing between a remote blob and the live tree.
+            # ``vet_patches`` runs at authoring time inside the specialist
+            # runner, so a patch from anywhere else -- ``params.patches``, and
+            # every remotely-fetched ``upstream_pr`` diff -- arrives unvetted.
             try:
                 patch_text = patch.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
@@ -3491,19 +3483,11 @@ class IntegratePatchExecutor:
             accuracy_delta_pct=acc_delta_pct,
             config_fingerprint=cfg_fingerprint,
         )
-        # Commit the KEEP. On a git tree this is what makes it survive: the next
-        # candidate's revert is ``checkout --force HEAD -- . && clean -fd``,
-        # which removes everything uncommitted. The source-layer snapshot taken
-        # below records the realized files for reproduction and reporting, but
-        # nothing replays it into the tree in-session, so an uncommitted KEEP
-        # would be announced, stacked, and then silently removed -- leaving
-        # ``current_best`` and every later measurement anchored on a tree that
-        # no longer carries it. A failed commit is therefore terminal, not a
-        # warning: revert cleanly and report, rather than corrupt the anchor.
-        #
-        # Non-git roots (e.g. a pip-installed framework in site-packages) have
-        # no checkout fallback to guard against, so the commit is skipped there
-        # rather than failed.
+        # The commit is what makes a KEEP survive the next candidate's
+        # ``checkout --force HEAD -- . && clean -fd``; nothing replays the
+        # source snapshot in-session. A failure is therefore terminal, or the
+        # stack would claim a win the tree no longer carries. Non-git roots have
+        # no checkout revert to survive, so the commit is skipped there.
         commit_failure: str = ""
         if framework_root is not None and _is_git_tree(framework_root):
             try:
@@ -4011,7 +3995,7 @@ class IntegratePatchExecutor:
         config_fingerprint: str = "",
     ) -> None:
         """Append a JSONL record to ``lessons.jsonl`` when the patch
-        came from the FRAMEWORK_AGENT phase.
+        carries an upstream PR identity.
 
         No-op for other provenance or when both dedup keys (``fa_pr_url`` /
         ``fa_pr_sha``) are missing. Write errors are logged + swallowed.
@@ -4030,12 +4014,9 @@ class IntegratePatchExecutor:
         """
         proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
-            # No specialist proposal: the upstream-PR lane carries the PR
-            # identity on the candidate itself, not relayed through a
-            # specialist's ``fa_*`` markers. Without this the whole lane writes
-            # no ledger record, and ``fa phase-discover`` -- which dedups on
-            # exactly this ledger -- rediscovers and re-benches every PR it has
-            # already integrated or reverted, every cycle.
+            # The upstream-PR lane carries the PR identity on the candidate
+            # rather than in a specialist's ``fa_*`` markers. Discovery dedups
+            # on this ledger, so a lane that writes none is re-benched forever.
             proposal = self._upstream_pr_kb_proposal(params or {})
             if proposal is None:
                 return
@@ -4405,9 +4386,8 @@ class IntegratePatchExecutor:
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {config_path}")
-        # ``state_model_path`` is the last rung of the precedence: without it a
-        # task whose params carry no model_path and whose env has no MODEL_PATH
-        # resolves to the empty string and launches a server with no model.
+        # Last rung of the precedence: without it a task with no params
+        # model_path and no MODEL_PATH in env resolves to the empty string.
         resolved_model = resolve_session_model_path(
             params=params,
             state_model_path=state_model_path,
@@ -4603,7 +4583,7 @@ class IntegratePatchExecutor:
           accuracy exists (``accuracy_baseline > 0``); otherwise leave the
           candidate's ``RUN_EVAL`` to the materializer's default handling.
 
-        Generic EXPLORE integrate_patch is untouched (returns ``None``).
+        A plain configuration integrate_patch is untouched (returns ``None``).
 
         Args:
             params: The integrate_patch task params.
@@ -4614,8 +4594,7 @@ class IntegratePatchExecutor:
             framework-authored perf patches with a positive baseline accuracy
             to compare against; else ``None``.
         """
-        # The session's own opt-out outranks every force-on below: a run started
-        # with --no-eval must not have an eval reinstated under it.
+        # The session's opt-out outranks every force-on below.
         if is_truthy(params.get("disable_run_eval")):
             return {"RUN_EVAL": "false"}
         if bool(params.get("enablement")):

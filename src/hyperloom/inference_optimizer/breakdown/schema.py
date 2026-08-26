@@ -1346,7 +1346,7 @@ class PhaseBreakdown(TypedDict, total=False):
     Attributes:
         prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
         framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
-        explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
+        explore (PhaseBreakdownExplore): Configuration-lever gain by domain.
         kernel_agent (PhaseBreakdownKernel): KERNEL_AGENT phase gain by
             ``kernel_id``. Unlike ``framework``, which the producer normalizes
             down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.

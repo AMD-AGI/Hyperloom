@@ -626,12 +626,8 @@ class EnablementBuild(CoordinatorCollaborator):
         cfg = str(state.enablement.probe_config_path or "") or str(getattr(state, "baseline_config_path", "") or "")
         if cfg:
             params["config_path"] = cfg
-        # The probe boots the model with the built runtime, so it takes the
-        # lanes its own kind declares -- ``server_lifecycle`` +
-        # ``workspace_mutation`` + ``benchmark_lane`` -- not the research lane a
-        # specialist would take. ``research_lane`` conflicts with nothing, so
-        # under it the probe could launch a server beside another one and mutate
-        # the tree beside another integrate_patch.
+        # The probe boots a server and mutates the tree, so it takes the lanes
+        # its own kind declares rather than a specialist's research lane.
         lanes, ttl = self._registry_lanes_ttl("integrate_patch")
         if not lanes:
             raise RuntimeError("integrate_patch resolved to no lanes; the launch probe would run unserialised.")

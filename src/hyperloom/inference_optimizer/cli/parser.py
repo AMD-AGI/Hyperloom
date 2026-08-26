@@ -670,7 +670,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "report still has a deterministic 'External baseline' "
             "section. The reference is API-measured and never influences "
             "the Objective, scoring, or any KEEP/REVERT gate; a matching "
-            "row is surfaced to the EXPLORE gap advisory as direction only. "
+            "row is surfaced to the gap advisory as direction only. "
             "Other dimensions (model / framework / precision / ISL / OSL) "
             "are derived from the corresponding CLI arguments."
         ),
@@ -1261,7 +1261,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Pin the per-variant hard timeout (seconds) inside the "
-        "EXPLORE phase. ``0`` (default) auto-derives from "
+        "optimisation phase. ``0`` (default) auto-derives from "
         "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
         "--explore-variant-timeout-safety-margin)`` once baseline "
         "lands, with a 2400-14400 s range guard. Set to a positive "
@@ -1273,7 +1273,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="Headroom (as a fraction of baseline_runtime_sec) added on "
-        "top of --explore-overtime-kill-ratio when the EXPLORE hard "
+        "top of --explore-overtime-kill-ratio when the explore hard "
         "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
         "buffer for variant cold starts: torch.compile AOTI compile, "
         "fresh aiter shapes, spec-decoding draft load). Bump for "

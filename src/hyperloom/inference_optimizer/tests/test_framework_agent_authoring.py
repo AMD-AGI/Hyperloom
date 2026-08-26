@@ -127,7 +127,6 @@ class _Stub:
     _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
     _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
-    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
     _framework_agent_authoring_inflight = Coordinator._framework_agent_authoring_inflight
@@ -135,7 +134,6 @@ class _Stub:
     _recover_framework_agent_authoring_outcome = Coordinator._recover_framework_agent_authoring_outcome
     _record_framework_agent_authoring_empty_outcome = Coordinator._record_framework_agent_authoring_empty_outcome
     _record_framework_agent_dispatch_failure = Coordinator._record_framework_agent_dispatch_failure
-    _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)
     _framework_audit_verdict_uncertain = staticmethod(FrameworkPhase._framework_audit_verdict_uncertain)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
     # Local-exploration arm surface (disabled in this suite's state, so these

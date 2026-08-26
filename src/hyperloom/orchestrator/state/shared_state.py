@@ -570,8 +570,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
-    explore_enabled: bool = True
     # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
     # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
     # only governs the entry's own dispatch: orchestration can still request
