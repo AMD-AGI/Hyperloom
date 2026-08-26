@@ -636,14 +636,14 @@ def _collect_phase_breakdown(
         if delta is None or delta <= 0:
             continue
         phase = _phase_at(_entry_ts(e), timeline).lower()
-        # ``phase_history`` records the phase as ``FRAMEWORK_AGENT`` but the
-        # attribution bucket is named ``framework``; normalize so framework-phase
-        # KEEPs land in the framework bucket instead of missing the bucket key and
-        # falling through to the action-family fallback (and then ``unattributed``).
-        if phase == "framework_agent":
-            phase = "framework"
         action = str(e.get("action") or "").lower()
         fam = _entry_family(e)
+        # Both levers run inside FRAMEWORK_AGENT, so being active when a KEEP
+        # landed no longer says which one moved it. The entry's own family
+        # does; without this every config win in the merged phase would be
+        # reported as an upstream PR.
+        if phase == "framework_agent":
+            phase = "framework" if fam == "framework" else "explore"
         if action.startswith("integrate_patch"):
             # For this delayed application mechanism, proposal ownership is the
             # attribution phase; the acceptance timestamp is only execution
