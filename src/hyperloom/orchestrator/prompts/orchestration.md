@@ -200,9 +200,12 @@ Drive `baseline_tput > 0` so the Coordinator advances.
 
 Land Critic-gated upstream framework patches via `integrate_patch`. Discovery
 and benchmarking are Coordinator-driven. Your role is to steer the direction
-(which candidates to prioritise), unblock stuck candidates, and emit
-`escalate_strategy_change{next_action_hint='skip_to_explore'}` once
-discovery is exhausted and no candidates remain.
+(which candidates to prioritise) and unblock stuck candidates.
+
+This phase takes no `next_action_hint`: it advances on its own once discovery
+is exhausted, a no-KEEP streak trips the plateau, or the per-phase budget cap
+is reached. Do not emit `escalate_strategy_change` here — the hint vocab has
+no member that FRAMEWORK consults, so it is silently dropped.
 
 <!-- phase: EXPLORE -->
 ### EXPLORE — phase goal
