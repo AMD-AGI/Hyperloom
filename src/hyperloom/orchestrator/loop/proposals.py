@@ -423,7 +423,6 @@ class ProposalsCollaborator:
             params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
-        params.setdefault("stack_stable_threshold_pct", keep / 2.0)
 
     async def _materialize_approved_proposal(
         self,
