@@ -852,26 +852,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # instead of skipping the phase. Requires framework_agent_authoring_enabled;
     # --no-framework-local-explore opts out (restores discover-exhaustion exit).
     framework_local_explore_enabled: bool = True
-    # Default OFF. When True the Coordinator may run explore-style config-grid
-    # exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor) before the
-    # phase advances. Coordinator-driven, never the LLM.
-    framework_config_exploration_enabled: bool = False
-    # Compact records of framework config-exploration rounds; kept separate from
-    # framework_agent_phase_progress so it never perturbs the plateau gate.
-    framework_config_exploration_results: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
-    # FRAMEWORK config-exploration subphase state machine:
-    # "" (not started) -> "running" -> "done". Drives the advance-time hold.
-    framework_config_lane_state: str = ""
-    # Rounds dispatched in the current FRAMEWORK config-exploration subphase;
-    # capped by _framework_config_max_rounds(). Reset on macro-cycle reloop.
-    framework_config_lane_round: int = 0
-    # Config variant grid harvested from the last generation specialist,
-    # awaiting an explore round. Consumed by _maybe_hold_for_framework_config_lane.
-    framework_config_pending_grid: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id
     # (PR URL), so the authored-outcome bridge can key the progress row on the
     # PR-URL that ``_select_next_framework_agent_candidate`` checks.

@@ -1242,10 +1242,6 @@ class DispatcherCollaborator:
                     # FRAMEWORK config-exploration: harvest a generation
                     # specialist's config proposal_set into the pending grid.
                     try:
-                        self._ingest_framework_config_generation(
-                            task=task,
-                            done_payload=done_payload,
-                        )
                         self._ingest_candidate_discovery(
                             task=task,
                             done_payload=done_payload,
@@ -1361,17 +1357,6 @@ class DispatcherCollaborator:
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
-                if str((task.params or {}).get("source") or "") == "framework_config_exploration":
-                    try:
-                        self._record_framework_config_exploration_result(
-                            task=task,
-                            result=result_dict,
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "framework_config: result bookkeeping failed for task=%s",
-                            task.task_id,
-                        )
                 try:
                     self._record_explore_round_gaps(
                         task=task,
