@@ -616,7 +616,7 @@ def _synthesize_via_llm(
 
     prompt = _build_llm_prompt(domain, findings)
     option_kwargs: dict[str, object] = {"model": model, "system_prompt": ""}
-    overlay = sdk_env_overlay(component="framework")
+    overlay = sdk_env_overlay(component="framework", operation="synthesize_kb")
     if overlay:
         option_kwargs["env"] = overlay
     options = sdk.ClaudeAgentOptions(**option_kwargs)

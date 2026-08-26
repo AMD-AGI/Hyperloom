@@ -280,7 +280,7 @@ async def run_one_attempt(
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
         "env": _quark_py310_compat_env(workspace),
     }
-    kwargs["env"].update(sdk_env_overlay(component="quantization"))
+    kwargs["env"].update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
     if model:
         kwargs["model"] = model
     kwargs["cwd"] = str(quark_root)

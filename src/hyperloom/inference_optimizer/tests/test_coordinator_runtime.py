@@ -2311,6 +2311,36 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
+    """This is the only place ``type`` is published for gateway attribution.
+
+    A caller that reached ``sub.run_task`` directly would spend its tokens with
+    no action label, which is exactly the hole this method exists to close.
+    """
+    from hyperloom.common.llm_attribution import current_action
+
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
+    seen: list[str] = []
+
+    async def runner(ctx):
+        seen.append(current_action())
+        return {}
+
+    sub.register_executor("conc_sweep", runner)
+    task = await tr.create(kind="conc_sweep", params={}, idempotency_key="k-labelled")
+
+    await disp.run_task_registered(task)
+
+    assert seen == ["conc_sweep"]
+    assert current_action() == "", "the label must not outlive the action"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_runner_fails_a_row_whose_workspace_cannot_be_made(
     tmp_path,
 ):

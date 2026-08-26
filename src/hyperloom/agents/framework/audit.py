@@ -427,6 +427,7 @@ def _maybe_llm_refine(
     raw_text, _ = _llm_cfg.stream_chat_completion_text(
         client,
         component="framework",
+        operation="refine_audit",
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,

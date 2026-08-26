@@ -79,6 +79,7 @@ class OpenAIHttpClient:
         return llm_config.chat_completion(
             self.client,
             component="breakdown",
+            operation="compose_report",
             model=self.model,
             messages=[
                 {"role": "system", "content": system},
@@ -114,6 +115,7 @@ class AnthropicClient:
         """
         return llm_config.anthropic_completion(
             component="breakdown",
+            operation="compose_report",
             model=self.model,
             system=system,
             messages=[{"role": "user", "content": user}],

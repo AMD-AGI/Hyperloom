@@ -805,7 +805,13 @@ class ClaudeBackend:
         env to the SDK subprocess and disable settings sources so the run is
         hermetic (Claude Code otherwise reads ``~/.claude`` config).
         """
-        kwargs.update(claude_sdk_env_options(model=self.model, component="orchestration"))
+        kwargs.update(
+            claude_sdk_env_options(
+                model=self.model,
+                component="orchestration",
+                operation="orchestrate_turn",
+            )
+        )
 
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options.

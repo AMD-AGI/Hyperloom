@@ -2737,6 +2737,7 @@ class FrameworkPhase(PhaseHandler):
             text, _ = await astream_chat_completion_text(
                 client,
                 component="framework",
+                operation="rank_candidates",
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=400,

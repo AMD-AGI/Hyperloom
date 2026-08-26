@@ -908,6 +908,7 @@ class CodexSession:
         codex_bin: str = "",
         env: dict[str, str] | None = None,
         component: str = "",
+        operation: str = "",
     ) -> None:
         self.cwd = Path(cwd)
         self.model = model
@@ -919,6 +920,7 @@ class CodexSession:
         self.codex_bin = codex_bin
         self.env = env
         self.component = component
+        self.operation = operation
         self._stack: contextlib.AsyncExitStack | None = None
         self._sdk: Any | None = None
         self._sandbox: Any = None
@@ -957,7 +959,11 @@ class CodexSession:
         # ``env_http_headers`` with the gateway's own. The session snapshots its
         # environment here, so the tag reflects the phase Codex started in.
         if self.component:
-            inject_attribution_env(effective_env, component=self.component)
+            inject_attribution_env(
+                effective_env,
+                component=self.component,
+                operation=self.operation,
+            )
         resolved_sandbox_mode = _resolve_codex_sandbox_mode(
             sandbox_mode=self.sandbox_mode,
             source=effective_env,

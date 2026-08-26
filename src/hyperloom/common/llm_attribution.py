@@ -3,14 +3,20 @@
 
 """Gateway attribution headers for every Hyperloom LLM call.
 
-Hyperloom knows which component and phase a call belongs to; the gateway that
+Hyperloom knows where a call came from and what it was for; the gateway that
 meters the call knows only that some token spent money. This module carries that
 context out on the headers a named gateway understands, selected by a single
 setting::
 
     HYPERLOOM_LLM_ATTRIBUTION=litellm
-    # x-litellm-tags: session=<id>,component=geak,phase=KERNEL_AGENT
+    # x-litellm-tags: session=<id>,component=geak,phase=KERNEL_AGENT,
+    #                 type=kernel_opt,operation=generate_candidate
     # x-litellm-trace-id: <id>
+
+The fields narrow from the run down to the individual call: ``session`` is the
+run, ``phase`` the stage it reached, ``type`` the action executing inside that
+stage, ``component`` the code that made the call, and ``operation`` what that
+one call was for.
 
 Leaving it unset is the default and emits nothing, so an unconfigured deployment
 behaves exactly as it did before.
@@ -31,11 +37,13 @@ the transport belongs to a child process.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable, Mapping, MutableMapping, Sequence
+from typing import Callable, Iterator, Mapping, MutableMapping, Sequence
 
 #: Selects the gateway whose headers to emit; unset emits nothing.
 ATTRIBUTION_ENV = "HYPERLOOM_LLM_ATTRIBUTION"
@@ -57,6 +65,8 @@ __all__ = [
     "PRESETS",
     "attribution_context",
     "call_headers",
+    "current_action",
+    "current_action_scope",
     "current_phase",
     "inject_env",
     "sdk_env_overlay",
@@ -90,6 +100,48 @@ def current_phase() -> str:
     return _current_phase
 
 
+# The action is *not* process-wide the way the phase is: the dispatcher runs
+# several actions at once, so a module global would label every call with
+# whichever action started last. A context variable is copied into each
+# ``asyncio.Task``, which is exactly the scope an action occupies -- the calls it
+# awaits see its value, and its siblings never do.
+_current_action: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "hyperloom_llm_attribution_action",
+    default="",
+)
+
+
+@contextlib.contextmanager
+def current_action_scope(action: str) -> Iterator[None]:
+    """Label every LLM call made while one action runs.
+
+    Resetting on exit matters because not every caller wraps this in its own
+    task: the ones that ``await`` the action directly would otherwise keep its
+    label after it returned.
+
+    Args:
+        action: The action's task kind, e.g. ``baseline`` or ``kernel_opt``.
+
+    Yields:
+        ``None``, with the action published for the duration of the block.
+    """
+    token = _current_action.set(_sanitize(action))
+    try:
+        yield
+    finally:
+        _current_action.reset(token)
+
+
+def current_action() -> str:
+    """Return the action whose scope this code is running inside.
+
+    Returns:
+        The action's task kind, or ``""`` outside any action -- which is the
+        honest answer for the orchestration call that is *choosing* the action.
+    """
+    return _current_action.get()
+
+
 def _sanitize(value: object) -> str:
     """Strip anything that would corrupt the ``Name: value`` header encoding.
 
@@ -109,20 +161,26 @@ def _sanitize(value: object) -> str:
 def attribution_context(
     *,
     component: str,
+    operation: str = "",
     phase: str | None = None,
     env: Mapping[str, str] | None = None,
     **extra: str,
 ) -> dict[str, str]:
     """Collect the attribution fields known at one call site.
 
-    ``session`` is read from the environment and ``phase`` defaults to the
-    published one, so a call site only has to name what it alone knows. ``extra``
-    keeps the vocabulary open: a site with more context (``kernel_id``,
+    Four of the five fields answer *where* the call came from and are filled in
+    without the call site's help: ``session`` from the environment, ``phase``
+    from the phase machine, and ``type`` from the action currently running.
+    ``operation`` is the exception, because what a call is *for* is knowable only
+    where it is written.
+
+    ``extra`` keeps the vocabulary open: a site with more context (``kernel_id``,
     ``task_id``, ``attempt``) can add it without changing this signature, and a
     preset decides whether to select it.
 
     Args:
         component: Producer label for the call, e.g. ``geak`` or ``specialist``.
+        operation: What this particular call does, e.g. ``review_commit``.
         phase: Orchestrator phase the call belongs to. ``None`` takes the phase
             published by :func:`set_current_phase`; pass ``""`` to force none.
         env: Environment mapping to read the session id from (defaults to
@@ -137,6 +195,8 @@ def attribution_context(
         "session": source.get(CLAW_SESSION_ID_ENV, ""),
         "component": component,
         "phase": current_phase() if phase is None else phase,
+        "type": current_action(),
+        "operation": operation,
         **extra,
     }
     return {key: text for key, value in fields.items() if (text := _sanitize(value))}
@@ -188,7 +248,11 @@ PRESETS: dict[str, tuple[AttributionHeader, ...]] = {
     "litellm": (
         # Comma-separated tags land in the LiteLLM_SpendLogs request_tags column,
         # which is what gives a per-component spend rollup.
-        AttributionHeader("x-litellm-tags", "combined", ("session", "component", "phase")),
+        AttributionHeader(
+            "x-litellm-tags",
+            "combined",
+            ("session", "component", "phase", "type", "operation"),
+        ),
         # Sets the spend log's session_id column and propagates to nested MCP and
         # A2A calls, so it is the column a per-session reconciliation joins on.
         AttributionHeader("x-litellm-trace-id", "raw", ("session",)),
@@ -211,6 +275,7 @@ def _configured_headers(env: Mapping[str, str]) -> tuple[AttributionHeader, ...]
 def call_headers(
     *,
     component: str,
+    operation: str = "",
     phase: str | None = None,
     env: Mapping[str, str] | None = None,
     **extra: str,
@@ -219,6 +284,7 @@ def call_headers(
 
     Args:
         component: Producer label for the call.
+        operation: What this particular call does.
         phase: Orchestrator phase the call belongs to; ``None`` uses the
             published phase.
         env: Environment mapping supplying the gateway selection and session id.
@@ -232,7 +298,13 @@ def call_headers(
     headers = _configured_headers(source)
     if not headers:
         return {}
-    context = attribution_context(component=component, phase=phase, env=source, **extra)
+    context = attribution_context(
+        component=component,
+        operation=operation,
+        phase=phase,
+        env=source,
+        **extra,
+    )
     rendered = {header.name: _RENDERERS[header.shape](header.fields, context) for header in headers}
     return {name: value for name, value in rendered.items() if value}
 
@@ -267,9 +339,7 @@ def _merge_raw(raw: str | None, headers: Mapping[str, str]) -> str:
 
     replaced = {name.lower() for name in headers}
     lines = [
-        line
-        for line in text.splitlines()
-        if line.strip() and line.partition(":")[0].strip().lower() not in replaced
+        line for line in text.splitlines() if line.strip() and line.partition(":")[0].strip().lower() not in replaced
     ]
     lines.extend(f"{name}: {value}" for name, value in headers.items())
     return "\n".join(lines)
@@ -302,6 +372,7 @@ def inject_env(
     env: MutableMapping[str, str],
     *,
     component: str,
+    operation: str = "",
     phase: str | None = None,
     source: Mapping[str, str] | None = None,
     **extra: str,
@@ -320,6 +391,7 @@ def inject_env(
     Args:
         env: Child environment to enrich (mutated in place).
         component: Producer label for the calls this child will make.
+        operation: What the child is being spawned to do.
         phase: Orchestrator phase the child belongs to; ``None`` uses the
             published phase.
         source: Environment to read configuration from (defaults to
@@ -328,6 +400,7 @@ def inject_env(
     """
     headers = call_headers(
         component=component,
+        operation=operation,
         phase=phase,
         env=source if source is not None else os.environ,
         **extra,
@@ -341,6 +414,7 @@ def inject_env(
 def sdk_env_overlay(
     *,
     component: str,
+    operation: str = "",
     phase: str | None = None,
     **extra: str,
 ) -> dict[str, str]:
@@ -353,6 +427,7 @@ def sdk_env_overlay(
 
     Args:
         component: Producer label for the child's calls.
+        operation: What the child is being spawned to do.
         phase: Orchestrator phase; ``None`` uses the published phase.
         **extra: Additional attribution fields.
 
@@ -361,7 +436,7 @@ def sdk_env_overlay(
         no gateway is selected.
     """
     merged = dict(os.environ)
-    inject_env(merged, component=component, phase=phase, **extra)
+    inject_env(merged, component=component, operation=operation, phase=phase, **extra)
     return {
         variable: merged[variable]
         for variable in (ANTHROPIC_CUSTOM_HEADERS_ENV, OPENAI_CUSTOM_HEADERS_ENV)

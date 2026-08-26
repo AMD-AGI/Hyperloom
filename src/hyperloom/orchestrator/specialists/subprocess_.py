@@ -908,7 +908,7 @@ class SpecialistSubprocessDispatcher:
         apply_llm_stability_env(env)
         # The child spends against the gateway under this task; tag it so the
         # spend can be read back per task instead of as one specialist total.
-        inject_attribution_env(env, component="specialist", task_id=task_id)
+        inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
 
         backend = ""
         try:

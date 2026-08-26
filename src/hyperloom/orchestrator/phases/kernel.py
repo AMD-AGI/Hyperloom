@@ -1138,7 +1138,7 @@ class KernelPhase(PhaseHandler):
             # tag reaches the Claude CLI that actually spends.
             from hyperloom.common.llm_attribution import inject_env
 
-            inject_env(runner_env, component="geak")
+            inject_env(runner_env, component="geak", operation="optimize_kernel")
             p = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,

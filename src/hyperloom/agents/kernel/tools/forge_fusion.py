@@ -87,7 +87,11 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
 
     from hyperloom.common import llm_config  # noqa: PLC0415 - standalone import-light
 
-    options = llm_config.claude_sdk_env_options(env=os.environ, component="forge")
+    options = llm_config.claude_sdk_env_options(
+        env=os.environ,
+        component="forge",
+        operation="author_kernel",
+    )
     resolved_env = options.get("env")
     if isinstance(resolved_env, dict):
         # Exactly the synthesizable subset: mirroring the subscription token

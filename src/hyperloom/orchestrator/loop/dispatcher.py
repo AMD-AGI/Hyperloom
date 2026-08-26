@@ -12,6 +12,7 @@ from collections.abc import Callable, Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
+from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -905,7 +906,9 @@ class DispatcherCollaborator:
             if handle is not None:
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
         try:
-            with use_cancel_scope(cancel_scope):
+            # Every LLM call this action makes, in-process or in a child, is
+            # labelled with its kind from here.
+            with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
                 return await self.sub.run_task(
                     task,
                     prebound_lease=lease,
