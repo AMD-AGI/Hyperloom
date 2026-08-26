@@ -2699,12 +2699,14 @@ class WritebackCollaborator:
                     for _src_key in (
                         "source_snapshot",
                         "source_manifest",
+                        "source_snapshot_complete",
+                        "source_import_root",
                         "framework_root",
                         "base_sha",
                     ):
                         val = bv.get(_src_key)
-                        if val:
-                            stack_entry[_src_key] = str(val)
+                        if val is not None and (val is not False or _src_key == "source_snapshot_complete"):
+                            stack_entry[_src_key] = val if isinstance(val, bool) else str(val)
                     target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
                     if target_files:
                         stack_entry["target_files"] = target_files
@@ -4429,13 +4431,19 @@ class WritebackCollaborator:
                     }
                 )
                 continue
+            _complete = entry.get("source_snapshot_complete")
+            if _complete is None:
+                from hyperloom.orchestrator.source_snapshot import snapshot_is_complete as _sic
+                _complete = _sic(snap)
+            _import_root = str(entry.get("source_import_root") or "").strip()
+            _overlay_dir = str(Path(snap) / "files" / _import_root) if _import_root else str(Path(snap) / "files")
             source_snapshots.append(
                 {
                     "id": str(entry.get("variant_name") or entry.get("name") or ""),
-                    "snapshot_dir": snap,
+                    "snapshot_dir": _overlay_dir,
                     "framework_root": str(entry.get("framework_root") or ""),
                     "base_sha": str(entry.get("base_sha") or ""),
-                    "reproducible": True,
+                    "reproducible": bool(_complete),
                 }
             )
         # FULL resolved engine config (not just the current_best delta): the

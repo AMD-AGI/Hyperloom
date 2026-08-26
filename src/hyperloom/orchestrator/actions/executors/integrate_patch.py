@@ -3355,15 +3355,31 @@ class IntegratePatchExecutor:
         source_manifest_path = ""
         source_target_files: list[str] = []
         source_base_sha = ""
+        source_snapshot_complete = False
+        source_import_root_val = ""
         try:
             from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
+            from ._patch_snapshot import _patch_touched_paths_split
 
             if framework_root is not None:
                 _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
                 if _cp is not None and getattr(_cp, "returncode", 1) == 0:
                     source_base_sha = (_cp.stdout or "").strip()
-                rel_paths = list(_patch_touched_paths(framework_root, applied))
-                rel_paths += [str(a.get("rel_target") or "") for a in (applied_artifacts or []) if isinstance(a, dict)]
+                upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
+                declared_ops: dict[str, str] = {r: "upsert" for r in upserted_patch}
+                declared_ops.update({r: "delete" for r in deleted_patch})
+                rel_paths = list(upserted_patch) + list(deleted_patch)
+                for art in applied_artifacts or []:
+                    if isinstance(art, dict) and art.get("rel_target"):
+                        art_root = str(art.get("root") or framework_root)
+                        if Path(art_root).resolve() == framework_root.resolve():
+                            rel_paths.append(str(art["rel_target"]))
+                try:
+                    from ...framework.adapters import get_adapter as _get_adapter
+                    _fw_name = str(getattr(ctx.task, "params", {}).get("framework", "") or "")
+                    source_import_root_val = _get_adapter(_fw_name).source_import_root(str(framework_root))
+                except Exception:  # noqa: BLE001
+                    source_import_root_val = ""
                 dest = (
                     self.session_dir
                     / "optimization_stack"
@@ -3377,6 +3393,8 @@ class IntegratePatchExecutor:
                     dest_dir=dest,
                     provenance="integrate_patch",
                     extra={"specialist_task_id": specialist_task_id},
+                    declared_ops=declared_ops,
+                    import_root=source_import_root_val,
                 )
                 if snap:
                     source_snapshot_dir = str(snap.get("snapshot_dir") or "")
@@ -3387,6 +3405,7 @@ class IntegratePatchExecutor:
                         for item in (snap.get("files") or [])
                         if isinstance(item, dict) and item.get("rel")
                     ]
+                    source_snapshot_complete = bool(snap.get("complete"))
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 
@@ -3421,6 +3440,8 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
                 "source_snapshot": source_snapshot_dir,
                 "source_manifest": source_manifest_path,
+                "source_snapshot_complete": source_snapshot_complete,
+                "source_import_root": source_import_root_val,
                 "target_files": source_target_files,
                 "framework_root": str(framework_root or ""),
                 "base_sha": source_base_sha,
