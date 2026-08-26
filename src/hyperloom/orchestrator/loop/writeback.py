@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
@@ -5128,6 +5129,9 @@ class WritebackCollaborator:
             ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
             if _ps_extra_flags:
                 ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
+            # GridVariant drops shell/loader keys before it fingerprints, so drop
+            # them here as well or the pinned hash never matches what ran.
+            ps_envs, _ = filter_untrusted_env_mapping(ps_envs, allow_predicate=is_allowed_variant_env_key)
             # An overlay that cannot load installs nothing: the server launches
             # as plain baseline and any delta measured against it belongs to the
             # flags alone. Resolve that BEFORE dispatch so the task never carries
