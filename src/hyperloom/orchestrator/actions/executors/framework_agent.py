@@ -21,6 +21,7 @@ from ._accuracy_gate import (
     require_framework_accuracy_default,
 )
 from ._patch_source_pr import (
+    DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     materialize_candidate_patches,
     _candidate_slug,
     _git_head_sha,
@@ -72,9 +73,6 @@ from hyperloom.common.gain_math import gain_pct
 
 
 log = logging.getLogger(__name__)
-
-
-DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 
 
 class FrameworkAgentExecutor:
