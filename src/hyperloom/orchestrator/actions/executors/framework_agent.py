@@ -21,11 +21,9 @@ from ._accuracy_gate import (
     require_framework_accuracy_default,
 )
 from ._patch_source_pr import (
-    _candidate_is_same_repo,
+    materialize_candidate_patches,
     _candidate_slug,
-    _fetch_diff_to_path,
     _git_head_sha,
-    _materialize_pr_diff_via_worktree,
 )
 from ._grid_runner import (
     GridVariant,
@@ -209,135 +207,29 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             }
 
-        # Patch source modes, in priority order: explicit ``params.patches``
-        # → checkout-head (net diff from a worktree at the PR head) → diff_url.
-        explicit_patches = params.get("patches") or None
-        patch_paths: list[Path] = []
-        patch_source_mode = ""
-        if isinstance(explicit_patches, list) and explicit_patches:
-            patch_source_mode = "explicit"
-            for p in explicit_patches:
-                pp = Path(str(p))
-                if pp.exists():
-                    patch_paths.append(pp.resolve())
-                else:
-                    log.warning(
-                        "framework: explicit patch %r not found",
-                        p,
-                    )
-            # Refuse to bench an unpatched tree when every explicit patch
-            # was missing (else measurements reflect the unmodified root).
-            if not patch_paths:
-                return {
-                    "status": "no_patch",
-                    "error_class": "explicit_patches_missing",
-                    "candidate": candidate,
-                    "batch_id": batch_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "reason": ("all explicit patches were missing from disk; refusing to benchmark unpatched tree"),
-                    "missing_patches": [str(p) for p in explicit_patches],
-                    "workspace": str(output_root),
-                }
-        else:
-            diff_url = str(candidate.get("diff_url") or "").strip()
-            apply_mode = (
-                str(
-                    params.get("apply_mode") or candidate.get("apply_mode") or "",
-                )
-                .strip()
-                .lower()
-            )
-            prefer_checkout = bool(params.get("prefer_checkout") or candidate.get("prefer_checkout"))
-            # Checkout-headable only with a resolvable head ref.
-            has_checkout_ref = bool(
-                str(candidate.get("head_sha") or "").strip()
-                or str(candidate.get("ref") or "").strip()
-                or candidate.get("pr_number") not in (None, "", 0)
-            )
-            explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
-            use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
-            # Same-repo guard: checkout-head fetches from the live origin, so
-            # a cross-repo candidate would fetch the wrong ref → use diff_url.
-            if use_checkout_head and not _candidate_is_same_repo(
-                candidate,
-                framework_root,
-            ):
-                log.info(
-                    "framework: candidate repo %r differs from live "
-                    "framework_root origin; disabling checkout-head, "
-                    "using diff_url",
-                    candidate.get("repo") or candidate.get("discovered_repo_url"),
-                )
-                use_checkout_head = False
-            if not diff_url and not use_checkout_head:
-                # No served diff and nothing to check out → genuine no-patch.
-                return {
-                    "status": "no_patch",
-                    "candidate": candidate,
-                    "batch_id": batch_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "reason": ("candidate carries no diff_url, no explicit patches, and no head ref to check out"),
-                    "workspace": str(output_root),
-                }
-            dest = output_root / f"{slug}.patch"
-            if use_checkout_head:
-                patch_source_mode = "checkout_head"
-                ok, err = _materialize_pr_diff_via_worktree(
-                    framework_root,
-                    candidate,
-                    dest,
-                    timeout_sec=self.diff_fetch_timeout_sec * 4.0,
-                )
-                if not ok and diff_url:
-                    # Fall back to diff_url so a worktree/fetch hiccup doesn't
-                    # strand an otherwise-applyable candidate.
-                    log.warning(
-                        "framework: checkout-head failed (%s); falling back to diff_url",
-                        err,
-                    )
-                    patch_source_mode = "diff_url_fallback"
-                    ok, err = _fetch_diff_to_path(
-                        diff_url,
-                        dest,
-                        timeout_sec=self.diff_fetch_timeout_sec,
-                    )
-                if not ok:
-                    return {
-                        "status": "fetch_failed",
-                        "error_class": "checkout_head_failed",
-                        "error": err,
-                        "candidate": candidate,
-                        "batch_id": batch_id,
-                        "patches_applied": [],
-                        "patches_reverted": [],
-                        "patch_source_mode": patch_source_mode,
-                        "reason": f"checkout-head diff extraction failed: {err}",
-                        "workspace": str(output_root),
-                    }
-                patch_paths.append(dest.resolve())
-            else:
-                patch_source_mode = "diff_url"
-                ok, err = _fetch_diff_to_path(
-                    diff_url,
-                    dest,
-                    timeout_sec=self.diff_fetch_timeout_sec,
-                )
-                if not ok:
-                    return {
-                        "status": "fetch_failed",
-                        "error_class": "diff_fetch_failed",
-                        "error": err,
-                        "candidate": candidate,
-                        "batch_id": batch_id,
-                        "patches_applied": [],
-                        "patches_reverted": [],
-                        "patch_source_mode": patch_source_mode,
-                        "reason": f"failed to fetch {diff_url!r}: {err}",
-                        "workspace": str(output_root),
-                    }
-                patch_paths.append(dest.resolve())
+        # Materialise the candidate into local patch files. Every failure is a
+        # terminal verdict rather than an empty list: benching a tree no patch
+        # reached measures the baseline and reports it as the candidate's.
+        materialized = materialize_candidate_patches(
+            candidate=candidate,
+            params=params,
+            framework_root=framework_root,
+            output_root=output_root,
+            slug=slug,
+            diff_fetch_timeout_sec=self.diff_fetch_timeout_sec,
+        )
+        patch_source_mode = materialized.mode
+        if materialized.failure is not None:
+            return {
+                **materialized.failure,
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "patch_source_mode": patch_source_mode,
+                "workspace": str(output_root),
+            }
+        patch_paths: list[Path] = list(materialized.patches)
 
         # Preserve user's uncommitted changes BEFORE applying the candidate so
         # the stash holds only user state and `git stash pop` restores it cleanly.
