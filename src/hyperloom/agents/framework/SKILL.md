@@ -51,7 +51,7 @@ fa kb list|show|search|contribute|synthesize ...   # knowledge-base ops
 `fa candidates` / `fa explore` run a standalone investigation loop (no
 IO coordinator). `fa phase-discover` is the thin shim driven by the
 Coordinator's per-candidate pump in the FRAMEWORK_AGENT phase (between
-PRELUDE and EXPLORE in `inference_optimizer`); the `fa phase-*`
+PRELUDE and FRAMEWORK_AGENT in `inference_optimizer`); the `fa phase-*`
 subcommands (`phase-discover`, `phase-audit`) are the **only** ones
 `src/hyperloom/orchestrator/framework/client.py` invokes. Don't use
 `phase-discover` outside that context.

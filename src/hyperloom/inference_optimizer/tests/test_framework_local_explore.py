@@ -389,3 +389,29 @@ def test_local_explore_dispatch_registers_gap_on_real_state():
     resolved = shared.find_gap(gap_cid)
     assert resolved is not None, f"find_gap({gap_cid!r}) returned None; gap was not registered"
     assert resolved["layer"] == "framework"
+
+
+def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
+    """Retries must not collide on one key, or the streak can never advance.
+
+    The registry hands back whatever row a key already names. With a fixed key
+    the second request re-fetches the finished first attempt, no discovery
+    runs, ``framework_agent_empty_discoveries`` stays at 1, and the lane
+    answers "asked again" on every tick forever -- the source arm never goes
+    dry and the phase never leaves.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    keys = []
+    for empties in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+        stub.shared_state.framework_agent_empty_discoveries = empties
+        assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
+        keys.append(stub.tasks.created[-1]["idempotency_key"])
+        # The dispatched round settles: nothing is in flight, so the next tick
+        # asks again and the key is all that stands between a real retry and a
+        # re-fetch of the finished one.
+        stub.tasks._queued.clear()
+    assert len(set(keys)) == len(keys)
+
+    # Budget spent: the lane declines so the rungs below it are reachable.
+    stub.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
