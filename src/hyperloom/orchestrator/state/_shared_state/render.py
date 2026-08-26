@@ -179,7 +179,6 @@ class _RenderMixin:
         """
         from ...phases.machine_state import (
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-            PHASE_EXPLORE,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
@@ -224,7 +223,7 @@ class _RenderMixin:
             allowed_line,
         ]
         # EXPLORE-only: distance to hard force-exit alongside the soft budget.
-        if phase == PHASE_EXPLORE:
+        if phase == PHASE_FRAMEWORK_AGENT:
             overrides = self.plateau_overrides or {}
             pct_thresh = float(
                 overrides.get(
@@ -246,7 +245,7 @@ class _RenderMixin:
             lines.append(force_line)
         # Whether deferring work to a later cycle is still a real option. Mirrors
         # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
-        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
             reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
             feasible = reloop and (self.framework_agent_phase_enabled or self.explore_enabled)
             reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"

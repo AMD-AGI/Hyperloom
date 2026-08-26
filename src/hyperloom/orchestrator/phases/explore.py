@@ -37,7 +37,7 @@ from ..loop.coordinator import (
     SPECIALIST_AUTO_RETRY_MAX,
     _framework_config_levers_from_done,
 )
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -91,8 +91,12 @@ def _forward_integrate_source(
             dst[key] = value
 
 
-class ExplorePhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class ExplorePhase(CoordinatorCollaborator):
+    """The configuration arm of the OPTIMIZE phase: server-arg / env grids, the
+    specialist fan-out that sources them, and the macro-cycle machinery that
+    reopens a cycle. Not a phase of its own -- it shares FRAMEWORK_AGENT with
+    the source arm, and ``exit_normal_optimize`` leaves only when both are dry.
+    """
 
     def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
         """Summarise recent negative explore-ledger pressure by specialist domain."""
@@ -470,16 +474,18 @@ class ExplorePhase(PhaseHandler):
 
         _kill_stale_servers()
 
-    async def _on_enter_explore(self, *, from_phase: str) -> None:
-        """Run EXPLORE-entry housekeeping (plus the per-cycle forced reprofile).
+    async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
+        """Force a fresh analysis at the start of a reopened macro-cycle.
+
+        Reached on every cycle start now. It used to be attached to EXPLORE
+        entry, and the reloop targeted FRAMEWORK_AGENT whenever the framework
+        phase was enabled -- so with the default configuration this never ran,
+        and each new cycle re-targeted the bottleneck the *previous* cycle
+        measured. One phase means one entry, and the reprofile happens.
 
         Args:
-            from_phase: The phase being left; a SWEEP origin in cyclic mode
-                triggers the per-cycle forced reprofile.
+            from_phase: The phase being left; only a SWEEP origin starts a cycle.
         """
-        # At the start of each macro-cycle (SWEEP→EXPLORE loopback), force a
-        # fresh roofline/profile so the new cycle re-targets the current
-        # bottleneck.
         if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(
             getattr(self.shared_state, "macro_cycle", 0) or 0
         ) > 0:
@@ -489,13 +495,13 @@ class ExplorePhase(PhaseHandler):
                 )
                 self.shared_state.auto_roofline_pending_task_id = task.task_id
                 log.info(
-                    "cycle %d EXPLORE entry: forced reprofile task=%s",
+                    "cycle %d start: forced reprofile task=%s",
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                     task.task_id,
                 )
             except Exception:  # noqa: BLE001 — reprofile is best-effort
                 log.exception(
-                    "cycle EXPLORE entry: forced reprofile enqueue failed",
+                    "cycle start: forced reprofile enqueue failed",
                 )
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
@@ -513,7 +519,7 @@ class ExplorePhase(PhaseHandler):
             ``shared_state``. Returns nothing.
         """
         state = self.shared_state
-        if str(getattr(state, "phase", "") or "").upper() != "EXPLORE":
+        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return None
         if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
             return None

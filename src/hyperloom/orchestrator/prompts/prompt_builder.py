@@ -56,7 +56,7 @@ _PHASE_HEADERS: dict[str, str] = {
 
 # Phases each scoped prompt module belongs to.
 _KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
-_EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"EXPLORE"})
+_EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT"})
 _BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
@@ -190,7 +190,7 @@ def _section_phase_semantics(
     if not framework_agent_phase_enabled:
         disabled_suffix["FRAMEWORK_AGENT"] = "--no-framework-agent"
     if not explore_enabled:
-        disabled_suffix["EXPLORE"] = "--no-explore"
+        disabled_suffix["FRAMEWORK_AGENT"] = "--no-framework-agent"
     if not kernel_enabled:
         disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
 

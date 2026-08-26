@@ -408,8 +408,7 @@ def _build_orchestration_prompt(
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
-        explore_enabled=not no_explore,
-        framework_agent_phase_enabled=not no_framework_agent,
+        framework_agent_phase_enabled=not (no_framework_agent or no_explore),
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -1430,20 +1429,6 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
 
 # Phases upstream of EXPLORE, so a resume may retroactively honour
 # --no-explore. Includes the legacy "FRAMEWORK" name for older sessions.
-_PRE_EXPLORE_PHASES: frozenset[str] = frozenset({"", "PRELUDE", "FRAMEWORK", "FRAMEWORK_AGENT"})
-
-
-def _resume_can_disable_explore(cur_phase: str) -> bool:
-    """Whether ``--no-explore`` may still disable EXPLORE for a resumed session.
-
-    Args:
-        cur_phase (str): The persisted ``state.phase``; case/whitespace-insensitive.
-
-    Returns:
-        bool: ``True`` when the phase is upstream of EXPLORE (EXPLORE not yet
-        entered), so the flag can be honoured retroactively.
-    """
-    return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
 
 
 def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
@@ -1472,7 +1457,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
-        PHASE_EXPLORE,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
@@ -1483,7 +1467,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
         ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
-        ("phase_budget_explore_pct", PHASE_EXPLORE),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
@@ -1995,22 +1978,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             else:
                 print(
                     f"  framework phase       : WARN --no-framework-agent ignored; "
-                    f"session is already in phase={cur_phase!r} "
-                    f"(cannot retroactively skip)"
-                )
-        # Same persistence contract for the EXPLORE phase toggle.
-        if not bool(getattr(state, "explore_enabled", True)):
-            args.no_explore = True
-            print("  explore phase         : DISABLED (persisted from original run)")
-        elif bool(getattr(args, "no_explore", False)):
-            # Honour --no-explore on resume only before EXPLORE is entered.
-            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if _resume_can_disable_explore(cur_phase):
-                state.explore_enabled = False
-                print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
-            else:
-                print(
-                    f"  explore phase         : WARN --no-explore ignored; "
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
                 )

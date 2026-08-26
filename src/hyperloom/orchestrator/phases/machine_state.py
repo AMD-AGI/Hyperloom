@@ -30,7 +30,6 @@ log = logging.getLogger(__name__)
 # Phase identifiers + ordering (monotonic chain)
 PHASE_PRELUDE = "PRELUDE"
 PHASE_FRAMEWORK_AGENT = "FRAMEWORK_AGENT"
-PHASE_EXPLORE = "EXPLORE"
 PHASE_KERNEL_AGENT = "KERNEL_AGENT"
 PHASE_SWEEP = "SWEEP"
 PHASE_CLOSE = "CLOSE"
@@ -38,7 +37,6 @@ PHASE_CLOSE = "CLOSE"
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
     PHASE_FRAMEWORK_AGENT,
-    PHASE_EXPLORE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     PHASE_CLOSE,
@@ -70,21 +68,15 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
+    # One optimisation phase, three levers: configuration grids (``explore``),
+    # investigation and authoring (``specialist``), and landing a patch from any
+    # source (``integrate_patch``). They were two phases while the phase was
+    # also the serialisation boundary; ``workspace_mutation`` is that boundary
+    # now, so the split bought nothing but a rotation the budget could not see.
     PHASE_FRAMEWORK_AGENT: frozenset(
-        {
-            # ``integrate_patch`` lands every patch source, upstream PRs included.
-            "integrate_patch",
-            "specialist",
-            "roofline",
-            "profile",
-            "recover",
-        }
-    ),
-    PHASE_EXPLORE: frozenset(
         {
             "explore",
             "specialist",
-            # Specialist source patches apply only through integrate_patch.
             "integrate_patch",
             # roofline/profile auto-enqueued on the cumulative-gain watermark.
             "roofline",
@@ -207,9 +199,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "prelude_done",
         "plateau_explore",
         "plateau_kernel",
-        "explore_phase_budget_exhausted",
+        "optimize_phase_budget_exhausted",
         "kernel_phase_budget_exhausted",
-        "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap
+        "optimize_budget_cap",  # OPTIMIZE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
@@ -218,13 +210,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
-        "explore_force_exit_low_budget",  # EXPLORE → next phase below operator force-exit thresholds
-        "explore_no_more_leverage",  # EXPLORE → KERNEL_AGENT (non-terminal): plateau / skip_to_sweep exhausts the explore lever
+        "optimize_force_exit_low_budget",  # OPTIMIZE → next phase below operator force-exit thresholds
+        "optimize_no_more_leverage",  # OPTIMIZE → KERNEL_AGENT (non-terminal): both arms plateaued, or skip_to_sweep
         "kernel_no_more_leverage",  # KERNEL_AGENT → SWEEP (non-terminal) via skip_to_sweep
-        # FRAMEWORK_AGENT phase transitions.
-        "framework_agent_phase_done",  # FRAMEWORK_AGENT → EXPLORE normal completion (no more candidates)
-        "framework_agent_plateau",  # FRAMEWORK_AGENT → EXPLORE; N consecutive resolved candidates with no KEEP (benchmarked or not)
-        "framework_agent_budget_cap",  # FRAMEWORK_AGENT → EXPLORE; per-phase wall-clock budget fraction reached
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
         "cycle_reloop",  # SWEEP → FRAMEWORK/EXPLORE; opens a new macro-cycle while budget + leverage remain
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
@@ -346,11 +334,11 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
-    # FRAMEWORK self-caps so it does not monopolise the run. The larger share
-    # (vs. the historical 0.15) funds the local-exploration arm, which authors
-    # source patches when PR discovery is empty instead of skipping the phase.
-    PHASE_FRAMEWORK_AGENT: 0.20,
-    PHASE_EXPLORE: 0.35,
+    # The merged optimisation phase carries what FRAMEWORK (0.20) and EXPLORE
+    # (0.35) held separately. Their separate caps used to rotate the lever when
+    # one overran; that rotation is now the arms' own plateau judgement, because
+    # a wall-clock cap cannot tell a productive arm from a stuck one.
+    PHASE_FRAMEWORK_AGENT: 0.55,
     PHASE_KERNEL_AGENT: 0.35,
     PHASE_SWEEP: 0.05,
     PHASE_CLOSE: 0.02,
@@ -804,7 +792,7 @@ def normalize_budget_pct(
 def redistribute_budget_pct(
     base: dict[str, float],
     *,
-    explore_enabled: bool = True,
+    optimize_enabled: bool = True,
     kernel_enabled: bool = True,
     framework_enabled: bool = False,
 ) -> dict[str, float]:
@@ -820,7 +808,7 @@ def redistribute_budget_pct(
     Args:
         base (dict[str, float]): A ``phase -> pct`` map, already sanitized by
             :func:`normalize_budget_pct`.
-        explore_enabled (bool): Whether the EXPLORE phase runs.
+        optimize_enabled (bool): Whether the OPTIMIZE (FRAMEWORK_AGENT) phase runs.
         kernel_enabled (bool): Whether the KERNEL_AGENT phase runs.
         framework_enabled (bool): Whether the FRAMEWORK_AGENT phase runs.
 
@@ -830,8 +818,8 @@ def redistribute_budget_pct(
     """
     out = dict(base)
     disabled: list[str] = []
-    if not explore_enabled:
-        disabled.append(PHASE_EXPLORE)
+    if not optimize_enabled:
+        disabled.append(PHASE_FRAMEWORK_AGENT)
     if not kernel_enabled:
         disabled.append(PHASE_KERNEL_AGENT)
     if not framework_enabled:
@@ -841,9 +829,7 @@ def redistribute_budget_pct(
         out[p] = 0.0
     if freed <= 0.0:
         return out
-    absorbers = [
-        p for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP) if p not in disabled
-    ]
+    absorbers = [p for p in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP) if p not in disabled]
     weight = sum(float(out.get(p, 0.0)) for p in absorbers)
     if weight > 0.0:
         for p in absorbers:
@@ -1144,7 +1130,7 @@ def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> flo
         accumulated = float(raw_accumulated or 0.0)
     except (TypeError, ValueError):
         return None
-    if (getattr(state, "phase", "") or "").strip().upper() == PHASE_EXPLORE:
+    if (getattr(state, "phase", "") or "").strip().upper() == PHASE_FRAMEWORK_AGENT:
         accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
     return max(0.0, accumulated)
 
@@ -1393,16 +1379,16 @@ def session_remaining_seconds(
     return max(0.0, mm * 60.0 - elapsed_sec)
 
 
-def should_force_exit_explore(
+def should_force_exit_optimize(
     state: Any,
     *,
     budget_pct_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Return ``(True, evidence)`` when HARD EXPLORE force-exit fires.
+    """Return ``(True, evidence)`` when the HARD optimisation force-exit fires.
 
-    Fires when the unspent fraction of EXPLORE's own charge-back budget drops
+    Fires when the unspent fraction of the phase's charge-back budget drops
     to ``budget_pct_threshold`` or below. A freshly entered phase always reads
     1.0, however little of the session is left.
 
@@ -2489,104 +2475,6 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
-def exit_normal_explore(
-    state: Any,
-    *,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-    plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-) -> tuple[str, dict[str, Any]] | None:
-    """EXPLORE normal exit.
-
-    Priority: 0. HARD force-exit (IR-6, overrides plateau); 1. ``skip_to_kernel``
-    → ``plateau_explore``; 2. ``skip_to_sweep`` / detected plateau →
-    ``explore_no_more_leverage`` (non-terminal; routes to KERNEL to switch
-    lever); 3. phase budget exhausted.
-
-    Args:
-        state (Any): Frozen SharedState view.
-        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
-            to ``state.phase_budget_pct`` when None.
-        now_unix (float | None): Override for the current time.
-        plateau_lookback: Number of EXPLORE KEEP results to inspect.
-        plateau_keep_gain_threshold_pct: Cumulative KEEP-gain threshold below
-            which the plateau gain arm is active.
-        plateau_empty_streak_threshold: Consecutive empty specialist rounds
-            required for the plateau streak arm.
-        force_exit_budget_pct (float): Phase-budget-fraction force-exit
-            threshold.
-
-    Returns:
-        tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the EXPLORE
-        exit, or ``None`` when EXPLORE should continue.
-    """
-    forced, force_ev = should_force_exit_explore(
-        state,
-        budget_pct_threshold=force_exit_budget_pct,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if forced:
-        return "explore_force_exit_low_budget", {
-            "evidence": "force_exit",
-            **force_ev,
-        }
-
-    hint = _pending_escalate_hint(state)
-    if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
-        # A skip_to_kernel hint that arrives before EXPLORE has actually
-        # dispatched a specialist round this cycle must not end the phase
-        # with zero validated work (the direct cause of a prior
-        # cumulative_gain_validated=0.00% session) -- leave it pending so it
-        # fires once a round has actually run, instead of honoring it
-        # unconditionally ahead of compute_plateau_explore's own evidence
-        # requirement.
-        if _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state):
-            return "plateau_explore", {
-                "evidence": "llm_escalation",
-                "hint": hint,
-            }
-    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
-        return "explore_no_more_leverage", {
-            "evidence": "explore_no_more_leverage",
-            "hint": hint,
-        }
-    # A detected EXPLORE plateau is not terminal: switch lever (→ KERNEL_AGENT)
-    # and flag that the next macro-cycle should steer off the bottleneck.
-    plateaued, plateau_ev = compute_plateau_explore(
-        state,
-        lookback=plateau_lookback,
-        keep_gain_threshold_pct=plateau_keep_gain_threshold_pct,
-        empty_streak_threshold=plateau_empty_streak_threshold,
-    )
-    if plateaued:
-        return "explore_no_more_leverage", {
-            "evidence": "plateau_explore",
-            "plateau": True,
-            "switch_bottleneck": True,
-            **plateau_ev,
-        }
-    remaining = phase_budget_remaining_seconds(
-        state,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
-    if remaining is not None and remaining <= 0:
-        return "explore_phase_budget_exhausted", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        return "explore_budget_cap", {
-            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-        }
-    return None
-
-
 def exit_normal_kernel(
     state: Any,
     *,
@@ -2831,79 +2719,130 @@ def framework_agent_plateau_streak_threshold() -> int:
     return DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
-def exit_normal_framework_agent(
-    state: Any,
-    *,
-    now_unix: float | None = None,
-    budget_pct: dict[str, float] | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """FRAMEWORK normal exit.
-
-    Priority: 0. per-phase budget cap reached → ``framework_agent_budget_cap``;
-    1. plateau when :func:`framework_agent_consecutive_no_keep` ≥ threshold →
-    ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else
-    ``None``.
+def source_arm_plateaued(state: Any) -> tuple[bool, dict[str, Any]]:
+    """Whether the source arm (candidates, authored patches) has run dry.
 
     Args:
-        state (Any): Frozen SharedState view; may expose a
-            ``framework_agent_phase_done`` flag.
-        now_unix (float | None): Override for the current time.
-        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
-            to ``state.phase_budget_pct``. Enables the per-phase wall-clock cap.
+        state (Any): Frozen SharedState view.
 
     Returns:
-        tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the
-        FRAMEWORK exit, or ``None`` when the phase should continue.
+        tuple[bool, dict[str, Any]]: ``(plateaued, evidence)``.
     """
-    # Per-phase wall-clock budget cap: rotate to EXPLORE once the phase has
-    # burned its share so it cannot monopolise the run.
-    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
-        cap = phase_cap_seconds(state, budget_pct=budget_pct)
-        return "framework_agent_budget_cap", {
-            "evidence": "phase_budget_cap",
-            "phase_cap_seconds": cap,
-            "phase_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
-            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
-            "pending_candidate_count": _framework_agent_pending_candidate_count(state),
-        }
-
-    # Per-candidate plateau: N consecutive resolved candidates with no KEEP means
-    # the current batch is not yielding leverage — exit to EXPLORE rather than
-    # grind through the remaining candidates.
     streak = framework_agent_consecutive_no_keep(state)
     threshold = framework_agent_plateau_streak_threshold()
-    if streak >= threshold:
-        return "framework_agent_plateau", {
-            "evidence": "consecutive_no_keep",
-            "consecutive_no_keep": streak,
-            "threshold": threshold,
-            "pending_candidate_count": _framework_agent_pending_candidate_count(state),
-        }
+    exhausted = bool(getattr(state, "framework_agent_phase_done", False))
+    evidence = {
+        "source_consecutive_no_keep": streak,
+        "source_threshold": threshold,
+        "source_candidates_exhausted": exhausted,
+    }
+    return (streak >= threshold or exhausted), evidence
 
-    batches = getattr(state, "framework_agent_batches", None) or []
-    if bool(getattr(state, "framework_agent_phase_done", False)):
-        return "framework_agent_phase_done", {
-            "evidence": "no_more_candidates",
-            "batch_count": len(batches) if isinstance(batches, list) else 0,
-        }
 
+def exit_normal_optimize(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+    plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+    plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+    force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
+) -> tuple[str, dict[str, Any]] | None:
+    """OPTIMIZE normal exit.
+
+    The phase carries two arms — configuration search and source/upstream
+    landing — and leaves only when **both** have run dry. A single arm going
+    quiet is a reason to switch levers inside the phase, not to abandon the
+    other one: that is what the two separate phases got wrong, because a
+    wall-clock cap rotated the lever whether or not the arm was still paying.
+
+    ``switch_bottleneck`` rides out whenever either arm plateaued, so the next
+    macro-cycle steers off the bottleneck this one exhausted.
+
+    Priority: 0. IR-6 force exit; 1. an explicit escalate hint; 2. both arms
+    plateaued; 3. phase budget exhausted; 4. absolute phase cap.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides.
+        now_unix (float | None): Override for the current time.
+        plateau_lookback (int): Config-arm trailing rounds inspected.
+        plateau_keep_gain_threshold_pct (float): Config-arm KEEP-gain floor.
+        plateau_empty_streak_threshold (int): Config-arm empty-round streak.
+        force_exit_budget_pct (float): IR-6 remaining-budget fraction.
+
+    Returns:
+        tuple[str, dict[str, Any]] | None: ``(reason, evidence)``, or ``None``
+        when the phase should continue.
+    """
+    forced, force_ev = should_force_exit_optimize(
+        state,
+        budget_pct_threshold=force_exit_budget_pct,
+        budget_pct=budget_pct,
+        now_unix=now_unix,
+    )
+    source_dry, source_ev = source_arm_plateaued(state)
+    config_dry, config_ev = compute_plateau_explore(
+        state,
+        lookback=plateau_lookback,
+        keep_gain_threshold_pct=plateau_keep_gain_threshold_pct,
+        empty_streak_threshold=plateau_empty_streak_threshold,
+    )
+    arms = {
+        **source_ev,
+        **config_ev,
+        "source_arm_plateaued": source_dry,
+        "config_arm_plateaued": config_dry,
+        # Either arm running dry is enough to redirect the next cycle.
+        "switch_bottleneck": bool(source_dry or config_dry),
+    }
+
+    if forced:
+        return "optimize_force_exit_low_budget", {**arms, **force_ev, "evidence": "force_exit"}
+
+    hint = str(getattr(state, "pending_escalate_hint", "") or "").strip()
+    if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
+        # Honoured only once a specialist round has actually run this cycle: a
+        # phase that dispatched nothing must not end with zero validated work.
+        if _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state):
+            return "plateau_explore", {**arms, "evidence": "llm_escalation", "hint": hint}
+    if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
+        return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
+
+    if source_dry and config_dry:
+        return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
+
+    remaining = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    if remaining is not None and remaining <= 0:
+        return "optimize_phase_budget_exhausted", {
+            **arms,
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
+        }
+    if phase_cap_exceeded(state, budget_pct=budget_pct, now_unix=now_unix):
+        return "optimize_budget_cap", {
+            **arms,
+            "entry_elapsed_seconds": phase_elapsed_seconds(state, now_unix=now_unix),
+            "cumulative_elapsed_seconds": phase_cumulative_seconds(state, now_unix=now_unix),
+        }
     return None
 
 
-def _post_prelude_target(*, explore_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE / FRAMEWORK: EXPLORE, else KERNEL,
-    else SWEEP (``--no-explore`` / ``--no-kernel`` collapse the chain).
+def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
+    """First active phase after PRELUDE: OPTIMIZE, else KERNEL, else SWEEP
+    (``--no-framework-agent`` / ``--no-kernel`` collapse the chain).
 
     Args:
-        explore_enabled (bool): Whether the EXPLORE phase is enabled.
+        optimize_enabled (bool): Whether the OPTIMIZE phase is enabled.
         kernel_enabled (bool): Whether the KERNEL_AGENT phase is enabled.
 
     Returns:
-        str: ``PHASE_EXPLORE``, ``PHASE_KERNEL_AGENT``, or ``PHASE_SWEEP`` depending on
+        str: ``PHASE_FRAMEWORK_AGENT``, ``PHASE_KERNEL_AGENT``, or ``PHASE_SWEEP`` depending on
         which phases are enabled.
     """
-    if explore_enabled:
-        return PHASE_EXPLORE
+    if optimize_enabled:
+        return PHASE_FRAMEWORK_AGENT
     if kernel_enabled:
         return PHASE_KERNEL_AGENT
     return PHASE_SWEEP
@@ -2915,8 +2854,7 @@ def compute_next_phase(
     kernel_enabled: bool = True,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
-    framework_agent_phase_enabled: bool = False,
-    explore_enabled: bool = True,
+    optimize_enabled: bool = True,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
@@ -2929,9 +2867,8 @@ def compute_next_phase(
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
-        framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase runs
             after PRELUDE.
-        explore_enabled (bool): Whether the EXPLORE phase is enabled.
+        optimize_enabled (bool): Whether the OPTIMIZE phase is enabled.
 
     Returns:
         tuple[str, str, dict[str, Any]] | None: ``(next_phase, reason,
@@ -2968,80 +2905,43 @@ def compute_next_phase(
             if exhausted is not None:
                 return PHASE_CLOSE, exhausted[0], {"terminal": True, **exhausted[1]}
         if norm is not None:
-            if framework_agent_phase_enabled:
-                return PHASE_FRAMEWORK_AGENT, norm[0], norm[1]
-            # Framework off → first active phase; ``explore_skipped`` stamped
-            # when EXPLORE is bypassed.
             target = _post_prelude_target(
-                explore_enabled=explore_enabled,
+                optimize_enabled=optimize_enabled,
                 kernel_enabled=kernel_enabled,
             )
             evidence = dict(norm[1])
-            if target != PHASE_EXPLORE:
-                evidence["explore_skipped"] = True
+            if target != PHASE_FRAMEWORK_AGENT:
+                evidence["optimize_skipped"] = True
             return target, norm[0], evidence
         return None
 
     if current == PHASE_FRAMEWORK_AGENT:
-        norm = exit_normal_framework_agent(
-            state,
-            now_unix=now_unix,
-            budget_pct=budget_pct,
-        )
-        if norm is not None:
-            # FRAMEWORK_AGENT → EXPLORE (or KERNEL/SWEEP when collapsed).
-            target = _post_prelude_target(
-                explore_enabled=explore_enabled,
-                kernel_enabled=kernel_enabled,
-            )
-            evidence = dict(norm[1])
-            if target != PHASE_EXPLORE:
-                evidence["explore_skipped"] = True
-            return target, norm[0], evidence
-        return None
-
-    if current == PHASE_EXPLORE:
-        norm = exit_normal_explore(
+        norm = exit_normal_optimize(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
             plateau_lookback=int(
-                overrides.get(
-                    "explore_lookback",
-                    DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-                )
+                overrides.get("explore_lookback", DEFAULT_PLATEAU_EXPLORE_LOOKBACK),
             ),
             plateau_keep_gain_threshold_pct=float(
-                overrides.get(
-                    "explore_keep_gain_pct",
-                    DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-                )
+                overrides.get("explore_keep_gain_pct", DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT),
             ),
             plateau_empty_streak_threshold=int(
-                overrides.get(
-                    "explore_empty_streak",
-                    DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-                )
+                overrides.get("explore_empty_streak", DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK),
             ),
             force_exit_budget_pct=float(
-                overrides.get(
-                    "force_exit_budget_pct",
-                    DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-                )
+                overrides.get("force_exit_budget_pct", DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT),
             ),
         )
         if norm is not None:
-            # Exhausted EXPLORE leverage is not terminal: advance to KERNEL;
-            # only when KERNEL is disabled does EXPLORE wind down to SWEEP.
+            # Exhausted optimisation leverage is not terminal: switch lever and
+            # advance to KERNEL; only with KERNEL disabled does it wind down.
             if kernel_enabled:
                 return PHASE_KERNEL_AGENT, norm[0], norm[1]
             return (
                 PHASE_SWEEP,
                 "no_kernel_skipped",
-                {
-                    "passed_through_reason": norm[0],
-                    **norm[1],
-                },
+                {"passed_through_reason": norm[0], **norm[1]},
             )
         return None
 
@@ -3067,10 +2967,10 @@ def compute_next_phase(
             # and the run hasn't globally converged (R7); wind down to CLOSE
             # only when reloop is blocked (budget, convergence, or max_cycles).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
-            if reloop and (framework_agent_phase_enabled or explore_enabled):
+            if reloop and optimize_enabled:
                 # Reloop to the highest-leverage layer available: FRAMEWORK when
                 # enabled, else EXPLORE.
-                reloop_target = PHASE_FRAMEWORK_AGENT if framework_agent_phase_enabled else PHASE_EXPLORE
+                reloop_target = PHASE_FRAMEWORK_AGENT
                 return (
                     reloop_target,
                     "cycle_reloop",
@@ -3164,8 +3064,7 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
 # Human-friendly labels for the six coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
-    PHASE_FRAMEWORK_AGENT: "Framework",
-    PHASE_EXPLORE: "Explore (params / backends)",
+    PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",
     PHASE_KERNEL_AGENT: "Kernel optimization",
     PHASE_SWEEP: "Concurrency sweep",
     PHASE_CLOSE: "Close (report)",
@@ -3300,7 +3199,7 @@ def bank_phase_segment(state, *, until_unix: float) -> float:
     # legacy resumes that status telemetry reports as absent, whereas
     # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
     # would read that as "no cap". The two answer different questions.
-    if phase == PHASE_EXPLORE:
+    if phase == PHASE_FRAMEWORK_AGENT:
         raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
         if raw_accumulated is not None:
             try:
@@ -3538,7 +3437,6 @@ __all__ = [
     "PHASE_LLM_PROPOSABLE_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
-    "PHASE_EXPLORE",
     "PHASE_FRAMEWORK_AGENT",
     "PHASE_HUMAN_LABELS",
     "PHASE_INDEX",
@@ -3565,8 +3463,8 @@ __all__ = [
     "framework_agent_consecutive_no_keep",
     "framework_agent_plateau_streak_threshold",
     "compute_plateau_kernel",
-    "exit_normal_explore",
-    "exit_normal_framework_agent",
+    "exit_normal_optimize",
+    "source_arm_plateaued",
     "exit_normal_kernel",
     "exit_cold_anchor_prelude",
     "exit_normal_prelude",
@@ -3604,6 +3502,6 @@ __all__ = [
     "phase_elapsed_totals_from_history",
     "phase_index",
     "session_remaining_seconds",
-    "should_force_exit_explore",
+    "should_force_exit_optimize",
     "warm_replay_in_flight",
 ]

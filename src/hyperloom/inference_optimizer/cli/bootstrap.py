@@ -412,12 +412,13 @@ def _seed_shared_state(
             getattr(args, "enable_roofline", True),
         ),
         # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it.
-        framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
+        framework_agent_phase_enabled=not (
+            bool(getattr(args, "no_framework_agent", False)) or bool(getattr(args, "no_explore", False))
+        ),
         # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        explore_enabled=not bool(getattr(args, "no_explore", False)),
         # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
         # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
         # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``

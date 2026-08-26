@@ -555,7 +555,7 @@ class ConversationCollaborator:
                 if denial_summary:
                     sections.append(denial_summary)
             # Outside the SEED gate: a queue seen once is the amnesia it fixes.
-            if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_EXPLORE:
+            if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
                 untested_block = self.shared_state.to_untested_proposals_summary()
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
@@ -865,37 +865,45 @@ class ConversationCollaborator:
         if not isinstance(overrides, dict):
             overrides = {}
         lines: list[str] = []
-        if phase == _phase_state.PHASE_EXPLORE:
-            triggered, evidence = _phase_state.compute_plateau_explore(
+        if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
+            # Both arms, always: the phase leaves only when both are dry, so
+            # reporting one alone would say "plateau" about a phase that is
+            # still paying on the other lever.
+            config_dry, config_ev = _phase_state.compute_plateau_explore(
                 state,
                 lookback=int(
-                    overrides.get(
-                        "explore_lookback",
-                        _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
-                    )
+                    overrides.get("explore_lookback", _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK),
                 ),
                 keep_gain_threshold_pct=float(
-                    overrides.get(
-                        "explore_keep_gain_pct",
-                        _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-                    )
+                    overrides.get("explore_keep_gain_pct", _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT),
                 ),
                 empty_streak_threshold=int(
-                    overrides.get(
-                        "explore_empty_streak",
-                        _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-                    )
+                    overrides.get("explore_empty_streak", _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK),
                 ),
             )
-            if triggered:
-                lines.append("EXPLORE plateau detected: low recent KEEP gain plus specialist empty streak.")
+            source_dry, source_ev = _phase_state.source_arm_plateaued(state)
+            if config_dry:
+                lines.append("OPTIMIZE config arm plateaued: low recent KEEP gain plus specialist empty streak.")
                 lines.append(
                     "  recent_keep_gain_pct="
-                    f"{evidence.get('recent_keep_gain_pct', 0.0)} "
-                    f"threshold={evidence.get('keep_gain_threshold_pct', 0.0)} "
-                    f"empty_streak={evidence.get('empty_streak', 0)} "
-                    f"streak_threshold={evidence.get('empty_streak_threshold', 0)}"
+                    f"{config_ev.get('recent_keep_gain_pct', 0.0)} "
+                    f"threshold={config_ev.get('keep_gain_threshold_pct', 0.0)} "
+                    f"empty_streak={config_ev.get('empty_streak', 0)} "
+                    f"streak_threshold={config_ev.get('empty_streak_threshold', 0)}"
                 )
+            streak = int(source_ev.get("source_consecutive_no_keep", 0) or 0)
+            if source_dry:
+                lines.append("OPTIMIZE source arm plateaued: candidates exhausted or no KEEP on the trailing ones.")
+            elif streak > 0:
+                lines.append("OPTIMIZE source arm approaching plateau: no KEEP on the trailing candidates.")
+            if source_dry or streak > 0:
+                lines.append(
+                    f"  consecutive_no_keep={streak} "
+                    f"threshold={source_ev.get('source_threshold', 0)} "
+                    f"candidates_exhausted={source_ev.get('source_candidates_exhausted', False)}"
+                )
+            if lines and not (config_dry and source_dry):
+                lines.append("  Only one arm is dry: the other lever is still live, and the phase stays open.")
         elif phase == _phase_state.PHASE_KERNEL_AGENT:
             triggered, evidence = _phase_state.compute_plateau_kernel(
                 state,
@@ -927,35 +935,16 @@ class ConversationCollaborator:
                     f"recent_keep_gain_pct={evidence.get('recent_keep_gain_pct', 0.0)} "
                     f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
                 )
-        elif phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            # Render the judge that actually ends the phase. The advisory used to
-            # report a batch-max-gain plateau the exit path never consulted, so
-            # the model was told one thing and rotated out by another.
-            streak = _phase_state.framework_agent_consecutive_no_keep(state)
-            threshold = _phase_state.framework_agent_plateau_streak_threshold()
-            if streak >= threshold:
-                lines.append("FRAMEWORK_AGENT plateau reached: consecutive resolved candidates without a KEEP.")
-            elif streak > 0:
-                lines.append("FRAMEWORK_AGENT plateau approaching: no KEEP on the trailing candidates.")
-            if streak > 0:
-                lines.append(f"  consecutive_no_keep={streak} threshold={threshold}")
         if not lines:
             return ""
-        if phase == _phase_state.PHASE_EXPLORE:
+        if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
             lines.append(
-                "Note: in cyclic mode a detected EXPLORE plateau "
-                "deterministically advances EXPLORE → KERNEL_AGENT (non-terminal "
-                "lever switch, reason=explore_no_more_leverage); it does not "
-                "end the run. You may still request an earlier advance with an "
-                "escalate_strategy_change hint, or keep exploring until the "
-                "plateau/budget gate fires."
-            )
-        elif phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            lines.append(
-                "Note: reaching the consecutive-no-KEEP threshold deterministically "
-                "advances FRAMEWORK_AGENT → EXPLORE (reason=framework_agent_plateau). "
-                "This phase reads no escalate_strategy_change hint; it also exits on "
-                "discover-exhaustion and on the per-phase budget cap."
+                "Note: OPTIMIZE advances to KERNEL_AGENT only when BOTH arms are dry "
+                "(reason=optimize_no_more_leverage) -- a non-terminal lever switch, not "
+                "the end of the run. Either arm going quiet also flags the next "
+                "macro-cycle to steer off this bottleneck. You may request an earlier "
+                "advance with an escalate_strategy_change hint, or keep working the live "
+                "arm until the plateau / budget gate fires."
             )
         else:
             lines.append(
@@ -993,7 +982,7 @@ class ConversationCollaborator:
             applicable.
         """
         state = self.shared_state
-        if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_EXPLORE:
+        if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return ""
         sat = getattr(state, "saturated_directions", {}) or {}
         saturated = {
