@@ -404,9 +404,6 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 # share, so no session-remaining floor belongs beside it.
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
-# FRAMEWORK plateau knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT.
-DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 5
-DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 import os as _os_env  # noqa: E402
 
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved
@@ -2732,95 +2729,6 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
-def _framework_batch_is_complete(
-    batch: dict[str, Any],
-    progress_by_batch: dict[str, int],
-) -> bool:
-    """A FRAMEWORK batch is complete iff every candidate has a terminal-status row in ``framework_agent_phase_progress`` (guards the plateau judge).
-
-    Args:
-        batch (dict[str, Any]): A FRAMEWORK batch carrying ``candidates`` and
-            ``batch_id``.
-        progress_by_batch (dict[str, int]): Per-batch count of recorded progress
-            rows, keyed by batch id.
-
-    Returns:
-        bool: True when every candidate in the batch has a progress row (or the
-        batch has no candidates).
-    """
-    candidates = batch.get("candidates") or []
-    if not isinstance(candidates, list) or not candidates:
-        return True
-    total = sum(1 for c in candidates if isinstance(c, dict))
-    if total == 0:
-        return True
-    batch_id = str(batch.get("batch_id") or "")
-    processed = int(progress_by_batch.get(batch_id, 0))
-    return processed >= total
-
-
-def compute_plateau_framework_agent(
-    state: Any,
-    *,
-    lookback: int = DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK,
-    keep_gain_threshold_pct: float = DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT,
-) -> tuple[bool, dict[str, Any]]:
-    """Pure plateau judgment for FRAMEWORK_AGENT → ``(triggered, evidence)``.
-
-    Triggers when the last ``lookback`` fully-processed batches each carry
-    ``max_gain_pct_observed_in_batch < keep_gain_threshold_pct``. Advisory-only.
-
-    Args:
-        state (Any): Frozen SharedState view exposing ``framework_agent_batches``
-            and ``framework_agent_phase_progress``.
-        lookback (int): Number of fully-processed trailing batches to inspect;
-            non-positive disables the judgment.
-        keep_gain_threshold_pct (float): Per-batch max-gain floor each batch
-            must fall below to trip the plateau.
-
-    Returns:
-        tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
-        plateau fired, and the supporting evidence map.
-    """
-    batches = _rows_for_current_cycle(getattr(state, "framework_agent_batches", None) or [], state)
-    lookback_int = int(lookback or 0)
-    base_evidence = {
-        "lookback": lookback_int,
-        "keep_gain_pct_threshold": float(keep_gain_threshold_pct),
-        "batch_max_gains": [],
-    }
-    if not isinstance(batches, list) or lookback_int <= 0 or len(batches) < lookback_int:
-        return False, base_evidence
-    progress = _rows_for_current_cycle(getattr(state, "framework_agent_phase_progress", None) or [], state)
-    progress_by_batch: dict[str, int] = {}
-    for row in progress:
-        if isinstance(row, dict):
-            bid = str(row.get("batch_id") or "")
-            progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
-    complete_tail: list[dict[str, Any]] = []
-    for entry in reversed(batches):
-        if not isinstance(entry, dict):
-            continue
-        if _framework_batch_is_complete(entry, progress_by_batch):
-            complete_tail.append(entry)
-            if len(complete_tail) >= lookback_int:
-                break
-    if len(complete_tail) < lookback_int:
-        return False, base_evidence
-    max_gains: list[float] = []
-    for entry in complete_tail:
-        try:
-            max_gains.append(float(entry.get("max_gain_pct_observed_in_batch") or 0.0))
-        except (TypeError, ValueError):
-            max_gains.append(0.0)
-    triggered = bool(max_gains) and all(g < float(keep_gain_threshold_pct) for g in max_gains)
-    return triggered, {
-        "lookback": lookback_int,
-        "keep_gain_pct_threshold": float(keep_gain_threshold_pct),
-        "batch_max_gains": list(reversed(max_gains)),
-    }
-
-
 def _framework_agent_pending_candidate_count(state: Any) -> int:
     """Count candidates discovered into a batch but missing a progress row.
 
@@ -2860,7 +2768,7 @@ def _framework_agent_pending_candidate_count(state: Any) -> int:
 _FRAMEWORK_DISPATCH_FAILED_STATUS = "dispatch_failed"
 
 
-def _framework_agent_consecutive_no_keep(state: Any) -> int:
+def framework_agent_consecutive_no_keep(state: Any) -> int:
     """Count trailing consecutive resolved candidates that did not KEEP.
 
     Walks ``framework_agent_phase_progress`` newest-first: a KEEP row breaks the
@@ -2904,7 +2812,7 @@ def _framework_agent_consecutive_no_keep(state: Any) -> int:
     return count
 
 
-def _framework_agent_plateau_streak_threshold() -> int:
+def framework_agent_plateau_streak_threshold() -> int:
     """Resolve the consecutive-no-keep plateau threshold."""
     return DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
@@ -2918,7 +2826,7 @@ def exit_normal_framework_agent(
     """FRAMEWORK normal exit.
 
     Priority: 0. per-phase budget cap reached → ``framework_agent_budget_cap``;
-    1. plateau when :func:`_framework_agent_consecutive_no_keep` ≥ threshold →
+    1. plateau when :func:`framework_agent_consecutive_no_keep` ≥ threshold →
     ``framework_agent_plateau``; 2. ``framework_agent_phase_done``; else
     ``None``.
 
@@ -2948,8 +2856,8 @@ def exit_normal_framework_agent(
     # Per-candidate plateau: N consecutive resolved candidates with no KEEP means
     # the current batch is not yielding leverage — exit to EXPLORE rather than
     # grind through the remaining candidates.
-    streak = _framework_agent_consecutive_no_keep(state)
-    threshold = _framework_agent_plateau_streak_threshold()
+    streak = framework_agent_consecutive_no_keep(state)
+    threshold = framework_agent_plateau_streak_threshold()
     if streak >= threshold:
         return "framework_agent_plateau", {
             "evidence": "consecutive_no_keep",
@@ -3627,8 +3535,6 @@ __all__ = [
     "STOP_REASON_VOCAB",
     "lifecycle_label",
     "make_lifecycle_event",
-    "DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK",
-    "DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT",
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
@@ -3642,7 +3548,8 @@ __all__ = [
     "bank_phase_segment",
     "compute_next_phase",
     "compute_plateau_explore",
-    "compute_plateau_framework_agent",
+    "framework_agent_consecutive_no_keep",
+    "framework_agent_plateau_streak_threshold",
     "compute_plateau_kernel",
     "exit_normal_explore",
     "exit_normal_framework_agent",

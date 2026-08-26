@@ -928,29 +928,17 @@ class ConversationCollaborator:
                     f"keep_gain_threshold_pct={evidence.get('keep_gain_threshold_pct', 0.0)}"
                 )
         elif phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            triggered, evidence = _phase_state.compute_plateau_framework_agent(
-                state,
-                lookback=int(
-                    overrides.get(
-                        "framework_lookback",
-                        _phase_state.DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK,
-                    )
-                ),
-                keep_gain_threshold_pct=float(
-                    overrides.get(
-                        "framework_keep_gain_pct",
-                        _phase_state.DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT,
-                    )
-                ),
-            )
-            if triggered:
-                lines.append("FRAMEWORK_AGENT plateau detected: recent batches all below keep-gain threshold.")
-                lines.append(
-                    "  lookback="
-                    f"{evidence.get('lookback', 0)} "
-                    f"keep_gain_pct_threshold={evidence.get('keep_gain_pct_threshold', 0.0)} "
-                    f"batch_max_gains={evidence.get('batch_max_gains', [])}"
-                )
+            # Render the judge that actually ends the phase. The advisory used to
+            # report a batch-max-gain plateau the exit path never consulted, so
+            # the model was told one thing and rotated out by another.
+            streak = _phase_state.framework_agent_consecutive_no_keep(state)
+            threshold = _phase_state.framework_agent_plateau_streak_threshold()
+            if streak >= threshold:
+                lines.append("FRAMEWORK_AGENT plateau reached: consecutive resolved candidates without a KEEP.")
+            elif streak > 0:
+                lines.append("FRAMEWORK_AGENT plateau approaching: no KEEP on the trailing candidates.")
+            if streak > 0:
+                lines.append(f"  consecutive_no_keep={streak} threshold={threshold}")
         if not lines:
             return ""
         if phase == _phase_state.PHASE_EXPLORE:
@@ -961,6 +949,13 @@ class ConversationCollaborator:
                 "end the run. You may still request an earlier advance with an "
                 "escalate_strategy_change hint, or keep exploring until the "
                 "plateau/budget gate fires."
+            )
+        elif phase == _phase_state.PHASE_FRAMEWORK_AGENT:
+            lines.append(
+                "Note: reaching the consecutive-no-KEEP threshold deterministically "
+                "advances FRAMEWORK_AGENT → EXPLORE (reason=framework_agent_plateau). "
+                "This phase reads no escalate_strategy_change hint; it also exits on "
+                "discover-exhaustion and on the per-phase budget cap."
             )
         else:
             lines.append(
