@@ -135,8 +135,8 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
+    # One switch for the one phase; --no-explore is its legacy spelling.
     assert state.framework_agent_phase_enabled is False
-    assert state.explore_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
     assert state.conc_sweep_variant_timeout_sec == 30
