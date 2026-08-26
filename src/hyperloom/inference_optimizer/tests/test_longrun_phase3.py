@@ -282,7 +282,7 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
     updated = await c.tasks.get(queued.task_id)
     assert c.shared_state.phase == ps.PHASE_SWEEP
     assert updated.state == "cancelled"
-    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:EXPLORE->SWEEP"
+    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:FRAMEWORK_AGENT->SWEEP"
 
 
 @pytest.mark.asyncio

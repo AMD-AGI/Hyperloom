@@ -104,27 +104,6 @@ def test_build_working_memory_caps_tried_rows():
     assert mem["tried_and_why"][-1]["ref"] == f"PR:{cap + 4}"
 
 
-def test_render_memory_empty_returns_blank():
-    assert Coordinator._render_framework_memory_for_prompt(None) == ""
-    assert Coordinator._render_framework_memory_for_prompt({"tried_and_why": [], "learnings": []}) == ""
-
-
-def test_render_memory_lists_tried_and_learnings():
-    mem = {
-        "tried_and_why": [
-            {"ref": "PR:723", "status": "reverted", "gain_pct": 0.0, "why": "no-op on SD3 path"},
-            {"ref": "PR:1015", "status": "critic_denied", "gain_pct": None, "why": "wrong bottleneck"},
-        ],
-        "learnings": ["env-only fp8 levers are no-op"],
-    }
-    txt = Coordinator._render_framework_memory_for_prompt(mem)
-    assert "Already tried THIS session" in txt
-    assert "PR:723 [reverted] gain=+0.00% — no-op on SD3 path" in txt
-    assert "PR:1015 [critic_denied] — wrong bottleneck" in txt
-    assert "Learnings" in txt
-    assert "env-only fp8 levers are no-op" in txt
-
-
 class _FakeStream:
     def __init__(self, text: str) -> None:
         self._text = text
