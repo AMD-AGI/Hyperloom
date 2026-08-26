@@ -584,27 +584,27 @@ def test_match_framework_agent_candidate_by_id_and_pr_number(coord: Coordinator)
     assert coord._match_framework_agent_candidate("", cands) is None
 
 
-async def test_select_best_framework_agent_candidate_falls_back_to_linear(coord: Coordinator, monkeypatch) -> None:
+async def test_select_next_framework_agent_candidate_falls_back_to_linear(coord: Coordinator, monkeypatch) -> None:
     """With the ranker client unavailable, selection degrades to discovery order."""
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []
     # Force the ranker client to be unavailable.
     monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: None)
-    chosen = await coord._select_best_framework_agent_candidate()
+    chosen = await coord._select_next_framework_agent_candidate()
     assert chosen == {"candidate_id": "c1"}
 
 
-async def test_select_best_framework_agent_candidate_single(coord: Coordinator) -> None:
+async def test_select_next_framework_agent_candidate_single(coord: Coordinator) -> None:
     """A single unprocessed candidate is returned without invoking the ranker."""
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "only"}]}]
     ss.framework_agent_phase_progress = []
-    chosen = await coord._select_best_framework_agent_candidate()
+    chosen = await coord._select_next_framework_agent_candidate()
     assert chosen == {"candidate_id": "only"}
 
 
-async def test_select_best_framework_agent_candidate_uses_ranker_choice(coord: Coordinator, monkeypatch) -> None:
+async def test_select_next_framework_agent_candidate_uses_ranker_choice(coord: Coordinator, monkeypatch) -> None:
     """When the ranker returns a candidate, it is used over discovery order."""
     ss = coord.shared_state
     # Arm off so the ranking set is exactly the discovered PR candidates.
@@ -618,7 +618,7 @@ async def test_select_best_framework_agent_candidate_uses_ranker_choice(coord: C
         return cands[-1]  # pick the last → c3
 
     monkeypatch.setattr(coord.phase_framework, "_rank_framework_agent_candidates_llm", _fake_rank)
-    chosen = await coord._select_best_framework_agent_candidate()
+    chosen = await coord._select_next_framework_agent_candidate()
     assert chosen == {"candidate_id": "c3"}
 
 

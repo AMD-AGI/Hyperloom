@@ -436,7 +436,7 @@ def test_exit_terminal_prelude_after_three_baseline_failures():
     assert out is not None and out[0] == "prelude_baseline_failed"
 
 
-def test_exit_normal_explore_uses_budget_exhaustion():
+def test_exit_normal_optimize_uses_budget_exhaustion():
     # Elapsed exceeds budget; IR-6 force-exit disabled to isolate the budget path.
     state = SimpleNamespace(
         phase="EXPLORE",
@@ -448,7 +448,7 @@ def test_exit_normal_explore_uses_budget_exhaustion():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(
+    out = phase_state.exit_normal_optimize(
         state,
         force_exit_budget_pct=0.0,
     )
@@ -465,7 +465,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
         # At least one specialist round this cycle, required for skip_to_kernel
-        # to fire at all (see test_exit_normal_explore_skip_to_kernel_*).
+        # to fire at all (see test_exit_normal_optimize_skip_to_kernel_*).
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
@@ -477,7 +477,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     assert evidence.get("passed_through_reason") == "plateau_explore"
 
 
-def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
+def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
     """A skip_to_kernel hint must not end EXPLORE with zero validated work.
 
     Reproduces the cumulative_gain_validated=0.00% session: the hint arrived
@@ -496,14 +496,14 @@ def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(
+    out = phase_state.exit_normal_optimize(
         state,
         force_exit_budget_pct=0.0,
     )
     assert out is None
 
 
-def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
+def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=1_000_000.0,
@@ -516,7 +516,7 @@ def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(
+    out = phase_state.exit_normal_optimize(
         state,
         force_exit_budget_pct=0.0,
     )

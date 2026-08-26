@@ -33,7 +33,7 @@ def test_phase_budget_resplit_values_and_sum():
     """FRAMEWORK 20 / EXPLORE 35 / KERNEL 35 / SWEEP 5; the split still sums to 1.0."""
     b = _phase_state.DEFAULT_PHASE_BUDGET_PCT
     assert b[_phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(0.20)
-    assert b[_phase_state.PHASE_EXPLORE] == pytest.approx(0.35)
+    assert b[_phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(0.35)
     # KERNEL was raised 0.28 -> 0.35 (funded by SWEEP 0.12 -> 0.05) because
     # MI355X GEMM tuning pays a one-time ~20min JIT before any benchmarking.
     assert b[_phase_state.PHASE_KERNEL_AGENT] == pytest.approx(0.35)
@@ -158,7 +158,7 @@ class _Stub:
     _enqueue_framework_agent_local_explore_specialist = FrameworkPhase._enqueue_framework_agent_local_explore_specialist
     _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
     _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
-    _select_best_framework_agent_candidate = FrameworkPhase._select_best_framework_agent_candidate
+    _select_next_framework_agent_candidate = FrameworkPhase._select_next_framework_agent_candidate
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True, local_explore: bool = True) -> None:
         self.session_dir = tmp_path
@@ -326,7 +326,7 @@ def test_select_best_offers_local_explore_to_ranker(tmp_path: Path):
         return None
 
     stub._rank_framework_agent_candidates_llm = _rank  # type: ignore[assignment]
-    chosen = asyncio.run(stub._select_best_framework_agent_candidate())
+    chosen = asyncio.run(stub._select_next_framework_agent_candidate())
     # Ranker saw both the real PR and the local-explore pseudo-candidate.
     assert "pr1" in seen["ids"]
     assert "local_explore:0" in seen["ids"]
@@ -336,7 +336,7 @@ def test_select_best_offers_local_explore_to_ranker(tmp_path: Path):
 def test_select_best_no_pseudo_when_batch_empty(tmp_path: Path):
     """No PR batch -> return None (the discovery trigger), never a bare pseudo."""
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    chosen = asyncio.run(stub._select_best_framework_agent_candidate())
+    chosen = asyncio.run(stub._select_next_framework_agent_candidate())
     assert chosen is None
 
 

@@ -122,12 +122,11 @@ class _Stub:
     _stamp_framework_progress = Coordinator._stamp_framework_progress
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
-    _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
+    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
     _record_framework_agent_phase_done = Coordinator._record_framework_agent_phase_done
     _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
     _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
-    _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
@@ -136,12 +135,8 @@ class _Stub:
     _recover_framework_agent_authoring_outcome = Coordinator._recover_framework_agent_authoring_outcome
     _record_framework_agent_authoring_empty_outcome = Coordinator._record_framework_agent_authoring_empty_outcome
     _record_framework_agent_dispatch_failure = Coordinator._record_framework_agent_dispatch_failure
-    _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
-    _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
     _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)
     _framework_audit_verdict_uncertain = staticmethod(FrameworkPhase._framework_audit_verdict_uncertain)
-    _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
-    _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
     # Local-exploration arm surface (disabled in this suite's state, so these
     # short-circuit; bound so the shared pump/select paths resolve).
@@ -1162,112 +1157,6 @@ def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> N
     assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/aiter.git") == ""
     assert Coordinator._framework_agent_repo_url_origin_framework("") == ""
     assert Coordinator._framework_agent_repo_url_origin_framework("not-a-url") == ""
-
-
-def test_discover_batch_tags_cross_repo_candidates_by_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A candidate discovered from a DIFFERENT framework's repo gets tagged with
-    its origin framework without any env opt-in; own-repo candidates stay untagged."""
-    monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
-    sglang_url = _fa_client.repo_url_for_framework("sglang")
-    vllm_url = _fa_client.repo_url_for_framework("vllm")
-
-    async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
-        if repo_url == vllm_url:
-            return {
-                "batch_id": "b1",
-                "candidates": [{"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}],
-            }
-        return {
-            "batch_id": "b1",
-            "candidates": [dict(_CANDIDATE)],  # already framework="sglang"
-        }
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
-    stub = _Stub(tmp_path, authoring=True)
-    monkeypatch.setattr(stub, "_framework_agent_discover_repo_urls", lambda framework: [sglang_url, vllm_url])
-
-    ok = asyncio.run(Coordinator._discover_next_framework_batch(stub))  # type: ignore[arg-type]
-    assert ok
-    candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
-    by_ref = {c["ref"]: c for c in candidates}
-    assert by_ref["PR:9"]["framework"] == "vllm"
-    assert by_ref["perf/moe"]["framework"] == "sglang"
-
-
-def test_discover_batch_does_not_tag_cross_repo_candidates_when_kill_switch_set(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kill switch (FRAMEWORK_AGENT_CROSS_DISCOVER_TAG=0): cross-repo candidates keep
-    whatever framework fa returned (blank in practice) — a full revert to the
-    pre-wiring behaviour for rollback/safety."""
-    monkeypatch.setenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "0")
-    sglang_url = _fa_client.repo_url_for_framework("sglang")
-    vllm_url = _fa_client.repo_url_for_framework("vllm")
-
-    async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
-        if repo_url == vllm_url:
-            return {
-                "batch_id": "b1",
-                "candidates": [{"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}],
-            }
-        return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
-    stub = _Stub(tmp_path, authoring=True)
-    monkeypatch.setattr(stub, "_framework_agent_discover_repo_urls", lambda framework: [sglang_url, vllm_url])
-
-    ok = asyncio.run(Coordinator._discover_next_framework_batch(stub))  # type: ignore[arg-type]
-    assert ok
-    candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
-    by_ref = {c["ref"]: c for c in candidates}
-    assert by_ref["PR:9"].get("framework") in (None, "")
-
-
-def test_discover_batch_overrides_misdefaulted_cross_repo_framework(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When fa phase-discover defaults a cross-repo candidate's ``framework`` to
-    the SESSION framework, the candidate's OWN repo must win and re-tag it so it
-    routes to the cross-framework specialist."""
-    monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
-    vllm_url = _fa_client.repo_url_for_framework("vllm")
-
-    async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
-        # fa returns a sgl-project PR framework mis-defaulted to the session framework.
-        return {
-            "batch_id": "b1",
-            "candidates": [
-                {
-                    "pr_url": "https://github.com/sgl-project/sglang/pull/29322",
-                    "repo": "https://github.com/sgl-project/sglang.git",
-                    "ref": "PR:29322",
-                    "framework": "vllm",
-                },
-                {
-                    "pr_url": "https://github.com/ROCm/vllm/pull/9",
-                    "repo": "https://github.com/ROCm/vllm.git",
-                    "ref": "PR:9",
-                    "framework": "vllm",
-                },
-            ],
-        }
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _discover)
-    stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.framework = "vllm"
-    monkeypatch.setattr(stub, "_framework_agent_discover_repo_urls", lambda framework: [vllm_url])
-
-    ok = asyncio.run(Coordinator._discover_next_framework_batch(stub))  # type: ignore[arg-type]
-    assert ok
-    candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
-    by_ref = {c["ref"]: c for c in candidates}
-    assert by_ref["PR:29322"]["framework"] == "sglang"
-    assert by_ref["PR:9"]["framework"] == "vllm"
 
 
 def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
