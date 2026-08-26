@@ -613,6 +613,14 @@ class SpecialistSubprocessResult:
     roots are session-absolute). Consumers read and sandbox-check these
     directly — do not join them onto a base."""
 
+    patch_roots: dict[str, str] = field(default_factory=dict)
+    """Map from absolute patch path to the apply root it was harvested from.
+
+    Populated for every patch produced by ``git diff HEAD`` in a worktree;
+    absent for patches scanned from disk whose root was not established at
+    collection time. When present, downstream steps use this as the
+    ``explicit_root`` instead of probing the filesystem."""
+
     usage: dict[str, Any] | None = None
     """Token usage recovered from the agent CLI's ``process.log``. Carries the
     four canonical counters (``input_tokens`` / ``output_tokens`` /
@@ -1176,8 +1184,8 @@ class SpecialistSubprocessDispatcher:
                 log_fh.close()
             clear_wall_budget_extension(task_id)
 
-        # Patches: scan worktree/patches/ (Arbor convention).
-        patches = self._collect_patches(worktree, workspace)
+        # Patches: harvest from the worktree via git diff first; fall back to disk scan.
+        patches, collected_patch_roots = self._collect_patches(worktree, workspace, worktree_base)
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
@@ -1229,6 +1237,7 @@ class SpecialistSubprocessDispatcher:
             stale_heartbeat=outcome["stale_heartbeat"],
             process_log_path=str(process_log),
             patches=patches,
+            patch_roots=collected_patch_roots,
             usage=usage,
             response=response,
             tool_calls=tool_calls,
@@ -1680,21 +1689,48 @@ class SpecialistSubprocessDispatcher:
     def _collect_patches(
         worktree: Path | None,
         workspace: Path,
-    ) -> list[str]:
-        """Discover patch files written by the specialist.
+        worktree_base: Path | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Collect specialist patches, preferring ``git diff HEAD`` over hand-authored files.
 
-        Scans both ``worktree/patches/`` and ``workspace/patches/``
-        (defense in depth — the agent may write to either) for ``*.patch``
-        and ``*.diff`` files.
+        When a worktree exists, run ``git diff HEAD`` against it to produce a
+        single canonical ``-p1`` patch whose apply root is the worktree base.
+        The fallback is the historical disk scan of ``<tree>/patches/*.patch``.
 
         Args:
-            worktree (Path | None): Per-task worktree, or None.
-            workspace (Path): Task workspace.
+            worktree: Per-task worktree, or None.
+            workspace: Task workspace.
+            worktree_base: The git checkout the worktree was branched off;
+                used as the apply root for harvested patches.
 
         Returns:
-            list[str]: Discovered patch file paths.
+            ``(patch_paths, patch_roots)`` where ``patch_roots`` maps each
+            harvested path to its apply root string.
         """
         out: list[str] = []
+        roots: dict[str, str] = {}
+
+        if worktree is not None and (worktree / ".git").exists():
+            harvest_root = worktree_base or worktree
+            try:
+                cp = subprocess.run(
+                    ["git", "-C", str(worktree), "diff", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0,
+                    check=False,
+                )
+                if cp.returncode == 0 and cp.stdout.strip():
+                    harvested_dir = worktree / "patches"
+                    harvested_dir.mkdir(exist_ok=True)
+                    harvested_path = harvested_dir / "_worktree_diff.patch"
+                    harvested_path.write_text(cp.stdout, encoding="utf-8")
+                    out.append(str(harvested_path))
+                    roots[str(harvested_path)] = str(harvest_root)
+                    return out, roots
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                log.warning("specialist: git diff harvest failed (%r); falling back to patch scan", exc)
+
         for base in (worktree, workspace):
             if base is None:
                 continue
@@ -1704,7 +1740,7 @@ class SpecialistSubprocessDispatcher:
             for ext in ("*.patch", "*.diff"):
                 for p in sorted(patches_dir.glob(ext)):
                     out.append(str(p))
-        return out
+        return out, roots
 
     @staticmethod
     def _read_done(done_file: Path) -> dict[str, Any] | None:

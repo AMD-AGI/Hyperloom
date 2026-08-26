@@ -1228,6 +1228,7 @@ class SpecialistRunner:
             backend_error=backend_error,
             extra_notes=notes,
             patches_written=list(sub_result.patches),
+            patch_roots=dict(sub_result.patch_roots),
         )
 
     # Finalize phase (shared)
@@ -1242,6 +1243,7 @@ class SpecialistRunner:
         backend_error: str,
         extra_notes: list[str],
         patches_written: list[str],
+        patch_roots: dict[str, str] | None = None,
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
@@ -1379,22 +1381,35 @@ class SpecialistRunner:
         # the rest against the clean base checkout, and scan for smuggled claims.
         # The worktree base names one framework tree, but a specialist may target
         # another allowlisted one, so the rest are offered as candidate roots.
+        collected_roots = dict(patch_roots or {})
         base_checkout = prep.worktree_base or prep.worktree
         candidate_roots = _sibling_checkouts(
             tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
             base_checkout,
         )
         explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
+        explicit_root: Path | None = Path(explicit_value) if explicit_value else None
+        if explicit_root is None and collected_roots:
+            unique_roots = set(collected_roots.values())
+            if len(unique_roots) == 1:
+                sole_root = Path(next(iter(unique_roots)))
+                if sole_root.is_dir():
+                    explicit_root = sole_root
         kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
-            explicit_root=Path(explicit_value) if explicit_value else None,
+            explicit_root=explicit_root,
         )
         # A set dropped for targets no tree holds is a distinct outcome from
         # "the specialist wrote none", and the next round has to be told which.
         all_dropped_by_grounding = bool(
-            deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
+            deduped
+            and not kept
+            and all(
+                d.get("verdict") in (_patch_safety.GROUND_MISSING_TARGET, _patch_safety.GROUND_AMBIGUOUS_ROOT)
+                for d in dropped
+            )
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
@@ -1410,6 +1425,8 @@ class SpecialistRunner:
         )
         done_payload["patches_written"] = kept
         done_payload["patch_grounding"] = grounding
+        if collected_roots:
+            done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
         if all_dropped_by_grounding:
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
         if spans_roots:

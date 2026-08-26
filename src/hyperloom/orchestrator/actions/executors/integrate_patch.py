@@ -377,13 +377,18 @@ def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
     patch_texts: list[str] | None = None,
+    recorded_root: str | None = None,
 ) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
-    With patches to place, the decision is
-    :func:`~...specialists.patch_safety.resolve_patch_apply_root`'s and it fails
-    closed. Without any, there is nothing to match a tree against, so the
-    session's declared root wins and the allowlist order is the last resort.
+    When ``recorded_root`` is supplied (set by the authoring stage and carried
+    through ``done_payload["patch_roots"]``), it is returned without any
+    filesystem probing as long as it resolves inside the allowlist. This is the
+    normal path for patches produced by ``git diff`` in a specialist worktree.
+
+    Without a recorded root, the decision falls through to
+    :func:`~...specialists.patch_safety.resolve_patch_apply_root`. Without any
+    patches to place, the session's declared root wins.
 
     Args:
         explicit: Declared framework root. Rejected when it resolves outside
@@ -391,12 +396,23 @@ def _resolve_framework_root(
         patch_paths: Patch files to place; unreadable ones are skipped.
         patch_texts: Patch diffs already in memory, placed alongside
             ``patch_paths``.
+        recorded_root: The apply root recorded at authoring time, if any.
 
     Returns:
         The resolved root, or ``None`` when the patches name no single tree.
     """
     allowlist = resolve_source_file_allowlist()
     roots = [Path(root) for root in allowlist]
+
+    if recorded_root:
+        trusted = trusted_explicit_root(recorded_root, allowlist=allowlist)
+        if trusted is not None:
+            return trusted
+        log.warning(
+            "integrate_patch: recorded_root %r is outside the allowlist; falling through to probe",
+            recorded_root,
+        )
+
     explicit_path: Path | None = None
     if explicit:
         explicit_path = trusted_explicit_root(explicit, allowlist=allowlist)
@@ -2220,9 +2236,15 @@ class IntegratePatchExecutor:
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
+        _patch_roots_map: dict[str, str] = {}
+        if isinstance((done_payload or {}).get("patch_roots"), dict):
+            _patch_roots_map = {str(k): str(v) for k, v in done_payload["patch_roots"].items()}  # type: ignore[index]
+        _patch_roots_values = list(dict.fromkeys(_patch_roots_map.values()))
+        _sole_recorded_root = _patch_roots_values[0] if len(_patch_roots_values) == 1 else None
         framework_root = _resolve_framework_root(
             explicit_framework_root,
             patch_paths=patch_paths,
+            recorded_root=_sole_recorded_root,
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)

@@ -1250,3 +1250,53 @@ async def test_partial_checkpoint_published_while_alive(
     payload, elapsed = seen[0]
     assert payload["summary"] == "fake claude subprocess output"
     assert elapsed >= 0.0
+
+
+# ---- _collect_patches: git diff harvest ------------------------------------
+def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
+    import subprocess as _sp
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "mod.py").write_text("old = 1\n", encoding="utf-8")
+    _sp.run(["git", "init", "-q", str(base)], check=True)
+    _sp.run(["git", "-C", str(base), "add", "-A"], check=True)
+    _sp.run(
+        ["git", "-C", str(base), "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+    wt = tmp_path / "worktree"
+    _sp.run(["git", "-C", str(base), "worktree", "add", "-b", "sp1", str(wt)], check=True)
+    return base, wt
+
+
+def test_collect_patches_harvests_git_diff_when_worktree_modified(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    assert len(patches) == 1
+    patch_text = Path(patches[0]).read_text(encoding="utf-8")
+    assert "mod.py" in patch_text
+    assert str(base) in roots[patches[0]]
+
+
+def test_collect_patches_falls_back_to_disk_scan_when_no_changes(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "patches").mkdir()
+    (ws / "patches" / "manual.patch").write_text(
+        "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8"
+    )
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws, worktree_base=base)
+    assert any("manual.patch" in p for p in patches)
+    assert all(p not in roots for p in patches)
+
+
+def test_collect_patches_no_worktree_falls_back_to_disk_scan(tmp_path: Path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "patches").mkdir()
+    (ws / "patches" / "p.patch").write_text("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(None, ws)
+    assert len(patches) == 1
+    assert roots == {}
