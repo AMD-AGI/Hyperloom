@@ -567,6 +567,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "phase_kernel": ("phases.kernel", "KernelPhase"),
         "phase_explore": ("phases.explore", "ExplorePhase"),
         "phase_framework": ("phases.framework", "FrameworkPhase"),
+        "gpu_lanes": ("gpu_lanes", "GpuLanes"),
         "enablement_params": ("enablement.params", "EnablementParams"),
         "enablement_lane": ("enablement.lane", "EnablementLane"),
         "enablement_build": ("enablement.build", "EnablementBuild"),
@@ -1049,9 +1050,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
         "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_coerce_needs_gpu": "phase_framework",
-        "_framework_gpu_params": "phase_framework",
-        "_framework_authoring_lanes_ttl": "phase_framework",
+        "_coerce_needs_gpu": "gpu_lanes",
+        "_framework_gpu_params": "gpu_lanes",
+        "_framework_authoring_lanes_ttl": "gpu_lanes",
         "_build_enablement_specialist_params": "enablement_params",
         "_read_enablement_source_context": "enablement_params",
         "_derive_checkpoint_weight_facts": "enablement_params",
@@ -1293,6 +1294,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from ..phases.framework import FrameworkPhase
 
         return self._collaborator("_phase_framework", FrameworkPhase)
+
+    @property
+    def gpu_lanes(self):
+        """GPU-lease params and lane resolution, shared by both dispatchers."""
+        from ..gpu_lanes import GpuLanes
+
+        return self._collaborator("_gpu_lanes", GpuLanes)
 
     @property
     def enablement_params(self):

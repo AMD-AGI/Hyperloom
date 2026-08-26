@@ -2602,7 +2602,6 @@ class EnablementBreakdown(TypedDict, total=False):
         localization_manifest: Files the localization pass identified.
         build_novelty: Novelty keys of the targeted builds requested.
         human_review_count: Number of logs parked for human review.
-        stack_actions: Candidate stack actions considered this session.
         active_runtime: The currently-promoted attempt runtime, or {} when none.
         attempt_runtimes: Retained attempt-runtime records (capped).
         failure_kind: Last classified enablement failure kind.
@@ -2652,7 +2651,6 @@ class EnablementBreakdown(TypedDict, total=False):
     localization_manifest: list[str]
     build_novelty: list[str]
     human_review_count: int
-    stack_actions: list[EnablementStackActionSummary]
     active_runtime: EnablementAttemptRuntime
     attempt_runtimes: list[EnablementAttemptRuntime]
     failure_kind: str
