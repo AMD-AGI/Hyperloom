@@ -291,7 +291,11 @@ def _shape_sweep_point(
 
     Parses the ``conc`` / ``isl`` / ``osl`` from the variant directory name,
     reads its benchmark report for throughput / latency metrics, and derives a
-    status (``ok`` / ``failed`` / ``skipped``).
+    status (``ok`` / ``failed`` / ``skipped``). Status is derived, never
+    defaulted to success: missing report → ``skipped``; unreadable report →
+    ``failed``; readable report with ``success is False`` → ``failed``;
+    otherwise ``ok``. ``error`` is present on every row (``None`` when there
+    is no failure reason).
 
     Args:
         variant_dir (Path): A ``variant_*`` directory.
@@ -301,7 +305,7 @@ def _shape_sweep_point(
 
     Returns:
         dict[str, Any]: A sweep-point row with the parsed workload knobs,
-        metrics, status, and relative report path.
+        metrics, status, error, and relative report path.
     """
     name = variant_dir.name
     m = _VARIANT_NAME_RE.search(name)
@@ -316,15 +320,23 @@ def _shape_sweep_point(
         except ValueError:
             pass
     report = _find_benchmark_report(variant_dir)
-    report_data = _load_json_safe(report, warnings) if report else None
-    status = "ok"
     out_tput = ttft = tpot = e2el = None
-    if isinstance(report_data, dict):
-        out_tput, ttft, tpot, e2el = _benchmark_report_metrics(report_data)
-        if report_data.get("success") is False:
-            status = "failed"
-    elif report is None:
+    error: str | None = None
+    if report is None:
         status = "skipped"
+    else:
+        report_data = _load_json_safe(report, warnings)
+        if isinstance(report_data, dict):
+            out_tput, ttft, tpot, e2el = _benchmark_report_metrics(report_data)
+            status = "failed" if report_data.get("success") is False else "ok"
+            if status == "failed":
+                error = str(report_data.get("error") or "").strip() or None
+        else:
+            # Report exists but is not a JSON object (truncated, empty, or a
+            # non-object top-level value): a measurement that did not land,
+            # not a successful measurement.
+            status = "failed"
+            error = "benchmark_report.json unreadable or not a JSON object"
     return {
         "variant_name": name,
         "conc": conc,
@@ -335,6 +347,7 @@ def _shape_sweep_point(
         "tpot_mean_ms": tpot,
         "e2el_mean_ms": e2el,
         "status": status,
+        "error": error,
         "benchmark_report_path": _rel(report, session_dir) if report else None,
     }
 

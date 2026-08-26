@@ -971,7 +971,12 @@ class SweepPoint(TypedDict, total=False):
         ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
         tpot_mean_ms (float | None): Mean time-per-output-token (ms), or None.
         e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
-        status (str): Point status (``ok`` / ``skipped`` / ``failed``).
+        status (str): Point status. ``ok`` only when a complete report was
+            read and ``success`` was not false; ``failed`` when the report
+            says failure or was unreadable; ``skipped`` when no report exists.
+        error (str | None): Failure reason when ``status`` is ``failed``, else
+            None. Present on every row so table-shaped consumers see a stable
+            key set.
         benchmark_report_path (str | None): Path to the benchmark report, or None.
     """
 
@@ -984,6 +989,7 @@ class SweepPoint(TypedDict, total=False):
     tpot_mean_ms: float | None
     e2el_mean_ms: float | None
     status: str  # ok / skipped / failed
+    error: str | None
     benchmark_report_path: str | None
 
 

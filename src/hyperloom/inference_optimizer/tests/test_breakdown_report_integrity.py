@@ -19,6 +19,8 @@ but never enforced:
   because they share an action and a wall-clock second.
 * A section skipped for lack of data still carries evidence ("this never ran");
   that evidence must reach the reader instead of being dropped silently.
+* A sweep variant whose ``benchmark_report.json`` is missing, truncated, empty,
+  or not a JSON object is ``failed`` / ``skipped``, never silently ``ok``.
 """
 
 from __future__ import annotations
@@ -30,7 +32,9 @@ from typing import Any
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 from hyperloom.inference_optimizer.breakdown.reporters import cross_section, llm_prompt
+from hyperloom.inference_optimizer.breakdown.reporters._renderers import sweep as sw
 from hyperloom.inference_optimizer.breakdown.reporters.base import RenderedSection
+from hyperloom.inference_optimizer.breakdown.schema import SweepPoint
 
 
 def _integrate_state(kernel_id: str, decision: str, gain: float | None = None) -> dict[str, Any]:
@@ -632,3 +636,140 @@ def test_multi_paragraph_prose_is_still_accepted() -> None:
     out = _parse(sweep=prose)
 
     assert out["section_narratives"]["sweep"] == prose
+
+
+# Sweep variant status
+
+
+_SWEEP_POINT_KEYS = frozenset(SweepPoint.__annotations__)
+_SWEEP_STATUSES = frozenset({"ok", "failed", "skipped"})
+
+
+def _sweep_variant_dir(session_dir: Path, name: str) -> Path:
+    """Create an empty ``runs/sweep/<task>/<name>`` variant directory.
+
+    Args:
+        session_dir (Path): Session root used as the sweep parent.
+        name (str): Variant directory name (``variant_*_conc*_isl*_osl*``).
+
+    Returns:
+        Path: The created variant directory.
+    """
+    path = session_dir / "runs" / "sweep" / "task-1" / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_report_text(variant_dir: Path, text: str) -> None:
+    """Write ``benchmark_report.json`` under ``variant_dir``.
+
+    Args:
+        variant_dir (Path): Sweep variant directory.
+        text (str): File contents, well-formed or deliberately corrupt.
+    """
+    (variant_dir / "benchmark_report.json").write_text(text, encoding="utf-8")
+
+
+def _ok_benchmark_report() -> dict[str, Any]:
+    """Return a readable successful benchmark report with metrics.
+
+    Returns:
+        dict[str, Any]: A report the collector treats as ``status=ok``.
+    """
+    return {
+        "success": True,
+        "output_throughput": 800.0,
+        "mean_ttft_ms": 50.0,
+        "mean_tpot_ms": 10.0,
+        "mean_e2el_ms": 1000.0,
+    }
+
+
+def test_sweep_variant_status_matrix_matches_report_readability(tmp_path: Path) -> None:
+    """Missing / unreadable reports are failed or skipped, never silently ok."""
+    ok_dir = _sweep_variant_dir(tmp_path, "variant_0_conc32_isl128_osl128")
+    _write_report_text(ok_dir, json.dumps(_ok_benchmark_report()))
+
+    failed_dir = _sweep_variant_dir(tmp_path, "variant_1_conc64_isl128_osl128")
+    _write_report_text(failed_dir, json.dumps({"success": False, "error": "OOM killed"}))
+
+    skipped_dir = _sweep_variant_dir(tmp_path, "variant_2_conc128_isl128_osl128")
+
+    truncated_dir = _sweep_variant_dir(tmp_path, "variant_3_conc256_isl128_osl128")
+    _write_report_text(truncated_dir, '{"success": true, "output_throughput":')
+
+    empty_dir = _sweep_variant_dir(tmp_path, "variant_4_conc8_isl128_osl128")
+    _write_report_text(empty_dir, "")
+
+    list_dir = _sweep_variant_dir(tmp_path, "variant_5_conc16_isl128_osl128")
+    _write_report_text(list_dir, json.dumps([{"output_throughput": 1.0}]))
+
+    warnings: list[str] = []
+    by_name = {row["variant_name"]: row for row in collectors.collect_sweep(tmp_path, {}, warnings)["all_variants"]}
+
+    ok_row = by_name[ok_dir.name]
+    assert ok_row["status"] == "ok"
+    assert ok_row["error"] is None
+    assert ok_row["output_throughput_tok_s"] == 800.0
+    assert ok_row["ttft_mean_ms"] == 50.0
+
+    failed_row = by_name[failed_dir.name]
+    assert failed_row["status"] == "failed"
+    assert failed_row["error"] == "OOM killed"
+
+    skipped_row = by_name[skipped_dir.name]
+    assert skipped_row["status"] == "skipped"
+    assert skipped_row["error"] is None
+    assert skipped_row["benchmark_report_path"] is None
+
+    unreadable = (truncated_dir.name, empty_dir.name, list_dir.name)
+    for name in unreadable:
+        row = by_name[name]
+        assert row["status"] == "failed", name
+        assert row["error"], name
+        assert row["output_throughput_tok_s"] is None, name
+
+    assert any("failed to parse" in w for w in warnings)
+
+
+def test_sweep_variant_rows_share_a_stable_key_set(tmp_path: Path) -> None:
+    """ok / failed / skipped rows expose the same SweepPoint keys.
+
+    Table-shaped consumers (DataFrame conversion, column-wise parsers) depend
+    on every row having the same key set, including ``error`` as null on
+    non-failed rows.
+    """
+    ok_dir = _sweep_variant_dir(tmp_path, "variant_0_conc32_isl128_osl128")
+    _write_report_text(ok_dir, json.dumps(_ok_benchmark_report()))
+    failed_dir = _sweep_variant_dir(tmp_path, "variant_1_conc64_isl128_osl128")
+    _write_report_text(failed_dir, '{"not json')
+    _sweep_variant_dir(tmp_path, "variant_2_conc128_isl128_osl128")
+
+    rows = collectors.collect_sweep(tmp_path, {}, [])["all_variants"]
+    assert {row["status"] for row in rows} == _SWEEP_STATUSES
+    for row in rows:
+        assert set(row) == _SWEEP_POINT_KEYS
+        assert row["status"] in _SWEEP_STATUSES
+        assert "error" in row
+
+
+def test_corrupt_sweep_report_is_not_counted_as_success_by_the_renderer(tmp_path: Path) -> None:
+    """Collector output fed to the renderer: only a readable success counts."""
+    ok_dir = _sweep_variant_dir(tmp_path, "variant_0_conc32_isl128_osl128")
+    _write_report_text(ok_dir, json.dumps(_ok_benchmark_report()))
+    bad_dir = _sweep_variant_dir(tmp_path, "variant_1_conc64_isl128_osl128")
+    _write_report_text(bad_dir, '{"success": true, "output_throughput":')
+    _sweep_variant_dir(tmp_path, "variant_2_conc128_isl128_osl128")
+
+    section = collectors.collect_sweep(tmp_path, {}, [])
+    out = sw.render({"sweep": section})
+
+    assert any("success=1" in f for f in out.key_facts), out.key_facts
+    assert any("Best point" in f and "tput=800.0" in f for f in out.key_facts), out.key_facts
+    assert out.decisions[0].kind == "kept"
+    assert "800.00" in out.markdown_block
+    assert "50.00" in out.markdown_block
+    assert "unreadable" in out.markdown_block
+    assert "| conc | isl | osl | status | tput | ttft | e2el | error |" in out.markdown_block
+    ok_count = sum(1 for v in section["all_variants"] if v["status"] == "ok")
+    assert ok_count == 1

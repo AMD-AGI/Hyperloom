@@ -528,6 +528,14 @@ Final concurrency / input sequence length (ISL) / output sequence length (OSL) s
 (a `SweepPoint[]`) and `best_overall`. `best_for_each_conc` and
 `pareto_front` are populated when the sweep grid is large enough.
 
+Each `all_variants` row carries `status`:
+
+* `ok` — a complete `benchmark_report.json` was read and its `success` field was not `false`.
+* `failed` — the report recorded a failure, or the file existed but could not be read as a JSON object (truncated, empty, or a non-object top-level value).
+* `skipped` — no `benchmark_report.json` was found for that variant.
+
+`error` is present on every row: a short reason string when `status` is `failed`, otherwise `null`. Downstream consumers can rely on a stable key set across `ok` / `failed` / `skipped` rows.
+
 ---
 
 ## `critic_robustness`
