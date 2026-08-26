@@ -17,9 +17,31 @@ CASE_SELECTOR_KEY = "CASE_ID"
 OPERATOR_IDENTITY_VERSION = 2
 
 
+def _strip_dispatch_decoration(operation: str) -> str:
+    """Remove how-a-kernel-was-launched decoration from a traced operation name.
+
+    A trace reports the launch API it saw (``hipGraphLaunch->``), the C return
+    type, and a synthetic-op suffix around the symbol. None of that identifies
+    the operator: one kernel reached through a graph replay and through a direct
+    module launch is the same kernel, and keying on the raw string splits it into
+    two task groups that then port the same source twice.
+    """
+    value = str(operation or "").strip()
+    value = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", value).strip()
+    value = re.sub(
+        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
+        "",
+        value,
+    ).strip()
+    value = re.sub(r"\s*\([^()]*\bOp\)\s*$", "", value).strip()
+    if value.endswith(".kd"):
+        value = value[:-3].strip()
+    return value
+
+
 def normalize_operation_key(operation: str) -> str:
-    """Remove balanced C++ template arguments from an operation identity."""
-    value = str(operation).strip()
+    """Remove launch decoration and balanced C++ template arguments."""
+    value = _strip_dispatch_decoration(operation)
     if "<" not in value:
         return value
     normalized: list[str] = []
@@ -69,26 +91,12 @@ def logical_operator_name(candidate: dict[str, Any] | None) -> str:
 
 
 def native_operation_key(operation: str) -> str:
-    """Return a stable native operator identity across template instances."""
-    normalized = str(operation or "").strip()
-    normalized = re.sub(
-        r"^[A-Za-z][A-Za-z0-9_]*->",
-        "",
-        normalized,
-    ).strip()
-    normalized = re.sub(
-        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
-        "",
-        normalized,
-    ).strip()
-    normalized = re.sub(
-        r"\s*\([^()]*\bOp\)\s*$",
-        "",
-        normalized,
-    ).strip()
-    if normalized.endswith(".kd"):
-        normalized = normalized[:-3].strip()
-    normalized = normalize_operation_key(normalized)
+    """Return a stable native operator identity across template instances.
+
+    Adds Itanium demangling to the shared normalization; every other step is
+    language-independent and lives in :func:`normalize_operation_key`.
+    """
+    normalized = normalize_operation_key(operation)
     if not normalized.startswith(("_Z", "__Z")):
         return normalized
 
