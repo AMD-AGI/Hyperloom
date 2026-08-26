@@ -32,6 +32,62 @@ AGENT_BY_PHASE = {
 UNATTRIBUTED = "unattributed"
 
 
+#: What kind of lever a unit of work moved. This is the attribution key that
+#: survives the phase machine: a phase says *when* work ran, which stops being
+#: evidence the moment two lanes share one phase, while the lever says *what
+#: was changed*, which is what a report is actually about.
+LEVER_CONFIG = "config"  # server args / envs only; nothing on disk is touched
+LEVER_SOURCE_PATCH = "source_patch"  # a diff a specialist authored
+LEVER_UPSTREAM_PR = "upstream_pr"  # a diff fetched from an upstream PR
+LEVER_ENABLEMENT = "enablement"  # graded on runnability + accuracy, not throughput
+
+LEVER_KINDS = (LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT)
+
+#: Lever kinds whose phase is not in doubt. ``source_patch`` and ``config`` are
+#: absent on purpose: either can be dispatched from more than one phase, so the
+#: lever alone does not name one and the older evidence still decides.
+_PHASE_BY_LEVER = {
+    LEVER_UPSTREAM_PR: "FRAMEWORK_AGENT",
+    LEVER_ENABLEMENT: "FRAMEWORK_AGENT",
+}
+
+
+def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
+    """Name the lever a unit of work moved, or ``""`` when nothing recorded one.
+
+    Reads the stamp the dispatcher left. Falls back to deriving one from the
+    markers that predate the stamp so a session recorded before it, or a task
+    a caller forgot to stamp, still attributes rather than silently landing in
+    :data:`UNATTRIBUTED`.
+
+    Args:
+        evidence: Task params, an executor result, or a recorded operation's
+            outputs. The same keys either way.
+
+    Returns:
+        One of :data:`LEVER_KINDS`, or ``""``.
+    """
+    evidence = evidence or {}
+    explicit = str(evidence.get("lever_kind") or "").strip().lower()
+    if explicit in LEVER_KINDS:
+        return explicit
+    # Derivation order mirrors how the gates differ: enablement grades on
+    # runnability, an upstream PR carries a fetched diff, an authored patch
+    # carries a written one, and anything left changed only configuration.
+    if evidence.get("enablement"):
+        return LEVER_ENABLEMENT
+    if evidence.get("pr_url") or evidence.get("pr_lead"):
+        return LEVER_UPSTREAM_PR
+    # A candidate id names a PR unless it is the candidate-free local arm, which
+    # authors against the live source with no upstream lead to attribute to.
+    candidate_id = str(evidence.get("framework_agent_candidate_id") or "")
+    if candidate_id:
+        return LEVER_SOURCE_PATCH if candidate_id.startswith("local_explore:") else LEVER_UPSTREAM_PR
+    if evidence.get("patch_name") or evidence.get("specialist_task_id") or evidence.get("patches_applied"):
+        return LEVER_SOURCE_PATCH
+    return ""
+
+
 def agent_from_phase(value: Any) -> str:
     """Map a phase label to its owning agent, or ``""`` when unknown."""
     return AGENT_BY_PHASE.get(str(value or "").strip().upper(), "")
@@ -40,6 +96,10 @@ def agent_from_phase(value: Any) -> str:
 def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     """Resolve the immutable authoring phase from recorded ownership evidence."""
     evidence = evidence or {}
+    # The lever is the stronger evidence where it names a phase at all.
+    phase_from_lever = _PHASE_BY_LEVER.get(patch_lever_kind(evidence))
+    if phase_from_lever:
+        return phase_from_lever
     if evidence.get("framework_agent_authoring") or evidence.get("framework_agent_candidate_id"):
         return "FRAMEWORK_AGENT"
     phase = str(evidence.get("source_phase") or "").strip().upper()
@@ -71,8 +131,14 @@ def patch_author(evidence: Mapping[str, Any] | None) -> str:
 
 __all__ = [
     "AGENT_BY_PHASE",
+    "LEVER_CONFIG",
+    "LEVER_ENABLEMENT",
+    "LEVER_KINDS",
+    "LEVER_SOURCE_PATCH",
+    "LEVER_UPSTREAM_PR",
     "UNATTRIBUTED",
     "agent_from_phase",
     "patch_author",
+    "patch_lever_kind",
     "patch_owner_phase",
 ]

@@ -15,11 +15,27 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from ..agent_ownership import patch_author
+from ..agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_UPSTREAM_PR,
+    UNATTRIBUTED,
+    patch_author,
+    patch_lever_kind,
+)
 from ._common import (
     _to_float,
     phase_at,
 )
+
+
+#: Phase bucket -> the lever that phase could only have moved, for rows written
+#: before ``lever_kind`` was stamped. ``explore`` and ``sweep`` only ever moved
+#: configuration; ``framework`` only ever landed upstream PRs.
+_LEVER_BY_PHASE_BUCKET = {
+    "explore": LEVER_CONFIG,
+    "sweep": LEVER_CONFIG,
+    "framework": LEVER_UPSTREAM_PR,
+}
 
 
 def _normalize_specialist_key(provenance: str) -> str:
@@ -516,8 +532,11 @@ def collect_attribution(
         notes.append(note)
         warnings.append(f"attribution: {note}")
 
-    # Per-phase gain breakdown (buckets each KEEP by its active phase).
-    phase_breakdown = _collect_phase_breakdown(state, entries, warnings)
+    # Per-phase gain breakdown (buckets each KEEP by its active phase), and the
+    # same total split by lever instead. They are two views of one number: the
+    # phase view answers "when", the lever view answers "what was changed", and
+    # only the second survives a phase being merged away.
+    phase_breakdown, lever_breakdown = _collect_phase_breakdown(state, entries, warnings)
 
     return {
         "gain_per_stack_entry": entries,
@@ -541,6 +560,7 @@ def collect_attribution(
             "validated_total_pct": round(validated_total, 2),
         },
         "phase_breakdown": phase_breakdown,
+        "lever_breakdown": lever_breakdown,
         "notes": notes,
     }
 
@@ -564,10 +584,11 @@ def _collect_phase_breakdown(
             ``phase_history`` is empty).
 
     Returns:
-        dict[str, Any]: Per-phase gain buckets (prelude / framework /
-        explore / kernel / gemm_tuning / sweep / close, plus a conditional
-        ``unattributed``), each with a ``total_gain_pct`` and phase-specific
-        sub-breakdowns.
+        tuple[dict[str, Any], dict[str, float]]: Per-phase gain buckets
+        (prelude / framework / explore / kernel / gemm_tuning / sweep / close,
+        plus a conditional ``unattributed``), each with a ``total_gain_pct``
+        and phase-specific sub-breakdowns; and the same total split by lever
+        kind instead of by phase.
     """
     # Phase timeline: for an entry ts, pick the latest row with ts_unix <= ts.
     timeline = _phase_timeline(state)
@@ -589,6 +610,8 @@ def _collect_phase_breakdown(
             if fp and sc:
                 scope_by_fp[fp] = sc
 
+    #: Lever totals, keyed by :data:`LEVER_KINDS` plus ``unattributed``.
+    lever_buckets: dict[str, float] = {}
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
         # by_pr keyed per adopted PR.
@@ -650,6 +673,21 @@ def _collect_phase_breakdown(
             float(bucket["total_gain_pct"]) + float(delta),
             2,
         )
+        # Lever split, accumulated from the same rows and the same deltas as the
+        # phase split above. It is the phase-free view of the identical total:
+        # a phase says when a KEEP landed, which a delayed application makes a
+        # lie; the lever says what was changed, which stays true.
+        lever = patch_lever_kind(e) or _LEVER_BY_PHASE_BUCKET.get(phase, "")
+        if lever:
+            lever_buckets[lever] = round(
+                float(lever_buckets.get(lever, 0.0)) + float(delta),
+                2,
+            )
+        else:
+            lever_buckets[UNATTRIBUTED] = round(
+                float(lever_buckets.get(UNATTRIBUTED, 0.0)) + float(delta),
+                2,
+            )
         if phase == "explore":
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
@@ -716,11 +754,13 @@ def _collect_phase_breakdown(
     # Drop the unattributed bucket when nothing landed there.
     if phase_buckets["unattributed"]["total_gain_pct"] == 0.0:
         phase_buckets.pop("unattributed", None)
+    if lever_buckets.get(UNATTRIBUTED) == 0.0:
+        lever_buckets.pop(UNATTRIBUTED, None)
 
     if not timeline:
         warnings.append("attribution.phase_breakdown: phase_history empty; gains bucketed via action family fallback")
 
-    return phase_buckets
+    return phase_buckets, lever_buckets
 
 
 def _reconstruct_gain_ledger(

@@ -109,6 +109,11 @@ class JournalEntry:
     task_id: str = ""
     variant_name: str = ""
     ts: str = ""
+    # Which lever this decision moved (config / source_patch / upstream_pr /
+    # enablement). ``phase`` above says when the decision was taken, which stops
+    # being evidence of ownership once two lanes share a phase; this says what
+    # was changed, which does not.
+    lever_kind: str = ""
     # Proposer attribution: ``provenance`` is the raw explore label, ``scope``
     # the specialist dial, ``fingerprint`` the join key into ``explore_search``.
     provenance: str = ""
