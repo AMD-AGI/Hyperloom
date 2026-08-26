@@ -450,7 +450,16 @@ tables rebuilt and re-uploaded. Sending a scriptable pipeline to
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead, device sync, host-blocking /
   host-pacing GPU idle** → `system_specialist`
-* **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
+* **uncertain / cross-cutting** → `candidate_discovery_specialist`
+
+Landing upstream work is a lever in its own right, ranked with the others
+rather than kept as a fallback. `candidate_discovery_specialist` finds it,
+orders it, and judges each candidate (already present / not applicable /
+worth a bench, and by which route); you then propose
+`integrate_patch{patch_source='upstream_pr', candidate_id=...}` for the ones
+worth measuring. Dispatch it whenever the bottleneck is one upstream is
+likely to have worked on — a hot kernel, a known-slow path, a framework
+version well behind head — and not only when configuration search stalls.
 
 <!-- phase: EXPLORE -->
 ### One specialist, four dials (scope / mode / bench / lane)

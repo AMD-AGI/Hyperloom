@@ -11,16 +11,12 @@ work or network is needed."""
 
 from __future__ import annotations
 
-import subprocess
 import types
 import pytest
 
 from hyperloom.orchestrator.loop import coordinator as coord_mod
-from hyperloom.orchestrator.framework import client as fa_client_mod
-from hyperloom.orchestrator.framework import paths as fp_mod
-from hyperloom.orchestrator.knowledge import kb_writeback as kb_mod
 from hyperloom.orchestrator.phases import machine_state as ps_mod
-from hyperloom.orchestrator.actions.executors import framework_agent as fpr_mod
+from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -121,154 +117,8 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
 # --------------------------------------------------------------------------
 # _framework_agent_audit_skip_confident
 # --------------------------------------------------------------------------
-def test_audit_skip_confident_paths(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", raising=False)
-    # No evidence -> not confident.
-    assert coord._framework_agent_audit_skip_confident({"confidence": 0.99}) is False
-    assert coord._framework_agent_audit_skip_confident(None) is False
-    # Evidence + high confidence -> confident.
-    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.9}) is True
-    # Evidence but low confidence -> not.
-    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.5}) is False
-    # Bad confidence value -> 0.0.
-    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": "NaNish"}) is False
 
 
-def test_audit_skip_confident_bad_floor_env(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", "not-a-float")
-    # Floor falls back to 0.8; 0.85 clears it.
-    assert coord._framework_agent_audit_skip_confident({"evidence": [{"x": 1}], "confidence": 0.85}) is True
-
-
-# --------------------------------------------------------------------------
-# _framework_agent_roots_have_git
-# --------------------------------------------------------------------------
-def test_roots_have_git_true(coord: Coordinator, monkeypatch, tmp_path) -> None:
-    repo = tmp_path / "fwrepo"
-    repo.mkdir()
-    subprocess.run(["git", "init", str(repo)], capture_output=True, check=True)
-    missing = tmp_path / "does_not_exist"
-    monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [str(missing), str(repo)])
-    assert coord._framework_agent_roots_have_git() is True
-
-
-def test_roots_have_git_false(coord: Coordinator, monkeypatch, tmp_path) -> None:
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [str(plain)])
-    assert coord._framework_agent_roots_have_git() is False
-
-
-# --------------------------------------------------------------------------
-# _audit_framework_agent_candidate
-# --------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_audit_candidate_cached(coord: Coordinator) -> None:
-    cand = {"candidate_id": "c1", "_audit": {"recommended_next_step": "skip", "cached": True}}
-    out = await coord._audit_framework_agent_candidate(cand)
-    assert out.get("cached") is True
-
-
-@pytest.mark.asyncio
-async def test_audit_candidate_success(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [])
-
-    async def _phase_audit(**kwargs):
-        return {"recommended_next_step": "direct_framework", "semantic_status": "applies", "evidence": []}
-
-    monkeypatch.setattr(fa_client_mod, "phase_audit", _phase_audit)
-    cand = {"candidate_id": "c2", "pr_url": "http://x/1"}
-    out = await coord._audit_framework_agent_candidate(cand)
-    assert out["recommended_next_step"] == "direct_framework"
-    assert cand["_audit"]["recommended_next_step"] == "direct_framework"  # cached onto candidate
-
-
-@pytest.mark.asyncio
-async def test_audit_candidate_failure_degrades_unknown(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [])
-
-    async def _boom(**kwargs):
-        raise RuntimeError("fa missing")
-
-    monkeypatch.setattr(fa_client_mod, "phase_audit", _boom)
-    out = await coord._audit_framework_agent_candidate({"candidate_id": "c3"})
-    assert out["semantic_status"] == "unknown"
-    assert out["recommended_next_step"] == ""
-
-
-@pytest.mark.asyncio
-async def test_audit_candidate_non_dict_result_coerced(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(fp_mod, "resolve_source_file_allowlist", lambda: [])
-
-    async def _weird(**kwargs):
-        return ["not", "a", "dict"]
-
-    monkeypatch.setattr(fa_client_mod, "phase_audit", _weird)
-    out = await coord._audit_framework_agent_candidate({"candidate_id": "c4"})
-    assert out["semantic_status"] == "unknown"
-
-
-# --------------------------------------------------------------------------
-# _framework_agent_audit_seed_lines
-# --------------------------------------------------------------------------
-def test_audit_seed_lines_empty(coord: Coordinator) -> None:
-    assert coord._framework_agent_audit_seed_lines(None) == []
-    assert coord._framework_agent_audit_seed_lines({}) == []
-
-
-def test_audit_seed_lines_populated(coord: Coordinator) -> None:
-    lines = coord._framework_agent_audit_seed_lines(
-        {
-            "semantic_status": "needs_rewrite",
-            "applicability": "needs_rewrite",
-            "evidence": [
-                {"local_file": "vllm/x.py", "symbol": "foo", "reason": "moved"},
-                "not-a-dict",
-            ],
-            "risks": ["r1", "r2"],
-        }
-    )
-    blob = "\n".join(lines)
-    assert "AUDIT EVIDENCE" in blob
-    assert "vllm/x.py" in blob and "[foo]" in blob and "moved" in blob
-    assert "risks: r1; r2" in blob
-
-
-# --------------------------------------------------------------------------
-# _record_framework_agent_audit_skip
-# --------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch) -> None:
-    seen: list = []
-
-    async def _kb(**kwargs):
-        seen.append(kwargs)
-
-    monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
-    coord.shared_state.framework_agent_phase_progress = None  # exercise the list-init branch
-    coord.shared_state.macro_cycle = 2
-    cand = {"candidate_id": "c1", "pr_url": "http://x/1", "batch_id": "b1", "head_sha": "deadbeef"}
-    await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
-    prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "already_present" and p.get("cycle") == 2 for p in prog)
-    assert seen  # KB writeback fired for already_present
-
-
-@pytest.mark.asyncio
-async def test_record_audit_skip_not_applicable(coord: Coordinator, monkeypatch) -> None:
-    async def _kb(**kwargs):  # should NOT be called for not_applicable
-        raise AssertionError("KB writeback must not fire for not_applicable")
-
-    monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
-    cand = {"candidate_id": "c2", "batch_id": "b1"}
-    await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "not_relevant", "risks": ["x"]})
-    prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "not_applicable" for p in prog)
-
-
-# --------------------------------------------------------------------------
-# _collect_framework_agent_candidate_priors
-# --------------------------------------------------------------------------
 def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
     coord.shared_state.framework_agent_phase_progress = [
         "not-a-dict",  # skipped via the isinstance filter
@@ -288,101 +138,6 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
 # --------------------------------------------------------------------------
 # _match_framework_agent_candidate
 # --------------------------------------------------------------------------
-def test_match_candidate(coord: Coordinator) -> None:
-    cands = [
-        {"candidate_id": "id-a", "pr_number": "1015"},
-        {"pr_url": "http://x/2", "pr_number": "2020"},
-    ]
-    assert coord._match_framework_agent_candidate("", cands) is None
-    assert coord._match_framework_agent_candidate("id-a", cands)["candidate_id"] == "id-a"
-    assert coord._match_framework_agent_candidate("http://x/2", cands)["pr_number"] == "2020"
-    # Bare PR-number fallback.
-    assert coord._match_framework_agent_candidate("PR:2020", cands)["pr_number"] == "2020"
-    assert coord._match_framework_agent_candidate("nope", cands) is None
-
-
-# --------------------------------------------------------------------------
-# _framework_agent_ranker_model / _framework_agent_ranker_client
-# --------------------------------------------------------------------------
-def test_ranker_model_env_override(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_RANKER_MODEL", "my-model")
-    assert coord._framework_agent_ranker_model() == "my-model"
-
-
-def test_ranker_model_from_backend(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_RANKER_MODEL", raising=False)
-    coord.backends["orchestration"].model = "backend-model"  # type: ignore[attr-defined]
-    assert coord._framework_agent_ranker_model() == "backend-model"
-
-
-def test_ranker_client_cached(coord: Coordinator) -> None:
-    sentinel = object()
-    coord._fa_ranker_client = sentinel  # type: ignore[attr-defined]
-    assert coord._framework_agent_ranker_client() is sentinel
-
-
-def test_ranker_client_from_scorer(coord: Coordinator) -> None:
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-    fake_client = object()
-
-    class _Scorer:
-        def _ensure_client(self):
-            return fake_client
-
-    coord._proposal_scorer = _Scorer()  # type: ignore[attr-defined]
-    assert coord._framework_agent_ranker_client() is fake_client
-    # Now cached.
-    assert coord._framework_agent_ranker_client() is fake_client
-
-
-def test_ranker_client_reuses_orchestration_backend_client(coord: Coordinator) -> None:
-    """When orchestration exposes an OpenAI-compatible client, the ranker reuses
-    it (default-on without extra credentials)."""
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-    coord._proposal_scorer = None  # type: ignore[attr-defined]
-
-    class _FakeChat:
-        pass
-
-    class _FakeClient:
-        chat = _FakeChat()
-
-    fake = _FakeClient()
-    coord.backends["orchestration"]._client = fake  # type: ignore[attr-defined]
-    assert coord._framework_agent_ranker_client() is fake
-    # Cached after first resolution.
-    assert coord._framework_agent_ranker_client() is fake
-
-
-def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None:
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-
-    class _Scorer:
-        def _ensure_client(self):
-            raise RuntimeError("no scorer client")
-
-    coord._proposal_scorer = _Scorer()  # type: ignore[attr-defined]
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert coord._framework_agent_ranker_client() is None
-
-
-def test_ranker_client_none_for_anthropic_only_deploy(coord: Coordinator, monkeypatch) -> None:
-    """The ranker speaks the OpenAI protocol, so an Anthropic-only deploy leaves it
-    disabled.
-
-    The orchestration backend carries ``api_key_env="ANTHROPIC_API_KEY"`` in
-    production (the role is Claude), so the stub declares it too; without it this
-    asserts nothing.
-    """
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-    coord._proposal_scorer = None  # type: ignore[attr-defined]
-    coord.backends["orchestration"].api_key_env = "ANTHROPIC_API_KEY"  # type: ignore[attr-defined]
-    coord.backends["orchestration"].base_url_env = "ANTHROPIC_BASE_URL"  # type: ignore[attr-defined]
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-user-token")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    assert coord._framework_agent_ranker_client() is None
 
 
 def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = None):
@@ -406,61 +161,6 @@ def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = Non
     monkeypatch.setattr(llm_config, "get_async_openai_client", _fake, raising=False)
 
 
-def test_ranker_client_ignores_anthropic_orchestration_key(coord: Coordinator, monkeypatch) -> None:
-    """A Claude orchestration backend must not lend its key to the ranker: with an
-    OpenAI side configured the ranker authenticates from that side only."""
-    _stub_sanctioned_async_client(monkeypatch)
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-    coord._proposal_scorer = None  # type: ignore[attr-defined]
-    coord.backends["orchestration"].api_key_env = "ANTHROPIC_API_KEY"  # type: ignore[attr-defined]
-    coord.backends["orchestration"].base_url_env = "ANTHROPIC_BASE_URL"  # type: ignore[attr-defined]
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-user-token")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.setenv("OPENAI_API_KEY", "ak-openai")
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
-
-    client = coord._framework_agent_ranker_client()
-
-    assert client is not None
-    assert client.api_key == "ak-openai"
-    assert "api.anthropic.com" not in str(client.base_url)
-
-
-def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
-    calls: list[dict] = []
-    _stub_sanctioned_async_client(monkeypatch, calls)
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-    coord._proposal_scorer = None  # type: ignore[attr-defined]
-    monkeypatch.setenv("OPENAI_API_KEY", "safe-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
-    client = coord._framework_agent_ranker_client()
-    assert client is not None
-    assert client.api_key == "safe-test-key"
-    # The ranker owns no construction of its own: llm_config built this client.
-    assert len(calls) == 1
-    # Cached on the instance after a successful build.
-    assert coord._framework_agent_ranker_client() is client
-    assert len(calls) == 1
-
-
-def test_ranker_client_none_when_client_construction_fails(coord: Coordinator, monkeypatch) -> None:
-    """An unusable SDK / gateway leaves the optional ranker disabled, not crashing."""
-    from hyperloom.common import llm_config
-
-    def _no_sdk(**_kwargs):
-        raise ImportError("No module named 'openai'")
-
-    monkeypatch.setattr(llm_config, "get_async_openai_client", _no_sdk, raising=False)
-    coord._fa_ranker_client = None  # type: ignore[attr-defined]
-    coord._proposal_scorer = None  # type: ignore[attr-defined]
-    monkeypatch.setenv("OPENAI_API_KEY", "safe-test-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
-    assert coord._framework_agent_ranker_client() is None
-
-
-# --------------------------------------------------------------------------
-# _select_best_framework_agent_candidate / _rank_framework_agent_candidates_llm
-# --------------------------------------------------------------------------
 class _FakeDelta:
     def __init__(self, content: str | None) -> None:
         self.content = content
@@ -519,81 +219,6 @@ def _install_ranker(coord: Coordinator, monkeypatch, client) -> None:
     monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_model", lambda: "m")
 
 
-@pytest.mark.asyncio
-async def test_select_best_empty_and_single(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: [])
-    assert await coord._select_best_framework_agent_candidate() is None
-    only = {"candidate_id": "solo"}
-    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: [only])
-    assert await coord._select_best_framework_agent_candidate() is only
-
-
-@pytest.mark.asyncio
-async def test_select_best_ranker_picks(coord: Coordinator, monkeypatch) -> None:
-    cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
-    _install_ranker(coord, monkeypatch, _FakeClient('{"candidate_id": "c2", "reason": "moe"}'))
-    chosen = await coord._select_best_framework_agent_candidate()
-    assert chosen["candidate_id"] == "c2"
-
-
-@pytest.mark.asyncio
-async def test_select_best_ranker_failure_falls_back(coord: Coordinator, monkeypatch) -> None:
-    cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
-
-    async def _raise(_c):
-        raise RuntimeError("rank boom")
-
-    monkeypatch.setattr(coord.phase_framework, "_rank_framework_agent_candidates_llm", _raise)
-    chosen = await coord._select_best_framework_agent_candidate()
-    assert chosen["candidate_id"] == "c1"  # deterministic fallback (discovery order)
-
-
-@pytest.mark.asyncio
-async def test_rank_llm_no_client_or_model(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: None)
-    assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}]) is None
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: _FakeClient("{}"))
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_model", lambda: "")
-    assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}]) is None
-
-
-@pytest.mark.asyncio
-async def test_rank_llm_success_with_audit_and_context(coord: Coordinator, monkeypatch) -> None:
-    coord.shared_state.best_throughput = 1234.5  # type: ignore[attr-defined]
-    cands = [
-        {"candidate_id": "c1", "title": "t1", "repo": "r", "_audit": {"applicability": "applies"}},
-        {"candidate_id": "c2", "title": "t2"},
-    ]
-    _install_ranker(coord, monkeypatch, _FakeClient('```json\n{"candidate_id": "c1", "reason": "ok"}\n```'))
-    chosen = await coord._rank_framework_agent_candidates_llm(cands)
-    assert chosen["candidate_id"] == "c1"
-
-
-@pytest.mark.asyncio
-async def test_rank_llm_call_raises(coord: Coordinator, monkeypatch) -> None:
-    _install_ranker(coord, monkeypatch, _FakeClient("", raise_exc=True))
-    assert await coord._rank_framework_agent_candidates_llm([{"candidate_id": "c1"}, {"candidate_id": "c2"}]) is None
-
-
-@pytest.mark.asyncio
-async def test_rank_llm_empty_and_unknown_id(coord: Coordinator, monkeypatch) -> None:
-    cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    # Empty reply -> None.
-    _install_ranker(coord, monkeypatch, _FakeClient("   "))
-    assert await coord._rank_framework_agent_candidates_llm(cands) is None
-    # Valid JSON but unknown id -> None.
-    _install_ranker(coord, monkeypatch, _FakeClient('{"candidate_id": "nope"}'))
-    assert await coord._rank_framework_agent_candidates_llm(cands) is None
-    # Non-JSON text (no braces) -> None.
-    _install_ranker(coord, monkeypatch, _FakeClient("no json here"))
-    assert await coord._rank_framework_agent_candidates_llm(cands) is None
-
-
-# --------------------------------------------------------------------------
-# framework._materialize_pr_diff_via_worktree (scripted _run_git)
-# --------------------------------------------------------------------------
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, worktree_add_ok: bool = True):
     def _fake(args, timeout=None):  # noqa: ANN001
         sub = args[2] if len(args) > 2 else ""
@@ -654,36 +279,6 @@ def test_materialize_pr_diff_worktree_add_fails(monkeypatch, tmp_path) -> None:
 
 # --------------------------------------------------------------------------
 # framework_agent_client.phase_audit optional-field plumbing
-# --------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_phase_audit_request_optional_fields(monkeypatch, tmp_path) -> None:
-    captured: dict = {}
-
-    async def _invoke(*, subcommand, request, session_dir, timeout_sec):
-        captured["request"] = request
-        captured["subcommand"] = subcommand
-        return {"recommended_next_step": "skip"}
-
-    monkeypatch.setattr(fa_client_mod, "_invoke_fa_phase", _invoke)
-    out = await fa_client_mod.phase_audit(
-        candidate={"candidate_id": "c1", "diff_url": "http://x/d"},
-        framework="sglang",
-        framework_source_roots=["/root"],
-        session_dir=tmp_path,
-        diff_text="--- a\n+++ b\n",
-        primus_cortex_url="http://cortex/v1",
-        model="my-model",
-    )
-    assert out["recommended_next_step"] == "skip"
-    req = captured["request"]
-    assert req["diff_text"].startswith("--- a")
-    assert req["primus_cortex_url"] == "http://cortex/v1"
-    assert req["model"] == "my-model"
-    assert req["diff_url"] == "http://x/d"
-
-
-# --------------------------------------------------------------------------
-# _dispatch_paused_for_phase_budget
 # --------------------------------------------------------------------------
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     coord.shared_state.phase = "PRELUDE"
@@ -991,16 +586,3 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
 # ---------------------------------------------------------------------------
 # Lenient ranker: an "applicable: false" reply never vetoes the phase
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_ranker_applicable_false_falls_back_to_discovery_order(coord: Coordinator, monkeypatch) -> None:
-    cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
-    monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
-    _install_ranker(
-        coord,
-        monkeypatch,
-        _FakeClient('{"applicable": false, "reason": "all off-arch"}'),
-    )
-    result = await coord._select_best_framework_agent_candidate()
-    assert result is cands[0]

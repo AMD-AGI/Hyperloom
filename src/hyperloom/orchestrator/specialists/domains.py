@@ -122,15 +122,19 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
-        key="pr_intel_specialist",
-        layer="cross-repo PR research",
+        key="candidate_discovery_specialist",
+        layer="upstream candidate discovery / ranking / audit",
         kb_anchor="pr_intelligence",
         available_in="M6",
         default_mode="research",
         description=(
-            "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
-            "repos and feeds refs to other specialists. Dispatch sparingly "
-            "(one every K rounds)."
+            "Finds upstream work worth landing. Surveys PRs across the "
+            "allowlisted repos for the live bottleneck, ranks what it finds "
+            "against the stack and the already-tried ledger, and judges each "
+            "candidate: already present, not applicable, or worth a bench and "
+            "by which route. Writes candidates to the ledger; Orchestration "
+            "then proposes integrate_patch for the ones it wants. A first-class "
+            "lever alongside configuration search, not an occasional top-up."
         ),
     ),
     SpecialistDomain(

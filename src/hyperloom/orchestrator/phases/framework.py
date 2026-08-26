@@ -5,7 +5,6 @@
 specialist dispatch, enablement repair, and Critic-review submission/reauthor."""
 
 from __future__ import annotations
-import asyncio
 import logging as _logging
 import os
 import subprocess
@@ -21,10 +20,8 @@ from ..state.shared_state import inject_stack_base_params, resolve_grading_ancho
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 from ..loop.coordinator import (
-    DEFAULT_FRAMEWORK_MAX_CANDIDATES,
     PendingProposal,
     _AUTHORED_LANE_MAX_ATTEMPTS,
-    _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC,
     _framework_config_levers_from_done,
 )
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
@@ -138,141 +135,48 @@ class FrameworkPhase(PhaseHandler):
             # author->integrate->KEEP/REVERT lifecycle before the next.
             if await self._framework_agent_authoring_inflight():
                 return
-        # Pick the most promising un-dispatched candidate, or request a new batch.
-        next_candidate = await self._select_best_framework_agent_candidate()
+        # Take the next un-dispatched candidate. Ordering and the
+        # already-present / not-applicable / worth-a-bench judgement are the
+        # discovery specialist's deliverable, so the pump takes them in the
+        # order it was given rather than re-ranking or re-auditing here.
+        next_candidate = self._select_next_framework_agent_candidate()
         if next_candidate is None:
-            # Hold the phase open while pump-discovered authored patches are still
-            # benched/reviewed; only when the pump itself discovered a PR batch
-            # (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
-            discovered_batch = bool(getattr(self.shared_state, "framework_agent_batches", None) or [])
+            # Hold the phase open while authored patches are still benched or
+            # reviewed; only when a batch was discovered (an LLM-proposed
+            # integrate_patch must not keep FRAMEWORK open).
+            discovered_batch = bool(getattr(state, "framework_agent_batches", None) or [])
             if (
                 discovered_batch
-                and getattr(self.shared_state, "framework_agent_authoring_enabled", False)
+                and getattr(state, "framework_agent_authoring_enabled", False)
                 and await self._framework_agent_authoring_inflight()
             ):
                 return
-            # Discover a fresh batch; only DISCOVER_FAILURE_RETRY_LIMIT
-            # consecutive failures or an empty-but-valid payload mark the phase done.
-            from ..framework import client as _fa_client
-
-            ok = await self._discover_next_framework_batch()
-            if not ok:
-                # Prefer self-driven local exploration over skipping the whole
-                # phase. Discovery is retried automatically on later ticks (once
-                # the local-explore specialist completes and no PR candidate
-                # remains), so with the local-explore arm enabled the phase now
-                # exits via plateau / budget / force-exit rather than a
-                # discover-failure streak. Falls back to the historical
-                # discover-exhaustion exit when the arm is disabled.
-                if await self._maybe_dispatch_local_explore(reason="discover_exhausted"):
-                    state.save(self.session_dir)
-                    return
-                failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
-                if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
-                    # Transient discover failures exhausted — real exit.
-                    self._record_framework_agent_phase_done(
-                        reason="discover_retries_exhausted",
-                        failure_count=failures,
-                    )
-                    state.framework_agent_phase_done = True
-                    state.save(self.session_dir)
-                    return
-                if failures == 0:
-                    # Empty-but-valid payload: tolerate a bounded number of
-                    # consecutive empties (transient upstream blip) before giving up.
-                    empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
-                    state.framework_agent_empty_discoveries = empties
-                    if empties < _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
-                        log.info(
-                            "FRAMEWORK: empty discovery batch (%d/%d) — retrying on a later tick",
-                            empties,
-                            _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                        )
-                        state.save(self.session_dir)
-                        return
-                    self._record_framework_agent_phase_done(
-                        reason="discover_empty_payload",
-                        failure_count=failures,
-                    )
-                state.framework_agent_phase_done = True
+            # Minimum supply: with the pool empty and no discovery in flight,
+            # ask for one. Orchestration may dispatch the same specialist
+            # itself at any time; this only keeps the lane from idling when it
+            # does not.
+            if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
                 state.save(self.session_dir)
                 return
-            # A non-empty batch cleared any prior empty-discovery streak.
-            state.framework_agent_empty_discoveries = 0
-            next_candidate = await self._select_best_framework_agent_candidate()
-            if next_candidate is None:
-                if await self._maybe_dispatch_local_explore(reason="no_new_candidates"):
-                    state.save(self.session_dir)
-                    return
-                self._record_framework_agent_phase_done(
-                    reason="discover_returned_no_new_candidates",
-                    failure_count=int(
-                        getattr(state, "framework_agent_discover_failures", 0) or 0,
-                    ),
-                )
-                state.framework_agent_phase_done = True
+            if await self._maybe_dispatch_local_explore(reason="no_new_candidates"):
                 state.save(self.session_dir)
                 return
-        # Local-exploration arm: a candidate-free authoring specialist chosen by
-        # the ranker (resident arm) has no upstream diff to judge, so it skips
-        # the PR semantic audit and dispatches directly.
+            self._record_framework_agent_phase_done(reason="no_candidates_and_discovery_exhausted")
+            state.framework_agent_phase_done = True
+            state.save(self.session_dir)
+            return
+        # Local-exploration arm: a candidate-free authoring specialist has no
+        # upstream diff, so it dispatches directly.
         if str(next_candidate.get("kind") or "") == self._LOCAL_EXPLORE_KIND:
             await self._enqueue_framework_agent_local_explore_specialist(next_candidate)
             state.save(self.session_dir)
             return
-        # Run semantic audit before the Critic/apply. A confident verdict routes
-        # the candidate; an unknown / unavailable audit falls back to both-tracks.
-        audit = await self._audit_framework_agent_candidate(next_candidate)
-        audit_step = str((audit or {}).get("recommended_next_step") or "")
-        _cand_id_log = self._framework_candidate_key(next_candidate)
-        # Only honour a skip when the audit is confident AND evidence-backed.
-        if audit_step == "skip" and not self._framework_agent_audit_skip_confident(audit):
-            log.info(
-                "FRAMEWORK: audit skip downgraded (low confidence / no evidence) candidate=%s conf=%s",
-                _cand_id_log,
-                (audit or {}).get("confidence"),
-            )
-            audit_step = "author_via_specialist"
-        if audit_step == "skip":
-            await self._record_framework_agent_audit_skip(next_candidate, audit)
-            state.save(self.session_dir)
-            return
-        # direct_apply needs a clean git checkout; degrade to authoring on a
-        # wheel install (no git tree among the framework source roots).
-        if audit_step == "direct_framework" and not self._framework_agent_roots_have_git():
-            log.info(
-                "FRAMEWORK: direct_apply downgraded to authoring "
-                "(no git checkout among framework source roots) candidate=%s",
-                _cand_id_log,
-            )
-            audit_step = "author_via_specialist"
-        # A candidate from a different concrete framework cannot be
-        # direct-applied; downgrade to authoring. ``aiter`` is shared across
-        # frameworks and is never treated as a mismatch.
-        if audit_step == "direct_framework":
-            session_fw = str(getattr(state, "framework", "") or "").strip().lower()
-            cand_fw = str(next_candidate.get("framework") or "").strip().lower()
-            if not cand_fw:
-                repo_token = str(next_candidate.get("repo") or next_candidate.get("discovered_repo_url") or "").lower()
-                for _fw_tok in ("sglang", "vllm", "atom"):
-                    if f"/{_fw_tok}" in repo_token or repo_token.endswith(_fw_tok):
-                        cand_fw = _fw_tok
-                        break
-            if cand_fw and cand_fw != "aiter" and session_fw and cand_fw != session_fw:
-                log.info(
-                    "FRAMEWORK: direct_apply downgraded to authoring "
-                    "(candidate framework=%s differs from session framework=%s) candidate=%s",
-                    cand_fw,
-                    session_fw,
-                    _cand_id_log,
-                )
-                audit_step = "author_via_specialist"
         # Submit the candidate as a proposal; the async Critic verdict drives the
         # apply/author enqueue or the critic_denied row on a later tick.
         await self._submit_framework_agent_candidate_for_review(
             next_candidate,
-            audit=audit,
-            audit_step=audit_step,
+            audit=dict(next_candidate.get("audit") or {}),
+            audit_step=str(next_candidate.get("route") or "author_via_specialist"),
         )
 
     async def _framework_agent_authoring_inflight(self) -> bool:
@@ -337,7 +241,6 @@ class FrameworkPhase(PhaseHandler):
             pass
         return False
 
-    @staticmethod
     def _framework_agent_audit_skip_confident(audit: dict[str, Any] | None) -> bool:
         """True iff an ``already_*`` skip is safe: concrete evidence + confidence ≥ floor (G5).
 
@@ -363,7 +266,6 @@ class FrameworkPhase(PhaseHandler):
             floor = 0.8
         return conf >= floor
 
-    @staticmethod
     def _framework_agent_roots_have_git() -> bool:
         """True iff any resolved framework source root is a git work tree (G3 preflight).
 
@@ -396,7 +298,6 @@ class FrameworkPhase(PhaseHandler):
                 return True
         return False
 
-    @staticmethod
     def _framework_audit_use_llm_mode() -> str:
         """Resolve the phase-audit LLM policy from the environment.
 
@@ -416,7 +317,6 @@ class FrameworkPhase(PhaseHandler):
             return "off"
         return "auto"
 
-    @staticmethod
     def _framework_audit_verdict_uncertain(audit: dict[str, Any] | None) -> bool:
         """True when a static audit verdict is too weak to route on confidently.
 
@@ -440,96 +340,6 @@ class FrameworkPhase(PhaseHandler):
         except (TypeError, ValueError):
             return True
 
-    async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
-        """Run ``fa phase-audit`` for a candidate; degrade to ``unknown`` on any failure.
-
-        A cached verdict stamped on the candidate (``_audit``) is reused so a
-        re-pump / resume never re-audits. An unavailable audit returns an
-        ``unknown`` verdict with an empty ``recommended_next_step`` so the pump
-        falls back to legacy both-tracks routing.
-
-        Args:
-            candidate: The discovered candidate row.
-
-        Returns:
-            The semantic-audit verdict dict.
-        """
-        cached = candidate.get("_audit") if isinstance(candidate, dict) else None
-        if isinstance(cached, dict) and cached.get("recommended_next_step") is not None:
-            return cached
-        state = self.shared_state
-        unknown: dict[str, Any] = {
-            "semantic_status": "unknown",
-            "applicability": "needs_human_review",
-            "recommended_next_step": "",
-            "confidence": 0.0,
-            "evidence": [],
-            "risks": ["audit unavailable"],
-            "source": "audit_unavailable",
-        }
-        try:
-            import os
-
-            from ..framework import client as _fa_client
-            from ..framework.paths import resolve_source_file_allowlist
-
-            roots = list(resolve_source_file_allowlist())
-            session_framework = str(getattr(state, "framework", "") or "").strip().lower()
-            cand_framework = str(candidate.get("framework") or "").strip().lower()
-            # A candidate from a DIFFERENT framework's repo is judged for
-            # portability into this session's framework; a blank cand_framework
-            # (the common same-framework case) resolves to session_framework.
-            is_cross_fw_candidate = bool(cand_framework) and cand_framework != session_framework
-            audit_kwargs: dict[str, Any] = dict(
-                candidate=candidate,
-                framework=cand_framework or session_framework,
-                framework_source_roots=roots,
-                target_framework=session_framework if is_cross_fw_candidate else "",
-                target_framework_source_roots=roots if is_cross_fw_candidate else None,
-                session_dir=self.session_dir,
-                repo_url=str(candidate.get("repo") or ""),
-                diff_url=str(candidate.get("diff_url") or ""),
-                primus_cortex_url=os.environ.get("PRIMUS_CORTEX_PR_API", "").strip(),
-                timeout_sec=getattr(
-                    self,
-                    "framework_audit_timeout_sec",
-                    _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC,
-                ),
-            )
-            # Selectable LLM deep-read: "off" keeps the hermetic static verdict;
-            # "on" always runs the evidence-gated LLM refine; "auto" (default)
-            # only escalates to the LLM when the cheap static pass is uncertain.
-            llm_mode = self._framework_audit_use_llm_mode()
-            audit = await _fa_client.phase_audit(**audit_kwargs, use_llm=(llm_mode == "on"))
-            if llm_mode == "auto" and self._framework_audit_verdict_uncertain(audit):
-                try:
-                    refined = await _fa_client.phase_audit(**audit_kwargs, use_llm=True)
-                    if isinstance(refined, dict) and refined.get("recommended_next_step") is not None:
-                        audit = refined
-                except Exception as refine_exc:  # noqa: BLE001 — refine is best-effort
-                    log.debug(
-                        "FRAMEWORK: auto LLM audit refine failed (%r); keeping static verdict",
-                        refine_exc,
-                    )
-        except Exception as exc:  # noqa: BLE001 — audit is advisory; never wedge the pump
-            log.warning("FRAMEWORK: phase-audit failed (%r); routing as unknown", exc)
-            audit = dict(unknown)
-        if not isinstance(audit, dict):
-            audit = dict(unknown)
-        try:
-            candidate["_audit"] = audit
-        except Exception:  # noqa: BLE001 — caching is best-effort
-            pass
-        log.info(
-            "FRAMEWORK: audit candidate=%s status=%s appl=%s next=%s",
-            self._framework_candidate_key(candidate),
-            audit.get("semantic_status"),
-            audit.get("applicability"),
-            audit.get("recommended_next_step"),
-        )
-        return audit
-
-    @staticmethod
     def _framework_agent_audit_seed_lines(audit: dict[str, Any] | None) -> list[str]:
         """Render audit evidence as authoring-seed lines (empty when no audit)."""
         if not isinstance(audit, dict) or not audit:
@@ -559,81 +369,6 @@ class FrameworkPhase(PhaseHandler):
         if isinstance(risks, list) and risks:
             lines.append("- risks: " + "; ".join(str(r) for r in risks[:4]))
         return lines
-
-    async def _record_framework_agent_audit_skip(
-        self,
-        candidate: dict[str, Any],
-        audit: dict[str, Any] | None,
-    ) -> None:
-        """Record a terminal progress row + decision.json (+ KB) for an audit-skipped candidate.
-
-        Called when the audit's ``recommended_next_step == "skip"`` (already
-        present / not applicable): no Critic, no GPU, no specialist. Writes the
-        candidate's fate so the batch advances and a later session can dedup.
-
-        Args:
-            candidate: The skipped candidate row.
-            audit: The semantic-audit verdict driving the skip.
-        """
-        state = self.shared_state
-        cand_id = self._framework_candidate_key(candidate)
-        batch_id = str(candidate.get("batch_id") or "")
-        semantic = str((audit or {}).get("semantic_status") or "")
-        status = "already_present" if semantic.startswith("already_") else "not_applicable"
-        progress = getattr(state, "framework_agent_phase_progress", None)
-        if not isinstance(progress, list):
-            progress = []
-            state.framework_agent_phase_progress = progress
-        progress.append(
-            {
-                "candidate_id": cand_id,
-                "pr_url": str(candidate.get("pr_url") or ""),
-                "status": status,
-                "kept": False,
-                "provenance": "audit",
-                "semantic_status": semantic,
-                "confidence": float((audit or {}).get("confidence") or 0.0),
-                "batch_id": batch_id,
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "cycle": int(getattr(state, "macro_cycle", 0) or 0),
-            }
-        )
-        if status == "already_present":
-            try:
-                from ..knowledge.kb_writeback import OUTCOME_ALREADY_PRESENT, write_framework_record
-
-                gap_keywords = candidate.get("gap_keywords") or []
-                if isinstance(gap_keywords, str):
-                    gap_keywords = [gap_keywords]
-                changed_files = candidate.get("changed_files") or []
-                if isinstance(changed_files, str):
-                    changed_files = [changed_files]
-                await write_framework_record(
-                    pr_url=str(candidate.get("pr_url") or ""),
-                    pr_sha=str(candidate.get("head_sha") or ""),
-                    patch_path="",
-                    outcome=OUTCOME_ALREADY_PRESENT,
-                    tps_delta_pct=0.0,
-                    session_id=str(getattr(state, "session_id", "") or ""),
-                    framework=str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
-                    gap_canonical_id=str(candidate.get("gap_canonical_id") or "").strip(),
-                    gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
-                    model_class=str(getattr(state, "model_class", "") or "").strip(),
-                    gpu_type=str(getattr(state, "gpu_type", "") or "").strip(),
-                    precision=str(getattr(state, "precision", "") or "").strip(),
-                    applicability=str((audit or {}).get("applicability") or "").strip(),
-                    provenance="phase_audit",
-                    changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
-                    session_dir=self.session_dir,
-                )
-            except Exception:  # noqa: BLE001 — KB writeback is best-effort
-                log.debug("FRAMEWORK: audit-skip KB writeback failed", exc_info=True)
-        log.info(
-            "FRAMEWORK: audit skip candidate=%s status=%s (semantic=%s)",
-            cand_id,
-            status,
-            semantic,
-        )
 
     async def _enqueue_framework_agent_authoring_specialist(
         self,
@@ -1304,11 +1039,12 @@ class FrameworkPhase(PhaseHandler):
         return out
 
     def _select_next_framework_agent_candidate(self) -> dict[str, Any] | None:
-        """Return the next unprocessed candidate in the latest batch (linear order).
+        """Return the next unprocessed candidate in the batch, in the order given.
 
-        Used for existence checks and as the deterministic fallback when the
-        agent-driven ranker (:meth:`_select_best_framework_agent_candidate`) is
-        unavailable.
+        Linear on purpose: the discovery specialist ranks what it finds and
+        judges each entry, so the batch arrives ordered. Re-ranking here would
+        overrule a judgement made with the gap and the tried-ledger in view,
+        using less context than the specialist had.
 
         Returns:
             The first candidate dict not yet recorded in the phase progress, or
@@ -1316,43 +1052,6 @@ class FrameworkPhase(PhaseHandler):
         """
         unprocessed = self._unprocessed_framework_agent_candidates()
         return unprocessed[0] if unprocessed else None
-
-    async def _select_best_framework_agent_candidate(self) -> dict[str, Any] | None:
-        """Pick the single most promising unprocessed candidate via the agent.
-
-        The batch is discovered once; each FRAMEWORK exploration then asks the
-        agent (LLM) to choose — among the *currently available* candidates — the
-        one most likely to improve serving throughput for this workload, instead
-        of grinding through the batch in discovery order. Degrades safely: any
-        ranker failure falls back to the first unprocessed candidate so the pump
-        never wedges.
-
-        Returns:
-            The chosen candidate dict, or ``None`` when none remain.
-        """
-        unprocessed = self._unprocessed_framework_agent_candidates()
-        if not unprocessed:
-            return None
-        # Resident local-exploration arm: offer a candidate-free "author from
-        # live source" option alongside the discovered PRs so the ranker can
-        # choose it when the PR leads look weak / already-present / off the
-        # current bottleneck. Only injected when a PR batch already exists (the
-        # no-batch path stays the discovery trigger).
-        ranking_set = list(unprocessed)
-        pseudo = self._make_local_explore_pseudo_candidate()
-        if pseudo is not None:
-            ranking_set.append(pseudo)
-        if len(ranking_set) == 1:
-            return ranking_set[0]
-        try:
-            chosen = await self._rank_framework_agent_candidates_llm(ranking_set)
-        except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
-            log.debug("FRAMEWORK: agent candidate ranking failed", exc_info=True)
-            chosen = None
-        if chosen is not None:
-            return chosen
-        # Deterministic fallback: discovery order (never the pseudo-candidate).
-        return unprocessed[0]
 
     def _authoring_specialist_domain(self) -> str:
         """Pick the authoring domain that matches the session's framework kind.
@@ -1705,118 +1404,6 @@ class FrameworkPhase(PhaseHandler):
         )
         return spec_tid
 
-    async def _rank_framework_agent_candidates_llm(
-        self,
-        candidates: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        """Ask the agent to choose the most promising candidate; ``None`` on any failure.
-
-        Builds a compact workload-context + candidate-list prompt and requests a
-        single ``candidate_id``. Matches the reply back to a candidate (exact id
-        or PR number). Best-effort: returns ``None`` (caller falls back) when the
-        client/model is unavailable, the call errors/times out, or the reply
-        can't be parsed.
-
-        Args:
-            candidates: The unprocessed candidates to rank.
-
-        Returns:
-            The chosen candidate dict, or ``None``.
-        """
-        import json as _json
-
-        from hyperloom.common.llm_config import astream_chat_completion_text
-        from hyperloom.orchestrator.prompts.framework_ranker_prompt import build_framework_ranker_prompt
-
-        client = self._framework_agent_ranker_client()
-        if client is None:
-            return None
-        model = self._framework_agent_ranker_model()
-        if not model:
-            return None
-        state = self.shared_state
-        best = resolve_grading_anchor_tput(state)
-        cap = 60
-        listed = candidates[:cap]
-        candidate_rows: list[str] = []
-        for i, c in enumerate(listed):
-            cid = self._framework_candidate_key(c)
-            title = str(c.get("title") or "").strip()
-            repo = str(c.get("repo") or c.get("discovered_repo_url") or "").strip()
-            audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
-            appl = str((audit or {}).get("applicability") or "") if audit else ""
-            extra = f" [audit_applicability={appl}]" if appl else ""
-            candidate_rows.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
-        has_local_explore = any(str(c.get("kind") or "") == self._LOCAL_EXPLORE_KIND for c in listed)
-        # Fold already-tried / failed candidates as negative samples (best-effort).
-        try:
-            memory_block = self._render_framework_memory_for_prompt(
-                self._build_framework_working_memory(),
-            )
-        except Exception:  # noqa: BLE001 — advisory only
-            log.debug("FRAMEWORK: working-memory render for ranker failed", exc_info=True)
-            memory_block = ""
-        prompt = build_framework_ranker_prompt(
-            model=getattr(state, "model", "") or getattr(state, "model_path", ""),
-            framework=getattr(state, "framework", ""),
-            gpu_type=getattr(state, "gpu_type", ""),
-            precision=getattr(state, "precision", ""),
-            tp=getattr(state, "tp", ""),
-            best_throughput=best,
-            candidate_rows=candidate_rows,
-            has_local_explore=has_local_explore,
-            memory_block=memory_block,
-        )
-
-        async def _read_stream() -> str:
-            text, _ = await astream_chat_completion_text(
-                client,
-                component="framework",
-                operation="rank_candidates",
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=400,
-            )
-            return text
-
-        try:
-            text = (
-                await asyncio.wait_for(
-                    _read_stream(),
-                    timeout=float(getattr(self, "framework_ranker_timeout_sec", 60.0) or 60.0),
-                )
-            ).strip()
-        except Exception as exc:  # noqa: BLE001 — degrade to fallback
-            log.debug("FRAMEWORK: ranker LLM call failed (%r)", exc)
-            return None
-        if not text:
-            return None
-        # Extract the JSON object (tolerate code fences / surrounding prose).
-        chosen_id = ""
-        reason = ""
-        try:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                obj = _json.loads(text[start : end + 1])
-                chosen_id = str(obj.get("candidate_id") or "").strip()
-                reason = str(obj.get("reason") or "").strip()
-        except Exception:  # noqa: BLE001
-            chosen_id = ""
-        if not chosen_id:
-            return None
-        match = self._match_framework_agent_candidate(chosen_id, candidates)
-        if match is None:
-            log.debug("FRAMEWORK: ranker chose unknown id=%s; falling back", chosen_id)
-            return None
-        log.info(
-            "FRAMEWORK: agent selected candidate=%s (of %d) reason=%s",
-            str(match.get("candidate_id") or match.get("pr_url") or ""),
-            len(candidates),
-            reason[:160],
-        )
-        return match
-
     @staticmethod
     def _match_framework_agent_candidate(
         chosen_id: str,
@@ -1837,70 +1424,6 @@ class FrameworkPhase(PhaseHandler):
                 if str(c.get("pr_number") or "").strip() == digits:
                     return c
         return None
-
-    def _framework_agent_ranker_model(self) -> str:
-        """Model slug for the candidate ranker (env override → orchestration model)."""
-        import os
-
-        env_model = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_RANKER_MODEL", "").strip()
-        if env_model:
-            return env_model
-        backend = self.backends.get("orchestration")
-        return str(getattr(backend, "model", "") or "").strip()
-
-    def _framework_agent_ranker_client(self) -> Any:
-        """Return an OpenAI-compatible async client for ranking, or ``None``.
-
-        Reuses the ProposalScorer's client when present (same gateway/auth),
-        then the orchestration backend's own client (so the LLM ranker is on by
-        default whenever orchestration has LLM credentials); otherwise asks
-        :func:`hyperloom.common.llm_config.get_async_openai_client` -- the only
-        sanctioned owner of provider client construction -- for one built from
-        ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``. Returns ``None`` when the
-        OpenAI side is unconfigured, which leaves the LLM ranker disabled.
-        Cached on first successful build.
-        """
-        import os
-
-        cached = getattr(self, "_fa_ranker_client", None)
-        if cached is not None:
-            return cached
-        scorer = getattr(self, "_proposal_scorer", None)
-        ensure = getattr(scorer, "_ensure_client", None)
-        if callable(ensure):
-            try:
-                client = ensure()
-                if client is not None:
-                    self._coord._fa_ranker_client = client
-                    return client
-            except Exception:  # noqa: BLE001 — fall through to direct build
-                log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
-        # Reuse the orchestration backend's own OpenAI-compatible client when it
-        # exposes one: same gateway + auth as the running session, so the ranker
-        # is default-on without extra configuration. Agent-runtime backends own
-        # no client of their own, so those fall through to the build below.
-        backend = self.backends.get("orchestration")
-        backend_client = getattr(backend, "_client", None)
-        if backend_client is not None and hasattr(backend_client, "chat"):
-            self._coord._fa_ranker_client = backend_client
-            return backend_client
-        from hyperloom.common import llm_config as _llm_cfg
-
-        # This client speaks the OpenAI protocol, so it authenticates from the
-        # OpenAI side only. The orchestration backend's own ``api_key_env`` is not
-        # consulted: the orchestration role is Claude, so it names the Anthropic
-        # key, which must never reach an OpenAI-protocol endpoint. The explicit
-        # gate keeps ``llm_config``'s ``LLM_GATEWAY_KEY`` fallback out of play.
-        if not os.environ.get("OPENAI_API_KEY"):
-            log.debug("FRAMEWORK: LLM ranker disabled (OPENAI_API_KEY not set; ranker needs the OpenAI side)")
-            return None
-        try:
-            client = _llm_cfg.get_async_openai_client()
-        except Exception:  # noqa: BLE001 — the ranker is optional, so it degrades to off
-            log.debug("FRAMEWORK: LLM ranker disabled (async OpenAI client unavailable)", exc_info=True)
-            return None
-        self._coord._fa_ranker_client = client
-        return client
 
     def _framework_known_candidate_ids(self) -> set[str]:
         """All candidate ids already discovered into any prior batch (dedup for new batches).
@@ -2100,7 +1623,7 @@ class FrameworkPhase(PhaseHandler):
         """Reverse-lookup: which known serving framework (if any) owns ``repo_url``.
 
         Design #5-P1/discovery-wiring: ``_framework_agent_discover_repo_urls``
-        already queries the ``pr_intel_specialist`` cross-repo set (e.g. a
+        already queries the global cross-repo allowlist (e.g. a
         sglang session's discovery batch already includes ``ROCm/vllm``), but
         candidates returned by ``fa phase-discover`` never carry a
         ``framework`` tag reflecting which repo they actually came from — so
@@ -2194,255 +1717,6 @@ class FrameworkPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — defensive
             pass
-
-    async def _discover_next_framework_batch(self) -> bool:
-        """Call ``fa phase-discover`` and append a batch to SharedState. Returns True iff a non-empty batch was appended; transient failures return False (see DISCOVER_FAILURE_RETRY_LIMIT).
-
-        Returns:
-            ``True`` if a non-empty, deduped batch of new candidates was
-            appended to SharedState; ``False`` on transient failure or when no
-            new candidates were found.
-        """
-        from ..framework import client as _fa_client
-
-        state = self.shared_state
-        # Directed gap composition: seed search from latest bottleneck + workload taxonomy via compose_gap,
-        # then merge structured state.gaps so each batch retargets the current bottleneck.
-        framework = ""
-        try:
-            framework = str(getattr(state, "framework", "") or "").strip().lower()
-        except Exception:  # noqa: BLE001
-            framework = ""
-        directed_keywords: list[str] = []
-        directed_gap = ""
-        try:
-            from ..actions.executors._framework_gap_composer import compose_gap
-
-            directed_gap, directed_keywords = compose_gap(
-                framework=framework,
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                model_class=str(getattr(state, "model_class", "") or ""),
-                precision=str(getattr(state, "precision", "") or ""),
-                profile_kernel_breakdown_path=getattr(
-                    state,
-                    "last_profile_kernel_breakdown",
-                    None,
-                ),
-                rewrite_evidence_path=getattr(
-                    state,
-                    "last_framework_rewrite_evidence",
-                    None,
-                ),
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            directed_gap, directed_keywords = "", []
-        gaps: list[dict[str, str]] = []
-        try:
-            gap_list = getattr(state, "gaps", None) or []
-            for g in gap_list:
-                if not isinstance(g, dict):
-                    continue
-                gaps.append(
-                    {
-                        "gap_canonical_id": str(g.get("canonical_id") or ""),
-                        "gap_description": str(g.get("symptom") or g.get("description") or ""),
-                    }
-                )
-        except Exception:  # noqa: BLE001 — defensive
-            gaps = []
-        if directed_gap:
-            # Prepend the directed gap so fa's search leads with bottleneck-aware phrasing; de-dup.
-            existing = {str(g.get("gap_description") or "") for g in gaps}
-            if directed_gap not in existing:
-                gaps.insert(
-                    0,
-                    {
-                        "gap_canonical_id": "directed",
-                        "gap_description": directed_gap,
-                    },
-                )
-        if not gaps:
-            gaps = [{"gap_canonical_id": "", "gap_description": ""}]
-        timeout_sec = float(
-            getattr(self, "framework_agent_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
-        )
-        max_candidates = DEFAULT_FRAMEWORK_MAX_CANDIDATES
-        # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
-        repo_urls = self._framework_agent_discover_repo_urls(framework)
-        # Step A/B — feed the session working memory into discovery so fa
-        # hard-filters already-seen/terminal candidates and de-prioritises
-        # equivalents. Best-effort: a build failure must never wedge discovery.
-        try:
-            fw_memory = self._build_framework_working_memory()
-        except Exception:  # noqa: BLE001 — advisory only
-            log.debug("FRAMEWORK: working-memory build for discovery failed", exc_info=True)
-            fw_memory = {}
-        excluded_candidate_ids = list(fw_memory.get("excluded_refs") or [])
-        failed_candidate_context = list(fw_memory.get("tried_and_why") or [])[-10:]
-        payload: dict[str, Any] | None = None
-        merged_candidates: list[dict[str, Any]] = []
-        batch_id = ""
-        any_call_ok = False
-        last_exc: Exception | None = None
-        # ``timeout_sec`` bounds one repo, not the whole fan-out: each call is an
-        # independent primus_cortex round-trip, so dividing it starves every repo
-        # once the repo list grows (9 repos drove it to the 30s floor while a
-        # single discover needs ~20s plus PR-Monitor latency). The whole-phase
-        # bound is the caller's budget plus DISCOVER_FAILURE_RETRY_LIMIT.
-        per_repo_timeout = max(timeout_sec, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
-        for repo_url in repo_urls:
-            try:
-                repo_payload = await _fa_client.phase_discover(
-                    model=str(getattr(state, "model", "") or ""),
-                    framework=framework or "sglang",
-                    gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                    gaps=gaps,
-                    session_dir=self.session_dir,
-                    repo_url=repo_url,
-                    keywords=directed_keywords,
-                    max_candidates=max_candidates,
-                    pr_states=["open"],
-                    excluded_candidate_ids=excluded_candidate_ids,
-                    failed_candidate_context=failed_candidate_context,
-                    timeout_sec=per_repo_timeout,
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                last_exc = exc
-                log.warning(
-                    "fa phase-discover failed for repo_url=%r: %r",
-                    repo_url,
-                    exc,
-                )
-                continue
-            any_call_ok = True
-            if payload is None:
-                payload = repo_payload
-            if not batch_id:
-                batch_id = str((repo_payload or {}).get("batch_id") or "")
-            repo_cands = (repo_payload or {}).get("candidates") or []
-            if isinstance(repo_cands, list):
-                # Cross-framework discovery lane (default ON; kill switch:
-                # FRAMEWORK_AGENT_CROSS_DISCOVER_TAG=0). This repo_url loop already
-                # discovers from OTHER serving frameworks' repos (pr_intel_specialist
-                # cross-repo set — e.g. a sglang session already queries ROCm/vllm),
-                # but fa phase-discover never tags candidates with which repo they came
-                # from. Untagged, a cross-repo candidate was audited/applied as if it
-                # were same-framework — unsafe, since a vllm diff can never be git-
-                # applied onto sglang. Stamp candidates from a DIFFERENT framework's
-                # own repo with that origin framework so _audit_framework_agent_candidate
-                # routes them through the cross-framework PORT (specialist rewrite, never
-                # raw apply). Same-framework candidates (incl. kernel-level pr_intel
-                # repos with no framework mapping) are untouched, so same-framework audit
-                # behaviour is unchanged. Set the env to 0/false/no/off to fully revert.
-                cross_on = os.environ.get("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "1").strip().lower() not in (
-                    "0",
-                    "false",
-                    "no",
-                    "off",
-                )
-                origin_fw = self._framework_agent_repo_url_origin_framework(repo_url) if cross_on else ""
-                for c in repo_cands:
-                    if not isinstance(c, dict):
-                        continue
-                    if cross_on:
-                        # Derive the origin from the candidate's OWN repo first:
-                        # fa phase-discover defaults `framework` to the session
-                        # framework even for cross-repo pr_intel candidates, so
-                        # only filling blanks (the prior behaviour) left a sglang
-                        # PR surfaced under a vllm session mis-tagged as vllm and
-                        # audited as same-framework — never routed to the cross-
-                        # framework port. Override when the candidate's repo maps
-                        # to a known framework different from the session's. Fall
-                        # back to the queried repo_url's origin when the candidate
-                        # carries no repo. Kernel repos (aiter/triton/rccl) resolve
-                        # to "" and are left untouched, so same-framework audit
-                        # behaviour is unchanged.
-                        cand_repo = str(c.get("repo") or "").strip()
-                        cand_origin = (
-                            self._framework_agent_repo_url_origin_framework(cand_repo) if cand_repo else origin_fw
-                        )
-                        if cand_origin and cand_origin != framework:
-                            c["framework"] = cand_origin
-                        elif origin_fw and origin_fw != framework and not c.get("framework"):
-                            c["framework"] = origin_fw
-                    merged_candidates.append(c)
-        if not any_call_ok:
-            failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
-            state.framework_agent_discover_failures = failures
-            log.warning(
-                "fa phase-discover failed across all %d repo(s) (attempt %d/%d): %r",
-                len(repo_urls),
-                failures,
-                _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                last_exc,
-            )
-            try:
-                state.append_phase_history_event(
-                    reason="framework_agent_discover_failed",
-                    evidence={
-                        "event": "framework_agent_discover_failed",
-                        "attempt": failures,
-                        "limit": _fa_client.DISCOVER_FAILURE_RETRY_LIMIT,
-                        "error": repr(last_exc),
-                    },
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                pass
-            state.save(self.session_dir)
-            return False
-        # Successful call — reset failure counter regardless of whether
-        # the payload contained candidates.
-        if int(getattr(state, "framework_agent_discover_failures", 0) or 0) != 0:
-            state.framework_agent_discover_failures = 0
-        if not merged_candidates:
-            return False
-        batch_id = str((payload or {}).get("batch_id") or "")
-        # Cross-batch + cross-repo de-dup so the new batch only carries genuinely
-        # new PRs. Coordinator-side hard-dedup backstop (Step B): even if fa
-        # forgot to honour ``excluded_candidate_ids``, re-filter here against the
-        # full excluded set (known candidate ids ∪ candidates that already carry
-        # a terminal progress row) so a failed/tested PR is never re-queued.
-        seen_ids = self._framework_known_candidate_ids() | self._framework_processed_candidate_keys()
-        primary_repo_url = repo_urls[0] if repo_urls else ""
-        # Normalise each candidate for consistent executor fields + a stable progress-ledger id.
-        norm: list[dict[str, Any]] = []
-        for c in merged_candidates:
-            if not isinstance(c, dict):
-                continue
-            cand_id = str(c.get("pr_url") or c.get("ref") or f"{c.get('repo', '')}-{c.get('pr_number', '')}")
-            if cand_id and cand_id in seen_ids:
-                continue
-            seen_ids.add(cand_id)
-            # Stamp the candidate's repo URL so the executor knows same-repo (fetchable) vs foreign (diff_url).
-            discovered_repo_url = str(c.get("repo_url") or c.get("discovered_repo_url") or primary_repo_url)
-            norm.append(
-                {
-                    **c,
-                    "candidate_id": cand_id,
-                    "batch_id": batch_id,
-                    "discovered_repo_url": discovered_repo_url,
-                }
-            )
-        if not norm:
-            return False
-        batch_entry = {
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
-            "candidate_count": len(norm),
-            "candidates": norm,
-            "max_gain_pct_observed_in_batch": 0.0,
-        }
-        if not isinstance(state.framework_agent_batches, list):
-            state.framework_agent_batches = []
-        state.framework_agent_batches.append(batch_entry)
-        state.save(self.session_dir)
-        log.info(
-            "FRAMEWORK: discovered batch=%s with %d candidates",
-            batch_id or "<unset>",
-            len(norm),
-        )
-        return True
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
         """Enqueue an ``integrate_patch`` task that lands ``candidate``'s diff.
@@ -3848,6 +3122,171 @@ class FrameworkPhase(PhaseHandler):
                     "note": str(p.get("reason") or "")[:200],
                 }
             )
+        return out
+
+    async def _candidate_discovery_inflight(self) -> bool:
+        """True while a candidate-discovery specialist is queued or running."""
+        try:
+            queued = await self.tasks.queued()
+            running = await self.tasks.running()
+        except Exception:  # noqa: BLE001 — defensive
+            return False
+        return any(
+            getattr(t, "kind", "") == "specialist"
+            and bool((getattr(t, "params", None) or {}).get("candidate_discovery"))
+            for t in (*queued, *running)
+        )
+
+    async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
+        """Dispatch the candidate-discovery specialist when the pool is empty.
+
+        This is the minimum-supply path, not the primary one: Orchestration may
+        dispatch the same specialist whenever it judges the upstream lane worth
+        pursuing. The Coordinator only keeps the lane from idling when nothing
+        has asked.
+
+        Args:
+            reason: Why discovery is being requested; carried into the mandate.
+
+        Returns:
+            True when a discovery task was created or is already in flight.
+        """
+        state = self.shared_state
+        if await self._candidate_discovery_inflight():
+            return True
+        gap, keywords = self._compose_framework_local_explore_gap()
+        framework = str(getattr(state, "framework", "") or "").strip().lower()
+        params: dict[str, Any] = {
+            "domain": "candidate_discovery_specialist",
+            "source_phase": "FRAMEWORK_AGENT",
+            "lever_kind": LEVER_UPSTREAM_PR,
+            "gap_canonical_id": f"gap.framework.candidate_discovery.{framework or 'unknown'}",
+            "gap_symptom": gap or "Find upstream work worth landing for the current bottleneck",
+            "gap_keywords": list(keywords or []),
+            "gap_layer": "framework",
+            "framework": framework,
+            "task_kind": "candidate_discovery",
+            "candidate_discovery": True,
+            "mode": "research",
+            "reason": reason,
+            "source": "coordinator_internal",
+            "discover_repo_urls": self._framework_agent_discover_repo_urls(framework),
+            "tried_refs": self._framework_tried_refs(),
+        }
+        await self._warm_specialist_params(params)
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
+        try:
+            await self.tasks.create_or_return_existing(
+                kind="specialist",
+                params=params,
+                idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}",
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                side_effects=["writes_results"],
+            )
+        except Exception:  # noqa: BLE001 — never wedge the pump
+            log.exception("FRAMEWORK: candidate-discovery dispatch failed (reason=%s)", reason)
+            return False
+        log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
+        return True
+
+    def _ingest_candidate_discovery(
+        self,
+        *,
+        task: "Task",
+        done_payload: dict[str, Any],
+    ) -> None:
+        """Harvest a discovery specialist's candidates into a batch.
+
+        No-op unless the task carries the ``candidate_discovery`` marker. The
+        specialist already ordered and judged its entries, so they are appended
+        verbatim; the pump consumes them in that order.
+
+        Args:
+            task: The completed specialist task.
+            done_payload: Its ``specialist_done`` payload.
+        """
+        params = getattr(task, "params", None) or {}
+        if not bool(params.get("candidate_discovery")):
+            return
+        proposals = done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
+        candidates = self._candidates_from_discovery_proposals(proposals or [])
+        state = self.shared_state
+        if not candidates:
+            empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
+            state.framework_agent_empty_discoveries = empties
+            log.info("FRAMEWORK: discovery returned no usable candidates (streak=%d)", empties)
+        else:
+            state.framework_agent_empty_discoveries = 0
+            batches = getattr(state, "framework_agent_batches", None)
+            if not isinstance(batches, list):
+                batches = []
+                state.framework_agent_batches = batches
+            batch_id = f"discovery-{len(batches)}-{getattr(task, 'task_id', '')[:8]}"
+            for cand in candidates:
+                cand["batch_id"] = batch_id
+            batches.append({"batch_id": batch_id, "candidates": candidates})
+            log.info("FRAMEWORK: harvested %d candidate(s) into batch=%s", len(candidates), batch_id)
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("FRAMEWORK: save after discovery ingest failed")
+
+    def _candidates_from_discovery_proposals(self, proposals: Any) -> list[dict[str, Any]]:
+        """Map discovery ``proposal_set`` entries to candidate rows.
+
+        Entries the specialist judged ``already_present`` or ``not_applicable``
+        are dropped here rather than dispatched: it looked at the installed
+        version and the tree, so re-deciding that with less context would only
+        spend a bench to reach the same answer.
+
+        Args:
+            proposals: The specialist's ``proposal_set``, or anything else.
+
+        Returns:
+            Candidate rows in the order the specialist returned them.
+        """
+        out: list[dict[str, Any]] = []
+        if not isinstance(proposals, list):
+            return out
+        known = self._framework_known_candidate_ids()
+        processed = self._framework_processed_candidate_keys()
+        for entry in proposals:
+            if not isinstance(entry, dict):
+                continue
+            verdict = str(entry.get("verdict") or "").strip().lower()
+            if verdict in {"already_present", "not_applicable"}:
+                continue
+            pr_url = str(entry.get("pr_url") or entry.get("url") or "").strip()
+            head_sha = str(entry.get("head_sha") or "").strip()
+            if not pr_url and not head_sha:
+                continue
+            cand: dict[str, Any] = {
+                "pr_url": pr_url,
+                "url": pr_url,
+                "head_sha": head_sha,
+                "title": str(entry.get("title") or "").strip(),
+                "diff_url": str(entry.get("diff_url") or "").strip(),
+                "repo": str(entry.get("repo") or "").strip(),
+                "pr_number": entry.get("pr_number"),
+                "ref": str(entry.get("ref") or "").strip(),
+                "framework": str(entry.get("framework") or "").strip().lower(),
+                "changed_files": entry.get("changed_files") or [],
+                "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
+                "gap_keywords": entry.get("gap_keywords") or [],
+                # The specialist's own judgement, carried to the Critic pre-screen.
+                "route": str(entry.get("route") or "author_via_specialist").strip(),
+                "audit": {
+                    "verdict": verdict,
+                    "reason": str(entry.get("reason") or "").strip(),
+                    "recommended_next_step": str(entry.get("route") or "").strip(),
+                },
+            }
+            key = self._framework_candidate_key(cand)
+            if not key or key in known or key in processed:
+                continue
+            known.add(key)
+            out.append(cand)
         return out
 
     def _ingest_framework_config_generation(
