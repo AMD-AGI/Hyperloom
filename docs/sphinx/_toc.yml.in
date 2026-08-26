@@ -15,7 +15,7 @@ subtrees:
 - caption: Install
   entries:
   - file: install/install.md
-    title: Install on Docker or Bare metal
+    title: Install on Docker or bare metal
   - file: install/slurm.md
     title: Install on a Slurm cluster
 

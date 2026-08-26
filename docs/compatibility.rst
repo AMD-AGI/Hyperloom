@@ -120,17 +120,11 @@ The following inference frameworks are supported:
      - ROCm version
      - Notes
    * - SGLang
-     - 7.2.4
+     - 7.2.4, 10.0.0
      - Default framework; recommended docker/bare-metal stack uses ``rocm724`` (see below)
    * - vLLM
-     - 7.2.3
+     - 7.2.3, 10.0.0
      - Do not mix frameworks within one session
-   * - Atom
-     - 7.2.0
-     - Single-node only (multi-node rejected by the IR-8 guard)
-   * - xDiT (diffusion)
-     - 7.2.0
-     - Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency ``e2el_mean_ms`` (ms).
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
@@ -178,7 +172,7 @@ Hyperloom does not install ROCm or torch itself.
      - Recommended
      - Notes
    * - ROCm
-     - 7.2.x
+     - 7.2.x, 10.0.0
      - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
    * - Python
      - 3.12
