@@ -95,7 +95,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
      Consumers MUST tolerate their absence (total=False TypedDict). */
   "model_info":                  { /* model architecture summary */ },
   "phase_segments":              [ /* per-phase segment records */ ],
-  "explore_search":              { /* EXPLORE dedup ledger */ },
+  "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
   "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],

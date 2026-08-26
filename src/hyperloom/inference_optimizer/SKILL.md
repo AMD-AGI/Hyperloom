@@ -205,13 +205,13 @@ round-trip saved); `manifest.json` then records `reason=explicit_flag`.
 Pass `--degraded-kb` and `--degraded-pr` together to short-circuit the entire
 IR-3 step.
 
-### IR-4 / IR-6 — EXPLORE phase contracts (Coordinator-internal)
+### IR-4 / IR-6 — OPTIMIZE phase contracts (Coordinator-internal)
 
-These govern the optimizer's EXPLORE phase, not the launcher; the full
+These govern the optimizer's OPTIMIZE phase, not the launcher; the full
 contract lives in `src/hyperloom/orchestrator/prompts/orchestration.md`. In
 brief:
 
-- **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
+- **IR-4 — OPTIMIZE is specialist-informed**: prefer specialist- or
   research-backed variants when available, but `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
   values are all accepted audit labels when phase and sequence gates pass.
@@ -234,12 +234,12 @@ brief:
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **IR-6 HARD force-exit**: EXPLORE exits the moment the unspent fraction of
+- **IR-6 HARD force-exit**: OPTIMIZE exits the moment the unspent fraction of
   its own phase budget drops to `--explore-force-exit-budget-pct` (default
   20%). Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is
   already inside that fraction, since charge-back rebuilds the allotment from
   the time left at phase entry; there is no session-remaining arm.
-- **Plateau advisory**: EXPLORE / KERNEL_AGENT / FRAMEWORK plateau signals
+- **Plateau advisory**: per-arm OPTIMIZE and KERNEL_AGENT plateau signals
   are computed every tick and rendered as advisory in the orchestration
   prompt. They do NOT drive phase advance — the LLM may emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
@@ -248,7 +248,7 @@ brief:
 
 ### FRAMEWORK_AGENT phase (Coordinator-internal)
 
-Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
+Runs inside OPTIMIZE (`--no-framework-agent` skips the whole phase). The
 Coordinator owns the loop end-to-end — the LLM never proposes the
 `framework_agent` action. It discovers a candidate batch **once** via
 `fa phase-discover`; then each exploration processes exactly **one**
@@ -286,14 +286,12 @@ loader, nor the `vendor_kernel_config` / `operator_tuning` /
 
 Rules that look reasonable but break the current flow:
 
-- **No `framework first-explore priority` rule** in
-  `prompts/orchestration.md` — conflicts with the EXPLORE
-  specialist-informed flow.
-  Framework-agent runs in the dedicated **FRAMEWORK** phase
-  before EXPLORE; the LLM never proposes the `framework_agent`
-  action — it is Coordinator-managed and absent from
-  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
-  LLM-side propose / delegate with `rule='phase_incompatible'`.
+- **No "source lever before configuration" rule** in
+  `prompts/orchestration.md` — the two are arms of one phase,
+  worked in parallel and ranked by what the bottleneck calls for.
+  Upstream diffs land through `integrate_patch` with
+  `patch_source='upstream_pr'`; there is no separate
+  `framework_agent` action for the LLM to propose or be denied.
   Use `--no-framework-agent` to skip the phase entirely.
 - **`kernel_opt` sequencing** is no longer gated by an
   explore-minimum check (the
@@ -717,7 +715,8 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 Use `--conc-sweep-concs` for the explicit sweep ladder.
 
 Operator server flags are the workload baseline, but they are not sacred. When
-EXPLORE has evidence or an operator hint that a pinned flag may be harmful, it
+the configuration arm has evidence or an operator hint that a pinned flag may
+be harmful, it
 may test an ablation variant with `remove_args` (or `unset_envs` for inherited
 environment variables). Do not simulate deletion by adding an unrelated
 counter-flag: emit an explicit explore grid entry such as

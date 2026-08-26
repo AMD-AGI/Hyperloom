@@ -198,9 +198,9 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 5. Include `--max-minutes-explore-pct 0.39` and `--max-minutes-sweep-pct 0.01`
    in the optimize command. With FRAMEWORK_AGENT and KERNEL_AGENT disabled,
    Hyperloom redistributes their shares so most of the short run budget is
-   reserved for EXPLORE while still leaving SWEEP/CLOSE time to exit cleanly
+   reserved for OPTIMIZE while still leaving SWEEP/CLOSE time to exit cleanly
    near the deadline. Also include `--explore-force-exit-budget-pct 0.01`: with
-   no KERNEL phase to hand the reserve to, EXPLORE should spend its whole share.
+   no KERNEL phase to hand the reserve to, OPTIMIZE should spend its whole share.
 6. Include `--no-framework-agent` in the optimize command so the
    FRAMEWORK_AGENT phase is skipped.
 7. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.

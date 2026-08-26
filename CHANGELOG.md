@@ -5,11 +5,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [v1.0.0] - 2026-08-26
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
-[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
-for the user-facing summary.
+### Changed
+
+- **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
+  now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`. Configuration
+  search and source/upstream landing are two arms of one phase, worked in
+  parallel; the phase advances only when both are dry. One arm plateauing
+  raises `switch_bottleneck` for the next macro-cycle instead of ending the
+  phase while the other lever still pays.
+  - `--no-explore` is an alias for `--no-framework-agent`; the two arms cannot
+    be disabled separately.
+  - `--max-minutes-explore-pct` / `--phase-budget-explore-pct` are aliases for
+    the framework budget option. The merged phase's default share is `0.55`.
+  - Exit reasons `explore_*` and `framework_agent_*` are replaced by
+    `optimize_no_more_leverage`, `optimize_phase_budget_exhausted`,
+    `optimize_budget_cap` and `optimize_force_exit_low_budget`.
+  - Sessions recorded before this change keep their phase labels; the
+    attribution and recorder read paths still understand them.
+
+- **BREAKING: the `framework_agent` action is retired.** Upstream PRs land
+  through `integrate_patch` with `patch_source='upstream_pr'`, the same action
+  and the same apply / vet / bench / KEEP-REVERT pipeline every other patch
+  source uses. `runs/framework_agent/<task_id>/` is no longer produced; PR
+  candidate workspaces are under `runs/integrate_patch/<task_id>/`.
+
+- **BREAKING: `pr_intel_specialist` is replaced by
+  `candidate_discovery_specialist`,** which owns finding, ranking and judging
+  upstream candidates rather than being an occasional PR top-up.
+
+- **Gain is attributed by lever, not by phase.** Both arms run inside one
+  phase, so the phase that was live when a KEEP landed no longer says which
+  lever moved it. `lever_kind` (config / source_patch / upstream_pr /
+  enablement) is the attribution key, and it is read from what a specialist
+  delivered rather than from what its mandate asked for.
+
+### Fixed
+
+- **The framework accuracy gate never passed.** `_bench_candidate` read a
+  `result_dir` field that does not exist on `VariantResult`, so the eval parse
+  searched the process CWD, found nothing, and blocked every KEEP with
+  `accuracy_unavailable_reject` whenever a baseline accuracy existed.
+- **Untrusted diffs reached `git apply` unvetted.** `vet_patches` runs at
+  authoring time inside the specialist runner, so patches supplied directly —
+  including every upstream PR diff — were never structurally checked.
+  `patch_escapes_tree` also missed absolute paths in headers without the
+  conventional `a/` prefix.
+- **The authored-lane retry state did not survive a resume**, letting the
+  re-author cap be re-spent once per resume.
+- **Seven Coordinator-internal enqueues took no lane lease,** launching servers
+  and benchmarks without `server_lifecycle` / `benchmark_lane`; the enablement
+  build probe took the research lane instead of its own kind's.
+- **The stack-rebench floor could exceed the KEEP gate it confirmed** from
+  macro-cycle 2 onward, rejecting variants the same round had admitted.
+- **A session's `--no-eval` was silently overridden** on the framework patch
+  lane.
+
+- **`canonical_fingerprint` now uses pair-aware arg normalization.**
+  The previous implementation sorted all arg tokens as a flat list, which
+  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
+  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
+  and were incorrectly treated as duplicates by the `explore_search` dedup
+  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
+  last-wins semantics for repeated flags, matching the semantics of
+  `_shell_safe_dedupe`.<br/>
+  **Operator note**: this changes the hash for any variant whose `extra_args`
+  contains at least one flag with a value.  All fingerprint keys already
+  persisted in `explore_search.tested`, `accepted`, `rejected`, and
+  `name_index` inside `state.json` are invalidated.  On the next resume the
+  session will re-bench its full explored history.
 
 ### Removed
 
@@ -176,6 +239,12 @@ for the user-facing summary.
   fail closed on a bump that changed none of them. The eight tests that already
   covered this salvage path were passing only because their fixtures carried
   the same wrong version.
+
+## [v1.0.0] - 2026-08-26
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
+for the user-facing summary.
 
 ## [v1.0.0b2] - 2026-08-19
 See [release notes](docs/release-notes.md) and the

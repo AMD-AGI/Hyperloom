@@ -714,12 +714,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-explore",
         action="store_true",
         default=False,
-        help="Skip the EXPLORE phase entirely. PRELUDE (and "
-        "FRAMEWORK, if enabled) route straight to KERNEL "
-        "— or to SWEEP when --no-kernel is also set. Useful "
-        "for a baseline -> kernel-only run, or to validate "
-        "the current recipe via SWEEP without a serving-"
-        "param search. Default: explore enabled.",
+        help="Alias for --no-framework-agent: skip the whole OPTIMIZE phase, "
+        "so PRELUDE routes straight to KERNEL — or to SWEEP when --no-kernel "
+        "is also set. Configuration search and source landing are two arms of "
+        "one phase and can no longer be disabled separately. "
+        "Default: optimize enabled.",
     )
     opt.add_argument(
         "--no-eval",
@@ -1386,18 +1385,15 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
+        # The EXPLORE spellings land on the same option: configuration search
+        # and source landing are two arms of one phase with one budget, so a
+        # separate share for either would be a number nothing reads.
+        "--max-minutes-explore-pct",
+        "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.20.",
-    )
-    opt.add_argument(
-        "--max-minutes-explore-pct",
-        "--phase-budget-explore-pct",
-        dest="phase_budget_explore_pct",
-        type=float,
-        default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.35.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.55.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
