@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Structured apply-failure feedback for patch reauthoring.
+"""Structured apply-failure and vetting-drop feedback for patch reauthoring.
 
 Public surface:
 
 * :class:`ApplyFeedback`            — structured patch-apply failure record.
+* :class:`VettingDropFeedback`      — record for a patch dropped by the safety gate.
 * :func:`read_patch_source_context` — parse a unified diff and extract a line
   window near the first failing hunk; used by the patch-apply path.
 * :func:`source_context_for_file`   — shared file-resolve + window primitive;
@@ -83,6 +84,73 @@ class ApplyFeedback:
             parts.append(f"\n### Rejected hunks (.rej)\n```diff\n{self.rejected_hunks.strip()}\n```")
         if self.source_context:
             parts.append(f"\n### Source context\n```\n{self.source_context.strip()}\n```")
+        return "\n".join(parts)
+
+
+@dataclass
+class VettingDropFeedback:
+    """One patch dropped by the pre-integration safety gate.
+
+    Attributes:
+        patch: Filename or path of the dropped patch.
+        verdict: The gate verdict, e.g. ``"missing_target"`` or
+            ``"ambiguous_root"``.
+        detail: The detail string from the gate (target paths, candidate roots,
+            etc.).
+    """
+
+    patch: str
+    verdict: str
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-safe dict."""
+        return {
+            "patch": self.patch,
+            "verdict": self.verdict,
+            "detail": self.detail,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "VettingDropFeedback":
+        """Deserialize from a previously serialized dict."""
+        return cls(
+            patch=str(d.get("patch") or ""),
+            verdict=str(d.get("verdict") or ""),
+            detail=str(d.get("detail") or ""),
+        )
+
+    @classmethod
+    def from_dropped_records(cls, dropped: list[dict[str, Any]]) -> "list[VettingDropFeedback]":
+        """Build a list from the ``dropped`` records returned by :func:`vet_patches`."""
+        return [
+            cls(
+                patch=str(r.get("path") or ""),
+                verdict=str(r.get("verdict") or ""),
+                detail=str(r.get("detail") or ""),
+            )
+            for r in dropped
+            if isinstance(r, dict) and r.get("path")
+        ]
+
+    def format_for_mandate(self) -> str:
+        """Return a human-readable block for a patch-author mandate."""
+        parts: list[str] = [f"## Patch dropped by safety gate: {Path(self.patch).name}"]
+        parts.append(f"Verdict: {self.verdict}")
+        if self.detail:
+            parts.append(f"Detail: {self.detail}")
+        if self.verdict == "missing_target":
+            parts.append(
+                "The patch names a file that does not exist in any allowlisted "
+                "source tree. Verify the target path with Glob/Grep inside the "
+                "worktree before authoring the diff."
+            )
+        elif self.verdict == "ambiguous_root":
+            parts.append(
+                "The patch targets match more than one disjoint source tree. "
+                "Declare framework_source_root or write the patch from inside "
+                "the worktree so the root is unambiguous."
+            )
         return "\n".join(parts)
 
 
