@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.phases import geak_rebench as gr
 from hyperloom.orchestrator.phases import machine_state as ps
@@ -216,6 +217,74 @@ async def test_enqueue_internal_stack_rebench_uses_macro_cycle_idempotency_key(
     row1 = await c.tasks.get(str(second["task_id"]))
     assert row1.idempotency_key == "geak-revalidate-c1"
     assert row1.task_id != row0.task_id
+
+
+@pytest.mark.asyncio
+async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
+    coordinator,
+) -> None:
+    """The pinned hash must describe the config the grid executor actually runs.
+
+    ``accepted_config`` carries PATH so the benchmark resolves its own
+    interpreter, but ``GridVariant`` drops shell/loader keys before it
+    fingerprints. Hashing the unfiltered mapping made the 2b identity check miss
+    on every GEAK win that shipped one, replaying a measured gain as
+    inconclusive.
+    """
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.macro_cycle = 0
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--fp8-gemm-backend aiter",
+            "env": "PATH=/opt/venv/bin:/usr/bin SGLANG_USE_AITER=1 TP=1",
+        },
+    }
+
+    enqueued = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    row = await c.tasks.get(str(enqueued["task_id"]))
+    entry = row.params["grid"][0]
+    ran = GridVariant(
+        str(entry["name"]),
+        str(entry["extra_args"]),
+        dict(entry["extra_envs"]),
+    )
+
+    assert "PATH" not in ran.extra_envs
+    assert ran.extra_envs == {"SGLANG_USE_AITER": "1", "TP": "1"}
+    assert row.params["expected_cfg_hash"] == ran.fingerprint
+
+
+def test_material_check_ignores_untrusted_env_names() -> None:
+    """An untrusted key on one side only must not read as a config difference.
+
+    ``accepted_config`` is a harness snapshot and carries PATH; ``current_best``
+    holds the executor-filtered mapping. Comparing them raw made every echoed
+    config look material, which is exactly the passthrough noise the gate exists
+    to reject.
+    """
+    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+
+    echoed = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--fp8-gemm-backend aiter",
+            "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1",
+        },
+    }
+    assert not _geak_result_has_material(
+        echoed,
+        prev_best_flags="--fp8-gemm-backend aiter",
+        prev_best_envs={"SGLANG_USE_AITER": "1"},
+    )
+    # A real config delta still registers.
+    assert _geak_result_has_material(
+        echoed,
+        prev_best_flags="--fp8-gemm-backend triton",
+        prev_best_envs={"SGLANG_USE_AITER": "1"},
+    )
 
 
 @pytest.mark.asyncio

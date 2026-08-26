@@ -1346,6 +1346,37 @@ def _fake_rocm_lib(tmp_path: Path) -> Path:
     return rocm_lib
 
 
+_SONAME_MARKER = ".hotfix_soname_links"
+_FAKE_SONAMES = {
+    "libamdhip64": "libamdhip64.so.7",
+    "libroctracer64": "libroctracer64.so.4",
+}
+
+
+def _fake_elf_tools(tmp_path: Path, sonames: dict[str, str] = _FAKE_SONAMES) -> Path:
+    """A readelf/ldconfig stub so the fake libraries report a DT_SONAME.
+
+    Real hosts read the soname off an ELF header; the fixtures here are plain
+    files, so without this the soname half of the hotfix is silently skipped.
+    """
+    bin_dir = tmp_path / "fake-elf-tools"
+    bin_dir.mkdir(exist_ok=True)
+    cases = "\n".join(
+        f'  *{stem}*) printf "  0x0e (SONAME)  Library soname: [{soname}]\\n" ;;' for stem, soname in sonames.items()
+    )
+    readelf = bin_dir / "readelf"
+    readelf.write_text(
+        "\n".join(["#!/usr/bin/env bash", 'case "${!#}" in', cases, "esac", "exit 0"]) + "\n",
+        encoding="utf-8",
+    )
+    readelf.chmod(0o755)
+    # The real one needs root to rewrite /etc/ld.so.cache.
+    ldconfig = bin_dir / "ldconfig"
+    ldconfig.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    ldconfig.chmod(0o755)
+    return bin_dir
+
+
 def _drive_torch_lib_sync(
     tmp_path: Path,
     *,
@@ -1455,7 +1486,8 @@ def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_pa
         tmp_path,
         body=(
             f"{_SYNC_BODY}\n"
-            # Stand in for `pip install -U torch`: fresh vendor bytes in place.
+            # Stand in for `pip install -U torch`: remove our symlinks, lay down fresh vendor bytes.
+            f'rm -f "{torch_lib}/libamdhip64.so" "{torch_lib}/libroctracer64.so"\n'
             f'printf vendor-hip-v2 > "{torch_lib}/libamdhip64.so"\n'
             f'printf vendor-tracer-v2 > "{torch_lib}/libroctracer64.so"\n'
             f"{_SYNC_BODY}"
@@ -1556,6 +1588,103 @@ def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path
     assert not (backup / "libroctracer64.so").read_bytes().startswith(b"hotfix")
 
 
+def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
+    """torch resolves the versioned soname first, so copying the bytes under the
+    unversioned name alone left the profiler on the vendor library."""
+    bin_dir = _fake_elf_tools(tmp_path)
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=_SYNC_BODY,
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+        extra_lines=(f'export PATH="{bin_dir}:$PATH"',),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert os.readlink(torch_lib / "libamdhip64.so.7") == "libamdhip64.so"
+    assert os.readlink(torch_lib / "libroctracer64.so.4") == "libroctracer64.so"
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"hotfix-hip-bytes"
+    marker = torch_lib / _BACKUP_DIRNAME / _SONAME_MARKER
+    assert marker.read_text(encoding="utf-8").split() == [
+        "libamdhip64.so.7",
+        "libroctracer64.so.4",
+    ]
+
+
+def test_torch_lib_sync_relinks_a_soname_alias_that_went_missing(tmp_path: Path):
+    """Matching bytes are not enough to call the sync done: a pip reinstall can
+    drop the alias and leave the versioned lookup back on the vendor library."""
+    bin_dir = _fake_elf_tools(tmp_path)
+    alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=f'{_SYNC_BODY}\nrm -f "{alias}"\n{_SYNC_BODY}',
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+        extra_lines=(f'export PATH="{bin_dir}:$PATH"',),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "already in sync" not in res.stdout
+    assert os.readlink(torch_lib / "libamdhip64.so.7") == "libamdhip64.so"
+
+
+def test_torch_lib_sync_skips_a_second_run_once_aliases_exist(tmp_path: Path):
+    """Bytes and aliases both in place must be a no-op, not another swap."""
+    bin_dir = _fake_elf_tools(tmp_path)
+    res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=f"{_SYNC_BODY}\n{_SYNC_BODY}",
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+        extra_lines=(f'export PATH="{bin_dir}:$PATH"',),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "already in sync" in res.stdout
+
+
+def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
+    """A torch that ships a real file under the versioned name must get it back
+    byte for byte, not the symlink the sync put there."""
+    bin_dir = _fake_elf_tools(tmp_path)
+    vendor_alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
+    res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body=_SYNC_BODY_SOFT,
+        torch_hip=b"vendor-hip-bytes",
+        torch_tracer=b"vendor-tracer-bytes",
+        runtime_ok=False,
+        extra_lines=(
+            f'export PATH="{bin_dir}:$PATH"',
+            f'printf vendor-hip-7 > "{vendor_alias}"',
+        ),
+    )
+
+    assert "vendor libraries restored" in res.stderr
+    assert not vendor_alias.is_symlink()
+    assert vendor_alias.read_bytes() == b"vendor-hip-7"
+    assert (torch_lib / "libamdhip64.so").read_bytes() == b"vendor-hip-bytes"
+    assert not (torch_lib / _BACKUP_DIRNAME / _SONAME_MARKER).exists()
+
+
+def test_verify_hotfix_only_fails_when_no_hotfix_is_installed(tmp_path: Path):
+    """--verify-hotfix is a standalone check, so it has to report a bad state
+    instead of exiting clean on a host that never applied the hotfix."""
+    bin_dir = _fake_elf_tools(tmp_path)
+    res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
+        tmp_path,
+        body="verify_rocm_profiler_hotfix_only || echo VERIFY_REPORTED_FAILURE",
+        torch_hip=b"stock-hip-bytes",
+        torch_tracer=b"stock-tracer-bytes",
+        extra_lines=(f'export PATH="{bin_dir}:$PATH"',),
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "VERIFY_REPORTED_FAILURE" in res.stdout
+    assert "no -hotfix libraries" in res.stderr
+
+
 def test_sync_warns_when_framework_imports_but_torch_lib_is_missing(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
@@ -1653,8 +1782,9 @@ def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
                 f'resolve_python() {{ printf "%s" "{py}"; }}',
                 # Stand in for the /opt/rocm half, which needs a real download.
                 "rocm_profiler_hotfix_compatible() { return 0; }",
-                "rocm_profiler_hotfix_applied() { return 0; }",
-                "verify_rocm_profiler_hotfix() { return 0; }",
+                "rocm_profiler_hotfix_ranked_applied() { return 0; }",
+                "verify_rocm_profiler_hotfix_links() { return 0; }",
+                "verify_rocm_profiler_hotfix_loaded() { return 0; }",
                 f'download_rocm_profiler_hotfix_libs() {{ printf "%s" "{extract}"; }}',
                 "apply_rocm_profiler_hotfix",
                 "echo REACHED_NEXT_PHASE",
@@ -1852,10 +1982,11 @@ def test_hotfix_logs_partial_apply_when_torch_sync_fails(tmp_path: Path):
                 f'ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="{rocm_lib}"',
                 f'resolve_python() {{ printf "%s" "{py}"; }}',
                 "rocm_profiler_hotfix_compatible() { return 0; }",
-                "rocm_profiler_hotfix_applied() { return 1; }",
-                "verify_rocm_profiler_hotfix() { return 0; }",
-                "backup_rocm_profiler_hotfix_targets() { :; }",
-                "install_rocm_profiler_hotfix_libs() { return 0; }",
+                "rocm_profiler_hotfix_ranked_applied() { return 1; }",
+                "verify_rocm_profiler_hotfix_links() { return 0; }",
+                "verify_rocm_profiler_hotfix_loaded() { return 0; }",
+                "backup_rocm_profiler_hotfix_links() { :; }",
+                "install_rocm_profiler_hotfix_ranked() { return 0; }",
                 f'download_rocm_profiler_hotfix_libs() {{ printf "%s" "{extract}"; }}',
                 "apply_rocm_profiler_hotfix",
             ]

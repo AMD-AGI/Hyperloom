@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+
 from ..specialists.patch_safety import (
     ADVISE_VERDICT,
     advisory_only_reason_codes,
@@ -1110,6 +1112,30 @@ def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
     return envs, " ".join(flag_tokens).strip()
 
 
+def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
+    """Normalize a GEAK ``accepted_config`` into the ``(args, envs)`` a variant runs.
+
+    ``accepted_config.env`` is a benchmark-harness snapshot, so it carries the
+    shell/loader keys ``GridVariant`` drops before it fingerprints. Anything that
+    fingerprints or dispatches that config has to see the same mapping the
+    executor will, or the identity it derives describes a config nothing runs.
+
+    Args:
+        cfg: The ``accepted_config`` blob (``flags`` / ``env``); non-dict is empty.
+
+    Returns:
+        ``(flags, envs)`` with harness-only flags folded into ``flags`` and
+        untrusted env names dropped.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    flags = str(cfg.get("flags") or "").strip()
+    envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
+    if extra_flags:
+        flags = (flags + " " + extra_flags).strip()
+    envs, _dropped = filter_untrusted_env_mapping(envs, allow_predicate=is_allowed_variant_env_key)
+    return flags, envs
+
+
 def _geak_revalidation_decision(
     *,
     measured: Any,
@@ -1222,21 +1248,20 @@ def _geak_result_has_material(
         return True
     if str(result.get("final_patch") or "").strip():
         return True
-    accepted_cfg = result.get("accepted_config") or {}
-    accepted_flags = str(accepted_cfg.get("flags") or "").strip()
-    parsed_envs, extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
-    if extra_flags:
-        accepted_flags = (accepted_flags + " " + extra_flags).strip()
+    accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
     # A missing / all-empty accepted_config carries no config optimization; a
     # bare fingerprint mismatch against a non-empty current_best is NOT material
     # (promoting it would wipe the existing config to empty).
     if not accepted_flags and not parsed_envs:
         return False
-    got_fp = canonical_fingerprint(accepted_flags, parsed_envs)
-    prev_fp = canonical_fingerprint(
-        str(prev_best_flags or ""),
+    # Both sides go through the same guard: a resume can hand current_best the
+    # raw accepted_config, and an untrusted key on one side only reads as a diff.
+    prev_envs, _dropped = filter_untrusted_env_mapping(
         dict(prev_best_envs or {}),
+        allow_predicate=is_allowed_variant_env_key,
     )
+    got_fp = canonical_fingerprint(accepted_flags, parsed_envs)
+    prev_fp = canonical_fingerprint(str(prev_best_flags or ""), prev_envs)
     return got_fp != prev_fp
 
 
