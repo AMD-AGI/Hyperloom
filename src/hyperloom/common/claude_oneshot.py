@@ -196,6 +196,7 @@ def _build_options(
     system: str | None,
     max_tokens: int | None,
     env: Mapping[str, str] | None = None,
+    component: str = "",
 ) -> Any:
     """Assemble the tool-free, single-turn options for one completion.
 
@@ -204,7 +205,7 @@ def _build_options(
     provider-specific variables has to be able to hand the CLI what it
     resolved, or the child would re-read the ambient values instead.
     """
-    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model, env=env))
+    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model, env=env, component=component))
     if max_tokens:
         # claude_sdk_env_options returns {} when no provider signal is set; fall
         # back to the caller's environment so the cap is the only addition.
@@ -278,10 +279,13 @@ class ClaudeOneShotClient:
         env: Environment the CLI child sees. ``None`` reads the process
             environment; a caller that resolved credentials from
             provider-specific variables passes its own view instead.
+        component: Producer label used to tag the child's calls for the gateway.
+            Empty leaves the child untagged.
     """
 
     timeout_s: float = _DEFAULT_TIMEOUT_SEC
     env: Mapping[str, str] | None = None
+    component: str = ""
 
     async def amessages(
         self,
@@ -307,7 +311,9 @@ class ClaudeOneShotClient:
             asyncio.TimeoutError: If the completion outruns :attr:`timeout_s`.
         """
         sdk = _load_sdk()
-        options = _build_options(sdk, model=model, system=system, max_tokens=max_tokens, env=self.env)
+        options = _build_options(
+            sdk, model=model, system=system, max_tokens=max_tokens, env=self.env, component=self.component
+        )
         return await asyncio.wait_for(
             _drive(sdk, _prompt_from_messages(messages), options),
             timeout=max(0.1, float(self.timeout_s)),

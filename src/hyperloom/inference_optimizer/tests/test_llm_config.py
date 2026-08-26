@@ -1261,9 +1261,10 @@ class _FakeOneShotClient:
 
     instances: list["_FakeOneShotClient"] = []
 
-    def __init__(self, timeout_s: float = 60.0, env: Any = None) -> None:
+    def __init__(self, timeout_s: float = 60.0, env: Any = None, component: str = "") -> None:
         self.timeout_s = timeout_s
         self.env = env
+        self.component = component
         self.calls: list[dict[str, Any]] = []
         _FakeOneShotClient.instances.append(self)
 

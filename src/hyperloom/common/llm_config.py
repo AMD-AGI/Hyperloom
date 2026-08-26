@@ -1284,18 +1284,21 @@ def _anthropic_http_params(
     return params
 
 
-def _one_shot_client(timeout_s: float | None, env: Mapping[str, str] | None) -> object:
+def _one_shot_client(timeout_s: float | None, env: Mapping[str, str] | None, component: str = "") -> object:
     """Build the Claude CLI one-shot client, imported late to avoid a cycle.
 
     ``env`` is forwarded rather than dropped: the CLI resolves its own
     credential from the environment it is handed, so a caller that passed an
     explicit mapping would otherwise silently get the ambient one.
+
+    ``component`` travels with it so the SDK transport tags its spend the same
+    way the HTTP one does, instead of going out anonymous.
     """
     from .claude_oneshot import ClaudeOneShotClient
 
     if timeout_s is None:
-        return ClaudeOneShotClient(env=env)
-    return ClaudeOneShotClient(timeout_s=float(timeout_s), env=env)
+        return ClaudeOneShotClient(env=env, component=component)
+    return ClaudeOneShotClient(timeout_s=float(timeout_s), env=env, component=component)
 
 
 def anthropic_completion(
@@ -1335,8 +1338,9 @@ def anthropic_completion(
         timeout: HTTP-path transport timeout; build one with
             :func:`build_http_timeout`.
         timeout_s: SDK-path wall-clock budget in seconds, CLI startup included.
-        component: Producer label used to tag the call for the gateway. Applies
-            to the HTTP path only; the SDK path tags via the child environment.
+        component: Producer label used to tag the call for the gateway. The
+            HTTP path sends it as a header; the SDK path passes it through the
+            CLI child's environment.
 
     Returns:
         The flattened :class:`AnthropicMessageResult`.
@@ -1348,7 +1352,7 @@ def anthropic_completion(
     """
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env)
+        client = _one_shot_client(timeout_s, env, component)
         return client.messages(  # type: ignore[attr-defined]
             model=model,
             messages=messages,
@@ -1397,8 +1401,9 @@ async def aanthropic_completion(
         env: Env mapping to read instead of ``os.environ``.
         timeout: HTTP-path transport timeout.
         timeout_s: SDK-path wall-clock budget in seconds.
-        component: Producer label used to tag the call for the gateway. Applies
-            to the HTTP path only; the SDK path tags via the child environment.
+        component: Producer label used to tag the call for the gateway. The
+            HTTP path sends it as a header; the SDK path passes it through the
+            CLI child's environment.
 
     Returns:
         The flattened :class:`AnthropicMessageResult`.
@@ -1410,7 +1415,7 @@ async def aanthropic_completion(
     """
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env)
+        client = _one_shot_client(timeout_s, env, component)
         return await client.amessages(  # type: ignore[attr-defined]
             model=model,
             messages=messages,

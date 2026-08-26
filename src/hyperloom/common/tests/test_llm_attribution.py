@@ -11,7 +11,9 @@ setting survives injection verbatim -- including a ``${VAR}`` reference, which
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
@@ -172,6 +174,94 @@ class TestPublishedPhase:
         child: dict[str, str] = {}
         llm_attribution.inject_env(child, component="geak", source=_env())
         assert parse_custom_headers(child[_ANTHROPIC], env={})["x-tags"].endswith("phase=KERNEL_AGENT")
+
+
+class TestSdkEnvOverlay:
+    """claude_agent_sdk merges options.env over the inherited environment."""
+
+    def test_overlay_is_empty_when_unconfigured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(_SPEC, raising=False)
+        assert llm_attribution.sdk_env_overlay(component="framework") == {}
+
+    def test_overlay_joins_the_gateway_header_instead_of_replacing_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A bare tag here would shadow the inherited auth header in the child.
+        monkeypatch.setenv(_SPEC, "x-tags:component")
+        monkeypatch.setenv(_ANTHROPIC, "Ocp-Apim-Subscription-Key: secret")
+        overlay = llm_attribution.sdk_env_overlay(component="framework")
+        parsed = parse_custom_headers(overlay[_ANTHROPIC], env={})
+        assert parsed["Ocp-Apim-Subscription-Key"] == "secret"
+        assert parsed["x-tags"] == "component=framework"
+
+    def test_overlay_reports_only_variables_it_changes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_SPEC, "x-tags:component")
+        monkeypatch.setenv(_ANTHROPIC, "Ocp-Apim-Subscription-Key: secret")
+        monkeypatch.delenv(_OPENAI, raising=False)
+        assert set(llm_attribution.sdk_env_overlay(component="framework")) == {_ANTHROPIC}
+
+
+#: Entry points that only tag a call when the caller names a component, so an
+#: untagged call site is spend the gateway cannot attribute to anything.
+_TAGGED_ENTRY_POINTS = frozenset(
+    {
+        "achat_completion",
+        "aanthropic_completion",
+        "aanthropic_messages",
+        "anthropic_completion",
+        "anthropic_messages",
+        "astream_chat_completion_text",
+        "chat_completion",
+        "claude_sdk_env_options",
+        "stream_chat_completion_text",
+    }
+)
+
+_SRC_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _scan_call_sites() -> tuple[int, list[str]]:
+    """Find production calls to a tagged entry point that omit ``component``.
+
+    Returns:
+        The number of call sites seen and one line per offender. The count is
+        reported so the guard cannot quietly pass by finding nothing.
+    """
+    seen = 0
+    offenders: list[str] = []
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        relative = path.relative_to(_SRC_ROOT)
+        if any(part in {"tests", "test"} for part in relative.parts):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our files to fix
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in _TAGGED_ENTRY_POINTS:
+                continue
+            seen += 1
+            if not any(keyword.arg == "component" for keyword in node.keywords):
+                offenders.append(f"{relative}:{node.lineno}: {name}(...) has no component=")
+    return seen, offenders
+
+
+def test_every_llm_entry_point_call_names_its_component() -> None:
+    """Every production LLM call must say who is spending.
+
+    This is the coverage half of the feature: the module can render a header,
+    but a call site that never names a component silently drops out of gateway
+    attribution, which is the accounting gap this exists to close.
+    """
+    seen, offenders = _scan_call_sites()
+    assert not offenders, "untagged LLM call sites:\n" + "\n".join(offenders)
+    # Guard the guard: a rename that emptied _TAGGED_ENTRY_POINTS would
+    # otherwise turn this into a test that always passes.
+    assert seen >= 15, f"only {seen} LLM call sites found; the scan is no longer finding them"
 
 
 class TestConfigurationIsReadFromTheParent:

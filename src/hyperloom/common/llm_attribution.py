@@ -51,6 +51,7 @@ __all__ = [
     "call_headers",
     "current_phase",
     "inject_env",
+    "sdk_env_overlay",
     "set_current_phase",
 ]
 
@@ -279,3 +280,34 @@ def inject_env(
         return
     for variable in _merge_targets(env):
         env[variable] = _merge_raw(env.get(variable), headers)
+
+
+def sdk_env_overlay(
+    *,
+    component: str,
+    phase: str | None = None,
+    **extra: str,
+) -> dict[str, str]:
+    """Return the header variables an agent-SDK child needs overlaid on its env.
+
+    ``claude_agent_sdk`` merges ``options.env`` over the inherited environment,
+    so an overlay carrying a bare tag would *replace* the operator's gateway
+    header rather than join it. Merging against this process's environment first
+    keeps both.
+
+    Args:
+        component: Producer label for the child's calls.
+        phase: Orchestrator phase; ``None`` uses the published phase.
+        **extra: Additional attribution fields.
+
+    Returns:
+        Only the variables whose value the overlay actually changes; ``{}`` when
+        the operator configured no header.
+    """
+    merged = dict(os.environ)
+    inject_env(merged, component=component, phase=phase, **extra)
+    return {
+        variable: merged[variable]
+        for variable in (ANTHROPIC_CUSTOM_HEADERS_ENV, OPENAI_CUSTOM_HEADERS_ENV)
+        if merged.get(variable) != os.environ.get(variable)
+    }

@@ -70,6 +70,12 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "forge",
         "tracelens",
         "breakdown",
+        # Framework-side reasoning (agent ranker, audit refinement, KB synthesis)
+        # and the quantization agent. Both spend against the gateway; neither has
+        # an append_llm_call producer yet, so today they appear only in gateway
+        # attribution.
+        "framework",
+        "quantization",
     }
 )
 

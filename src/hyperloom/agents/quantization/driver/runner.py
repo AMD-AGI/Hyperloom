@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+from hyperloom.common.llm_attribution import sdk_env_overlay
+
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
@@ -278,6 +280,7 @@ async def run_one_attempt(
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
         "env": _quark_py310_compat_env(workspace),
     }
+    kwargs["env"].update(sdk_env_overlay(component="quantization"))
     if model:
         kwargs["model"] = model
     kwargs["cwd"] = str(quark_root)
