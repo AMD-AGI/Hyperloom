@@ -476,6 +476,44 @@ def test_trace_launcher_caller_does_not_override_grep_definition(
     assert "trace launcher differs from grep source" in got["source_resolution_reason"]
 
 
+def test_grep_prefers_defining_module_over_reexporting_init(monkeypatch, tmp_path):
+    """A package ``__init__`` that re-exports a kernel is not its source.
+
+    The re-exporter scores well on path shape alone, so plain ranking put it
+    ahead of the module holding the ``@triton.jit`` body and handed a backend a
+    file with no kernel in it.
+    """
+    pkg = tmp_path / "pkg" / "kernels" / "linear"
+    (pkg / "mxfp8").mkdir(parents=True)
+    (pkg / "__init__.py").write_text(
+        "from .mxfp8.rocm_native import _mxfp8_linear_kernel\n\n"
+        '__all__ = ["_mxfp8_linear_kernel"]\n',
+        encoding="utf-8",
+    )
+    definition = pkg / "mxfp8" / "rocm_native.py"
+    definition.write_text(
+        "import triton\n\n\n@triton.jit\ndef _mxfp8_linear_kernel(a, b):\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tl, "kernel_search_roots", lambda: (str(tmp_path),))
+
+    assert tl.locate_source_via_grep("_mxfp8_linear_kernel") == str(definition)
+
+
+def test_grep_falls_back_to_ranking_when_no_file_defines_the_symbol(
+    monkeypatch,
+    tmp_path,
+):
+    """Preferring definitions must not drop mention-only hits on the floor."""
+    root = tmp_path / "pkg" / "kernels"
+    root.mkdir(parents=True)
+    mention = root / "dispatch.py"
+    mention.write_text("launch(_mxfp8_linear_kernel, grid)\n", encoding="utf-8")
+    monkeypatch.setattr(tl, "kernel_search_roots", lambda: (str(tmp_path),))
+
+    assert tl.locate_source_via_grep("_mxfp8_linear_kernel") == str(mention)
+
+
 def test_unconfirmed_trace_launcher_leaves_the_source_empty(
     monkeypatch,
     tmp_path,

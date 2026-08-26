@@ -2704,7 +2704,11 @@ def locate_source_via_grep(name: str) -> str:
     if is_runtime_api_name(name):
         return ""
     tried: set[str] = set()
-    # Primary pass: keyword extraction + ranking.
+    # Primary pass: keyword extraction + ranking. A file that DEFINES the symbol
+    # outranks one that merely mentions it, the same rule the fallback pass below
+    # applies: a package __init__ that re-exports the kernel scores well on path
+    # shape alone and would otherwise be handed to a backend as the kernel source.
+    # _prefer_symbol_definition degrades to plain ranking when nothing defines it.
     for keyword in _candidate_keywords(name):
         if not keyword or keyword in tried:
             continue
@@ -2713,8 +2717,7 @@ def locate_source_via_grep(name: str) -> str:
         for root in kernel_search_roots():
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
-            ranked = _rank_paths(hits, keyword=keyword)
-            return str(ranked[0])
+            return str(_prefer_symbol_definition(keyword, hits)[0])
     # Fallback pass: trailing sub-windows of a compound/profiler-wrapped symbol
     # whose full identifier never appears verbatim in source. Prefer the file
     # that defines the embedded function over dispatch shims.
