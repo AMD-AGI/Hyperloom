@@ -424,14 +424,10 @@ def _resolve_framework_root(
     has_patch_input = bool(patch_paths or patch_texts)
     if has_patch_input:
         session_root = resolve_session_framework_root()
-        candidates = [
-            *roots,
-            *((Path(session_root),) if session_root else ()),
-        ]
         resolution = resolve_patch_apply_root(
             texts,
             explicit_root=explicit_path,
-            candidate_roots=candidates,
+            candidate_roots=tuple(roots),
             default_root=Path(session_root) if session_root else None,
         )
         if resolution.root is None:

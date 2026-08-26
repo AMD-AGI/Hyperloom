@@ -339,6 +339,7 @@ def test_final_source_layers_populated_from_stack(tmp_path):
                         "scope": "source_patch",
                         "variant_name": "patch-abc",
                         "source_snapshot": "/session/opt/src/abc",
+                        "source_snapshot_complete": True,
                         "framework_root": "/opt/sglang",
                         "base_sha": "cafebabe",
                     }

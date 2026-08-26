@@ -82,9 +82,9 @@ _PATCH_PATH_RE: re.Pattern[str] = re.compile(
 
 
 # Candidate ``-p`` strip levels for resolving a diff header path to a real file.
-# Specialists author patches with heterogeneous path prefixes, so target
-# existence is probed across levels rather than assuming ``-p1``.
-_P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
+# Used only on the legacy fallback path (worktree-harvested patches are -p1 by
+# construction and never need probing).
+_P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4)
 
 # Sentinel the post-/pre-image path takes for a created/deleted file.
 _DEV_NULL = "/dev/null"
