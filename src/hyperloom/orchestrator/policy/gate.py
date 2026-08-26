@@ -541,6 +541,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "model_path",
         "model_name",
         "model_class",
+        # The topology every number in the session was measured on, established
+        # once at launch from a read of the card. Locked for the same reason as
+        # model_path: it is provenance, not a decision, and a rewrite would file
+        # the results under a shape the card was never in -- silently, since the
+        # report prints whatever this says.
+        "compute_partition",
         "start_ts",
         # Where the current run leg begins; a forged value hands a previous
         # leg's CLOSE transition back the right to speak for this one.

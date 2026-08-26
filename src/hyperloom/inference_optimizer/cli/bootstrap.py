@@ -22,6 +22,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
@@ -193,6 +194,7 @@ def _seed_shared_state(
     args: argparse.Namespace,
     *,
     session_id: str,
+    compute_partition: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run.
 
@@ -203,6 +205,12 @@ def _seed_shared_state(
         session_dir: Directory for the new session.
         args: Parsed CLI arguments.
         session_id: Identifier assigned to the session.
+        compute_partition: The shape the launch validated, passed in rather than
+            re-read because the environment carries a lossy subset of it: the
+            published variables cannot express where the CU count came from, and
+            an absent provenance flag would be reported as a board-table guess
+            when the device was in fact probed. Falls back to the published
+            variables when a caller has no verdict to hand over.
 
     Returns:
         The seeded :class:`SharedState` instance.
@@ -395,6 +403,7 @@ def _seed_shared_state(
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
+        compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),

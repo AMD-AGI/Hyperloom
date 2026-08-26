@@ -1608,6 +1608,205 @@ def _export_operator_launch_shape(
         os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
 
 
+def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
+    """Whether this framework's runner can place work per partition.
+
+    Split out and returned rather than tested inline because the interesting
+    case is the third one. ``--framework`` defaults to ``None`` and is resolved
+    later, so a truthiness guard here reads as "checked and fine" while actually
+    meaning "not checked" -- and the operator sees nothing either way.
+
+    Args:
+        framework: The session framework, possibly unresolved.
+
+    Returns:
+        ``(supported, detail)``. ``detail`` is empty when supported, and
+        otherwise says whether the answer is *no* or *not yet known*.
+    """
+    name = str(framework or "").strip().lower()
+    if not name:
+        return False, (
+            "the framework is not resolved yet, so whether its runner places work "
+            "per partition could not be checked here"
+        )
+    if framework_registry.is_scriptable(name):
+        return True, ""
+    return False, (
+        f"{name!r} runs a server, and its benchmark does not place work per partition, "
+        f"so the streams-per-partition setting would be ignored"
+    )
+
+
+def _export_partition_shape(
+    *,
+    declared_mode: str | None,
+    streams_per_partition: int | None,
+    framework: str | None = None,
+    gpu_type: str | None = None,
+    nodes: int = 1,
+    model_path: str | None = None,
+    precision: str | None = None,
+    shared_state: Any = None,
+) -> dict[str, Any]:
+    """Validate the session's compute-partition shape and publish it.
+
+    Read-only. The mode belongs to the card and is set outside the optimizer;
+    this observes what the card is in, refuses a session that cannot work in
+    that shape, and hands the shape to the benchmark entrypoint that fans work
+    out across partitions.
+
+    Validating at launch is the whole point. Every failure this catches -- a mode
+    that was never applied, a partition too small for the workload -- otherwise
+    surfaces hours later as an out-of-memory crash or, worse, as a perfectly
+    good measurement filed under a topology the card was never in.
+
+    Args:
+        declared_mode: The raw ``--compute-partition-mode`` value, if any.
+        streams_per_partition: The raw ``--streams-per-partition`` value, if any.
+        framework: The resolved session framework. Decides whether anything will
+            place work per partition, which gates both the footprint refusal and
+            the runtime hand-off. Must be resolved before this is called: an
+            unresolved framework reads as "cannot fan out".
+        gpu_type: Board name, used only if the device's CU count cannot be read.
+        nodes: Resolved node count. The shape describes the card this process
+            can see, which on a multi-node session is not the benchmark's, so
+            nothing is observed or recorded there.
+        model_path: Checkpoint to size the workload from. Without it the
+            feasibility check has nothing to weigh and can only warn.
+        precision: Resolved precision, which sets the bytes per weight.
+        shared_state: Persisted state on a resume, carrying any measured
+            per-stream peak. Tighter than the weight-bytes bound, so preferred
+            when present.
+
+    Returns:
+        The published shape, or ``{}`` when this session has none.
+    """
+    from hyperloom.common.gpu_partition import PartitionError, parse_mode
+    from hyperloom.orchestrator.actions.executors._partition_shape import (
+        DEFAULT_STREAMS_PER_PARTITION,
+        PARTITION_COUNT_ENV,
+        PARTITION_CU_ENV,
+        PARTITION_MODE_ENV,
+        PARTITION_STREAMS_ENV,
+        PARTITION_TOTAL_STREAMS_ENV,
+        runtime_env,
+        session_shape_summary,
+        validate_session_shape,
+    )
+
+    # Cleared first so a second session in the same shell cannot inherit a shape
+    # the operator did not ask for this time.
+    for key in (
+        PARTITION_MODE_ENV,
+        PARTITION_COUNT_ENV,
+        PARTITION_CU_ENV,
+        PARTITION_STREAMS_ENV,
+        PARTITION_TOTAL_STREAMS_ENV,
+    ):
+        os.environ.pop(key, None)
+
+    try:
+        mode = parse_mode(declared_mode)
+    except PartitionError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    streams_named = streams_per_partition is not None
+    # Tested against None rather than falsiness: `0 or DEFAULT` is DEFAULT, which
+    # would quietly honour an invalid request as the default instead of refusing
+    # it, and leave the guard below unreachable for the one value most likely to
+    # be passed by mistake.
+    streams = DEFAULT_STREAMS_PER_PARTITION if streams_per_partition is None else int(streams_per_partition)
+    if streams < 1:
+        print(
+            f"ERROR: --streams-per-partition must be >= 1, got {streams_per_partition}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if nodes >= 2:
+        # Unconditional: the misleading record is produced by observing at all,
+        # not by asking for a mode. A controller that happens to have GPUs would
+        # otherwise publish its own topology as the session's while the
+        # benchmark ran somewhere else entirely.
+        print(
+            f"WARN: this session has --nodes {nodes}, and a compute-partition shape "
+            f"describes one card. The benchmark node's topology cannot be read from here, "
+            f"so no shape is recorded for this session.",
+            file=sys.stderr,
+        )
+        if mode:
+            print(
+                f"ERROR: --compute-partition-mode {mode} cannot be checked on a "
+                f"--nodes {nodes} session: the assertion is about the benchmark node's "
+                f"card, which this process cannot read. An unverifiable assertion is not "
+                f"a satisfied one. Drop the flag to run multi-node.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        return {}
+
+    fanout, fanout_detail = _partition_fanout_supported(framework)
+    if (mode or streams_named) and not fanout:
+        print(f"WARN: {fanout_detail}.", file=sys.stderr)
+
+    verdict = validate_session_shape(
+        declared_mode=mode,
+        streams=streams,
+        gpu_type=gpu_type,
+        params={
+            "model_path": str(model_path or ""),
+            "precision": str(precision or ""),
+        },
+        shared_state=shared_state,
+        # The footprint refusal is arithmetic about streams sharing a partition.
+        # An operator who named the flags has asserted that shape and is held to
+        # it; otherwise it only applies where something will actually fan out.
+        fanout_expected=fanout or bool(mode) or streams_named,
+    )
+    for warning in verdict.warnings:
+        print(f"WARN: {warning}", file=sys.stderr)
+    if not verdict.ok:
+        print(f"ERROR: {verdict.refusal}", file=sys.stderr)
+        sys.exit(2)
+    for note in verdict.notes:
+        print(note)
+
+    if verdict.layout is None:
+        return {}
+    # The observed shape is published either way -- the platform fingerprint
+    # reads it back from here, and provenance is the point. Only the fan-out
+    # instruction is withheld from a session whose benchmark cannot act on it.
+    os.environ.update(runtime_env(verdict.layout, streams, fanout=fanout))
+    return session_shape_summary(verdict.layout, streams, fanout_expected=fanout)
+
+
+def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
+    """Fill the partition flags from the archive when this resume omitted them.
+
+    Priority is CLI flag > archived ``SharedState``, the same chain
+    :func:`_restore_operator_supplied_paths_from_state` applies to the
+    custom-workload paths. Resolved values are written back onto ``args`` so
+    :func:`_export_partition_shape` stays the only writer of the env it owns,
+    and so a restored declaration is re-checked against the live card rather
+    than trusted -- the card may have been repartitioned while the session was
+    stopped, which is exactly the case the declaration exists to catch.
+
+    Args:
+        args: Parsed CLI namespace, updated in place.
+        state: Resumed session state.
+    """
+    archived = dict(getattr(state, "compute_partition", None) or {})
+    if not str(getattr(args, "compute_partition_mode", None) or "").strip():
+        args.compute_partition_mode = str(archived.get("mode") or "")
+    # `is None` rather than falsiness, so an explicit `--streams-per-partition 0`
+    # still reaches the guard that refuses it instead of being read as "omitted"
+    # and quietly replaced by the archived value.
+    if getattr(args, "streams_per_partition", None) is None:
+        streams = archived.get("streams_per_partition")
+        args.streams_per_partition = int(streams) if streams else None
+
+
 # Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
 # Anything else (baseline / preflight failures, crashes, enablement stalls) exits
 # non-zero so CI surfaces genuine problems.
@@ -1692,6 +1891,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         server_args=str(getattr(args, "server_args", "") or "").strip(),
         extra_env=parse_operator_extra_env(args),
     )
+    # The partition shape is deliberately NOT exported here. It needs the
+    # resolved framework, GPU type and post-quantization model path, none of
+    # which exist yet, and each fresh-launch and resume branch calls it once at
+    # the point where they do. Exporting here as well made a resume validate
+    # twice -- the first time against an unresolved model it could only warn
+    # about.
+
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
@@ -1929,6 +2135,28 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
         )
         _persist_operator_supplied_paths(state)
+        # The partition shape is part of the measurement contract, so it resumes
+        # on the same restore / apply / persist path as the paths above. The
+        # re-check is not ceremony: a card can be repartitioned while a session
+        # is stopped, and resuming into a different topology would compare
+        # candidates measured under one shape against a baseline from another.
+        _restore_partition_shape_from_state(args, state)
+        state.compute_partition = _export_partition_shape(
+            declared_mode=getattr(args, "compute_partition_mode", None),
+            streams_per_partition=getattr(args, "streams_per_partition", None),
+            framework=state.framework or getattr(args, "framework", None),
+            gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
+            # A resume must re-pass --nodes, so the persisted count is the one
+            # that says whether this session was ever multi-node.
+            nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
+            model_path=state.model_path or str(getattr(args, "model", "") or ""),
+            precision=state.precision or getattr(args, "precision", None),
+            # A resume can size the workload against what the last session
+            # actually measured, which rules out a mode the weights alone fit.
+            shared_state=state,
+        )
+        if state.compute_partition.get("mode"):
+            print(f"  re-exported partition shape: {state.compute_partition['mode']}")
         if state.framework_repo_path:
             print(f"  re-exported FRAMEWORK_REPO_PATH: {state.framework_repo_path}")
         if state.bypass_scripts_dir:
@@ -2219,10 +2447,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             model=str(args.model) if args.model else "",
             launch_info_file=getattr(args, "launch_info_file", None),
         )
+        # Placed here, not at the top of _run_optimize, because everything it
+        # weighs is resolved by now and none of it was then: the framework
+        # (whether anything fans out), args.gpu_type (the CU fallback), and
+        # args.model, which --quantize rewrites to the exported checkpoint --
+        # sizing partitions against the source model would weigh the wrong
+        # weights. Still before the seed, so the shape it returns is the one
+        # persisted rather than a lossy re-read from the environment.
+        compute_partition = _export_partition_shape(
+            declared_mode=getattr(args, "compute_partition_mode", None),
+            streams_per_partition=getattr(args, "streams_per_partition", None),
+            framework=framework,
+            gpu_type=args.gpu_type,
+            nodes=nodes_resolved,
+            model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
+            precision=getattr(args, "precision", None),
+        )
         state = _seed_shared_state(
             session_dir,
             args,
             session_id=manifest["session_id"],
+            compute_partition=compute_partition,
         )
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
         if _preflight_unsupported_model_arch(args, session_dir):

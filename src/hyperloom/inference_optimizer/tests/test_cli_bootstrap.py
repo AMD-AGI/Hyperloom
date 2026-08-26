@@ -164,6 +164,48 @@ def test_seed_shared_state_records_custom_workload_paths(
     assert state.benchmark_backend == "bypass"
 
 
+def _neutralize_seed_io(monkeypatch):
+    """Stub the model/recipe reads so a seed can be asserted on one field."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+
+
+def test_seed_records_the_launch_verdict_for_the_partition_shape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The verdict carries provenance the published env cannot express.
+
+    ``published_shape()`` reads back mode, count, CU and streams, but nothing
+    that says the CU count was probed from the device rather than derived from
+    the board table. Re-reading the env therefore reported a fresh launch's
+    probed count as a table guess, which is the one thing the section is for.
+    """
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "CPX", "cu_per_partition": 32})
+
+    verdict = {"mode": "CPX", "partitions": 8, "cu_per_partition": 32, "cu_probed": True}
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="s-shape", compute_partition=verdict)
+
+    assert state.compute_partition == verdict
+
+
+def test_seed_falls_back_to_the_published_shape_when_handed_no_verdict(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "DPX"})
+
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="s-fallback")
+    assert state.compute_partition == {"mode": "DPX"}
+
+
 def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
     tmp_path: Path,
     monkeypatch,

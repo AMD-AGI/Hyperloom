@@ -5,6 +5,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **The card's compute-partition shape is now recorded, checked, and published.**
+  An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
+  `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
+  throughput. Until now nothing in a session recorded which shape a
+  number came from, so two runs of the same configuration on the same card in
+  `SPX` and in `CPX` were indistinguishable in the history — different
+  experiments filed under one name.<br/>
+  The observed mode now goes into the platform fingerprint alongside NPS, the
+  session report names it on partitioned runs, and the shape is published to
+  the environment for the benchmark entrypoint to fan work out across
+  partitions. That entrypoint lives outside this repository, so until it reads
+  them a session on a split card measures one partition rather than the total;
+  the recorded shape is still what stops a `CPX` number being filed as though
+  it were `SPX`. The published variables are set only for the scriptable
+  frameworks whose benchmarks can fan out; a serving session records the shape
+  but is handed no fan-out contract, and its report says the figure cannot be
+  read as an aggregate.<br/>
+  Two optional flags configure it. `--compute-partition-mode` **asserts** the
+  mode the card is already in and refuses the session if it is in another one,
+  or if the card cannot be read — the flag exists to catch an external set that
+  did not take, so an unverifiable assertion is treated as a failed one.
+  `--streams-per-partition` (default `2`) is how many concurrent streams go on
+  each partition.<br/>
+  **The optimizer does not change the mode.** Setting it is privileged and
+  disrupts every process holding a GPU context, which is not something an
+  optimization loop should do between benchmark rounds. The card must be in its
+  mode before `optimize` starts: the shape is checked and recorded at launch, so
+  a mode applied later — by the benchmark entrypoint, for instance — is too late
+  to be either. Nothing added here needs privilege: every probe is an
+  unprivileged read, and a host without `amd-smi` behaves exactly as before.<br/>
+  **Operator note**: launch now refuses a session whose streams provably will
+  not fit one partition, sized from the checkpoint's weight bytes as a lower
+  bound. The arithmetic costs milliseconds and the failure it replaces is an
+  out-of-memory crash hours in. When the checkpoint cannot be sized the session
+  runs and says so. The refusal applies where streams will actually share a
+  partition — a scriptable framework, or an operator who named the flags — and
+  not to a serving session that merely happens to start on a card someone else
+  left split. Multi-node sessions record no shape, since the readable card is
+  not the benchmark's.
+
 ### Changed
 
 - **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
