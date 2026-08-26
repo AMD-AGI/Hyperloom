@@ -9,14 +9,14 @@ context out on the headers a named gateway understands, selected by a single
 setting::
 
     HYPERLOOM_LLM_ATTRIBUTION=litellm
-    # x-litellm-tags: session=<id>,component=geak,phase=KERNEL_AGENT,
-    #                 type=kernel_opt,operation=generate_candidate
+    # x-litellm-tags: application=hyperloom,session=<id>,component=geak,
+    #                 phase=KERNEL_AGENT,type=kernel_opt,operation=generate_candidate
     # x-litellm-trace-id: <id>
 
-The fields narrow from the run down to the individual call: ``session`` is the
-run, ``phase`` the stage it reached, ``type`` the action executing inside that
-stage, ``component`` the code that made the call, and ``operation`` what that
-one call was for.
+The fields narrow from the product down to the individual call: ``application``
+names Hyperloom on a shared gateway, ``session`` is the run, ``phase`` the stage
+it reached, ``type`` the action executing inside that stage, ``component`` the
+code that made the call, and ``operation`` what that one call was for.
 
 Leaving it unset is the default and emits nothing, so an unconfigured deployment
 behaves exactly as it did before.
@@ -49,6 +49,8 @@ from typing import Callable, Iterator, Mapping, MutableMapping, Sequence
 ATTRIBUTION_ENV = "HYPERLOOM_LLM_ATTRIBUTION"
 #: PrimusClaw session id, already exported by the session bootstrap.
 CLAW_SESSION_ID_ENV = "CLAW_SESSION_ID"
+#: Product label on a shared gateway; every Hyperloom call carries this.
+DEFAULT_APPLICATION = "hyperloom"
 
 ANTHROPIC_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 OPENAI_CUSTOM_HEADERS_ENV = "OPENAI_CUSTOM_HEADERS"
@@ -62,6 +64,7 @@ __all__ = [
     "ATTRIBUTION_ENV",
     "AttributionHeader",
     "CLAW_SESSION_ID_ENV",
+    "DEFAULT_APPLICATION",
     "PRESETS",
     "attribution_context",
     "call_headers",
@@ -168,11 +171,11 @@ def attribution_context(
 ) -> dict[str, str]:
     """Collect the attribution fields known at one call site.
 
-    Four of the five fields answer *where* the call came from and are filled in
-    without the call site's help: ``session`` from the environment, ``phase``
-    from the phase machine, and ``type`` from the action currently running.
-    ``operation`` is the exception, because what a call is *for* is knowable only
-    where it is written.
+    Five of the six fields answer *where* the call came from and are filled in
+    without the call site's help: ``application`` is always Hyperloom,
+    ``session`` from the environment, ``phase`` from the phase machine, and
+    ``type`` from the action currently running. ``operation`` is the exception,
+    because what a call is *for* is knowable only where it is written.
 
     ``extra`` keeps the vocabulary open: a site with more context (``kernel_id``,
     ``task_id``, ``attempt``) can add it without changing this signature, and a
@@ -192,6 +195,7 @@ def attribution_context(
     """
     source = env if env is not None else os.environ
     fields: dict[str, str] = {
+        "application": DEFAULT_APPLICATION,
         "session": source.get(CLAW_SESSION_ID_ENV, ""),
         "component": component,
         "phase": current_phase() if phase is None else phase,
@@ -251,7 +255,7 @@ PRESETS: dict[str, tuple[AttributionHeader, ...]] = {
         AttributionHeader(
             "x-litellm-tags",
             "combined",
-            ("session", "component", "phase", "type", "operation"),
+            ("application", "session", "component", "phase", "type", "operation"),
         ),
         # Sets the spend log's session_id column and propagates to nested MCP and
         # A2A calls, so it is the column a per-session reconciliation joins on.

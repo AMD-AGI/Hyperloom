@@ -55,7 +55,7 @@ def shapes(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 
 @pytest.fixture
 def every_field(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    """Register a preset selecting all five fields; return its environment."""
+    """Register a preset selecting all six fields; return its environment."""
     monkeypatch.setitem(
         llm_attribution.PRESETS,
         "every-field",
@@ -63,7 +63,7 @@ def every_field(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
             AttributionHeader(
                 "x-all",
                 "combined",
-                ("session", "component", "phase", "type", "operation"),
+                ("application", "session", "component", "phase", "type", "operation"),
             ),
         ),
     )
@@ -147,7 +147,7 @@ class TestPresets:
     def test_litellm_emits_tags_and_a_trace_id(self) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         assert llm_attribution.call_headers(component="geak", env=_env()) == {
-            "x-litellm-tags": "session=claw-abc,component=geak,phase=KERNEL_AGENT",
+            "x-litellm-tags": ("application=hyperloom,session=claw-abc,component=geak,phase=KERNEL_AGENT"),
             "x-litellm-trace-id": "claw-abc",
         }
 
@@ -171,7 +171,7 @@ class TestMergePreservesExistingSetting:
         llm_attribution.inject_env(env, component="geak", source=_env())
         parsed = parse_custom_headers(env[_ANTHROPIC], env={})
         assert parsed["Ocp-Apim-Subscription-Key"] == "secret"
-        assert parsed["x-litellm-tags"] == "session=claw-abc,component=geak"
+        assert parsed["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=geak"
 
     def test_env_reference_is_not_expanded(self) -> None:
         # codex_session matches ${VAR} against the raw text to forward the
@@ -185,7 +185,7 @@ class TestMergePreservesExistingSetting:
         llm_attribution.inject_env(env, component="geak", source=_env())
         decoded = json.loads(env[_ANTHROPIC])
         assert decoded["Ocp-Apim-Subscription-Key"] == "${GATEWAY_KEY}"
-        assert decoded["x-litellm-tags"] == "session=claw-abc,component=geak"
+        assert decoded["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=geak"
 
     def test_reinjection_replaces_instead_of_stacking(self) -> None:
         # The env hooks run once per turn, so this happens on every retry.
@@ -259,7 +259,7 @@ class TestSdkEnvOverlay:
         overlay = llm_attribution.sdk_env_overlay(component="framework")
         parsed = parse_custom_headers(overlay[_ANTHROPIC], env={})
         assert parsed["Ocp-Apim-Subscription-Key"] == "secret"
-        assert parsed["x-litellm-tags"] == "session=claw-abc,component=framework"
+        assert parsed["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=framework"
 
     def test_overlay_reports_only_variables_it_changes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_ATTR, "litellm")
@@ -276,7 +276,7 @@ class TestConfigurationIsReadFromTheParent:
         child: dict[str, str] = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
         llm_attribution.inject_env(child, component="specialist", source=_env())
         parsed = parse_custom_headers(child[_ANTHROPIC], env={})
-        assert parsed["x-litellm-tags"] == "session=claw-abc,component=specialist"
+        assert parsed["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=specialist"
 
 
 class TestActionScope:
@@ -342,7 +342,7 @@ class TestOperation:
     def test_it_is_dropped_when_the_call_site_names_none(self, every_field: dict[str, str]) -> None:
         assert "operation=" not in llm_attribution.call_headers(component="critic", env=every_field)["x-all"]
 
-    def test_all_five_fields_narrow_from_the_run_to_the_call(self, every_field: dict[str, str]) -> None:
+    def test_all_six_fields_narrow_from_the_product_to_the_call(self, every_field: dict[str, str]) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         with llm_attribution.current_action_scope("kernel_opt"):
             headers = llm_attribution.call_headers(
@@ -351,8 +351,13 @@ class TestOperation:
                 env=every_field,
             )
         assert headers["x-all"] == (
-            "session=claw-abc,component=geak,phase=KERNEL_AGENT,type=kernel_opt,operation=optimize_kernel"
+            "application=hyperloom,session=claw-abc,component=geak,"
+            "phase=KERNEL_AGENT,type=kernel_opt,operation=optimize_kernel"
         )
+
+    def test_the_litellm_preset_carries_application(self) -> None:
+        headers = llm_attribution.call_headers(component="geak", env=_env())
+        assert headers["x-litellm-tags"].startswith("application=hyperloom,")
 
     def test_the_litellm_preset_carries_both_new_fields(self) -> None:
         llm_attribution.set_current_phase("SWEEP")
