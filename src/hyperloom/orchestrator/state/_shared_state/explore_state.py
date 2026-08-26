@@ -406,9 +406,6 @@ class _ExploreStateMixin:
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
-        self.framework_config_lane_state = ""
-        self.framework_config_lane_round = 0
-        self.framework_config_pending_grid = []
         self.specialist_domain_empty_streak = {}
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}

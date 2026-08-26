@@ -249,12 +249,6 @@ class MachinePhase(PhaseHandler):
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
-        # (default OFF) FRAMEWORK config-exploration lane: run explore-style
-        # config-grid rounds before leaving FRAMEWORK_AGENT. No-op unless
-        # framework_config_exploration_enabled is set.
-        if self._framework_config_lane_should_engage(next_phase):
-            if await self._maybe_hold_for_framework_config_lane():
-                return
         if next_phase is None:
             return
         target, reason, evidence = next_phase

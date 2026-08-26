@@ -428,10 +428,6 @@ def _seed_shared_state(
         # stopping the session. Routing AgentX through the same channel as
         # ``--no-eval`` is what makes the opt-out legible to that guard.
         eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
-        # FRAMEWORK config-exploration lane toggle (default OFF).
-        framework_config_exploration_enabled=bool(
-            getattr(args, "enable_framework_config_exploration", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
