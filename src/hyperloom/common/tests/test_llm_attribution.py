@@ -20,7 +20,10 @@ import pytest
 from hyperloom.common import llm_attribution
 from hyperloom.common.llm_config import parse_custom_headers
 
-_SPEC = llm_attribution.HEADER_SPEC_ENV
+_SPEC = llm_attribution.COMBINED_HEADER_ENV
+_RAW = llm_attribution.RAW_HEADER_ENV
+_JSON = llm_attribution.JSON_HEADER_ENV
+_PRESET = llm_attribution.PRESET_ENV
 _CLAW = llm_attribution.CLAW_SESSION_ID_ENV
 _ANTHROPIC = llm_attribution.ANTHROPIC_CUSTOM_HEADERS_ENV
 _OPENAI = llm_attribution.OPENAI_CUSTOM_HEADERS_ENV
@@ -95,6 +98,76 @@ class TestRendering:
         # parse_custom_headers expands ${VAR}; a value must not reach it as one.
         headers = llm_attribution.call_headers(component="${SECRET}", env=_env())
         assert "$" not in headers["x-tags"]
+
+
+class TestValueShapes:
+    """Gateways disagree about the shape of a value, not about its content."""
+
+    def test_raw_shape_omits_the_field_prefix(self) -> None:
+        # A trace-id slot wants the identifier itself, not "session=<id>".
+        env = {_RAW: "x-litellm-trace-id:session", _CLAW: "claw-abc"}
+        assert llm_attribution.call_headers(component="geak", env=env) == {
+            "x-litellm-trace-id": "claw-abc"
+        }
+
+    def test_raw_shape_falls_through_to_the_first_field_with_a_value(self) -> None:
+        env = {_RAW: "x-trace:session,component", _CLAW: ""}
+        assert llm_attribution.call_headers(component="geak", env=env) == {"x-trace": "geak"}
+
+    def test_json_shape_renders_a_parseable_object(self) -> None:
+        env = {_JSON: "x-meta:session,component", _CLAW: "claw-abc"}
+        headers = llm_attribution.call_headers(component="geak", env=env)
+        assert json.loads(headers["x-meta"]) == {"session": "claw-abc", "component": "geak"}
+
+    def test_shapes_compose_into_several_headers(self) -> None:
+        env = {
+            _SPEC: "x-litellm-tags:component",
+            _RAW: "x-litellm-trace-id:session",
+            _CLAW: "claw-abc",
+        }
+        assert llm_attribution.call_headers(component="geak", env=env) == {
+            "x-litellm-tags": "component=geak",
+            "x-litellm-trace-id": "claw-abc",
+        }
+
+    def test_a_shape_with_no_values_is_not_emitted(self) -> None:
+        env = {_RAW: "x-trace:session", _JSON: "x-meta:session", _CLAW: ""}
+        assert llm_attribution.call_headers(component="", env=env) == {}
+
+
+class TestPresets:
+    """A preset supplies defaults; it must never become a lock-in."""
+
+    def test_litellm_preset_configures_both_headers(self) -> None:
+        env = {_PRESET: "litellm", _CLAW: "claw-abc"}
+        llm_attribution.set_current_phase("KERNEL_AGENT")
+        headers = llm_attribution.call_headers(component="geak", env=env)
+        assert headers == {
+            "x-litellm-tags": "session=claw-abc,component=geak,phase=KERNEL_AGENT",
+            "x-litellm-trace-id": "claw-abc",
+        }
+
+    def test_explicit_variable_overrides_the_preset(self) -> None:
+        env = {_PRESET: "litellm", _SPEC: "x-own-tags:component", _CLAW: "claw-abc"}
+        headers = llm_attribution.call_headers(component="geak", env=env)
+        assert headers["x-own-tags"] == "component=geak"
+        assert "x-litellm-tags" not in headers
+
+    def test_empty_variable_disables_that_preset_header(self) -> None:
+        env = {_PRESET: "litellm", _SPEC: "", _CLAW: "claw-abc"}
+        headers = llm_attribution.call_headers(component="geak", env=env)
+        assert set(headers) == {"x-litellm-trace-id"}
+
+    def test_unknown_preset_configures_nothing(self) -> None:
+        env = {_PRESET: "not-a-gateway", _CLAW: "claw-abc"}
+        assert llm_attribution.call_headers(component="geak", env=env) == {}
+
+    def test_preset_names_are_specs_an_operator_could_have_written(self) -> None:
+        # Keeps presets from growing logic the env form cannot express.
+        for shapes in llm_attribution.PRESETS.values():
+            for shape, spec in shapes.items():
+                assert shape in {"combined", "raw", "json"}
+                assert ":" in spec
 
 
 class TestMergePreservesExistingSetting:
