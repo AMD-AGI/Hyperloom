@@ -225,6 +225,16 @@ except ImportError:  # flat import (standalone: tools/ on sys.path)
         _kernel_source_index = None  # type: ignore[assignment]
         _active_finder = None  # type: ignore[assignment]
 
+# Owns the only AST reading of what a Triton kernel definition looks like, which
+# source_type_for needs to tell a Triton ``.py`` from any other Python file.
+try:  # package import (TraceLens route / tests)
+    from ._bypass_source_resolver import triton_def_line as _triton_def_line
+except ImportError:  # flat import (standalone: tools/ on sys.path)
+    try:
+        from _bypass_source_resolver import triton_def_line as _triton_def_line  # type: ignore[no-redef]
+    except ImportError:
+        _triton_def_line = None  # type: ignore[assignment]
+
 _ACTIVE_FINDER_METHOD = getattr(_KSC, "METHOD_ACTIVE_FINDER", "active_finder")
 
 # Resolution methods whose verdict is carried on the ``op_to_source_*`` fields
@@ -1746,6 +1756,31 @@ def _looks_like_flydsl_source(source_file: str) -> bool:
     return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
 
 
+def _defines_traced_triton_kernel(name: str, source_file: str) -> bool:
+    """Whether ``source_file`` defines the Triton kernel ``name`` was traced from.
+
+    A Triton kernel is named after the device symbol, which carries no language:
+    ``_gqa_sparse_decode_kernel`` reads as plain Python, and the file imports
+    Triton through a framework shim rather than by name. Classifying it on those
+    signals reports ``python``, which every consumer that asks for a portable
+    language then declines. Resolve the traced symbol to a ``@triton.jit`` def
+    instead, so the answer is the file's own AST rather than a naming habit.
+
+    Args:
+        name: Kernel/symbol name as the trace reports it.
+        source_file: Resolved source path.
+
+    Returns:
+        ``True`` when a ``@triton.jit`` def in ``source_file`` matches ``name``.
+    """
+    if _triton_def_line is None or not source_file or not source_file.endswith(".py"):
+        return False
+    for keyword in _candidate_keywords(name):
+        if _triton_def_line(source_file, symbol=keyword) is not None:
+            return True
+    return False
+
+
 _FLYDSL_PSEUDO_OP_NAME_MARKERS = (
     "pseudo_op::moe_flydsl_",
     "pseudo_op::flydsl_",
@@ -1776,8 +1811,12 @@ def source_type_for(name: str, source_file: str) -> str:
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
         return "triton"
+    # Ahead of the Triton proof: a FlyDSL kernel may import Triton for its own
+    # reference path, and the FlyDSL identity is the one its consumers act on.
     if _looks_like_flydsl_source(source_file):
         return "flydsl"
+    if _defines_traced_triton_kernel(name, source_file):
+        return "triton"
     if source_file.endswith(".py"):
         return "python"
     if "hipblas" in lower_name or "rocblas" in lower_name:
