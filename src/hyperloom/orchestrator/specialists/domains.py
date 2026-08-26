@@ -13,6 +13,7 @@ Field reference:
 * ``layer`` — short human label (analysis layer covered).
 * ``kb_anchor`` — knowledge-domain label for prompt grouping.
 * ``available_in`` — ``"M5"`` / ``"M6"``; both are dispatchable.
+* ``llm_selectable`` — False for a domain only the Coordinator dispatches.
 
 All specialists share the global :data:`PR_QUERY_REPOS` allowlist and query
 the PR Monitor directly via ``mcp__pr_monitor__*`` tools.
@@ -53,6 +54,10 @@ class SpecialistDomain:
     available_in: str = "M6"
     description: str = ""
     default_mode: str = "patch"
+    #: Whether Orchestration may name this domain in a ``delegate``. False for
+    #: the domains the Coordinator dispatches itself. The emit hint and its test
+    #: both derive from this instead of each carrying a copy of the list.
+    llm_selectable: bool = True
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.
@@ -173,6 +178,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     ),
     SpecialistDomain(
         key="enablement_specialist",
+        llm_selectable=False,
         layer="non-runnable or eval-failing (model, backend) enablement / framework + ROCm/HIP bridging",
         kb_anchor="framework",
         available_in="M6",
@@ -217,6 +223,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     ),
     SpecialistDomain(
         key="cross_framework_rewrite_specialist",
+        llm_selectable=False,
         layer="cross-framework feature port (sglang <-> vllm), rewrite not git-apply",
         kb_anchor="framework",
         available_in="M6",

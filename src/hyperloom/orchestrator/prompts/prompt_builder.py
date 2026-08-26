@@ -388,6 +388,13 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
     return f"{lo:.0f}-{hi:.0f}%"
 
 
+def _llm_selectable_domains() -> str:
+    """The domains Orchestration may name, pipe-separated, from the registry."""
+    from ..specialists.domains import SPECIALIST_DOMAINS
+
+    return "|".join(d.key for d in SPECIALIST_DOMAINS if d.llm_selectable)
+
+
 def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
@@ -410,10 +417,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
-            "domain=<one of serving_specialist|framework_rewrite_specialist|"
-            "kernel_switch_specialist|comm_specialist|compiler_specialist|"
-            "system_specialist|candidate_discovery_specialist|research_scout_specialist|"
-            "static_recon_specialist>, "
+            f"domain=<one of {_llm_selectable_domains()}>, "
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "

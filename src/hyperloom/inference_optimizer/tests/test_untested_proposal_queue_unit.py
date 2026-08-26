@@ -13,12 +13,8 @@ from hyperloom.orchestrator.actions.executors._proposal_identity import (
     normalize_proposal,
 )
 from hyperloom.orchestrator.phases.machine_state import (
-    PHASE_CLOSE,
     PHASE_FRAMEWORK_AGENT,
-    PHASE_FRAMEWORK_AGENT,
-    PHASE_KERNEL_AGENT,
-    PHASE_PRELUDE,
-    PHASE_SWEEP,
+    PHASE_NAMES,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
@@ -205,19 +201,13 @@ def test_overflow_is_truncated_and_counted():
     assert "(+8 more not shown)" in out
 
 
-@pytest.mark.parametrize(
-    "phase,expected",
-    [
-        (PHASE_PRELUDE, False),
-        (PHASE_FRAMEWORK_AGENT, False),
-        (PHASE_FRAMEWORK_AGENT, True),
-        (PHASE_KERNEL_AGENT, False),
-        (PHASE_SWEEP, False),
-        (PHASE_CLOSE, False),
-    ],
-)
+@pytest.mark.parametrize("phase", PHASE_NAMES)
 @pytest.mark.asyncio
-async def test_the_block_is_injected_only_in_explore(coord, phase, expected):
+async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase):
+    """Untested proposals feed explore grids, so only the phase that runs them
+    is shown the queue. Parameterised over the live chain: a phase added
+    without a decision here fails rather than silently inheriting ``False``."""
+    expected = phase == PHASE_FRAMEWORK_AGENT
     coord.shared_state.phase = phase
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
