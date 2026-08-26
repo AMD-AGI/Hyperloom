@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
 )
-from .base import PhaseHandler
+from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
 
@@ -47,8 +47,11 @@ _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
-class FrameworkPhase(PhaseHandler):
-    """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+class FrameworkPhase(CoordinatorCollaborator):
+    """The source arm of the OPTIMIZE phase: upstream candidates, authored
+    patches, and the enablement hand-off. Not a phase of its own -- it shares
+    FRAMEWORK_AGENT with the configuration arm.
+    """
 
     # Marker for the candidate-free local-exploration arm (a synthetic
     # "candidate" whose id is ``local_explore:<n>``): the ranker may pick it,
@@ -62,9 +65,15 @@ class FrameworkPhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         log.info(
-            "FRAMEWORK entry (from=%s): pumping initial batch",
+            "OPTIMIZE entry (from=%s): pumping initial batch",
             from_phase or "<unknown>",
         )
+        # Shared with the configuration arm: a reopened macro-cycle re-measures
+        # before either arm spends anything on last cycle's bottleneck.
+        try:
+            await self._on_cycle_start_reprofile(from_phase=from_phase)
+        except Exception:  # noqa: BLE001 — reprofile is best-effort
+            log.warning("OPTIMIZE entry: cycle-start reprofile failed")
         try:
             await self._pump_framework_agent_phase()
         except Exception as exc:  # noqa: BLE001 — defensive

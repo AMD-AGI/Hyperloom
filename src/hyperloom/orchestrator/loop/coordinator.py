@@ -1027,7 +1027,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_apply_macro_cycle_reloop": "phase_explore",
         "_run_cycle_soft_restart": "phase_explore",
         "_restart_inference_servers": "phase_explore",
-        "_on_enter_explore": "phase_explore",
+        "_on_cycle_start_reprofile": "phase_explore",
         "_maybe_force_stalled_domain_specialist": "phase_explore",
         "_seed_gaps_from_research_hints": "phase_explore",
         "_fan_out_specialist_wave": "phase_explore",

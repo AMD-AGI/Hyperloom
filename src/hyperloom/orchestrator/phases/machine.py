@@ -28,9 +28,8 @@ class MachinePhase(PhaseHandler):
         # the per-tick refresh below is a no-op once applied.
         self._phase_budget_pct = _phase_state.redistribute_budget_pct(
             self._phase_budget_pct,
-            explore_enabled=self._explore_enabled(),
+            optimize_enabled=self._optimize_enabled(),
             kernel_enabled=self._kernel_enabled(),
-            framework_enabled=bool(state.framework_agent_phase_enabled),
         )
         # Persist the phase budget so CLI flags land in state.json for resume parity.
         if not state.phase_budget_pct:
@@ -143,15 +142,16 @@ class MachinePhase(PhaseHandler):
         """Whether kernel optimization is enabled for this run."""
         return bool(self.shared_state.kernel_enabled)
 
-    def _explore_enabled(self) -> bool:
+    def _optimize_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
 
         Returns:
             ``True`` unless ``--no-explore`` disabled it (collapsing to
             KERNEL/SWEEP).
         """
-        # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
-        return bool(self.shared_state.explore_enabled)
+        # Mirror the persisted toggle; --no-framework-agent collapses the
+        # optimisation phase to KERNEL/SWEEP.
+        return bool(self.shared_state.framework_agent_phase_enabled)
 
     async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
         """Return the ids of queued/running tasks doing KERNEL-lane work.
@@ -238,15 +238,14 @@ class MachinePhase(PhaseHandler):
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()
-        explore_enabled = self._explore_enabled()
+        optimize_enabled = self._optimize_enabled()
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
-            explore_enabled=explore_enabled,
+            optimize_enabled=optimize_enabled,
         )
-        if str(state.phase or "").upper() == "EXPLORE":
+        if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
@@ -276,28 +275,24 @@ class MachinePhase(PhaseHandler):
             # via the more honest reason, so the next phase must not re-evaluate
             # it as if it were still unclaimed.
             state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint and target != _phase_state.PHASE_EXPLORE:
+        elif state.pending_escalate_hint:
             # A phase change fired for a reason unrelated to the hint while one
-            # was still pending (e.g. set by a different phase's agent turn and
-            # never claimed). skip_to_kernel/skip_to_sweep are consumed only
-            # inside exit_normal_explore, so a hint is still legitimately in
-            # flight not just when riding straight to EXPLORE, but also one hop
-            # earlier: PRELUDE -> FRAMEWORK_AGENT still has EXPLORE ahead of it
-            # whenever explore is enabled, and discarding here is the same bug
-            # this branch exists to fix, just moved upstream. Only discard once
-            # the transition moves to a phase from which EXPLORE can no longer
-            # be reached (including EXPLORE itself force-exiting past the hint
-            # via IR-6, or explore being disabled for this session).
-            hint_still_reachable = target == _phase_state.PHASE_FRAMEWORK_AGENT and explore_enabled
-            if not hint_still_reachable:
-                discarded_hint = state.discard_pending_escalate_hint()
-                log.info(
-                    "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
-                    discarded_hint,
-                    prior,
-                    target,
-                    reason,
-                )
+            # was still pending (set by an agent turn and never claimed).
+            # ``exit_normal_optimize`` is the only consumer, so once the
+            # transition leaves the optimisation phase the hint can no longer be
+            # claimed and would otherwise be re-evaluated by a phase it was
+            # never meant for. This used to need a reachability test, because
+            # EXPLORE sat one hop past FRAMEWORK_AGENT and a hint set in the
+            # first was still legitimately in flight for the second; with one
+            # phase there is no hop left to be in flight across.
+            discarded_hint = state.discard_pending_escalate_hint()
+            log.info(
+                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
+                discarded_hint,
+                prior,
+                target,
+                reason,
+            )
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
             target == _phase_state.PHASE_CLOSE
@@ -430,8 +425,6 @@ class MachinePhase(PhaseHandler):
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._on_enter_framework(from_phase=from_phase)
-        elif target == _phase_state.PHASE_EXPLORE:
-            await self._on_enter_explore(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL_AGENT:
             await self._on_enter_kernel(from_phase=from_phase)
         elif target == _phase_state.PHASE_SWEEP:
