@@ -20,11 +20,9 @@ OPERATOR_IDENTITY_VERSION = 2
 def _strip_dispatch_decoration(operation: str) -> str:
     """Remove how-a-kernel-was-launched decoration from a traced operation name.
 
-    A trace reports the launch API it saw (``hipGraphLaunch->``), the C return
-    type, and a synthetic-op suffix around the symbol. None of that identifies
-    the operator: one kernel reached through a graph replay and through a direct
-    module launch is the same kernel, and keying on the raw string splits it into
-    two task groups that then port the same source twice.
+    The launch API, C return type and synthetic-op suffix describe the dispatch,
+    not the operator, so keying on them splits one kernel into a task group per
+    launch path and ports its source once per group.
     """
     value = str(operation or "").strip()
     value = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", value).strip()

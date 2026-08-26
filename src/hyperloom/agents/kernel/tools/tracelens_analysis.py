@@ -1759,12 +1759,9 @@ def _looks_like_flydsl_source(source_file: str) -> bool:
 def _defines_traced_triton_kernel(name: str, source_file: str) -> bool:
     """Whether ``source_file`` defines the Triton kernel ``name`` was traced from.
 
-    A Triton kernel is named after the device symbol, which carries no language:
-    ``_gqa_sparse_decode_kernel`` reads as plain Python, and the file imports
-    Triton through a framework shim rather than by name. Classifying it on those
-    signals reports ``python``, which every consumer that asks for a portable
-    language then declines. Resolve the traced symbol to a ``@triton.jit`` def
-    instead, so the answer is the file's own AST rather than a naming habit.
+    A device symbol carries no language and frameworks import Triton through a
+    shim, so both signals the name-based check reads are absent. Resolve the
+    symbol to a ``@triton.jit`` def instead.
 
     Args:
         name: Kernel/symbol name as the trace reports it.
@@ -2630,13 +2627,8 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    # Also match the leading-underscore spelling: _candidate_keywords strips
-    # trailing underscores from each token (rstrip), so a kernel named
-    # ``_mxfp8_linear_kernel`` yields the keyword ``_mxfp8_linear_kernel``.
-    # The word-boundary anchor \b cannot sit between ``_`` and a letter, so
-    # the bare ``\bdef\s+kw\b`` pattern will miss ``def _kw(...)`` even when
-    # the leading underscore survived into the keyword.  Search the underscore
-    # prefix spelling explicitly so definition-site ranking works.
+    # \b cannot anchor between "_" and a letter, so a bare \bkw\b never matches
+    # def _kw. Search the underscore spelling too.
     candidates = [kw] if kw.startswith("_") else [kw, "_" + kw]
     patterns: list[str] = []
     for sym in candidates:
@@ -5153,12 +5145,8 @@ def _finalize_candidates(
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.
         if res is None or res.status == "unresolved":
-            # Resolution tiers for candidates without a source_file:
-            # 1. Tracer Python stack frame (highest confidence — direct runtime
-            #    observation of what called the device kernel).
-            # 2. Name grep (corroborates or provides an independent path).
-            # Corroboration upgrades the confidence signal; disagreement is
-            # annotated but the tracer frame is not vetoed by a grep mismatch.
+            # The tracer frame is a direct runtime observation, so a grep result
+            # corroborates or annotates it but never vetoes it.
             frame = None
             trace_source = ""
             if not item.get("source_file"):
