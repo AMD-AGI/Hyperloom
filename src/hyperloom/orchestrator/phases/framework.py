@@ -1928,7 +1928,7 @@ class FrameworkPhase(PhaseHandler):
 
         state = self.shared_state
 
-        existing = getattr(state, "apply_fail_reauthor_attempts", None)
+        existing = state.apply_fail_reauthor_attempts
         apply_fail_attempts: dict[str, int] = existing if isinstance(existing, dict) else {}
         prior = int(apply_fail_attempts.get(cand_id, 0) or 0)
         attempt = prior + 1
@@ -1973,7 +1973,7 @@ class FrameworkPhase(PhaseHandler):
         }
         if isinstance(vetting_drops_raw, list) and vetting_drops_raw:
             retry_ctx["vetting_drops"] = [str(d) for d in vetting_drops_raw[:8]]
-        pending = getattr(state, "apply_fail_retry_pending", None) or []
+        pending = state.apply_fail_retry_pending or []
         if not isinstance(pending, list):
             pending = []
         pending.append(retry_ctx)
@@ -2182,7 +2182,7 @@ class FrameworkPhase(PhaseHandler):
         stale contexts cannot accumulate.
         """
         state = self.shared_state
-        pending: list[dict[str, Any]] = getattr(state, "apply_fail_retry_pending", None) or []
+        pending: list[dict[str, Any]] = state.apply_fail_retry_pending or []
         if not isinstance(pending, list) or not pending:
             return
         # Consume the list atomically so a concurrent call doesn't double-fire.

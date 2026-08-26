@@ -867,6 +867,20 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_agent_review_counts: dict[str, int] = field(
         default_factory=dict,
     )
+    # Apply-failure re-author attempts per candidate id, capped by
+    # ``_AUTHORED_LANE_MAX_ATTEMPTS``. Declared (not set ad hoc) because
+    # ``to_dict`` is ``asdict``, which walks declared fields only: an undeclared
+    # attribute is dropped at every save, so the cap would be re-spent from zero
+    # on every resume.
+    apply_fail_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
+    # Retry contexts queued by the authored lane and drained by
+    # ``_drain_apply_fail_retry_pending``. Declared for the same reason: an
+    # undeclared attribute means a resume silently discards queued retries.
+    apply_fail_retry_pending: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``.
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision
