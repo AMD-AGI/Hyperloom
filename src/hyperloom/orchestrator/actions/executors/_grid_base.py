@@ -63,7 +63,14 @@ def variant_fingerprint(
     )
 
 
-_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
+# Single home for the grid-level defaults every graded executor shares. They
+# were previously redefined per executor with identical values, which is how the
+# stack-rebench floors drifted apart.
+DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
+# Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
+# A KEEP is re-confirmed by a stack rebench. Override per task via
+# ``params['keep_threshold_pct']``.
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 
 @dataclass

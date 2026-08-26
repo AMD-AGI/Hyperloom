@@ -11,8 +11,8 @@ from .baseline import (
     BaselineExecutor,
     baseline_executor,
 )
+from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
 from .explore import (
-    DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_STACK_STABLE_PCT,
     ExploreExecutor,
     explore_executor,
