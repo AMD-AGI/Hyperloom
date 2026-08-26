@@ -31,10 +31,14 @@ from ...framework.paths import (
     resolved_within,
 )
 from ...specialists.patch_safety import (
+    is_unified_diff,
+    patch_escapes_tree,
     patch_targets_missing,
     resolve_patch_apply_root,
 )
 from ...state.shared_state import inject_stack_base_params, resolve_anchor_with_drift
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
+from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
@@ -2298,6 +2302,7 @@ class IntegratePatchExecutor:
         )
         if artifact_runtime_errors:
             await self._maybe_write_framework_kb_record(
+                params=params,
                 done_payload=done_payload,
                 outcome="rejected_apply_fail",
                 tps_delta_pct=0.0,
@@ -2443,6 +2448,7 @@ class IntegratePatchExecutor:
             missing_records = _preflight_missing_targets(framework_root, patch_paths)
             if missing_records:
                 await self._maybe_write_framework_kb_record(
+                    params=params,
                     done_payload=done_payload,
                     outcome="rejected_apply_fail",
                     tps_delta_pct=0.0,
@@ -2539,6 +2545,25 @@ class IntegratePatchExecutor:
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         self._apply_attempted = bool(patch_paths)
         for patch in patch_paths:
+            # Structural gate on the diff BEFORE it reaches ``git apply``.
+            # ``specialists.patch_safety.vet_patches`` runs at authoring time,
+            # inside the specialist runner -- so a patch that did not come from
+            # a specialist (``params.patches``, and every ``upstream_pr``
+            # candidate, whose diff is curled from a remote host) has never been
+            # vetted by the time it gets here. Without this, ``git apply``'s own
+            # refusal is the only thing between a remote blob and the live tree.
+            try:
+                patch_text = patch.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                apply_errors.append({"patch": str(patch), "stderr": f"unreadable: {exc!r}"})
+                break
+            if not is_unified_diff(patch_text):
+                apply_errors.append({"patch": str(patch), "stderr": "not a unified diff"})
+                break
+            escaping = patch_escapes_tree(patch_text)
+            if escaping is not None:
+                apply_errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
+                break
             if git_tree:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
                 if not ok:
@@ -2565,6 +2590,7 @@ class IntegratePatchExecutor:
         if apply_errors:
             reverted = self._revert_patches(framework_root, applied)
             await self._maybe_write_framework_kb_record(
+                params=params,
                 done_payload=done_payload,
                 outcome="rejected_apply_fail",
                 tps_delta_pct=0.0,
@@ -2598,6 +2624,7 @@ class IntegratePatchExecutor:
                 self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 await self._maybe_write_framework_kb_record(
+                    params=params,
                     done_payload=done_payload,
                     outcome="rejected_apply_fail",
                     tps_delta_pct=0.0,
@@ -2704,6 +2731,7 @@ class IntegratePatchExecutor:
                 extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
+                state_model_path=str(getattr(shared_state, "model_path", "") or ""),
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
             )
@@ -2925,6 +2953,7 @@ class IntegratePatchExecutor:
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 await self._maybe_write_framework_kb_record(
+                    params=params,
                     done_payload=done_payload,
                     outcome="integrated",
                     tps_delta_pct=0.0,
@@ -2968,6 +2997,7 @@ class IntegratePatchExecutor:
             reverted = self._revert_patches(framework_root, applied)
             _gc_on_revert()
             await self._maybe_write_framework_kb_record(
+                params=params,
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
                 tps_delta_pct=0.0,
@@ -3002,6 +3032,7 @@ class IntegratePatchExecutor:
         if provisional:
             reason += " (provisional: booted but eval produced no accuracy; correctness not verified)"
         await self._maybe_write_framework_kb_record(
+            params=params,
             done_payload=done_payload,
             outcome="integrated",
             tps_delta_pct=0.0,
@@ -3234,6 +3265,7 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 switch_manifest=switch_manifest,
                 base_tput=base_tput,
+                state_model_path=str(getattr(shared_state, "model_path", "") or ""),
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
             )
@@ -3257,6 +3289,7 @@ class IntegratePatchExecutor:
                     parity.get("reason"),
                 )
                 await self._maybe_write_framework_kb_record(
+                    params=params,
                     done_payload=done_payload,
                     outcome=kb_outcome,
                     tps_delta_pct=float(delta_pct or 0.0),
@@ -3348,6 +3381,7 @@ class IntegratePatchExecutor:
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
             )
             await self._maybe_write_framework_kb_record(
+                params=params,
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
                 tps_delta_pct=float(delta_pct or 0.0),
@@ -3411,6 +3445,7 @@ class IntegratePatchExecutor:
                     else "reverted"
                 )
                 await self._maybe_write_framework_kb_record(
+                    params=params,
                     done_payload=done_payload,
                     outcome="reverted_smoke_fail",
                     tps_delta_pct=float(delta_pct or 0.0),
@@ -3448,6 +3483,7 @@ class IntegratePatchExecutor:
                 accuracy_pass = confirm["accuracy_pass"]
 
         await self._maybe_write_framework_kb_record(
+            params=params,
             done_payload=done_payload,
             outcome="integrated",
             tps_delta_pct=float(delta_pct or 0.0),
@@ -3597,6 +3633,7 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         switch_manifest: list[dict[str, Any]],
         base_tput: float,
+        state_model_path: str = "",
         session_deadline_sec: float | None = None,
         variant_expected_sec: float | None = None,
     ) -> dict[str, Any]:
@@ -3650,6 +3687,7 @@ class IntegratePatchExecutor:
                 extra_server_args_applied="",
                 extra_envs_applied={},
                 specialist_task_id=specialist_task_id,
+                state_model_path=state_model_path,
                 unset_envs=switch_names,
                 variant_suffix="-parity",
                 session_deadline_sec=session_deadline_sec,
@@ -3802,6 +3840,7 @@ class IntegratePatchExecutor:
                 f"and are only measurable inside their bundle"
             )
         await self._maybe_write_framework_kb_record(
+            params=params,
             done_payload=done_payload,
             outcome="kept_inert_levers_registered",
             tps_delta_pct=float(delta_pct or 0.0),
@@ -3867,6 +3906,8 @@ class IntegratePatchExecutor:
         Args:
             done_payload: The parsed ``specialist_done.json`` payload, or
                 ``None``.
+            params: Task params; the upstream-PR lane's PR identity lives on
+                ``params['candidate']`` rather than in a specialist proposal.
 
         Returns:
             The matching framework proposal dict, or ``None`` when absent.
@@ -3884,10 +3925,50 @@ class IntegratePatchExecutor:
                 return proposal
         return None
 
+    @staticmethod
+    def _upstream_pr_kb_proposal(params: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Present an upstream-PR candidate in the shape the KB writer reads.
+
+        The ``fa_pr_url`` / ``fa_pr_sha`` keys exist because the PR identity used
+        to reach this executor only by being smuggled through a specialist's
+        output. A candidate row carries it directly, so map rather than relay.
+
+        Args:
+            params: Task params, read for ``candidate``.
+
+        Returns:
+            A proposal-shaped mapping, or ``None`` when this is not an
+            upstream-PR task or the candidate carries no dedup key.
+        """
+        if resolve_patch_source(params) != PATCH_SOURCE_UPSTREAM_PR:
+            return None
+        candidate = params.get("candidate")
+        if not isinstance(candidate, dict):
+            return None
+        pr_url = str(candidate.get("pr_url") or candidate.get("url") or "").strip()
+        pr_sha = str(candidate.get("head_sha") or "").strip()
+        if not pr_url and not pr_sha:
+            return None
+        return {
+            "fa_pr_url": pr_url,
+            "fa_pr_sha": pr_sha,
+            "framework": candidate.get("framework") or "",
+            "gap_canonical_id": candidate.get("gap_canonical_id") or "",
+            "gap_keywords": candidate.get("gap_keywords") or [],
+            "changed_files": candidate.get("changed_files") or [],
+            "applicability": candidate.get("applicability") or "",
+            # Names the lever, matching ``lever_kind``. No ledger reader filters
+            # on provenance; it is audit metadata.
+            "provenance": LEVER_UPSTREAM_PR,
+            "source_framework": candidate.get("source_framework") or "",
+            "target_framework": candidate.get("target_framework") or "",
+        }
+
     async def _maybe_write_framework_kb_record(
         self,
         *,
         done_payload: dict[str, Any] | None,
+        params: Mapping[str, Any] | None = None,
         outcome: str,
         tps_delta_pct: float,
         extra: dict[str, Any],
@@ -3914,7 +3995,15 @@ class IntegratePatchExecutor:
         """
         proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
-            return
+            # No specialist proposal: the upstream-PR lane carries the PR
+            # identity on the candidate itself, not relayed through a
+            # specialist's ``fa_*`` markers. Without this the whole lane writes
+            # no ledger record, and ``fa phase-discover`` -- which dedups on
+            # exactly this ledger -- rediscovers and re-benches every PR it has
+            # already integrated or reverted, every cycle.
+            proposal = self._upstream_pr_kb_proposal(params or {})
+            if proposal is None:
+                return
         pr_url = str(proposal.get("fa_pr_url") or "").strip()
         pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
         if not pr_url and not pr_sha:
@@ -4241,6 +4330,7 @@ class IntegratePatchExecutor:
         extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
         specialist_task_id: str,
+        state_model_path: str = "",
         unset_envs: "list[str] | None" = None,
         variant_suffix: str = "",
         session_deadline_sec: float | None = None,
@@ -4251,6 +4341,9 @@ class IntegratePatchExecutor:
         Args:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
+            state_model_path: ``SharedState.model_path``, the last rung of the
+                model-path precedence. Passed in because the caller owns the
+                session context.
             extra_server_args_applied: Server CLI arguments for the variant.
             extra_envs_applied: Environment overrides layered onto the variant.
             specialist_task_id: The originating specialist task id (names the
@@ -4277,7 +4370,14 @@ class IntegratePatchExecutor:
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {config_path}")
-        resolved_model = resolve_session_model_path(params=params, for_serving=True)
+        # ``state_model_path`` is the last rung of the precedence: without it a
+        # task whose params carry no model_path and whose env has no MODEL_PATH
+        # resolves to the empty string and launches a server with no model.
+        resolved_model = resolve_session_model_path(
+            params=params,
+            state_model_path=state_model_path,
+            for_serving=True,
+        )
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
@@ -4474,10 +4574,15 @@ class IntegratePatchExecutor:
             params: The integrate_patch task params.
 
         Returns:
-            ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches, or for
-            framework-authored perf patches that have a positive baseline
-            accuracy to compare against; else ``None``.
+            ``{"RUN_EVAL": "false"}`` when the session disabled evals,
+            ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
+            framework-authored perf patches with a positive baseline accuracy
+            to compare against; else ``None``.
         """
+        # The session's own opt-out outranks every force-on below: a run started
+        # with --no-eval must not have an eval reinstated under it.
+        if is_truthy(params.get("disable_run_eval")):
+            return {"RUN_EVAL": "false"}
         if bool(params.get("enablement")):
             return {"RUN_EVAL": "true"} if _is_eval_origin(params) else None
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
