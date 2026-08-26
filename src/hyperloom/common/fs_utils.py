@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 
+# Mounts that can be revoked mid-run: a process whose cwd lives on one sees
+# relative-path writes fail with ENOENT after a flap, so callers place anything
+# they must keep writing to on local disk instead.
 NETWORK_FS_TYPES: frozenset[str] = frozenset(
     {
         "nfs",
@@ -52,6 +55,7 @@ def path_fstype(path: str) -> str:
                 parts = line.split()
                 if len(parts) < 3:
                     continue
+                # /proc/mounts octal-escapes spaces in the mountpoint.
                 try:
                     mp = parts[1].encode("latin-1").decode("unicode_escape")
                 except (UnicodeDecodeError, UnicodeEncodeError):

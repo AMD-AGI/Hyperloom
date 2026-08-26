@@ -30,7 +30,7 @@ from typing import Any, Mapping
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.fs_utils import NETWORK_FS_TYPES, is_network_fs, path_fstype
+from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -752,11 +752,6 @@ def _is_double_run_accuracy_handoff(
     return _WARMUP_ROUND_DIR in Path(source).parts
 
 
-# Private aliases kept for backward compatibility with call sites in this module.
-_NETWORK_FS_TYPES = NETWORK_FS_TYPES
-_path_fstype = path_fstype
-_is_network_fs = is_network_fs
-
 
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     """Mirror an InferenceX checkout onto stable local disk.
@@ -798,7 +793,7 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     ):
         return src
     try:
-        if not _is_network_fs(src):
+        if not is_network_fs(src):
             return src
     except Exception:  # noqa: BLE001 — detection is best-effort
         return src
