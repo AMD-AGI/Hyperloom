@@ -1,18 +1,101 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0b2, including the official upstream vLLM ROCm image, the Magpie v0.2.0 upgrade, the single remote Recipe KB Store contract, the consolidated action catalog, and a set of breaking removals."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0, the first stable release, including flag-aware configuration fingerprints, the kernel fusion and best-result salvage fixes, warm-replay optimization accounting, and consolidated environment-variable filtering."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0b2 (`pyproject.toml`). For the
+The current packaged version is 1.0.0 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Hyperloom 1.0.0 release
+
+The [1.0.0 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0) is
+the first stable Hyperloom release. It promotes the 1.0.0b2 beta to general
+availability and adds a correctness pass over the optimization loop: the
+fingerprint that decides whether a configuration has already been benchmarked,
+the kernel evidence a hard-killed campaign leaves behind, the ledger a warm
+replay writes, and the filters standing between an agent's proposal and the
+benchmark subprocess. One change invalidates persisted session state; review the
+list below before upgrading.
+
+### 1.0.0 highlights
+
+- **Configuration fingerprints are flag-aware**: `canonical_fingerprint` sorted
+  arg tokens as a flat list, so `--max-num-seqs 128 --max-model-len 4096` and
+  `--max-num-seqs 4096 --max-model-len 128` hashed identically and the second
+  was skipped as a duplicate by the `explore_search` dedup ledger. Args are now
+  parsed into sorted `(flag, value)` pairs with last-wins semantics for repeated
+  flags. **Operator note**: every fingerprint already persisted in
+  `explore_search.tested`, `accepted`, `rejected`, and `name_index` inside
+  `state.json` is invalidated, so a resumed session re-benches its full explored
+  history. **(Breaking)**
+
+- **Kernel fusion runs again**: the fusion wrapper passed `--llm-model` to
+  `forge-fuse` after KernelForge renamed the option to `--model`. Because
+  `forge-fuse` rejects an unknown option outright rather than ignoring it, every
+  fusion run was exiting 2 before it started and surfacing only as a missing
+  `fusion_manifest.json`. The `llm_model` key in the wrapper's own input JSON is
+  unchanged.
+
+- **A hard-killed kernel campaign keeps its result**: `best_result.json` was
+  gated on `schema_version == 1` while KernelForge has stamped `2` into that
+  file since 2026-08-13, so every published best was rejected and the kernel
+  backend fell through to the caller checkpoint or the stdout sentinel — losing
+  the one record that survives a hard kill, which is the case it exists for. The
+  version gate is removed rather than corrected: the commit, the timings, and
+  the score are each still checked on their own.
+
+- **A reproduced warm replay is recorded as an adopted optimization**: the
+  replay was mirrored into the canonical recorder streams before the keep
+  decision was reached, and because a replay's executor settles on `succeeded`
+  either way, every replay was recorded as `discarded`. A session that had
+  measurably gained therefore came back with an empty `optimizations.entries`
+  and the whole gain surfaced as a `reconciliation_gap_pct`. The ledger and
+  `cumulative_gain_validated` are now a single number, and drift or failed
+  replays carry the measured gain, the threshold, and the reason on their
+  attempt row. This is a forward fix; breakdowns already exported without the
+  adoption are not retroactively repaired.
+
+- **Agent-proposed environment overrides are filtered where they enter the
+  loop**: the `extra_envs` argument to `materialize_config_with_envs` was
+  checked only for key shape, which let `LD_PRELOAD`, `PYTHONPATH` and `PATH`
+  through into the rendered YAML and from there into the benchmark subprocess. A
+  specialist's `config_changes` / `extra_envs` proposal is now filtered once at
+  assembly in `integrate_patch`, so the benchmarked configuration and the
+  recorded one can no longer differ; dropped keys are logged and reported as
+  `dropped_env_overrides`. Multi-node SSH forwarding drops its own shorter
+  denylist for the shared definitions, which additionally cover `CDPATH`,
+  `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
+  `PYTHONINSPECT`, `PYTHONUSERBASE` and `SHELLOPTS`.
+
+- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
+  `--max-iters` this repository put on every `forge-loop` and
+  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option because its
+  campaigns are bounded by `--max-hours`, so the cap those variables fed was a
+  no-op that logged a limit it never applied. `--max-hours` and the hard-kill
+  timeout remain the only budget controls. **(Breaking)**
+
+- **A hung `ray stop` no longer blocks recovery**: `force_restart_local_cluster`
+  inlined its own `ray stop --force` with neither a timeout nor an `OSError`
+  guard. It now routes through `_stop_ray_force`, so
+  `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable via
+  `HYPERLOOM_RAY_STOP_TIMEOUT_SEC`) covers all three stop sites instead of only
+  one. Log output is unchanged.
+
+- **Two no-op internals are removed**: `stop_ray_if_owned`, whose only caller
+  went away with `parallel_e2e_runner.py` and whose ownership flag
+  `ensure_ray_cluster` returned for it alone (that signature is now `-> None`),
+  and the `reference_envs` filter inside `materialize_config_with_envs`, whose
+  only writer already applied a strictly stronger filter. Neither dropped
+  anything in production. **(Breaking)** for an external importer of
+  `stop_ray_if_owned`.
 
 ## Hyperloom 1.0.0b2 release
 
