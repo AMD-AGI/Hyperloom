@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.0.0b2 --target .
+pip install hyperloom-inference-optimizer==1.0.0 --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
