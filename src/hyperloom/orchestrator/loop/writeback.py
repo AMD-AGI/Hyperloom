@@ -116,10 +116,8 @@ def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
         One of :data:`LEVER_KINDS`, or ``""`` when nothing named a lever --
         which the caller logs rather than papering over.
     """
-    # The kind wins where it can only move one lever: an ``explore`` round
-    # changes configuration and nothing else, whatever incidental keys its
-    # winner dict carries. ``integrate_patch`` lands every lever, so there the
-    # producer's stamp is the only evidence.
+    # The kind decides where it can only move one lever; ``integrate_patch``
+    # lands every lever, so there the producer's stamp is the only evidence.
     by_kind = _LEVER_BY_TASK_KIND.get(str(task_kind or "").strip(), "")
     if by_kind:
         return by_kind
@@ -2386,7 +2384,7 @@ class WritebackCollaborator:
                     task.task_id,
                 )
 
-        # Consume static-recon bridge candidates into gaps[] so the EXPLORE
+        # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate. Fail-soft.
         if domain == "static_recon_specialist":
             try:
@@ -2674,16 +2672,10 @@ class WritebackCollaborator:
                     or (getattr(self.shared_state, "phase", "") if task_kind != "integrate_patch" else "")
                     or ""
                 ).strip()
-                # The lever is what the report is about; the phase only says
-                # when the work ran, and for every kind but ``integrate_patch``
-                # the fallback above inherits whatever phase is live at
-                # writeback time -- which is not the phase that authored it.
+                # The phase fallback above inherits whatever is live at
+                # writeback time, which is not what authored the winner.
                 lever_kind = _lever_kind_for_lift(task_kind, bv)
                 if not lever_kind:
-                    # Loud, not fatal: a bookkeeping gap must not cost a real
-                    # KEEP, but it must not pass unnoticed either -- an
-                    # unattributed stack entry is how gain lands on the wrong
-                    # lever's total with nothing failing.
                     log.warning(
                         "lift: no lever_kind for a %s winner (variant=%s); the stack entry will report as unattributed",
                         task_kind,

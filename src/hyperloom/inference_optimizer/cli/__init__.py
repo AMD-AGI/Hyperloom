@@ -386,7 +386,7 @@ def _build_orchestration_prompt(
         framework (str): The serving framework name (e.g. ``sglang``).
         objective (Objective): The run objective summarised into the prompt.
         max_minutes (int): The wall-clock budget in minutes.
-        no_explore (bool): When ``True`` the EXPLORE phase is disabled.
+        no_explore (bool): Alias for ``no_framework_agent``; disables the optimisation phase.
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
         cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.

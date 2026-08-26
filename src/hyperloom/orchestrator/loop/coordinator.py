@@ -109,9 +109,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK).
-DEFAULT_FRAMEWORK_MAX_CANDIDATES: int = 8
-
 
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
     """Extract launch/traceback text from a failed baseline result payload.
@@ -934,7 +931,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_ensure_phase_initialised": "phase_machine",
         "_ensure_recipe_kb_t0_anchored": "phase_machine",
         "_kernel_enabled": "phase_machine",
-        "_explore_enabled": "phase_machine",
+        "_optimize_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
         "_on_phase_entered": "phase_machine",
         "_reseed_orch_prompt_for_phase": "phase_machine",
@@ -1080,7 +1077,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_framework_known_candidate_ids": "phase_framework",
         "_framework_tried_refs": "phase_framework",
         "_build_framework_working_memory": "phase_framework",
-        "_render_framework_memory_for_prompt": "phase_framework",
         "_framework_agent_discover_repo_urls": "phase_framework",
         "_record_framework_agent_phase_done": "phase_framework",
         "_enqueue_framework_agent_task": "phase_framework",
@@ -1099,7 +1095,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
         "_record_framework_agent_dispatch_failure": "phase_framework",
-        "_framework_agent_repo_url_origin_framework": "phase_framework",
         "_maybe_enqueue_candidate_discovery": "phase_framework",
         "_candidate_discovery_inflight": "phase_framework",
         "_ingest_candidate_discovery": "phase_framework",

@@ -493,7 +493,6 @@ def test_compute_next_phase_prelude_skips_explore_to_kernel():
     out = phase_state.compute_next_phase(
         state,
         framework_agent_phase_enabled=False,
-        explore_enabled=False,
         kernel_enabled=True,
     )
     assert out is not None
@@ -508,7 +507,6 @@ def test_compute_next_phase_prelude_skips_to_sweep_when_no_explore_no_kernel():
     out = phase_state.compute_next_phase(
         state,
         framework_agent_phase_enabled=False,
-        explore_enabled=False,
         kernel_enabled=False,
     )
     assert out is not None
@@ -527,7 +525,6 @@ def test_compute_next_phase_framework_skips_explore_to_kernel():
     out = phase_state.compute_next_phase(
         state,
         framework_agent_phase_enabled=True,
-        explore_enabled=False,
         kernel_enabled=True,
     )
     assert out is not None

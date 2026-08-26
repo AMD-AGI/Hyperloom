@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""EXPLORE phase handler: macro-cycle strategy, specialist fan-out/retry, gap
+"""Configuration arm: macro-cycle strategy, specialist fan-out/retry, gap
 tracking, and autosubmit of specialist patches / framework configs."""
 
 from __future__ import annotations

@@ -6,12 +6,9 @@ specialist dispatch, enablement repair, and Critic-review submission/reauthor.""
 
 from __future__ import annotations
 import logging as _logging
-import os
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from hyperloom.common.git_safety import safe_directory_args
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -67,12 +64,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "OPTIMIZE entry (from=%s): pumping initial batch",
             from_phase or "<unknown>",
         )
-        # Shared with the configuration arm: a reopened macro-cycle re-measures
-        # before either arm spends anything on last cycle's bottleneck.
-        try:
-            await self._on_cycle_start_reprofile(from_phase=from_phase)
-        except Exception:  # noqa: BLE001 — reprofile is best-effort
-            log.warning("OPTIMIZE entry: cycle-start reprofile failed")
+        # A reopened macro-cycle re-measures before either arm spends anything.
+        await self._on_cycle_start_reprofile(from_phase=from_phase)
         try:
             await self._pump_framework_agent_phase()
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -248,82 +241,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         except Exception:  # noqa: BLE001 — defensive
             pass
         return False
-
-    def _framework_agent_audit_skip_confident(audit: dict[str, Any] | None) -> bool:
-        """True iff an ``already_*`` skip is safe: concrete evidence + confidence ≥ floor (G5).
-
-        Floor is ``INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE``
-        (default 0.8). A low-confidence / evidence-free skip must not silently
-        bypass the GPU test.
-
-        Args:
-            audit: The semantic-audit verdict.
-
-        Returns:
-            ``True`` when the skip is confident and evidence-backed.
-        """
-        if not isinstance(audit, dict) or not (audit.get("evidence") or []):
-            return False
-        try:
-            conf = float(audit.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            conf = 0.0
-        try:
-            floor = float(os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_SKIP_MIN_CONFIDENCE", "0.8"))
-        except (TypeError, ValueError):
-            floor = 0.8
-        return conf >= floor
-
-    def _framework_agent_roots_have_git() -> bool:
-        """True iff any resolved framework source root is a git work tree (G3 preflight).
-
-        A wheel install (dist-packages, no ``.git``) yields ``False`` → the pump
-        degrades ``direct_apply`` to authoring (the executor's git apply / commit
-        / reset would otherwise fail).
-
-        Returns:
-            ``True`` when at least one source root is inside a git work tree.
-        """
-
-        from ..framework.paths import resolve_source_file_allowlist
-
-        for root in resolve_source_file_allowlist():
-            p = Path(str(root))
-            if not p.is_dir():
-                continue
-            try:
-                cp = subprocess.run(
-                    ["git", *safe_directory_args(["-C", str(p), "rev-parse", "--is-inside-work-tree"])],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                # One unusable root says nothing about the others.
-                continue
-            if cp.returncode == 0 and cp.stdout.strip() == "true":
-                return True
-        return False
-
-    def _framework_audit_use_llm_mode() -> str:
-        """Resolve the phase-audit LLM policy from the environment.
-
-        ``INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_USE_LLM`` selects:
-          - ``off`` — never run the LLM refine (hermetic static verdict only);
-          - ``on`` — always run the evidence-gated LLM refine;
-          - ``auto`` (default) — only escalate to the LLM when the static
-            verdict is uncertain (see :meth:`_framework_audit_verdict_uncertain`).
-
-        Returns:
-            One of ``"on"`` / ``"off"`` / ``"auto"``.
-        """
-        val = (os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_USE_LLM", "") or "").strip().lower()
-        if val in ("on", "1", "true", "yes", "always"):
-            return "on"
-        if val in ("off", "0", "false", "no", "never"):
-            return "off"
-        return "auto"
 
     def _framework_audit_verdict_uncertain(audit: dict[str, Any] | None) -> bool:
         """True when a static audit verdict is too weak to route on confidently.
@@ -1345,27 +1262,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         return spec_tid
 
-    @staticmethod
-    def _match_framework_agent_candidate(
-        chosen_id: str,
-        candidates: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        """Map a model-chosen id back to a candidate (exact id, url, ref, or PR number)."""
-        chosen = (chosen_id or "").strip()
-        if not chosen:
-            return None
-        for c in candidates:
-            for key in ("candidate_id", "pr_url", "ref"):
-                if str(c.get(key) or "").strip() == chosen:
-                    return c
-        # Fallback: bare PR number match (e.g. model replied "1015" or "PR:1015").
-        digits = "".join(ch for ch in chosen if ch.isdigit())
-        if digits:
-            for c in candidates:
-                if str(c.get("pr_number") or "").strip() == digits:
-                    return c
-        return None
-
     def _framework_known_candidate_ids(self) -> set[str]:
         """All candidate ids already discovered into any prior batch (dedup for new batches).
 
@@ -1470,7 +1366,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "pending": [r for r in pending if r],
         }
 
-    @staticmethod
     def _render_framework_memory_for_prompt(memory: dict[str, Any] | None) -> str:
         """Render the FRAMEWORK working memory into prompt text (mirror of ``render_memory_for_seed``).
 
@@ -1559,7 +1454,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                 _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
-    @staticmethod
     def _framework_agent_repo_url_origin_framework(repo_url: str) -> str:
         """Reverse-lookup: which known serving framework (if any) owns ``repo_url``.
 
@@ -2589,11 +2483,8 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _candidate_discovery_inflight(self) -> bool:
         """True while a candidate-discovery specialist is queued or running."""
-        try:
-            queued = await self.tasks.queued()
-            running = await self.tasks.running()
-        except Exception:  # noqa: BLE001 — defensive
-            return False
+        queued = await self.tasks.queued()
+        running = await self.tasks.running()
         return any(
             getattr(t, "kind", "") == "specialist"
             and bool((getattr(t, "params", None) or {}).get("candidate_discovery"))
@@ -2603,10 +2494,8 @@ class FrameworkPhase(CoordinatorCollaborator):
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
         """Dispatch the candidate-discovery specialist when the pool is empty.
 
-        This is the minimum-supply path, not the primary one: Orchestration may
-        dispatch the same specialist whenever it judges the upstream lane worth
-        pursuing. The Coordinator only keeps the lane from idling when nothing
-        has asked.
+        Minimum supply only; Orchestration dispatches the same specialist
+        whenever it judges the upstream lane worth pursuing.
 
         Args:
             reason: Why discovery is being requested; carried into the mandate.
@@ -2638,18 +2527,14 @@ class FrameworkPhase(CoordinatorCollaborator):
         }
         await self._warm_specialist_params(params)
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
-        try:
-            await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=params,
-                idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}",
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                side_effects=["writes_results"],
-            )
-        except Exception:  # noqa: BLE001 — never wedge the pump
-            log.exception("FRAMEWORK: candidate-discovery dispatch failed (reason=%s)", reason)
-            return False
+        await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+            side_effects=["writes_results"],
+        )
         log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
         return True
 
@@ -2661,9 +2546,8 @@ class FrameworkPhase(CoordinatorCollaborator):
     ) -> None:
         """Harvest a discovery specialist's candidates into a batch.
 
-        No-op unless the task carries the ``candidate_discovery`` marker. The
-        specialist already ordered and judged its entries, so they are appended
-        verbatim; the pump consumes them in that order.
+        No-op unless the task carries the ``candidate_discovery`` marker.
+        Entries are appended in the order the specialist ranked them.
 
         Args:
             task: The completed specialist task.
@@ -2690,21 +2574,17 @@ class FrameworkPhase(CoordinatorCollaborator):
                 cand["batch_id"] = batch_id
             batches.append({"batch_id": batch_id, "candidates": candidates})
             log.info("FRAMEWORK: harvested %d candidate(s) into batch=%s", len(candidates), batch_id)
-        try:
-            state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("FRAMEWORK: save after discovery ingest failed")
+        state.save(self.session_dir)
 
     def _candidates_from_discovery_proposals(self, proposals: Any) -> list[dict[str, Any]]:
         """Map discovery ``proposal_set`` entries to candidate rows.
 
-        Entries the specialist judged ``already_present`` or ``not_applicable``
-        are dropped here rather than dispatched: it looked at the installed
-        version and the tree, so re-deciding that with less context would only
-        spend a bench to reach the same answer.
+        Entries verdicted ``already_present`` or ``not_applicable`` are dropped
+        rather than dispatched, as are duplicates of known or processed
+        candidates.
 
         Args:
-            proposals: The specialist's ``proposal_set``, or anything else.
+            proposals: The specialist's ``proposal_set``.
 
         Returns:
             Candidate rows in the order the specialist returned them.
@@ -2737,7 +2617,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "changed_files": entry.get("changed_files") or [],
                 "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
                 "gap_keywords": entry.get("gap_keywords") or [],
-                # The specialist's own judgement, carried to the Critic pre-screen.
                 "route": str(entry.get("route") or "author_via_specialist").strip(),
                 "audit": {
                     "verdict": verdict,

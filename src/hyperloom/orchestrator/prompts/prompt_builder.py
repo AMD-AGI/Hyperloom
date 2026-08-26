@@ -112,7 +112,6 @@ def _section_session_context(
     objective_kind: str,
     objective_value: float | str | None,
     max_minutes: int,
-    explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
@@ -121,7 +120,6 @@ def _section_session_context(
     Args:
         framework (str): The framework name shown verbatim.
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
-        explore_enabled (bool): Whether the EXPLORE phase is enabled.
         framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase
             is enabled.
         objective_kind (str): The objective kind (e.g. ``time_only``,
@@ -146,8 +144,7 @@ def _section_session_context(
         "",
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
-        f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
-        f"- framework_agent_phase_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
+        f"- optimize_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -164,7 +161,6 @@ def _section_session_context(
 def _section_phase_semantics(
     *,
     kernel_enabled: bool,
-    explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
     """Render the per-phase LLM-proposable action contract (current phase
@@ -177,7 +173,6 @@ def _section_phase_semantics(
 
     Args:
         kernel_enabled: Whether kernel_agent-owned actions are enabled.
-        explore_enabled: Whether the EXPLORE phase is enabled.
         framework_agent_phase_enabled: Whether the FRAMEWORK_AGENT phase is enabled.
 
     Returns:
@@ -188,8 +183,6 @@ def _section_phase_semantics(
     # phase name -> the flag that disabled it (None => always enabled).
     disabled_suffix: dict[str, str] = {}
     if not framework_agent_phase_enabled:
-        disabled_suffix["FRAMEWORK_AGENT"] = "--no-framework-agent"
-    if not explore_enabled:
         disabled_suffix["FRAMEWORK_AGENT"] = "--no-framework-agent"
     if not kernel_enabled:
         disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
@@ -990,7 +983,6 @@ def build_orchestration_prompt(
     enabled_actions: Iterable[str],
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
-    explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
     objective_kind: str = "time_only",
     objective_value: float | str | None = None,
@@ -1012,7 +1004,6 @@ def build_orchestration_prompt(
         framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
         kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED
             actions.
-        explore_enabled: when False (``--no-explore``) the EXPLORE phase is
             skipped; the prompt annotates it as DISABLED so Orchestration's plan
             matches the real phase chain.
         framework_agent_phase_enabled: when False (``--no-framework-agent``) the
@@ -1076,14 +1067,12 @@ def build_orchestration_prompt(
             objective_kind=objective_kind,
             objective_value=objective_value,
             max_minutes=max_minutes,
-            explore_enabled=explore_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
-            explore_enabled=explore_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions, phase=phase_norm),

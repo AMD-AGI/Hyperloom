@@ -68,11 +68,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
-    # One optimisation phase, three levers: configuration grids (``explore``),
-    # investigation and authoring (``specialist``), and landing a patch from any
-    # source (``integrate_patch``). They were two phases while the phase was
-    # also the serialisation boundary; ``workspace_mutation`` is that boundary
-    # now, so the split bought nothing but a rotation the budget could not see.
+    # Three levers: configuration grids (``explore``), investigation and
+    # authoring (``specialist``), and landing a patch from any source
+    # (``integrate_patch``).
     PHASE_FRAMEWORK_AGENT: frozenset(
         {
             "explore",
@@ -334,10 +332,8 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
-    # The merged optimisation phase carries what FRAMEWORK (0.20) and EXPLORE
-    # (0.35) held separately. Their separate caps used to rotate the lever when
-    # one overran; that rotation is now the arms' own plateau judgement, because
-    # a wall-clock cap cannot tell a productive arm from a stuck one.
+    # The optimisation phase carries both levers' share. Rotation between them
+    # is the arms' plateau judgement, not a wall-clock cap.
     PHASE_FRAMEWORK_AGENT: 0.55,
     PHASE_KERNEL_AGENT: 0.35,
     PHASE_SWEEP: 0.05,
@@ -767,10 +763,8 @@ def normalize_budget_pct(
     for phase, val in budget.items():
         canon = (phase or "").strip().upper()
         if canon not in PHASE_NAMES:
-            # Loud: a key naming a phase that no longer exists (a renamed
-            # phase, a resumed session, a typo in a manifest) silently reverts
-            # that share to its default, which reads downstream as an operator
-            # choice nobody made.
+            # An unknown key silently reverts that share to its default,
+            # which reads downstream as a choice nobody made.
             log.warning(
                 "phase budget: dropping override for unknown phase %r (known: %s)",
                 phase,
@@ -3175,7 +3169,7 @@ def bank_phase_segment(state, *, until_unix: float) -> float:
     stopped leg never transitioned out of.
 
     Args:
-        state: The live SharedState; ``phase_elapsed_totals`` (and the EXPLORE
+        state: The live SharedState; ``phase_elapsed_totals`` (and the optimisation-phase
             accumulator) are mutated in place.
         until_unix (float): When the segment ended, in seconds since the epoch.
 

@@ -43,7 +43,6 @@ class _MemCoord:
     _framework_known_candidate_ids = Coordinator._framework_known_candidate_ids
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _build_framework_working_memory = Coordinator._build_framework_working_memory
-    _render_framework_memory_for_prompt = staticmethod(Coordinator._render_framework_memory_for_prompt)
 
     def __init__(self) -> None:
         self.shared_state = _StateStub()

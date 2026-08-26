@@ -134,7 +134,6 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
 
     out = redistribute_budget_pct(
         normalized,
-        explore_enabled=not args.no_explore,
         kernel_enabled=not args.no_kernel,
         framework_enabled=not args.no_framework_agent,
     )
@@ -164,7 +163,7 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
     PRELUDE/CLOSE are fixed overhead and must not absorb; the total is preserved.
     """
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    out = redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True)
+    out = redistribute_budget_pct(base, kernel_enabled=True, framework_enabled=True)
     assert out["EXPLORE"] == 0.0
     assert out["PRELUDE"] == base["PRELUDE"]
     assert out["CLOSE"] == base["CLOSE"]
@@ -178,13 +177,12 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
 def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
     """No disabled phase → unchanged; re-running never drifts."""
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    once = redistribute_budget_pct(base, explore_enabled=True, kernel_enabled=True, framework_enabled=True)
+    once = redistribute_budget_pct(base, kernel_enabled=True, framework_enabled=True)
     assert once == base
     twice = redistribute_budget_pct(
-        redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True),
-        explore_enabled=False,
+        redistribute_budget_pct(base, kernel_enabled=True, framework_enabled=True),
         kernel_enabled=True,
         framework_enabled=True,
     )
-    single = redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True)
+    single = redistribute_budget_pct(base, kernel_enabled=True, framework_enabled=True)
     assert twice == single

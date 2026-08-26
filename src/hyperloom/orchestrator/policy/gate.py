@@ -1316,17 +1316,16 @@ class PolicyGate:
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
             return
-        explore_enabled = bool(getattr(state, "explore_enabled", True))
-        # --no-explore disables EXPLORE for the whole run, so KERNEL must not
-        # re-introduce an ``explore`` grid. Always fail-closed (independent of
-        # ``strict_phase``): it is an operator decision.
-        if not explore_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
+        optimize_enabled = bool(getattr(state, "framework_agent_phase_enabled", True))
+        # Skipping the optimisation phase must not let KERNEL reintroduce an
+        # ``explore`` grid. Fail-closed independent of ``strict_phase``.
+        if not optimize_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
             raise PolicyDenied(
                 f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
-                f"(--no-explore); KERNEL may not run an explore grid",
+                f"(--no-framework-agent); KERNEL may not run an explore grid",
                 rule="explore_disabled",
                 hint=(
-                    "--no-explore skips the EXPLORE phase entirely, so "
+                    "--no-framework-agent skips the optimisation phase, so "
                     "`explore` cannot be reintroduced into KERNEL. Use "
                     "kernel_agent-owned actions (kernel_opt / integrate / ...), "
                     "or `specialist` / `integrate_patch` if you need patch "

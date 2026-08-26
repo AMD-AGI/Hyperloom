@@ -144,7 +144,6 @@ class _CoordinatorStub:
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # The discovery merge calls this reverse-lookup on every repo.
-    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
     # The enqueue path resolves its lanes and lease TTL from the registry.
     _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 

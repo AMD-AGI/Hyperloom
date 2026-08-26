@@ -103,42 +103,42 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
 
 
 def test_resume_writeback_disables_state_when_prelude_and_flag_passed():
-    state = _ResumeStateStub(explore_enabled=True, phase="PRELUDE")
+    state = _ResumeStateStub(phase="PRELUDE")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
     assert state.explore_enabled is False
 
 
 def test_resume_writeback_allows_disable_in_framework():
-    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK_AGENT")
+    state = _ResumeStateStub(phase="FRAMEWORK_AGENT")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
     assert state.explore_enabled is False
 
 
 def test_resume_writeback_allows_disable_in_legacy_framework():
-    state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK")
+    state = _ResumeStateStub(phase="FRAMEWORK")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"
     assert state.explore_enabled is False
 
 
 def test_resume_writeback_warns_when_already_in_explore():
-    state = _ResumeStateStub(explore_enabled=True, phase="EXPLORE")
+    state = _ResumeStateStub(phase="EXPLORE")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "WARN_IGNORED"
     assert state.explore_enabled is True
 
 
 def test_resume_writeback_honours_persisted_disable_over_flag_absent():
-    state = _ResumeStateStub(explore_enabled=False, phase="KERNEL_AGENT")
+    state = _ResumeStateStub(phase="KERNEL_AGENT")
     args = _ArgsStub(no_explore=False)
     assert _apply_resume_writeback(state, args) == "DISABLED_PERSISTED"
     assert args.no_explore is True
 
 
 def test_resume_writeback_no_op_when_state_and_flag_both_enabled():
-    state = _ResumeStateStub(explore_enabled=True, phase="EXPLORE")
+    state = _ResumeStateStub(phase="EXPLORE")
     args = _ArgsStub(no_explore=False)
     assert _apply_resume_writeback(state, args) == ""
     assert state.explore_enabled is True
