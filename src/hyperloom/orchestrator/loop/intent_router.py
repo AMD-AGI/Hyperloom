@@ -1266,7 +1266,7 @@ class IntentRouter:
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             ESCALATE_HINT_SKIP_TO_CLOSE,
-            PHASE_EXPLORE,
+            PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
             is_valid_escalate_hint,
@@ -1301,7 +1301,7 @@ class IntentRouter:
         if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
                 self.shared_state.phase_budget_pct,
-                phase=PHASE_EXPLORE,
+                phase=PHASE_FRAMEWORK_AGENT,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts

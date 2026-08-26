@@ -269,10 +269,12 @@ class MachinePhase(PhaseHandler):
             # via the more honest reason, so the next phase must not re-evaluate
             # it as if it were still unclaimed.
             state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
+        elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
             # ``exit_normal_optimize`` is the hint's only consumer, so a
             # transition away from that phase leaves it unclaimable; keeping it
-            # would let an unrelated phase re-evaluate it.
+            # would let an unrelated phase re-evaluate it. A transition *into*
+            # that phase is the opposite case: discarding there would drop the
+            # hint on the doorstep of the one rule that reads it.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",

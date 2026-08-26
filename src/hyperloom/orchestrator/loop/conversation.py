@@ -848,12 +848,13 @@ class ConversationCollaborator:
     # Consumed by :meth:`_compose_prompt` above and by the phase handlers via the
     # coordinator's bare-name ``_DELEGATED`` resolution.
     def _plateau_advisory_block(self) -> str:
-        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK). Returns "" when no plateau signal is active.
+        """Render the plateau-judgment advisory block for the current phase.
 
-        KERNEL / FRAMEWORK plateaus are advisory only (never auto-exit the
-        phase). An EXPLORE plateau deterministically advances
-        EXPLORE → KERNEL_AGENT via ``explore_no_more_leverage`` (a non-terminal
-        lever switch).
+        In the optimisation phase both arms are always reported: the phase
+        leaves only when both are dry, so naming one alone would say "plateau"
+        about a phase still paying on the other lever. Both dry advances to
+        KERNEL_AGENT via ``optimize_no_more_leverage`` (a non-terminal lever
+        switch); a KERNEL plateau is advisory only.
 
         Returns:
             The rendered plateau advisory text, or ``""`` when no plateau
