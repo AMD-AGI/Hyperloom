@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Collection, Mapping
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_ENABLEMENT,
+    LEVER_SOURCE_PATCH,
+    LEVER_UPSTREAM_PR,
+    patch_lever_kind,
     patch_owner_phase,
 )
 from .models import (
@@ -253,8 +258,25 @@ class _Files:
         self.artifacts = retained
 
 
+#: Lever -> published section. The section names are the phases that used to own
+#: each lever; they are kept because they are on the wire, and they were always
+#: really "configuration" and "source" under a phase's name. Routing on the
+#: lever restores that meaning now that one phase carries both -- otherwise
+#: every entry would land in ``framework`` and ``explore`` would sit empty.
+_SECTION_BY_LEVER = {
+    LEVER_CONFIG: "explore",
+    LEVER_SOURCE_PATCH: "framework",
+    LEVER_UPSTREAM_PR: "framework",
+    LEVER_ENABLEMENT: "framework",
+}
+
+
 def _entry_origin(entry: Mapping[str, Any]) -> str:
     action = str(entry.get("action") or "").strip().lower()
+    lever_section = _SECTION_BY_LEVER.get(patch_lever_kind(entry))
+    if lever_section:
+        return lever_section
+    # Pre-``lever_kind`` rows fall back to the phase that recorded them.
     phase = (
         patch_owner_phase(entry)
         if action.startswith("integrate_patch")
@@ -1096,6 +1118,8 @@ def build_remote_knowledge(
         for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
         if isinstance(item, Mapping)
     ]
+    # ``kb_required_owner`` is a recorded phase label; both spellings still map
+    # to their section so a resumed pre-merge session stages correctly.
     owner_names = {
         "EXPLORE": "explore",
         "FRAMEWORK_AGENT": "framework",
