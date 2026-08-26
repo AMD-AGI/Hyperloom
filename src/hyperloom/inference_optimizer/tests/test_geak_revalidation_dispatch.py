@@ -257,6 +257,36 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     assert row.params["expected_cfg_hash"] == ran.fingerprint
 
 
+def test_material_check_ignores_untrusted_env_names() -> None:
+    """An untrusted key on one side only must not read as a config difference.
+
+    ``accepted_config`` is a harness snapshot and carries PATH; ``current_best``
+    holds the executor-filtered mapping. Comparing them raw made every echoed
+    config look material, which is exactly the passthrough noise the gate exists
+    to reject.
+    """
+    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+
+    echoed = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--fp8-gemm-backend aiter",
+            "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1",
+        },
+    }
+    assert not _geak_result_has_material(
+        echoed,
+        prev_best_flags="--fp8-gemm-backend aiter",
+        prev_best_envs={"SGLANG_USE_AITER": "1"},
+    )
+    # A real config delta still registers.
+    assert _geak_result_has_material(
+        echoed,
+        prev_best_flags="--fp8-gemm-backend triton",
+        prev_best_envs={"SGLANG_USE_AITER": "1"},
+    )
+
+
 @pytest.mark.asyncio
 async def test_rebench_can_be_rebuilt_after_cancel_within_same_cycle(coordinator) -> None:
     """A cancelled rebench must not block a fresh one in the same macro-cycle.

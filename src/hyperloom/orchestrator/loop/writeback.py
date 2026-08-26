@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
-from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
@@ -38,6 +37,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
+    _accepted_config_as_variant,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
@@ -52,7 +52,6 @@ from .coordinator_helpers import (
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
-    _split_env_and_flags,
 )
 from ..policy.gate import (
     PolicyDenied,
@@ -5125,13 +5124,7 @@ class WritebackCollaborator:
         if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
-            ps_flags = str(ps_cfg.get("flags") or "").strip()
-            ps_envs, _ps_extra_flags = _split_env_and_flags(str(ps_cfg.get("env") or ""))
-            if _ps_extra_flags:
-                ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
-            # GridVariant drops shell/loader keys before it fingerprints, so drop
-            # them here as well or the pinned hash never matches what ran.
-            ps_envs, _ = filter_untrusted_env_mapping(ps_envs, allow_predicate=is_allowed_variant_env_key)
+            ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
             # An overlay that cannot load installs nothing: the server launches
             # as plain baseline and any delta measured against it belongs to the
             # flags alone. Resolve that BEFORE dispatch so the task never carries
