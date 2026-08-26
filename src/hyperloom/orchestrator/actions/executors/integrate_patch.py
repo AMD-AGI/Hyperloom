@@ -3491,11 +3491,20 @@ class IntegratePatchExecutor:
             accuracy_delta_pct=acc_delta_pct,
             config_fingerprint=cfg_fingerprint,
         )
-        # Commit the KEEP so a later REVERT checkout fallback can't wipe this
-        # win (best-effort, non-fatal). Non-git roots (e.g. a pip-installed
-        # framework in site-packages) have no checkout fallback to guard
-        # against and get their durability from snapshot_source_layer below,
-        # so skip the commit instead of failing it — matches framework_agent.
+        # Commit the KEEP. On a git tree this is what makes it survive: the next
+        # candidate's revert is ``checkout --force HEAD -- . && clean -fd``,
+        # which removes everything uncommitted. The source-layer snapshot taken
+        # below records the realized files for reproduction and reporting, but
+        # nothing replays it into the tree in-session, so an uncommitted KEEP
+        # would be announced, stacked, and then silently removed -- leaving
+        # ``current_best`` and every later measurement anchored on a tree that
+        # no longer carries it. A failed commit is therefore terminal, not a
+        # warning: revert cleanly and report, rather than corrupt the anchor.
+        #
+        # Non-git roots (e.g. a pip-installed framework in site-packages) have
+        # no checkout fallback to guard against, so the commit is skipped there
+        # rather than failed.
+        commit_failure: str = ""
         if framework_root is not None and _is_git_tree(framework_root):
             try:
                 touched = _patch_touched_paths(framework_root, applied)
@@ -3505,12 +3514,38 @@ class IntegratePatchExecutor:
                     touched,
                 )
                 if not ok:
-                    log.warning(
-                        "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
-                        note,
-                    )
-            except Exception:  # noqa: BLE001 — commit durability is best-effort
+                    commit_failure = note or "git commit failed"
+            except Exception as exc:  # noqa: BLE001 — surfaced as a verdict below
                 log.exception("integrate_patch: commit-on-KEEP raised")
+                commit_failure = f"commit raised: {exc!r}"
+        if commit_failure:
+            log.error(
+                "integrate_patch: commit-on-KEEP failed (%s); reverting rather than "
+                "reporting a KEEP the next revert would silently remove",
+                commit_failure,
+            )
+            artifacts_reverted = self._revert_artifacts(applied_artifacts)
+            reverted = self._revert_patches(framework_root, applied)
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "apply_failed",
+                    "error_class": "keep_commit_failed",
+                    "error": commit_failure,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "config_changes_applied": {},
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "bench_result": bench_result,
+                    "reason": f"KEEP could not be committed: {commit_failure}",
+                    "workspace": str(output_root),
+                },
+            )
         else:
             log.info(
                 "integrate_patch: non-git framework root %s; skipping commit-on-KEEP "
