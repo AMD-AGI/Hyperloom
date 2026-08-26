@@ -81,6 +81,24 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 _KERNEL_HEARTBEAT_SEC: float = 150.0
 
 
+def _is_upstream_pr_candidate(pending: Any) -> bool:
+    """True for an ``integrate_patch`` proposal that pre-screens a PR candidate.
+
+    The candidate pre-screen and an authored patch are the same action now;
+    a top-level ``framework_agent_candidate_id`` is what distinguishes the
+    pre-screen, whose approval means "spend a bench on this candidate".
+
+    Args:
+        pending: The pending proposal.
+
+    Returns:
+        True when this proposal is a candidate pre-screen.
+    """
+    if getattr(pending, "action_name", "") != "integrate_patch":
+        return False
+    return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
+
+
 class IntentRouter:
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
@@ -478,7 +496,7 @@ class IntentRouter:
         """
         pending.decided = True
         pending.verdict = verdict
-        if pending.action_name == "framework_agent":
+        if _is_upstream_pr_candidate(pending):
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -544,8 +562,8 @@ class IntentRouter:
                 pending,
                 approved_variant_names=approved_variant_names,
             )
-        elif verdict == "reject" and pending.action_name == "framework_agent":
-            # Record the critic_denied row so the framework_agent pump advances.
+        elif verdict == "reject" and _is_upstream_pr_candidate(pending):
+            # Record the critic_denied row so the candidate pump advances.
             await self._coord._record_framework_agent_critic_denied(
                 pending,
                 reasoning,

@@ -87,8 +87,6 @@ _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
         "recover",
         "report",
         "session_breakdown",
-        # Candidate-selection gate only; patches land via integrate_patch.
-        "framework_agent",
     }
 )
 
@@ -136,6 +134,32 @@ _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _is_upstream_pr_prescreen(payload: dict[str, Any] | None) -> bool:
+    """Whether this proposal only decides *whether to spend a bench* on a PR.
+
+    A candidate pre-screen arrives as ``integrate_patch`` -- one action lands
+    every patch source -- but nothing has been applied or measured yet, so the
+    patch-landing evidence bar (before/after benchmark, accuracy gate, rollback
+    plan) cannot be met by construction. Approval here means only "this
+    candidate is worth a GPU bench"; the resulting measurement is what the
+    executor's own gate then judges.
+
+    Distinguished by a top-level ``framework_agent_candidate_id``, which the
+    pre-screen carries and an actual patch application does not.
+
+    Args:
+        payload: The proposal payload.
+
+    Returns:
+        True when this is a candidate pre-screen rather than a patch landing.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("patches") or (payload.get("params") or {}).get("patches"):
+        return False
+    return bool(payload.get("framework_agent_candidate_id"))
+
+
 def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
     """Whether a patch-landing proposal is a pre-boot enablement patch.
 
@@ -165,7 +189,9 @@ def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | 
     Unknown or missing actions fall back to the evidence-producer class,
     which is the cold-start-safe default. A patch-landing action carrying an
     enablement marker in ``payload`` is routed to the lighter
-    ``enablement_landing`` class (see :func:`_is_enablement_patch`).
+    ``enablement_landing`` class (see :func:`_is_enablement_patch`), and an
+    upstream-PR candidate pre-screen to ``framework_op`` (see
+    :func:`_is_upstream_pr_prescreen`).
 
     Args:
         action_name: The proposed action's name, if any.
@@ -180,6 +206,8 @@ def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | 
     if not name:
         return ACTION_CLASS_EVIDENCE_PRODUCER
     if name in _PATCH_LANDING_ACTIONS:
+        if _is_upstream_pr_prescreen(payload):
+            return ACTION_CLASS_FRAMEWORK_OP
         if _is_enablement_patch(payload):
             return ACTION_CLASS_ENABLEMENT_LANDING
         return ACTION_CLASS_PATCH_LANDING
