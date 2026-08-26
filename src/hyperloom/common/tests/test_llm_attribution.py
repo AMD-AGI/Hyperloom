@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the operator-configured LLM attribution header.
+"""Unit tests for gateway attribution headers.
 
-The riskiest behaviour here is not the rendering but the merge: these variables
-already carry gateway auth in production, so the tests pin that an existing
-setting survives injection verbatim -- including a ``${VAR}`` reference, which
-``codex_session`` must still be able to recognize afterwards.
+The riskiest behaviour here is not the rendering but the merge: the variables
+these headers travel in already carry gateway auth in production, so the tests
+pin that an existing setting survives injection verbatim -- including a
+``${VAR}`` reference, which ``codex_session`` must still be able to recognize
+afterwards.
+
+Shape tests register their own preset rather than leaning on ``litellm``, so they
+describe the mechanism and do not have to change when a gateway's headers do.
 """
 
 from __future__ import annotations
@@ -18,12 +22,10 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import llm_attribution
+from hyperloom.common.llm_attribution import AttributionHeader
 from hyperloom.common.llm_config import parse_custom_headers
 
-_SPEC = llm_attribution.COMBINED_HEADER_ENV
-_RAW = llm_attribution.RAW_HEADER_ENV
-_JSON = llm_attribution.JSON_HEADER_ENV
-_PRESET = llm_attribution.PRESET_ENV
+_ATTR = llm_attribution.ATTRIBUTION_ENV
 _CLAW = llm_attribution.CLAW_SESSION_ID_ENV
 _ANTHROPIC = llm_attribution.ANTHROPIC_CUSTOM_HEADERS_ENV
 _OPENAI = llm_attribution.OPENAI_CUSTOM_HEADERS_ENV
@@ -35,19 +37,30 @@ def _reset_published_phase() -> None:
     llm_attribution.set_current_phase("")
 
 
+@pytest.fixture
+def shapes(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Register a preset exercising every value shape; return its environment."""
+    monkeypatch.setitem(
+        llm_attribution.PRESETS,
+        "shapes",
+        (
+            AttributionHeader("x-combined", "combined", ("session", "component", "phase")),
+            AttributionHeader("x-raw", "raw", ("session", "component")),
+            AttributionHeader("x-json", "json", ("session", "component")),
+        ),
+    )
+    return {_ATTR: "shapes", _CLAW: "claw-abc"}
+
+
 def _env(**overrides: str) -> dict[str, str]:
-    """Build an environment carrying a configured spec plus a session id."""
-    return {
-        _SPEC: "x-tags:session,component,phase",
-        _CLAW: "claw-abc",
-        **overrides,
-    }
+    """An environment selecting the LiteLLM preset with a session id."""
+    return {_ATTR: "litellm", _CLAW: "claw-abc", **overrides}
 
 
-class TestUnconfigured:
-    """An operator who sets nothing must observe no change at all."""
+class TestUnselected:
+    """An operator who selects no gateway must observe no change at all."""
 
-    def test_call_headers_empty_without_spec(self) -> None:
+    def test_call_headers_empty_without_a_selection(self) -> None:
         assert llm_attribution.call_headers(component="geak", env={_CLAW: "claw-abc"}) == {}
 
     def test_inject_env_leaves_environment_untouched(self) -> None:
@@ -55,119 +68,83 @@ class TestUnconfigured:
         llm_attribution.inject_env(env, component="geak", source={_CLAW: "claw-abc"})
         assert env == {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
 
-    def test_malformed_spec_is_ignored(self) -> None:
-        # No colon, so no field list can be read.
-        assert llm_attribution.call_headers(component="geak", env=_env(**{_SPEC: "x-tags"})) == {}
-
-    def test_header_name_codex_would_reject_is_ignored(self) -> None:
-        # resolve_codex_provider_config raises on a non-bare-key header name.
-        env = _env(**{_SPEC: "x.tags:session"})
-        assert llm_attribution.call_headers(component="geak", env=env) == {}
-
-
-class TestRendering:
-    """Field selection, ordering, and value hygiene."""
-
-    def test_renders_selected_fields_in_spec_order(self) -> None:
-        headers = llm_attribution.call_headers(component="geak", phase="KERNEL_AGENT", env=_env())
-        assert headers == {"x-tags": "session=claw-abc,component=geak,phase=KERNEL_AGENT"}
-
-    def test_unselected_fields_are_not_emitted(self) -> None:
-        env = _env(**{_SPEC: "x-tags:component"})
-        headers = llm_attribution.call_headers(component="geak", phase="KERNEL_AGENT", env=env)
-        assert headers == {"x-tags": "component=geak"}
-
-    def test_empty_fields_are_dropped(self) -> None:
-        headers = llm_attribution.call_headers(component="geak", phase="", env=_env())
-        assert headers == {"x-tags": "session=claw-abc,component=geak"}
-
-    def test_no_header_when_every_selected_field_is_empty(self) -> None:
-        env = _env(**{_SPEC: "x-tags:phase", _CLAW: ""})
-        assert llm_attribution.call_headers(component="geak", phase="", env=env) == {}
-
-    def test_extra_fields_keep_the_vocabulary_open(self) -> None:
-        env = _env(**{_SPEC: "x-tags:component,kernel_id"})
-        headers = llm_attribution.call_headers(component="geak", kernel_id="k-7", env=env)
-        assert headers == {"x-tags": "component=geak,kernel_id=k-7"}
-
-    def test_newlines_cannot_split_the_header_record(self) -> None:
-        headers = llm_attribution.call_headers(component="geak\nX-Injected: 1", env=_env())
-        assert "\n" not in headers["x-tags"]
-
-    def test_dollar_is_stripped_so_values_cannot_be_re_expanded(self) -> None:
-        # parse_custom_headers expands ${VAR}; a value must not reach it as one.
-        headers = llm_attribution.call_headers(component="${SECRET}", env=_env())
-        assert "$" not in headers["x-tags"]
+    def test_unknown_gateway_emits_nothing(self) -> None:
+        assert llm_attribution.call_headers(component="geak", env=_env(**{_ATTR: "nope"})) == {}
 
 
 class TestValueShapes:
     """Gateways disagree about the shape of a value, not about its content."""
 
-    def test_raw_shape_omits_the_field_prefix(self) -> None:
-        # A trace-id slot wants the identifier itself, not "session=<id>".
-        env = {_RAW: "x-litellm-trace-id:session", _CLAW: "claw-abc"}
-        assert llm_attribution.call_headers(component="geak", env=env) == {
-            "x-litellm-trace-id": "claw-abc"
-        }
+    def test_combined_renders_field_value_pairs(self, shapes: dict[str, str]) -> None:
+        llm_attribution.set_current_phase("KERNEL_AGENT")
+        headers = llm_attribution.call_headers(component="geak", env=shapes)
+        assert headers["x-combined"] == "session=claw-abc,component=geak,phase=KERNEL_AGENT"
 
-    def test_raw_shape_falls_through_to_the_first_field_with_a_value(self) -> None:
-        env = {_RAW: "x-trace:session,component", _CLAW: ""}
-        assert llm_attribution.call_headers(component="geak", env=env) == {"x-trace": "geak"}
+    def test_raw_omits_the_field_prefix(self, shapes: dict[str, str]) -> None:
+        # An identifier slot wants the value itself, not "session=<id>".
+        assert llm_attribution.call_headers(component="geak", env=shapes)["x-raw"] == "claw-abc"
 
-    def test_json_shape_renders_a_parseable_object(self) -> None:
-        env = {_JSON: "x-meta:session,component", _CLAW: "claw-abc"}
-        headers = llm_attribution.call_headers(component="geak", env=env)
-        assert json.loads(headers["x-meta"]) == {"session": "claw-abc", "component": "geak"}
+    def test_raw_falls_through_to_the_first_field_with_a_value(self, shapes: dict[str, str]) -> None:
+        shapes[_CLAW] = ""
+        assert llm_attribution.call_headers(component="geak", env=shapes)["x-raw"] == "geak"
 
-    def test_shapes_compose_into_several_headers(self) -> None:
-        env = {
-            _SPEC: "x-litellm-tags:component",
-            _RAW: "x-litellm-trace-id:session",
-            _CLAW: "claw-abc",
-        }
-        assert llm_attribution.call_headers(component="geak", env=env) == {
-            "x-litellm-tags": "component=geak",
-            "x-litellm-trace-id": "claw-abc",
-        }
+    def test_json_renders_a_parseable_object(self, shapes: dict[str, str]) -> None:
+        headers = llm_attribution.call_headers(component="geak", env=shapes)
+        assert json.loads(headers["x-json"]) == {"session": "claw-abc", "component": "geak"}
 
-    def test_a_shape_with_no_values_is_not_emitted(self) -> None:
-        env = {_RAW: "x-trace:session", _JSON: "x-meta:session", _CLAW: ""}
-        assert llm_attribution.call_headers(component="", env=env) == {}
+    def test_empty_fields_are_dropped(self, shapes: dict[str, str]) -> None:
+        headers = llm_attribution.call_headers(component="geak", phase="", env=shapes)
+        assert headers["x-combined"] == "session=claw-abc,component=geak"
+
+    def test_a_header_with_no_values_is_not_emitted(self, shapes: dict[str, str]) -> None:
+        shapes[_CLAW] = ""
+        assert llm_attribution.call_headers(component="", phase="", env=shapes) == {}
+
+    def test_extra_fields_keep_the_vocabulary_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(
+            llm_attribution.PRESETS,
+            "extras",
+            (AttributionHeader("x-tags", "combined", ("component", "kernel_id")),),
+        )
+        headers = llm_attribution.call_headers(component="geak", kernel_id="k-7", env={_ATTR: "extras"})
+        assert headers == {"x-tags": "component=geak,kernel_id=k-7"}
+
+
+class TestValueHygiene:
+    """A field value must not be able to break out of the header encoding."""
+
+    def test_newlines_cannot_split_the_header_record(self) -> None:
+        headers = llm_attribution.call_headers(component="geak\nX-Injected: 1", env=_env())
+        assert "\n" not in headers["x-litellm-tags"]
+
+    def test_dollar_is_stripped_so_values_cannot_be_re_expanded(self) -> None:
+        # parse_custom_headers expands ${VAR}; a value must not reach it as one.
+        headers = llm_attribution.call_headers(component="${SECRET}", env=_env())
+        assert "$" not in headers["x-litellm-tags"]
 
 
 class TestPresets:
-    """A preset supplies defaults; it must never become a lock-in."""
+    """Presets are the whole configuration surface, so they are checked here."""
 
-    def test_litellm_preset_configures_both_headers(self) -> None:
-        env = {_PRESET: "litellm", _CLAW: "claw-abc"}
+    def test_litellm_emits_tags_and_a_trace_id(self) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
-        headers = llm_attribution.call_headers(component="geak", env=env)
-        assert headers == {
+        assert llm_attribution.call_headers(component="geak", env=_env()) == {
             "x-litellm-tags": "session=claw-abc,component=geak,phase=KERNEL_AGENT",
             "x-litellm-trace-id": "claw-abc",
         }
 
-    def test_explicit_variable_overrides_the_preset(self) -> None:
-        env = {_PRESET: "litellm", _SPEC: "x-own-tags:component", _CLAW: "claw-abc"}
-        headers = llm_attribution.call_headers(component="geak", env=env)
-        assert headers["x-own-tags"] == "component=geak"
-        assert "x-litellm-tags" not in headers
-
-    def test_empty_variable_disables_that_preset_header(self) -> None:
-        env = {_PRESET: "litellm", _SPEC: "", _CLAW: "claw-abc"}
-        headers = llm_attribution.call_headers(component="geak", env=env)
-        assert set(headers) == {"x-litellm-trace-id"}
-
-    def test_unknown_preset_configures_nothing(self) -> None:
-        env = {_PRESET: "not-a-gateway", _CLAW: "claw-abc"}
-        assert llm_attribution.call_headers(component="geak", env=env) == {}
-
-    def test_preset_names_are_specs_an_operator_could_have_written(self) -> None:
-        # Keeps presets from growing logic the env form cannot express.
-        for shapes in llm_attribution.PRESETS.values():
-            for shape, spec in shapes.items():
-                assert shape in {"combined", "raw", "json"}
-                assert ":" in spec
+    def test_every_preset_header_is_usable(self) -> None:
+        for gateway, headers in llm_attribution.PRESETS.items():
+            assert headers, f"{gateway} preset emits nothing"
+            for header in headers:
+                # Codex rejects a header name that is not a TOML bare key.
+                assert llm_attribution._VALID_HEADER_NAME_RE.match(header.name), (
+                    f"{gateway}: header name {header.name!r} is not a TOML bare key"
+                )
+                assert header.shape in llm_attribution._RENDERERS, (
+                    f"{gateway}: unknown shape {header.shape!r}"
+                )
+                assert header.fields, f"{gateway}: header {header.name!r} selects no fields"
 
 
 class TestMergePreservesExistingSetting:
@@ -178,7 +155,7 @@ class TestMergePreservesExistingSetting:
         llm_attribution.inject_env(env, component="geak", source=_env())
         parsed = parse_custom_headers(env[_ANTHROPIC], env={})
         assert parsed["Ocp-Apim-Subscription-Key"] == "secret"
-        assert parsed["x-tags"] == "session=claw-abc,component=geak"
+        assert parsed["x-litellm-tags"] == "session=claw-abc,component=geak"
 
     def test_env_reference_is_not_expanded(self) -> None:
         # codex_session matches ${VAR} against the raw text to forward the
@@ -192,15 +169,15 @@ class TestMergePreservesExistingSetting:
         llm_attribution.inject_env(env, component="geak", source=_env())
         decoded = json.loads(env[_ANTHROPIC])
         assert decoded["Ocp-Apim-Subscription-Key"] == "${GATEWAY_KEY}"
-        assert decoded["x-tags"] == "session=claw-abc,component=geak"
+        assert decoded["x-litellm-tags"] == "session=claw-abc,component=geak"
 
     def test_reinjection_replaces_instead_of_stacking(self) -> None:
         # The env hooks run once per turn, so this happens on every retry.
         env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
         llm_attribution.inject_env(env, component="geak", phase="A", source=_env())
         llm_attribution.inject_env(env, component="geak", phase="B", source=_env())
-        assert env[_ANTHROPIC].count("x-tags") == 1
-        assert parse_custom_headers(env[_ANTHROPIC], env={})["x-tags"].endswith("phase=B")
+        assert env[_ANTHROPIC].count("x-litellm-tags") == 1
+        assert parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"].endswith("phase=B")
 
 
 class TestOpenAIFallbackIsNotBroken:
@@ -215,13 +192,14 @@ class TestOpenAIFallbackIsNotBroken:
     def test_existing_openai_variable_is_still_enriched(self) -> None:
         env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret", _OPENAI: "X-Other: 1"}
         llm_attribution.inject_env(env, component="geak", source=_env())
-        assert parse_custom_headers(env[_OPENAI], env={})["X-Other"] == "1"
-        assert "x-tags" in parse_custom_headers(env[_OPENAI], env={})
+        parsed = parse_custom_headers(env[_OPENAI], env={})
+        assert parsed["X-Other"] == "1"
+        assert "x-litellm-tags" in parsed
 
     def test_openai_variable_is_created_when_no_fallback_could_apply(self) -> None:
         env: dict[str, str] = {}
         llm_attribution.inject_env(env, component="geak", source=_env())
-        assert "x-tags" in parse_custom_headers(env[_OPENAI], env={})
+        assert "x-litellm-tags" in parse_custom_headers(env[_OPENAI], env={})
 
 
 class TestPublishedPhase:
@@ -230,48 +208,61 @@ class TestPublishedPhase:
     def test_published_phase_is_used_when_the_call_site_omits_it(self) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         headers = llm_attribution.call_headers(component="geak", env=_env())
-        assert headers == {"x-tags": "session=claw-abc,component=geak,phase=KERNEL_AGENT"}
+        assert headers["x-litellm-tags"].endswith("phase=KERNEL_AGENT")
 
     def test_explicit_phase_overrides_the_published_one(self) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         headers = llm_attribution.call_headers(component="critic", phase="COMMIT", env=_env())
-        assert headers["x-tags"].endswith("phase=COMMIT")
+        assert headers["x-litellm-tags"].endswith("phase=COMMIT")
 
     def test_explicit_empty_phase_suppresses_the_published_one(self) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         headers = llm_attribution.call_headers(component="critic", phase="", env=_env())
-        assert "phase=" not in headers["x-tags"]
+        assert "phase=" not in headers["x-litellm-tags"]
 
     def test_published_phase_reaches_a_spawned_child(self) -> None:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         child: dict[str, str] = {}
         llm_attribution.inject_env(child, component="geak", source=_env())
-        assert parse_custom_headers(child[_ANTHROPIC], env={})["x-tags"].endswith("phase=KERNEL_AGENT")
+        tags = parse_custom_headers(child[_ANTHROPIC], env={})["x-litellm-tags"]
+        assert tags.endswith("phase=KERNEL_AGENT")
 
 
 class TestSdkEnvOverlay:
     """claude_agent_sdk merges options.env over the inherited environment."""
 
-    def test_overlay_is_empty_when_unconfigured(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(_SPEC, raising=False)
+    def test_overlay_is_empty_when_no_gateway_is_selected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(_ATTR, raising=False)
         assert llm_attribution.sdk_env_overlay(component="framework") == {}
 
     def test_overlay_joins_the_gateway_header_instead_of_replacing_it(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A bare tag here would shadow the inherited auth header in the child.
-        monkeypatch.setenv(_SPEC, "x-tags:component")
+        monkeypatch.setenv(_ATTR, "litellm")
+        monkeypatch.setenv(_CLAW, "claw-abc")
         monkeypatch.setenv(_ANTHROPIC, "Ocp-Apim-Subscription-Key: secret")
         overlay = llm_attribution.sdk_env_overlay(component="framework")
         parsed = parse_custom_headers(overlay[_ANTHROPIC], env={})
         assert parsed["Ocp-Apim-Subscription-Key"] == "secret"
-        assert parsed["x-tags"] == "component=framework"
+        assert parsed["x-litellm-tags"] == "session=claw-abc,component=framework"
 
     def test_overlay_reports_only_variables_it_changes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(_SPEC, "x-tags:component")
+        monkeypatch.setenv(_ATTR, "litellm")
+        monkeypatch.setenv(_CLAW, "claw-abc")
         monkeypatch.setenv(_ANTHROPIC, "Ocp-Apim-Subscription-Key: secret")
         monkeypatch.delenv(_OPENAI, raising=False)
         assert set(llm_attribution.sdk_env_overlay(component="framework")) == {_ANTHROPIC}
+
+
+class TestConfigurationIsReadFromTheParent:
+    """A child env is often an allowlisted subset carrying neither setting."""
+
+    def test_selection_and_session_come_from_source_not_from_the_child_env(self) -> None:
+        child: dict[str, str] = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        llm_attribution.inject_env(child, component="specialist", source=_env())
+        parsed = parse_custom_headers(child[_ANTHROPIC], env={})
+        assert parsed["x-litellm-tags"] == "session=claw-abc,component=specialist"
 
 
 #: Entry points that only tag a call when the caller names a component, so an
@@ -335,14 +326,3 @@ def test_every_llm_entry_point_call_names_its_component() -> None:
     # Guard the guard: a rename that emptied _TAGGED_ENTRY_POINTS would
     # otherwise turn this into a test that always passes.
     assert seen >= 15, f"only {seen} LLM call sites found; the scan is no longer finding them"
-
-
-class TestConfigurationIsReadFromTheParent:
-    """A child env is often an allowlisted subset carrying neither setting."""
-
-    def test_spec_and_session_come_from_source_not_from_the_child_env(self) -> None:
-        child: dict[str, str] = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
-        llm_attribution.inject_env(child, component="specialist", source=_env())
-        assert parse_custom_headers(child[_ANTHROPIC], env={})["x-tags"] == (
-            "session=claw-abc,component=specialist"
-        )

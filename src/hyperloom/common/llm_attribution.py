@@ -1,34 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Operator-configured attribution headers for every Hyperloom LLM call.
+"""Gateway attribution headers for every Hyperloom LLM call.
 
 Hyperloom knows which component and phase a call belongs to; the gateway that
 meters the call knows only that some token spent money. This module carries that
-context out on HTTP headers the operator configures, so a deployment that
-configures nothing behaves exactly as it did before.
+context out on the headers a named gateway understands, selected by a single
+setting::
 
-Gateways disagree about the *shape* of a header value, not about the content, so
-shape is the only thing this module dispatches on:
-
-=========== ================================ ==================================
-Shape       Env var                          Renders
-=========== ================================ ==================================
-``combined`` :data:`COMBINED_HEADER_ENV`     ``field=value,field=value``
-``raw``      :data:`RAW_HEADER_ENV`          the single field's value, bare
-``json``     :data:`JSON_HEADER_ENV`         a JSON object of the fields
-=========== ================================ ==================================
-
-Each spec is ``<header-name>:<field>,<field>,...``. Header *names* and field
-selection always come from the environment, never from this repo -- a preset
-only supplies defaults for them::
-
-    HYPERLOOM_LLM_ATTRIBUTION_PRESET=litellm
+    HYPERLOOM_LLM_ATTRIBUTION=litellm
     # x-litellm-tags: session=<id>,component=geak,phase=KERNEL_AGENT
     # x-litellm-trace-id: <id>
 
-Setting a shape's variable explicitly overrides the preset for that shape, and
-setting it empty disables it, so a preset is never a lock-in.
+Leaving it unset is the default and emits nothing, so an unconfigured deployment
+behaves exactly as it did before.
+
+Gateways disagree about the *shape* of a header value, not about its content, so
+shape is the only axis a preset chooses between: ``combined`` renders
+``field=value`` pairs, ``raw`` renders one field's bare value for slots that
+expect an identifier, and ``json`` renders an object. Supporting a new gateway is
+adding a :data:`PRESETS` entry naming its headers and their shapes; the tests
+check every entry, which a free-form environment string could not.
 
 Two delivery paths exist because Hyperloom reaches providers two ways.
 :func:`call_headers` returns headers for in-process clients that build their own
@@ -42,18 +34,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from typing import Callable, Mapping, MutableMapping, Sequence
 
-#: Header carrying ``field=value`` pairs joined by commas. Suits any gateway
-#: that treats a header as a comma-separated tag list.
-COMBINED_HEADER_ENV = "HYPERLOOM_LLM_HEADER_COMBINED"
-#: Header carrying one field's value with no ``field=`` prefix. Suits gateway
-#: slots that expect an identifier, such as a trace or customer id.
-RAW_HEADER_ENV = "HYPERLOOM_LLM_HEADER_RAW"
-#: Header carrying the fields as a JSON object, for gateways that parse one.
-JSON_HEADER_ENV = "HYPERLOOM_LLM_HEADER_JSON"
-#: Opt-in defaults for a known gateway; see :data:`PRESETS`.
-PRESET_ENV = "HYPERLOOM_LLM_ATTRIBUTION_PRESET"
+#: Selects the gateway whose headers to emit; unset emits nothing.
+ATTRIBUTION_ENV = "HYPERLOOM_LLM_ATTRIBUTION"
 #: PrimusClaw session id, already exported by the session bootstrap.
 CLAW_SESSION_ID_ENV = "CLAW_SESSION_ID"
 
@@ -66,12 +51,10 @@ _VALID_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _NEWLINE_RE = re.compile(r"[\r\n]+")
 
 __all__ = [
+    "ATTRIBUTION_ENV",
+    "AttributionHeader",
     "CLAW_SESSION_ID_ENV",
-    "COMBINED_HEADER_ENV",
-    "JSON_HEADER_ENV",
     "PRESETS",
-    "PRESET_ENV",
-    "RAW_HEADER_ENV",
     "attribution_context",
     "call_headers",
     "current_phase",
@@ -135,8 +118,8 @@ def attribution_context(
     ``session`` is read from the environment and ``phase`` defaults to the
     published one, so a call site only has to name what it alone knows. ``extra``
     keeps the vocabulary open: a site with more context (``kernel_id``,
-    ``task_id``, ``attempt``) can add it without changing this signature, and the
-    operator decides whether to select it.
+    ``task_id``, ``attempt``) can add it without changing this signature, and a
+    preset decides whether to select it.
 
     Args:
         component: Producer label for the call, e.g. ``geak`` or ``specialist``.
@@ -175,59 +158,54 @@ def _render_json(fields: Sequence[str], context: Mapping[str, str]) -> str:
     return json.dumps(selected, separators=(",", ":")) if selected else ""
 
 
-#: Value shape by name. This is the whole of the gateway-specific knowledge:
-#: everything else about a header is operator configuration.
+#: Value shape by name. This is the whole of the gateway-specific knowledge;
+#: everything else a preset states is which header carries which fields.
 _RENDERERS: dict[str, Callable[[Sequence[str], Mapping[str, str]], str]] = {
     "combined": _render_combined,
     "raw": _render_raw,
     "json": _render_json,
 }
 
-_SHAPE_ENV: dict[str, str] = {
-    "combined": COMBINED_HEADER_ENV,
-    "raw": RAW_HEADER_ENV,
-    "json": JSON_HEADER_ENV,
+
+@dataclass(frozen=True)
+class AttributionHeader:
+    """One header a gateway preset emits.
+
+    Attributes:
+        name: The HTTP header name. Must be a TOML bare key so the Codex config
+            path can represent it.
+        shape: A key of :data:`_RENDERERS`, choosing how the value is rendered.
+        fields: Attribution fields to carry, in order. ``raw`` uses the first
+            one that has a value; the others use all of them.
+    """
+
+    name: str
+    shape: str
+    fields: tuple[str, ...]
+
+
+PRESETS: dict[str, tuple[AttributionHeader, ...]] = {
+    "litellm": (
+        # Comma-separated tags land in the LiteLLM_SpendLogs request_tags column,
+        # which is what gives a per-component spend rollup.
+        AttributionHeader("x-litellm-tags", "combined", ("session", "component", "phase")),
+        # Sets the spend log's session_id column and propagates to nested MCP and
+        # A2A calls, so it is the column a per-session reconciliation joins on.
+        AttributionHeader("x-litellm-trace-id", "raw", ("session",)),
+    ),
 }
 
-#: Known-good defaults per gateway, so an operator does not have to rediscover
-#: which header name a gateway reads. Every entry is a plain spec string an
-#: operator could have written, and any of them can be overridden or disabled by
-#: setting the matching variable.
-PRESETS: dict[str, dict[str, str]] = {
-    "litellm": {
-        # Comma-separated tags land in the LiteLLM_SpendLogs request_tags column.
-        "combined": "x-litellm-tags:session,component,phase",
-        # Sets the spend log's session_id, which also propagates to nested calls.
-        "raw": "x-litellm-trace-id:session",
-    },
-}
 
-
-def _header_specs(env: Mapping[str, str]) -> list[tuple[str, str, tuple[str, ...]]]:
-    """Resolve the configured headers, preset defaults included.
-
-    An explicitly set variable always wins over the preset, including when it is
-    set empty, which is how an operator turns one preset header off.
+def _configured_headers(env: Mapping[str, str]) -> tuple[AttributionHeader, ...]:
+    """Return the headers the selected gateway preset emits.
 
     Args:
-        env: Environment mapping holding the operator settings.
+        env: Environment mapping holding :data:`ATTRIBUTION_ENV`.
 
     Returns:
-        One ``(header_name, shape, fields)`` per usable header spec.
+        The preset's headers, empty when unset or naming an unknown gateway.
     """
-    preset = PRESETS.get((env.get(PRESET_ENV) or "").strip().lower(), {})
-    specs: list[tuple[str, str, tuple[str, ...]]] = []
-    for shape, variable in _SHAPE_ENV.items():
-        configured = env.get(variable)
-        raw = preset.get(shape, "") if configured is None else configured
-        name, separator, field_list = raw.strip().partition(":")
-        name = name.strip()
-        if not separator or not _VALID_HEADER_NAME_RE.match(name):
-            continue
-        fields = tuple(field.strip() for field in field_list.split(",") if field.strip())
-        if fields:
-            specs.append((name, shape, fields))
-    return specs
+    return PRESETS.get((env.get(ATTRIBUTION_ENV) or "").strip().lower(), ())
 
 
 def call_headers(
@@ -237,25 +215,25 @@ def call_headers(
     env: Mapping[str, str] | None = None,
     **extra: str,
 ) -> dict[str, str]:
-    """Render the configured attribution headers for an in-process request.
+    """Render the selected gateway's attribution headers for a request.
 
     Args:
         component: Producer label for the call.
         phase: Orchestrator phase the call belongs to; ``None`` uses the
             published phase.
-        env: Environment mapping supplying the specs and session id.
+        env: Environment mapping supplying the gateway selection and session id.
         **extra: Additional attribution fields.
 
     Returns:
-        Header name to value, empty when nothing is configured or none of the
+        Header name to value, empty when no gateway is selected or none of the
         selected fields has a value.
     """
     source = env if env is not None else os.environ
-    specs = _header_specs(source)
-    if not specs:
+    headers = _configured_headers(source)
+    if not headers:
         return {}
     context = attribution_context(component=component, phase=phase, env=source, **extra)
-    rendered = {name: _RENDERERS[shape](fields, context) for name, shape, fields in specs}
+    rendered = {header.name: _RENDERERS[header.shape](header.fields, context) for header in headers}
     return {name: value for name, value in rendered.items() if value}
 
 
@@ -330,13 +308,13 @@ def inject_env(
 ) -> None:
     """Merge the attribution headers into a child environment, in place.
 
-    The specs and session id are read from ``source`` (this process) rather than
-    from ``env``, because a child environment is often an allowlisted subset that
-    deliberately carries neither. Which variables get written is still decided
-    from ``env``, since that is what the child will resolve its gateway
-    credentials from.
+    The gateway selection and session id are read from ``source`` (this process)
+    rather than from ``env``, because a child environment is often an allowlisted
+    subset that deliberately carries neither. Which variables get written is
+    still decided from ``env``, since that is what the child will resolve its
+    gateway credentials from.
 
-    No-op when nothing is configured, so an unconfigured deployment spawns
+    No-op when no gateway is selected, so an unconfigured deployment spawns
     children with a byte-identical environment.
 
     Args:
@@ -380,7 +358,7 @@ def sdk_env_overlay(
 
     Returns:
         Only the variables whose value the overlay actually changes; ``{}`` when
-        nothing is configured.
+        no gateway is selected.
     """
     merged = dict(os.environ)
     inject_env(merged, component=component, phase=phase, **extra)
