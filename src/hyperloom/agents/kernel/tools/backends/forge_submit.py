@@ -733,58 +733,39 @@ def _is_on_network_fs(path: Path) -> bool:
 
 
 def _local_scratch_dir(output_dir: Path) -> Path:
-    """Return the scratch worktree directory, relocated to local disk when needed.
+    """Return where the scratch worktree belongs for ``output_dir``.
 
-    When ``output_dir`` is on a network filesystem (NFS, wekafs, …), place the
-    throwaway scratch worktree under a local-disk root so git hashing and copytree
-    run at local-disk speed.  Only the scratch worktree is relocated; the durable
-    experiment archive under ``output_dir`` stays on the shared mount.
-
-    The local root is ``$FORGE_LOCAL_SCRATCH_ROOT`` (default
-    ``~/.cache/hyperloom/forge_scratch``).  An orphan-sweep runs at construction
-    time to reclaim space from attempts that crashed before cleanup.
+    A worktree is throwaway but gets copied and git-hashed in full, so on a
+    network mount it is placed on local disk instead. Only the worktree moves;
+    the durable archive under ``output_dir`` stays where the operator put it.
+    Override the local root with ``$FORGE_LOCAL_SCRATCH_ROOT``.
     """
-    candidate = output_dir / "worktree"
     if not _is_on_network_fs(output_dir):
-        return candidate
+        return output_dir / "worktree"
     root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
-    local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
-    try:
-        local_root.mkdir(parents=True, exist_ok=True)
-        _sweep_orphaned_scratch(local_root, output_dir)
-    except OSError:
-        log.warning("forge: could not create local scratch root %s; falling back to %s", local_root, candidate)
-        return candidate
-    # Use the same basename as the durable output dir so the path is recognisable.
+    local_root = (
+        Path(root_env).expanduser()
+        if root_env
+        else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
+    )
+    local_root.mkdir(parents=True, exist_ok=True)
+    _sweep_orphaned_scratch(local_root, output_dir)
     return local_root / output_dir.name / "worktree"
 
 
 def _sweep_orphaned_scratch(local_root: Path, current_output_dir: Path) -> None:
-    """Remove scratch worktrees under *local_root* whose parent session is gone.
+    """Delete local worktrees whose durable session directory is already gone.
 
-    A crash or SIGKILL can leave a worktree on local disk after its durable
-    output directory has been removed.  Without a sweep, each failed attempt
-    accumulates several GB under the local root.  Only removes trees whose
-    sibling ``worktree`` marker is present but whose parent directory no longer
-    exists on the shared mount — never removes the current attempt.
+    A SIGKILL skips the normal teardown, and each abandoned tree holds the whole
+    framework copy, so without this the local root grows by GB per crash.
     """
-    try:
-        for child in local_root.iterdir():
-            if not child.is_dir() or child == current_output_dir.parent:
-                continue
-            wt = child / "worktree"
-            if not wt.is_dir():
-                continue
-            shared_peer = current_output_dir.parent.parent / child.name
-            if not shared_peer.exists():
-                try:
-                    import shutil as _shutil
-                    _shutil.rmtree(child, ignore_errors=True)
-                    log.info("forge: swept orphaned scratch worktree %s", child)
-                except OSError:
-                    pass
-    except OSError:
-        pass
+    sessions_root = current_output_dir.parent.parent
+    for child in local_root.iterdir():
+        if not child.is_dir() or child.name == current_output_dir.name:
+            continue
+        if (child / "worktree").is_dir() and not (sessions_root / child.name).exists():
+            shutil.rmtree(child, ignore_errors=True)
+            log.info("forge: swept orphaned scratch worktree %s", child)
 
 
 def _prepare_worktree_nogit(
@@ -871,19 +852,15 @@ def _prepare_worktree_nogit(
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
-    _excl_dirs = _forge_scratch_exclude_dirs() | {"build", "dist"}
-    _excl_suffixes = _forge_scratch_exclude_suffixes()
+    runtime_dirs, runtime_suffixes = _runtime_artifact_names()
+    skipped_dirs = runtime_dirs | {".git"}
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
-        ignored: list[str] = []
-        for n in names:
-            if (
-                n in (".git", *_excl_dirs)
-                or n.endswith(".egg-info")
-                or any(n.endswith(s) for s in _excl_suffixes)
-            ):
-                ignored.append(n)
-        return ignored
+        return [
+            n
+            for n in names
+            if n in skipped_dirs or n.endswith((".egg-info", *runtime_suffixes))
+        ]
 
     try:
         if copy_subtrees is None:
@@ -926,7 +903,7 @@ def _prepare_worktree_nogit(
 
     # Must precede the baseline `git add -A`, so the pattern is in force for
     # every commit the loop later makes against this repository.
-    _exclude_bytecode_caches(scratch_dir)
+    _exclude_runtime_artifacts(scratch_dir)
 
     if not _scaffold(
         [
@@ -1390,56 +1367,45 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 
 
 _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
-# Patterns for machine-generated artefacts that must never enter the scratch
-# repository's index.  The authoritative set comes from the forge path-ownership
-# manifest; these are the local fallback for when kernel_agents is unavailable.
-_SCRATCH_EXCLUDE_GLOBS_FALLBACK: tuple[str, ...] = (
-    "__pycache__/",
-    "flydsl_cache/",
-    "jit/",
-    "*.so",
+
+
+# The floor used when the producer's manifest cannot be reached. KernelForge
+# owns the authoritative list and is asked for it first, so the two stay in step
+# wherever it is installed -- but it is not a declared dependency of this
+# package and CI does not install it, so requiring it would turn every scratch
+# copy into an ImportError on a node that never needed the producer. These are
+# the artefacts no repository should ever hash, not a mirror of the manifest; a
+# producer-specific addition arrives through the import below.
+_FALLBACK_RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
+    {"__pycache__", "build", "dist", "flydsl_cache", "jit"}
 )
-# _SCRATCH_EXCLUDE_GLOB_NAMES lists just the bare directory names (no trailing
-# slash) used by the _ignore copytree filter.
-_SCRATCH_EXCLUDE_DIR_NAMES_FALLBACK: frozenset[str] = frozenset(
-    {"__pycache__", "flydsl_cache", "jit"}
-)
-_SCRATCH_EXCLUDE_SUFFIXES_FALLBACK: tuple[str, ...] = (".so",)
+_FALLBACK_RUNTIME_FILE_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".so")
 
 
-def _forge_scratch_exclude_globs() -> tuple[str, ...]:
-    """Return gitignore-style globs covering all runtime artefacts in a scratch repo.
+def _runtime_artifact_names() -> tuple[frozenset[str], tuple[str, ...]]:
+    """Return the directory names and file suffixes a scratch copy must skip."""
+    _ensure_forge_on_path()
+    try:
+        from kernel_agents.loop.path_ownership import (  # noqa: PLC0415
+            RUNTIME_DIRECTORY_NAMES,
+            RUNTIME_FILE_SUFFIXES,
+        )
+    except ImportError:
+        return _FALLBACK_RUNTIME_DIRECTORY_NAMES, _FALLBACK_RUNTIME_FILE_SUFFIXES
+    return RUNTIME_DIRECTORY_NAMES, tuple(RUNTIME_FILE_SUFFIXES)
 
-    Reads from the forge path-ownership manifest when kernel_agents is importable
-    via $FORGE_PATH; falls back to a local constant otherwise so the function is
-    usable on remote nodes and before FORGE_PATH is configured.
-    """
+
+def _runtime_artifact_globs() -> tuple[str, ...]:
+    """Return gitignore patterns keeping runtime artefacts out of the index."""
     _ensure_forge_on_path()
     try:
         from kernel_agents.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
-        return runtime_gitignore_globs()
     except ImportError:
-        return _SCRATCH_EXCLUDE_GLOBS_FALLBACK
-
-
-def _forge_scratch_exclude_dirs() -> frozenset[str]:
-    """Return directory basenames that the copytree filter should skip."""
-    _ensure_forge_on_path()
-    try:
-        from kernel_agents.loop.path_ownership import RUNTIME_DIRECTORY_NAMES  # noqa: PLC0415
-        return RUNTIME_DIRECTORY_NAMES
-    except ImportError:
-        return _SCRATCH_EXCLUDE_DIR_NAMES_FALLBACK
-
-
-def _forge_scratch_exclude_suffixes() -> tuple[str, ...]:
-    """Return file suffixes that the copytree filter should skip."""
-    _ensure_forge_on_path()
-    try:
-        from kernel_agents.loop.path_ownership import RUNTIME_FILE_SUFFIXES  # noqa: PLC0415
-        return tuple(RUNTIME_FILE_SUFFIXES)
-    except ImportError:
-        return _SCRATCH_EXCLUDE_SUFFIXES_FALLBACK
+        directories = sorted(_FALLBACK_RUNTIME_DIRECTORY_NAMES)
+        return tuple(
+            [f"{name}/" for name in directories] + [f"*{suffix}" for suffix in _FALLBACK_RUNTIME_FILE_SUFFIXES]
+        )
+    return runtime_gitignore_globs()
 
 
 def _exclude_generated_drivers(workspace: Path) -> None:
@@ -1484,7 +1450,7 @@ def _git_exclude_file(workspace: Path) -> Path | None:
     return common / "info" / "exclude"
 
 
-def _exclude_bytecode_caches(workspace: Path) -> None:
+def _exclude_runtime_artifacts(workspace: Path) -> None:
     """Keep machine-generated artefacts out of the scratch repository's index.
 
     Only the throwaway scratch repository needs this. Real repositories carry
@@ -1496,7 +1462,7 @@ def _exclude_bytecode_caches(workspace: Path) -> None:
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
         present = set(existing.split())
-        missing = [g for g in _forge_scratch_exclude_globs() if g not in present]
+        missing = [g for g in _runtime_artifact_globs() if g not in present]
         if not missing:
             return
         exclude.parent.mkdir(parents=True, exist_ok=True)
