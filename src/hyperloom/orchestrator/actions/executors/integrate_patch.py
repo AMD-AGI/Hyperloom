@@ -4251,8 +4251,10 @@ class IntegratePatchExecutor:
                 "name": r.name,
                 "status": r.status,
                 "output_throughput": getattr(r, "output_throughput", None),
-                "ttft_ms": getattr(r, "ttft_ms", None),
-                "itl_ms": getattr(r, "itl_ms", None),
+                # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
+                # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
+                "ttft_ms": r.ttft_mean_ms,
+                "itl_ms": r.tpot_mean_ms,
                 # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
