@@ -1215,7 +1215,7 @@ class CriticAgentBackend:
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
         _t0 = time.perf_counter()
         try:
-            result = await achat_completion(self._client, **kwargs)
+            result = await achat_completion(self._client, component="critic", **kwargs)
         except Exception as exc:  # noqa: BLE001
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
@@ -1258,6 +1258,7 @@ class CriticAgentBackend:
         _t0 = time.perf_counter()
         try:
             result = await aanthropic_completion(
+                component="critic",
                 model=self._review_model,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],

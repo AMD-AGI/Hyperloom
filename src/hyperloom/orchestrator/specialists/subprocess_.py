@@ -44,6 +44,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.env import is_truthy
+from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     scrub_child_process_env,
@@ -143,6 +144,9 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_BASE_URL",
         "AWS_DEFAULT_REGION",
         "AWS_REGION",
+        # Session identity, so a child that reports its own spend files it under
+        # the same session the parent does. Not a credential.
+        "CLAW_SESSION_ID",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
@@ -902,6 +906,9 @@ class SpecialistSubprocessDispatcher:
         from ..roles._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
+        # The child spends against the gateway under this task; tag it so the
+        # spend can be read back per task instead of as one specialist total.
+        inject_attribution_env(env, component="specialist", task_id=task_id)
 
         backend = ""
         try:

@@ -1133,6 +1133,12 @@ class KernelPhase(PhaseHandler):
         def _run() -> subprocess.CompletedProcess:
             runner_env = dict(os.environ)
             runner_env["E2E_METRIC"] = "output"
+            # Only injection point needed for the whole GEAK chain: geak_runner
+            # and run_e2e both hand their full environment to the child, so the
+            # tag reaches the Claude CLI that actually spends.
+            from hyperloom.common.llm_attribution import inject_env
+
+            inject_env(runner_env, component="geak")
             p = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,

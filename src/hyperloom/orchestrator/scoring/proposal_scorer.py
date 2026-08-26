@@ -346,7 +346,7 @@ class ProposalScorer:
         )
         try:
             text, usage = await asyncio.wait_for(
-                astream_chat_completion_text(client, **create_params),
+                astream_chat_completion_text(client, component="proposal_scorer", **create_params),
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:

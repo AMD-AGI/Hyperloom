@@ -46,6 +46,8 @@ from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.coerce import to_int as _to_int
+from hyperloom.common.llm_attribution import call_headers as _attribution_headers
+from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
 
 log = logging.getLogger(__name__)
 
@@ -830,6 +832,8 @@ def claude_sdk_env_options(
     *,
     model: str | None = None,
     env: Mapping[str, str] | None = None,
+    component: str = "",
+    **attribution: str,
 ) -> dict[str, object]:
     """Return Claude SDK options that isolate a run from global Claude config.
 
@@ -838,6 +842,18 @@ def claude_sdk_env_options(
     gateway. When any LLM-provider signal is present in the current environment,
     pass an explicit child environment and disable settings sources so global
     developer-machine configuration cannot override the run contract.
+
+    Naming a ``component`` also tags the child's calls for the gateway. That
+    only applies on the gateway-signal path: without a signal the child inherits
+    this process's environment untouched, and a deployment with no gateway has
+    nothing to attribute the spend to anyway.
+
+    Args:
+        model: Model to pin for the child, or ``None`` to leave it unset.
+        env: Environment to derive the child environment from.
+        component: Producer label for the child's calls; ``""`` disables
+            attribution tagging.
+        **attribution: Additional attribution fields (e.g. ``task_id``).
     """
     source = dict(env if env is not None else os.environ)
     # Callers that never reach CLI preflight (library-mode backends) may still
@@ -861,6 +877,8 @@ def claude_sdk_env_options(
     if model:
         source.setdefault("ANTHROPIC_MODEL", model)
         source.setdefault("ANTHROPIC_SMALL_FAST_MODEL", model)
+    if component:
+        _inject_attribution_env(source, component=component, **attribution)
     return {"env": source, "setting_sources": []}
 
 
@@ -910,8 +928,31 @@ def _chat_completion_result(resp: object) -> ChatCompletionResult:
     )
 
 
+def _tag_request(params: dict[str, object], component: str) -> dict[str, object]:
+    """Merge the attribution header into an OpenAI-SDK request, in place.
+
+    Tagging the request rather than the client is deliberate: a caller builds
+    its client once and keeps it across phases, so a header fixed at
+    construction would report whichever phase happened to be current then.
+
+    Args:
+        params: ``create`` parameters, mutated in place.
+        component: Producer label for the call; ``""`` skips tagging.
+
+    Returns:
+        The same ``params`` mapping, for call-site brevity.
+    """
+    headers = _attribution_headers(component=component) if component else {}
+    if headers:
+        existing = params.get("extra_headers") or {}
+        params["extra_headers"] = {**existing, **headers}  # type: ignore[dict-item]
+    return params
+
+
 def chat_completion(
     client: object,
+    *,
+    component: str = "",
     **params: object,
 ) -> ChatCompletionResult:
     """Non-streaming chat completion; returns text, finish reason and usage.
@@ -921,16 +962,19 @@ def chat_completion(
 
     Args:
         client: A client from :func:`get_openai_client`.
+        component: Producer label used to tag the call for the gateway.
         **params: ``chat.completions.create`` parameters.
 
     Returns:
         The flattened :class:`ChatCompletionResult` for the first choice.
     """
-    return _chat_completion_result(client.chat.completions.create(**params))  # type: ignore[union-attr]
+    return _chat_completion_result(client.chat.completions.create(**_tag_request(params, component)))  # type: ignore[union-attr]
 
 
 async def achat_completion(
     client: object,
+    *,
+    component: str = "",
     **params: object,
 ) -> ChatCompletionResult:
     """Async non-streaming chat completion; returns text, finish reason and usage.
@@ -940,12 +984,13 @@ async def achat_completion(
 
     Args:
         client: A client from :func:`get_async_openai_client`.
+        component: Producer label used to tag the call for the gateway.
         **params: ``chat.completions.create`` parameters.
 
     Returns:
         The flattened :class:`ChatCompletionResult` for the first choice.
     """
-    return _chat_completion_result(await client.chat.completions.create(**params))  # type: ignore[union-attr]
+    return _chat_completion_result(await client.chat.completions.create(**_tag_request(params, component)))  # type: ignore[union-attr]
 
 
 def _sdk_field(obj: object, key: str) -> object:
@@ -1066,6 +1111,22 @@ class AnthropicMessageResult:
     usage: object | None
 
 
+def _attribution_tag_kwargs(component: str) -> dict[str, object]:
+    """Build the ``post`` keyword carrying the attribution header, if any.
+
+    The keyword is omitted rather than passed as ``None`` so an unconfigured
+    deployment calls the transport with exactly the arguments it always did.
+
+    Args:
+        component: Producer label for the call; ``""`` yields no keyword.
+
+    Returns:
+        ``{"headers": {...}}``, or ``{}`` when there is nothing to tag with.
+    """
+    headers = _attribution_headers(component=component) if component else {}
+    return {"headers": headers} if headers else {}
+
+
 def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
     """Check one Messages response for failure, then flatten it.
 
@@ -1094,6 +1155,8 @@ def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
 
 def anthropic_messages(
     client: object,
+    *,
+    component: str = "",
     **params: object,
 ) -> AnthropicMessageResult:
     """POST one Anthropic Messages request; returns text, stop_reason and usage.
@@ -1101,6 +1164,9 @@ def anthropic_messages(
     Args:
         client: A client from :func:`get_anthropic_client`, which carries the
             base URL and auth headers.
+        component: Producer label used to tag the call for the gateway. This
+            transport sends ``params`` as the request body, so the tag travels
+            as a header rather than as a parameter.
         **params: The Messages request body — ``model``, ``messages``,
             ``max_tokens``, and ``system`` when there is a system prompt.
 
@@ -1112,23 +1178,28 @@ def anthropic_messages(
             from the client propagate untouched so each caller can tag them with
             its own role context.
     """
-    return _anthropic_message_result(client.post(_ANTHROPIC_MESSAGES_PATH, json=params))  # type: ignore[union-attr]
+    tag = _attribution_tag_kwargs(component)
+    return _anthropic_message_result(client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag))  # type: ignore[union-attr]
 
 
 async def aanthropic_messages(
     client: object,
+    *,
+    component: str = "",
     **params: object,
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_messages`; see it for the full contract.
 
     Args:
         client: A client from :func:`get_async_anthropic_client`.
+        component: Producer label used to tag the call for the gateway.
         **params: The Messages request body.
 
     Returns:
         The flattened :class:`AnthropicMessageResult`.
     """
-    resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params)  # type: ignore[union-attr]
+    tag = _attribution_tag_kwargs(component)
+    resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
     return _anthropic_message_result(resp)
 
 
@@ -1237,6 +1308,7 @@ def anthropic_completion(
     env: Mapping[str, str] | None = None,
     timeout: object | None = None,
     timeout_s: float | None = None,
+    component: str = "",
 ) -> AnthropicMessageResult:
     """Issue one single-shot Anthropic completion over whichever transport works.
 
@@ -1263,6 +1335,8 @@ def anthropic_completion(
         timeout: HTTP-path transport timeout; build one with
             :func:`build_http_timeout`.
         timeout_s: SDK-path wall-clock budget in seconds, CLI startup included.
+        component: Producer label used to tag the call for the gateway. Applies
+            to the HTTP path only; the SDK path tags via the child environment.
 
     Returns:
         The flattened :class:`AnthropicMessageResult`.
@@ -1287,6 +1361,7 @@ def anthropic_completion(
     with http_client:  # type: ignore[attr-defined]
         return anthropic_messages(
             http_client,
+            component=component,
             **_anthropic_http_params(
                 model=model,
                 messages=messages,
@@ -1307,6 +1382,7 @@ async def aanthropic_completion(
     env: Mapping[str, str] | None = None,
     timeout: object | None = None,
     timeout_s: float | None = None,
+    component: str = "",
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_completion`; see it for the full contract.
 
@@ -1321,6 +1397,8 @@ async def aanthropic_completion(
         env: Env mapping to read instead of ``os.environ``.
         timeout: HTTP-path transport timeout.
         timeout_s: SDK-path wall-clock budget in seconds.
+        component: Producer label used to tag the call for the gateway. Applies
+            to the HTTP path only; the SDK path tags via the child environment.
 
     Returns:
         The flattened :class:`AnthropicMessageResult`.
@@ -1345,6 +1423,7 @@ async def aanthropic_completion(
     async with http_client:  # type: ignore[attr-defined]
         return await aanthropic_messages(
             http_client,
+            component=component,
             **_anthropic_http_params(
                 model=model,
                 messages=messages,
@@ -1357,6 +1436,8 @@ async def aanthropic_completion(
 
 def stream_chat_completion_text(
     client: object,
+    *,
+    component: str = "",
     **params: object,
 ) -> "tuple[str, object | None]":
     """Streamed chat completion; returns ``(text, usage)``."""
@@ -1364,7 +1445,7 @@ def stream_chat_completion_text(
     params["stream_options"] = {"include_usage": True}
     parts: list[str] = []
     usage_obj: object | None = None
-    stream = client.chat.completions.create(**params)  # type: ignore[union-attr]
+    stream = client.chat.completions.create(**_tag_request(params, component))  # type: ignore[union-attr]
     for chunk in stream:
         if getattr(chunk, "usage", None) is not None:
             usage_obj = chunk.usage
@@ -1377,6 +1458,8 @@ def stream_chat_completion_text(
 
 async def astream_chat_completion_text(
     client: object,
+    *,
+    component: str = "",
     **params: object,
 ) -> "tuple[str, object | None]":
     """Async streamed chat completion; returns ``(text, usage)``."""
@@ -1384,7 +1467,7 @@ async def astream_chat_completion_text(
     params["stream_options"] = {"include_usage": True}
     parts: list[str] = []
     usage_obj: object | None = None
-    stream = await client.chat.completions.create(**params)  # type: ignore[union-attr]
+    stream = await client.chat.completions.create(**_tag_request(params, component))  # type: ignore[union-attr]
     async for chunk in stream:
         if getattr(chunk, "usage", None) is not None:
             usage_obj = chunk.usage

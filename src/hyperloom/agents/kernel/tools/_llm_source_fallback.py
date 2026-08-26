@@ -372,6 +372,7 @@ def _complete_openai(prompt: str, model: str, timeout_sec: float) -> str:
 
     return llm_config.chat_completion(
         llm_config.get_openai_client(),
+        component="kernel_agent",
         model=model,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -394,7 +395,7 @@ def _complete_claude_sdk(prompt: str, model: str, timeout_sec: float) -> str:
     from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
     from hyperloom.common.llm_config import claude_sdk_env_options  # noqa: PLC0415
 
-    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model))
+    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model, component="kernel_agent"))
     kwargs.update(
         {
             "model": model,

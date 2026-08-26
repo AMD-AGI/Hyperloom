@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
 
 # Name Codex records the gateway under in its own TOML config. Only stability
@@ -906,6 +907,7 @@ class CodexSession:
         base_url_env: str = "OPENAI_BASE_URL",
         codex_bin: str = "",
         env: dict[str, str] | None = None,
+        component: str = "",
     ) -> None:
         self.cwd = Path(cwd)
         self.model = model
@@ -916,6 +918,7 @@ class CodexSession:
         self.base_url_env = base_url_env
         self.codex_bin = codex_bin
         self.env = env
+        self.component = component
         self._stack: contextlib.AsyncExitStack | None = None
         self._sdk: Any | None = None
         self._sandbox: Any = None
@@ -950,6 +953,11 @@ class CodexSession:
         if self._stack is not None:
             return
         effective_env = _effective_env(self.env)
+        # Tag before provider resolution so the header is mapped into
+        # ``env_http_headers`` with the gateway's own. The session snapshots its
+        # environment here, so the tag reflects the phase Codex started in.
+        if self.component:
+            inject_attribution_env(effective_env, component=self.component)
         resolved_sandbox_mode = _resolve_codex_sandbox_mode(
             sandbox_mode=self.sandbox_mode,
             source=effective_env,
