@@ -27,6 +27,7 @@ from ..loop.coordinator import (
     _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC,
     _framework_config_levers_from_done,
 )
+from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_SOURCE_PATCH,
@@ -95,13 +96,18 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             queued, running = [], []
         for t in (*queued, *running):
-            if getattr(t, "kind", "") == "framework_agent":
+            # A candidate landing as ``integrate_patch`` with a candidate id.
+            if getattr(t, "kind", "") == "integrate_patch" and (getattr(t, "params", None) or {}).get(
+                "framework_agent_candidate_id"
+            ):
                 return
         # Serialize one candidate at a time: skip while a candidate proposal
         # awaits its (durable) Critic verdict, resolved on a later tick.
         try:
             if any(
-                getattr(p, "action_name", "") == "framework_agent" and not getattr(p, "decided", False)
+                getattr(p, "action_name", "") == "integrate_patch"
+                and not getattr(p, "decided", False)
+                and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
                 for p in self.state.pending_proposals.values()
             ):
                 return
@@ -311,17 +317,22 @@ class FrameworkPhase(PhaseHandler):
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
                     continue
-                action = getattr(p, "action_name", "")
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
                 payload = getattr(p, "payload", None) or {}
-                if action == "framework_agent":
-                    if _cand_pins_pump(str(payload.get("framework_agent_candidate_id") or "")):
-                        return True
-                elif action == "integrate_patch":
-                    iparams = payload.get("params") or {}
-                    if not iparams.get("framework_agent_authoring"):
-                        continue
-                    if _cand_pins_pump(str(iparams.get("framework_agent_candidate_id") or "")):
-                        return True
+                # Both the candidate pre-screen and the authored patch are
+                # ``integrate_patch`` proposals now, so the candidate marker --
+                # not the action name -- says which candidate is pinned. The
+                # pre-screen carries it at the top level, the authored patch
+                # under ``params``.
+                iparams = payload.get("params") or {}
+                cand_id = str(
+                    payload.get("framework_agent_candidate_id") or iparams.get("framework_agent_candidate_id") or ""
+                )
+                if not cand_id and not iparams.get("framework_agent_authoring"):
+                    continue
+                if _cand_pins_pump(cand_id):
+                    return True
         except Exception:  # noqa: BLE001 — defensive
             pass
         return False
@@ -2432,11 +2443,13 @@ class FrameworkPhase(PhaseHandler):
         return True
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework_agent`` task for ``candidate``.
+        """Enqueue an ``integrate_patch`` task that lands ``candidate``'s diff.
 
         Builds the task params (candidate, batch id, baseline throughput, KEEP
-        threshold, framework) and creates an idempotent ``framework_agent`` task
-        whose lanes and lease TTL come from the action catalogue. On enqueue failure,
+        threshold, framework, and the ownership markers the authored-outcome
+        bridge keys on) and creates an idempotent ``integrate_patch`` task with
+        ``patch_source=upstream_pr``, whose lanes and lease TTL come from the
+        action catalogue. On enqueue failure,
         records an ``enqueue_failed`` progress row so the pump skips the
         candidate next tick instead of spinning.
 
@@ -2445,11 +2458,21 @@ class FrameworkPhase(PhaseHandler):
                 and benchmark.
         """
         state = self.shared_state
+        cand_id = self._framework_candidate_key(candidate)
         params = {
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
-            # This lane fetches and applies an upstream diff directly.
+            # One action lands every patch; this says where the diff comes from.
+            "patch_source": PATCH_SOURCE_UPSTREAM_PR,
             "lever_kind": LEVER_UPSTREAM_PR,
+            # The authored-outcome bridge, the candidate-processed dedup, the
+            # batch max-gain roll-up and phase attribution all key on these two
+            # markers. Without them a KEEP lands with no progress row, the
+            # plateau judge never advances, and the gain reports unattributed.
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": cand_id,
+            "framework_batch_id": str(candidate.get("batch_id") or ""),
+            "source_phase": "FRAMEWORK_AGENT",
             "base_tput": resolve_grading_anchor_tput(state),
             # Same decaying bar the explore and integrate_patch dispatch paths inject.
             "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
@@ -2461,18 +2484,17 @@ class FrameworkPhase(PhaseHandler):
             # materializes RUN_EVAL=true and would override the session's choice.
             "disable_run_eval": bool(getattr(state, "eval_disabled", False)),
         }
-        cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
-        lanes, ttl = self._registry_lanes_ttl("framework_agent")
+        lanes, ttl = self._registry_lanes_ttl("integrate_patch")
         try:
             # A framework candidate rebuilds and benchmarks, so it cannot share
             # the GPU. Enqueueing without lanes would run it unserialised
             # against every other task; the handler below turns this into a
             # warning plus a progress row.
             if not lanes:
-                raise RuntimeError("framework_agent resolved to no lanes; the task would run without GPU exclusivity.")
+                raise RuntimeError("integrate_patch resolved to no lanes; the task would run without GPU exclusivity.")
             await self.tasks.create_or_return_existing(
-                kind="framework_agent",
+                kind="integrate_patch",
                 params=params,
                 idempotency_key=idem,
                 requires_lanes=lanes,
@@ -2569,7 +2591,9 @@ class FrameworkPhase(PhaseHandler):
         # Dedup: a candidate is already awaiting its pre-screen verdict.
         for p in self.state.pending_proposals.values():
             try:
-                if getattr(p, "action_name", "") != "framework_agent":
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                if not (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id"):
                     continue
                 if getattr(p, "decided", False):
                     continue
@@ -2609,8 +2633,8 @@ class FrameworkPhase(PhaseHandler):
                 )
                 return
         propose_payload: dict[str, Any] = {
-            "action_name": "framework_agent",
-            "provenance": "framework_agent",
+            "action_name": "integrate_patch",
+            "provenance": LEVER_UPSTREAM_PR,
             "predicted_gain_pct": 0.0,
             "candidate": dict(candidate),
             "batch_id": batch_id,
@@ -2630,7 +2654,7 @@ class FrameworkPhase(PhaseHandler):
         self.state.pending_proposals[msg.msg_id] = PendingProposal(
             proposal_msg_id=msg.msg_id,
             from_agent="coordinator",
-            action_name="framework_agent",
+            action_name="integrate_patch",
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
@@ -2879,7 +2903,7 @@ class FrameworkPhase(PhaseHandler):
         candidate: dict[str, Any] = {}
         audit: dict[str, Any] = {}
         old_sid = ""
-        if action_name == "framework_agent":
+        if action_name == "integrate_patch" and payload.get("framework_agent_candidate_id"):
             candidate = dict(payload.get("candidate") or {})
             raw_audit = payload.get("audit")
             audit = raw_audit if isinstance(raw_audit, dict) else {}

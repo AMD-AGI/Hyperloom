@@ -5,7 +5,7 @@
 subcommands.
 
 Wraps ``fa phase-discover`` (returns a batch of candidate PRs; the Critic gate
-+ ``FrameworkAgentExecutor`` handle the rest) and ``fa phase-audit`` (returns
++ ``integrate_patch`` handle the rest) and ``fa phase-audit`` (returns
 the semantic-audit verdict for one candidate). Both are invoked via
 ``asyncio.to_thread`` so the reactor never blocks; failures degrade to empty /
 ``RuntimeError`` that the pump absorbs.

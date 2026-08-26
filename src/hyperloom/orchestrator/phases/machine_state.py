@@ -72,8 +72,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
     PHASE_FRAMEWORK_AGENT: frozenset(
         {
-            # Coordinator-internal; integrate_patch is the Critic-gated consume side.
-            "framework_agent",
+            # ``integrate_patch`` lands every patch source, upstream PRs included.
             "integrate_patch",
             "specialist",
             "roofline",

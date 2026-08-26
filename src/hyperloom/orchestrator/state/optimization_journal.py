@@ -41,7 +41,7 @@ OUTCOME_SKIP: str = "skipped"
 # Task kinds whose result carries an authoritative per-status verdict the
 # journal outcome must follow rather than the coarse dispatcher ``promotable``
 # flag (a ``reverted`` patch is promotable yet was rolled back).
-_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "framework_agent"})
+_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch"})
 
 # Task kinds whose result can legitimately declare ``was_skipped``. Scoped so
 # reusing that key elsewhere cannot silently demote a kept patch.

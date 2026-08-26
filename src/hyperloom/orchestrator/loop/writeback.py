@@ -878,7 +878,7 @@ class WritebackCollaborator:
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
-        if task.kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+        if task.kind in {"conc_sweep", "replay_warm_recipe", "integrate_patch"}:
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -962,10 +962,10 @@ class WritebackCollaborator:
                 },
             )
             self.shared_state.record_conc_sweep(result_payload)
-        # A framework_agent task that settles failed/empty never reaches the
-        # promote branch that writes the terminal progress row; stamp
+        # An upstream-PR candidate task that settles failed/empty never reaches
+        # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
-        if task.kind == "framework_agent":
+        if task.kind == "integrate_patch" and (task.params or {}).get("framework_agent_candidate_id"):
             cand = (task.params or {}).get("candidate")
             cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
             if cand_id:
@@ -2897,7 +2897,7 @@ class WritebackCollaborator:
         # only reached further down this call, so mirroring it here published
         # every replay as discarded -- including the ones that went on to be
         # pushed onto the stack.
-        if task_kind in {"framework_agent", "conc_sweep", "integrate_patch"}:
+        if task_kind in {"conc_sweep", "integrate_patch"}:
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2917,7 +2917,7 @@ class WritebackCollaborator:
                     result=v4_result,
                     extras={
                         "candidate_id": self._framework_candidate_key(result.get("candidate"))
-                        if task_kind == "framework_agent" and isinstance(result.get("candidate"), dict)
+                        if isinstance(result.get("candidate"), dict)
                         else ""
                     },
                     phase=str(getattr(self.shared_state, "phase", "") or ""),
@@ -2955,7 +2955,6 @@ class WritebackCollaborator:
         "roofline": "_promote_roofline",
         "explore": "_promote_explore",
         "integrate_patch": "_promote_integrate_patch",
-        "framework_agent": "_promote_framework_agent",
         "sweep": "_promote_sweep",
         "conc_sweep": "_promote_conc_sweep",
     }
@@ -4176,124 +4175,6 @@ class WritebackCollaborator:
                     task=task,
                     include_patches=True,
                 )
-        outcome.changed = changed
-        outcome.audit_decision = audit_decision
-        outcome.audit_extras = audit_extras
-
-    async def _promote_framework_agent(
-        self,
-        result: dict,
-        task: "Task | None",
-        outcome: _PromoteOutcome,
-    ) -> None:
-        """Promote a framework_agent candidate: progress row, batch max-gain stat, KEEP lift."""
-        changed = False
-        stack_len_before = len(self.shared_state.optimization_stack or [])
-        audit_decision: str | None = None
-        audit_extras: dict[str, Any] = {}
-        # FRAMEWORK per-candidate result: append a progress row, update the batch
-        # max-gain stat, and on KEEP lift to current_best + validated gain + watermark.
-        status = str(result.get("status") or "")
-        candidate = result.get("candidate") or {}
-        cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
-        # Silent apply/bench failure: recover the candidate key from task
-        # params and coerce the status so the row is a real terminal verdict
-        # the pump can dedup on, not a blank row keyed on "".
-        if not cand_id and task is not None:
-            task_cand = (getattr(task, "params", None) or {}).get("candidate")
-            cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
-        if not status:
-            status = "no_result_failed"
-        batch_id = str(
-            result.get("batch_id")
-            or candidate.get("batch_id")
-            or ((getattr(task, "params", None) or {}).get("batch_id") if task is not None else "")
-            or ""
-        )
-        delta_pct = result.get("delta_pct")
-        new_tput = result.get("output_throughput")
-        kept_flag = status == "kept"
-        progress_entry = {
-            "candidate_id": cand_id,
-            "pr_url": str(candidate.get("pr_url") or ""),
-            "status": status,
-            "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-            "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-            "gain_pct": float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0,
-            "kept": kept_flag,
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-        }
-        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-            self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        # Update batch max-gain rolling stat (for the plateau judge).
-        batches = getattr(self.shared_state, "framework_agent_batches", None) or []
-        if isinstance(batches, list) and batches:
-            for entry in reversed(batches):
-                if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
-                    prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                    gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-                    if gain > prev:
-                        entry["max_gain_pct_observed_in_batch"] = gain
-                    break
-        changed = True
-        lifted = False
-        if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
-            if not cand_id:
-                # A falsy key skips the stack append but still lifts current_best,
-                # so the win counts without leaving a step anything can reconcile,
-                # dedupe or replay.
-                log.warning(
-                    "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
-                    "empty, and task params had none either). current_best still advances, but "
-                    "no optimization_stack entry records how. task=%s",
-                    getattr(task, "task_id", "") if task is not None else "",
-                )
-            lift = {
-                # The canonical candidate key, unadorned: it becomes the stack
-                # entry's variant_name, which resume reconciliation matches
-                # against the KEEP recorded on the event log.
-                "name": cand_id,
-                "task_id": getattr(task, "task_id", "") if task is not None else "",
-                "candidate_extra_server_args": "",
-                "extra_envs": {},
-                "workspace": result.get("workspace"),
-                # Direct framework candidates are owned by FRAMEWORK_AGENT even
-                # if writeback runs after the state machine has advanced.
-                "source_phase": "FRAMEWORK_AGENT",
-                "provenance": "framework_agent",
-            }
-            lifted = self._lift_to_current_best(_FRAMEWORK_STACK_ACTION, float(new_tput), lift)
-            if lifted and self.shared_state.baseline_tput > 0:
-                self._update_cumulative_gain_validated(new_tput)
-                await self._maybe_enqueue_watermark_roofline(
-                    reason="framework_keep_watermark",
-                )
-        if lifted:
-            audit_decision = "promoted"
-        elif kept_flag:
-            audit_decision = "no_promote"
-            result[PROMOTION_REFUSED_KEY] = True
-        else:
-            audit_decision = "discarded"
-        audit_extras = {
-            "candidate_id": cand_id,
-            "batch_id": batch_id,
-            "status": status,
-            "delta_pct": delta_pct,
-            "output_throughput": new_tput,
-            "kept": kept_flag,
-        }
-        if lifted and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            self._enqueue_agent_keep_outbox(
-                owner="FRAMEWORK_AGENT",
-                stack_index=len(self.shared_state.optimization_stack) - 1,
-                result=result,
-                task=task,
-                include_patches=True,
-            )
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
