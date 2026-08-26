@@ -91,6 +91,11 @@ from ._grid_runner import (
     session_grid_bounds,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
+from ._latency_budget import (
+    describe_latency_budget,
+    latency_keep_block,
+    resolve_latency_budget_ms,
+)
 from ._ray_serving import maybe_serving_lease
 
 from ._server_lifecycle import (
@@ -820,6 +825,9 @@ class ExploreExecutor:
                 self.keep_threshold_pct,
             )
         )
+        latency_budget_ms = resolve_latency_budget_ms(params, ss)
+        if latency_budget_ms > 0:
+            log.info("explore: enforcing %s on KEEP", describe_latency_budget(latency_budget_ms))
 
         # per-variant overtime kill — anchored on baseline wall-clock.
         # Coordinator injects ``baseline_runtime_sec`` +
@@ -1571,12 +1579,34 @@ class ExploreExecutor:
                                 r.total_token_throughput,
                             )
                         gain = gain_pct(r.output_throughput, running_base_tput)
+                    # A throughput gain bought with latency is still a gain to
+                    # the gate above, so a session that named a latency budget
+                    # has it enforced here rather than only reported. The KEEP
+                    # choke point gates it again; checking here keeps an
+                    # over-budget variant from being folded onto the stack and
+                    # becoming the anchor the rest of the batch is graded
+                    # against, and gives the ledger a latency reason for the
+                    # REVERT instead of a promotion refused later with no round
+                    # to attribute it to.
+                    latency_blocked, latency_reason = latency_keep_block(
+                        r.e2el_mean_ms,
+                        budget_ms=latency_budget_ms,
+                    )
                     if not reason:
                         if r.status != "succeeded" or gain is None:
                             reason = (r.error or "")[-1200:] or "no_measurement"
                         elif gain < keep_threshold_pct:
                             outcome = "REVERT"
                             reason = "gain_below_threshold"
+                        elif latency_blocked:
+                            outcome = "REVERT"
+                            reason = latency_reason
+                            log.warning(
+                                "explore: variant %s REVERT (+%.2f%% throughput, %s)",
+                                gv.name,
+                                gain,
+                                latency_reason,
+                            )
                     if outcome == "FAILED" and not reason:
                         # Accuracy gate. Every variant is gated: the round already
                         # ran the eval, so the score is on disk and the flag
@@ -1733,6 +1763,10 @@ class ExploreExecutor:
                             "total_throughput": r.total_token_throughput,
                             "intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
+                            # Travels with the KEEP so the promotion gate reads
+                            # the latency of the round the throughput came from,
+                            # which is the round that graded the variant.
+                            "e2el_mean_ms": r.e2el_mean_ms,
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,

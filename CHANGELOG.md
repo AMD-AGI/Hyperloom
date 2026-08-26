@@ -585,6 +585,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   persisted in `explore_search.tested`, `accepted`, `rejected`, and
   `name_index` inside `state.json` are invalidated.  On the next resume the
   session will re-bench its full explored history.
+- **`--max-latency-ms`: a latency constraint on every KEEP.** The optimizer
+  maximized `output_throughput` and nothing else; latency was measured,
+  reported and fed to the prompts, but no latency number could block a
+  promotion. That is survivable for a lever that raises throughput without
+  touching per-request latency, and unsafe for any lever that raises throughput
+  *by* making each stream slower — against a throughput-only gate, such a lever
+  does not merely tolerate a latency regression, it selects for the largest one
+  available.<br/>
+  The flag names a ceiling on mean end-to-end latency in milliseconds. It is a
+  constraint rather than a target, so it sits outside the `--target-*`
+  mutually-exclusive group and combines with them. Enforcement is at
+  `_lift_to_current_best`, the single choke point that writes `current_best`, so
+  it holds for explore, kernel, framework, specialist and integrate winners
+  alike rather than only for the lane that happened to be wired first. Explore
+  also applies it a round earlier, which spares an over-budget variant a
+  stack-rebench it cannot survive. Where a rebench supersedes the decision
+  round, the gate grades the rebench's latency, because that is the measurement
+  the headline throughput comes from.<br/>
+  **Off by default**, which leaves KEEP behaviour exactly as it was. When set,
+  the gate **fails closed**: a candidate that reported no end-to-end latency is
+  refused, since an unmeasured constraint is not a satisfied one. Operator note:
+  this makes end-to-end latency effectively mandatory for promotion under a
+  budget — a lane that never times its candidates will not promote one. Refused
+  winners are recorded in `latency_refusals` and listed in the report, so a
+  constrained session that ends near its baseline can be told apart from one
+  that simply found no headroom. A baseline already over budget warns at
+  promotion time rather than failing, since it is the reference the run is
+  measured against, but it does mean nothing will be kept until a candidate
+  comes in under the ceiling.
+
+## [v1.0.0] - 2026-08-26
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
+for the user-facing summary.
 
 ### Removed
 

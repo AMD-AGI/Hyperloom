@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import shlex
 import sys
@@ -68,6 +69,7 @@ from .bootstrap import (
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
+from hyperloom.orchestrator.actions.executors._latency_budget import LATENCY_BUDGET_ENV
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -1820,6 +1822,58 @@ def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
         args.streams_per_partition = int(streams) if streams else None
 
 
+def _export_latency_budget(max_latency_ms: float | None) -> float:
+    """Validate ``--max-latency-ms`` and project it into env.
+
+    Validated here, at launch, rather than where the gate reads it: a budget
+    that cannot be parsed should be a usage error before the session starts, not
+    a constraint that silently evaluates to "off" three hours in. An empty input
+    clears the variable so a second session in the same shell cannot inherit a
+    budget the operator did not ask for this time.
+
+    Args:
+        max_latency_ms: The resolved flag value, if any.
+
+    Returns:
+        The canonical budget in ms, ``0.0`` when the gate is off.
+    """
+    budget = float(max_latency_ms or 0.0)
+    if budget and not math.isfinite(budget):
+        print("ERROR: --max-latency-ms must be a finite number", file=sys.stderr)
+        sys.exit(2)
+    if budget < 0:
+        print(f"ERROR: --max-latency-ms must be positive, got {budget:g}", file=sys.stderr)
+        sys.exit(2)
+    if budget > 0:
+        os.environ[LATENCY_BUDGET_ENV] = repr(budget)
+    else:
+        os.environ.pop(LATENCY_BUDGET_ENV, None)
+    return budget
+
+
+def _restore_latency_budget_from_state(args: Any, state: SharedState) -> None:
+    """Fill the budget from env or archive when this resume omitted the flag.
+
+    Priority is CLI flag > already-exported env > archived ``SharedState``, the
+    same chain :func:`_restore_operator_supplied_paths_from_state` applies to the
+    custom-workload paths. The resolved value is written back onto ``args`` so
+    :func:`_export_latency_budget` stays the only writer of the env it owns, and
+    so a restored budget is validated rather than trusted.
+
+    The archive tier is what lets a resume reproduce the session's measurement
+    contract: a budget is part of *which* candidates were admissible, so a
+    resume that silently dropped it would start keeping configurations the
+    original session had refused.
+
+    Args:
+        args: Parsed CLI namespace, updated in place.
+        state: Resumed session state.
+    """
+    if not (getattr(args, "max_latency_ms", None) or 0.0):
+        env_budget = os.environ.get(LATENCY_BUDGET_ENV, "").strip()
+        args.max_latency_ms = float(env_budget or state.latency_budget_ms or 0.0)
+
+
 # Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
 # Anything else (baseline / preflight failures, crashes, enablement stalls) exits
 # non-zero so CI surfaces genuine problems.
@@ -1979,7 +2033,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # the point where they do. Exporting here as well made a resume validate
     # twice -- the first time against an unresolved model it could only warn
     # about.
-
+    _export_latency_budget(getattr(args, "max_latency_ms", None))
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
@@ -2248,6 +2302,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         if state.compute_partition.get("mode"):
             print(f"  re-exported partition shape: {state.compute_partition['mode']}")
+        # The budget is part of the measurement contract, so it resumes on the
+        # same restore / apply / persist path as the custom-workload paths above.
+        _restore_latency_budget_from_state(args, state)
+        state.latency_budget_ms = _export_latency_budget(getattr(args, "max_latency_ms", None))
+        if state.latency_budget_ms:
+            print(f"  re-exported max_latency_ms: {state.latency_budget_ms:g}")
         if state.framework_repo_path:
             print(f"  re-exported FRAMEWORK_REPO_PATH: {state.framework_repo_path}")
         if state.bypass_scripts_dir:

@@ -606,6 +606,11 @@ def _build_summary_dict(
         # The card's partition shape these numbers were measured in. A property
         # of the session, not a result of it.
         "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
+        # The session's latency constraint and what it cost. Both are needed to
+        # read the result: the budget alone cannot distinguish a run that found
+        # no headroom from one whose headroom the SLA refused to buy.
+        "latency_budget_ms": float(getattr(state, "latency_budget_ms", 0.0) or 0.0),
+        "latency_refusals": list(getattr(state, "latency_refusals", None) or []),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
@@ -763,6 +768,7 @@ def _format_md(summary: dict[str, Any]) -> str:
 
     lines.extend(_format_degraded_mode_section(summary))
     lines.extend(_format_compute_partition_section(summary))
+    lines.extend(_format_latency_budget_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
@@ -873,6 +879,53 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
         "is worse here than on the whole card by construction."
     )
     lines.append("")
+    return lines
+
+
+def _format_latency_budget_section(summary: dict[str, Any]) -> list[str]:
+    """Render the session's latency constraint and what it refused.
+
+    Silent when no budget was set, because the throughput-only KEEP is still the
+    default and a section saying so on every report would be noise.
+
+    The refusals are the point of the section. A constrained session that ends
+    near its baseline looks identical to one that found no headroom, and the two
+    call for opposite responses: the first means the SLA is the binding limit,
+    the second means the configuration space is exhausted. Listing what the
+    budget turned down is the only way the report can tell them apart.
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines, or ``[]`` when the session ran unconstrained.
+    """
+    budget = float(summary.get("latency_budget_ms") or 0.0)
+    if budget <= 0:
+        return []
+    refusals = [r for r in (summary.get("latency_refusals") or []) if isinstance(r, dict)]
+    lines = ["## Latency budget", ""]
+    lines.append(f"- budget            : `{budget:.1f}` ms mean end-to-end")
+    lines.append(f"- refused winners   : {len(refusals)}")
+    cb = summary.get("current_best") or {}
+    kept_e2el = cb.get("e2el_mean_ms") if isinstance(cb, dict) else None
+    if isinstance(kept_e2el, (int, float)):
+        lines.append(f"- best config       : `{float(kept_e2el):.1f}` ms, within budget")
+    lines.append("")
+    if refusals:
+        lines.append(
+            "These configurations measured faster in throughput but were not kept, "
+            "because the budget is a constraint on the result rather than a "
+            "preference. Raising it would make them available."
+        )
+        lines.append("")
+        for ref in refusals:
+            name = str(ref.get("variant_name") or "?")
+            action = str(ref.get("action") or "?")
+            observed = ref.get("e2el_mean_ms")
+            shown = f"{float(observed):.1f} ms" if isinstance(observed, (int, float)) else "not measured"
+            lines.append(f"- `{name}` ({action}): {shown}")
+        lines.append("")
     return lines
 
 

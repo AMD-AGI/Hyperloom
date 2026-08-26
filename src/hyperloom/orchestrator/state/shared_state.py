@@ -802,6 +802,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # measurement contract, not a tuning knob -- the same configuration in SPX
     # and in CPX is two different experiments.
     compute_partition: dict[str, Any] = field(default_factory=dict)
+    # ``--max-latency-ms``: constraint, not target. 0 disables, which restores
+    # the throughput-only KEEP the optimizer had before.
+    latency_budget_ms: float = 0.0
+    # Winners the budget refused, kept so the report can say what the constraint
+    # cost. Without it a session under a budget looks like a session that simply
+    # found nothing, and the operator cannot tell "no headroom" from "headroom
+    # the SLA would not buy".
+    latency_refusals: list[dict[str, Any]] = field(default_factory=list)
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
