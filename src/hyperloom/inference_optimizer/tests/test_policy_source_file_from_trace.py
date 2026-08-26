@@ -151,3 +151,62 @@ def test_sentinel_pass_through_is_logged(tmp_path, monkeypatch, caplog):
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.policy.gate"):
         _gate(tmp_path).validate_intent("orchestration", _dispatch_intent("Not found"))
     assert any("absent-value sentinel" in record.message and "Not found" in record.message for record in caplog.records)
+
+
+# A pip-installed framework has no checkout, so resolve_session_framework_root()
+# is empty and the join above never fires -- yet the frame's file really does sit
+# under an allowlist root. The package name is synthetic so a host that ships the
+# real package cannot make these pass for the wrong reason.
+INSTALLED_FRAME = "hlfixture_aiter/ops/gemm_op_a8w8.py"
+
+
+def _installed_package_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Model a pip install: an allowlisted package root and no checkout to name."""
+    root = tmp_path / "site-packages"
+    (root / "hlfixture_aiter" / "ops").mkdir(parents=True)
+    (root / "hlfixture_aiter" / "ops" / "gemm_op_a8w8.py").write_text(
+        "def gemm_a8w8_blockscale():\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", str(root))
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    for var in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    return root
+
+
+def test_relative_frame_under_an_installed_package_root_is_accepted(tmp_path, monkeypatch):
+    """The bare relative form a roofline row records for a pip-installed framework."""
+    _installed_package_root(tmp_path, monkeypatch)
+    _gate(tmp_path).validate_intent("orchestration", _dispatch_intent(INSTALLED_FRAME))
+
+
+def test_annotated_frame_under_an_installed_package_root_is_accepted(tmp_path, monkeypatch):
+    """Same frame carrying the trace's ``(line): function`` annotation."""
+    _installed_package_root(tmp_path, monkeypatch)
+    _gate(tmp_path).validate_intent(
+        "orchestration",
+        _dispatch_intent(f"{INSTALLED_FRAME}(214): gemm_a8w8_blockscale"),
+    )
+
+
+def test_relative_frame_absent_from_every_installed_root_is_denied(tmp_path, monkeypatch):
+    """Joining against a root is not a licence to admit paths that do not exist."""
+    _installed_package_root(tmp_path, monkeypatch)
+    with pytest.raises(PolicyDenied) as exc:
+        _gate(tmp_path).validate_intent(
+            "orchestration",
+            _dispatch_intent("hlfixture_aiter/ops/no_such_file.py"),
+        )
+    assert exc.value.rule == "source_file_outside_trusted_scope"
+
+
+def test_relative_traversal_out_of_an_installed_root_is_denied(tmp_path, monkeypatch):
+    """Resolving against installed roots must not become an escape hatch either."""
+    _installed_package_root(tmp_path, monkeypatch)
+    with pytest.raises(PolicyDenied) as exc:
+        _gate(tmp_path).validate_intent(
+            "orchestration",
+            _dispatch_intent("hlfixture_aiter/../../../../etc/passwd"),
+        )
+    assert exc.value.rule == "source_file_outside_trusted_scope"

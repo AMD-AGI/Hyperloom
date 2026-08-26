@@ -31,6 +31,8 @@ HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
 HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
+# Installed name must outrank the vendor library in ldconfig's ordering.
+ROCM_PROFILER_HOTFIX_SUFFIX="${ROCM_PROFILER_HOTFIX_SUFFIX:--hotfix}"
 
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
 OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
@@ -75,6 +77,7 @@ REQUIRE_FRAMEWORKS=0
 SKIP_BASE_CHECK=0
 DRY_RUN=0
 CHECK_ONLY=0
+VERIFY_HOTFIX_ONLY=0
 ASSUME_YES=0
 USER_DATA_PATH_ARG=""
 DEPS_ROOT_ARG=""
@@ -105,6 +108,8 @@ Options:
   --skip-base-check      Skip Phase 1 base preflight
   --check-only           Verify only; do not clone/install/mutate
   --dry-run              Print planned actions without cloning/installing/writing
+  --verify-hotfix        Re-check the ROCm profiler hotfix only; exits non-zero
+                         when the loader or torch/lib no longer resolves to it
   --yes, -y              Non-interactive; fail fast on missing credentials
   -h, --help             Show this help
 
@@ -119,7 +124,7 @@ Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
-SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
+SGLANG_ROCM_EXTRA, SGLANG_BUILD_RUST_EXTS, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
 VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
@@ -159,6 +164,7 @@ while [ "$#" -gt 0 ]; do
     --skip-base-check)  SKIP_BASE_CHECK=1 ;;
     --check-only)       CHECK_ONLY=1 ;;
     --dry-run)          DRY_RUN=1 ;;
+    --verify-hotfix)    VERIFY_HOTFIX_ONLY=1 ;;
     --yes|-y)           ASSUME_YES=1 ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "[install-baremetal] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
@@ -226,7 +232,6 @@ resolve_installed_framework() {
   done
   return 0
 }
-
 
 python_venv_root() {
   local py="$1" bin_dir venv_dir
@@ -547,6 +552,9 @@ install_sglang_from_source() {
   fi
   constraint_file="$(mktemp)"
   write_rocm_torch_constraints "$py" "$constraint_file"
+  # ROCm editable installs only need multimodal Rust crates for VLM serving.
+  export SGLANG_BUILD_RUST_EXTS="${SGLANG_BUILD_RUST_EXTS:-none}"
+  log "SGLANG_BUILD_RUST_EXTS=${SGLANG_BUILD_RUST_EXTS}"
   "$py" -m pip install --constraint "$constraint_file" -e "${sglang_root}/python[srt_hip]"
   rm -f "$constraint_file"
 }
@@ -684,6 +692,7 @@ PY
         log "would build in-tree ROCm kernel via setup_rocm.py after clone (sgl-kernel/ legacy or python/sglang/kernels/aot/ for v0.5.17+)"
       fi
       log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
+      log "would set SGLANG_BUILD_RUST_EXTS=${SGLANG_BUILD_RUST_EXTS:-none} (editable install; override to build multimodal Rust crates)"
     fi
     if [ -n "$AITER_REF" ]; then
       log "would clone/update ${AITER_REPO}@${AITER_REF} at ${aiter_root} and install it with current torch/triton constraints"
@@ -914,12 +923,6 @@ install_requested_framework() {
   esac
 }
 
-rocm_profiler_hotfix_applied() {
-  local target_dir="$1" hip_lib="$2" tracer_lib="$3"
-  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so" 2>/dev/null || true)")" = "$hip_lib" ] \
-    && [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so" 2>/dev/null || true)")" = "$tracer_lib" ]
-}
-
 rocm_profiler_hotfix_compatible() {
   local py hip
   py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
@@ -956,6 +959,11 @@ PY
       *" sglang "*) log "container run with sglang; ROCm profiler hotfix is eligible" ;;
       *) warn "container run without sglang (found: ${found}); skipping ROCm profiler hotfix" ; return 1 ;;
     esac
+  else
+    case " ${found} " in
+      *" sglang "*) ;;
+      *) warn "bare-metal run without sglang (found: ${found}); applying the hotfix anyway, unlike the container path" ;;
+    esac
   fi
 }
 
@@ -990,75 +998,197 @@ download_rocm_profiler_hotfix_libs() {
   printf '%s\n' "$tmp_dir"
 }
 
-backup_rocm_profiler_hotfix_targets() {
-  local target_dir="$1" backup_dir="$2" path real
-  install -d "$backup_dir"
+# The loader looks up the versioned SONAME, not the plain file name.
+_soname_of() {
+  local f="$1" s=""
+  [ -f "$f" ] || return 1
+  if command -v readelf >/dev/null 2>&1; then
+    s="$(readelf -d "$f" 2>/dev/null | sed -n 's/.*SONAME.*\[\(.*\)\].*/\1/p' | head -n 1)"
+  fi
+  if [ -z "$s" ] && command -v objdump >/dev/null 2>&1; then
+    s="$(objdump -p "$f" 2>/dev/null | awk '/SONAME/ {print $2; exit}')"
+  fi
+  [ -n "$s" ] || return 1
+  printf '%s\n' "$s"
+}
+
+# Base is the highest-versioned non-hotfix file, i.e. the vendor library. Reading
+# it from the soname link instead would rank against an already-installed hotfix.
+_hotfix_installed_name() {
+  local target_dir="$1" soname="$2" asset="$3" base tail
+  base="$(find "$target_dir" -maxdepth 1 -type f -name "${soname}.*" -printf '%f\n' 2>/dev/null \
+    | grep -v -- "$ROCM_PROFILER_HOTFIX_SUFFIX" | sort -V | tail -n 1)"
+  [ -n "$base" ] || return 1
+  tail="$(basename "$asset")"
+  printf '%s%s.%s\n' "$base" "$ROCM_PROFILER_HOTFIX_SUFFIX" "${tail#"${soname%%.so.*}.so."}"
+}
+
+install_rocm_profiler_hotfix_ranked() {
+  local source_dir="$1" target_dir="$2" hip_lib="$3" tracer_lib="$4"
+  local name soname installed unversioned
+
+  for name in "$hip_lib" "$tracer_lib"; do
+    soname="$(_soname_of "${source_dir}/${name}")" \
+      || { warn "cannot read SONAME of ${name}"; return 1; }
+    installed="$(_hotfix_installed_name "$target_dir" "$soname" "${source_dir}/${name}")" \
+      || { warn "cannot derive a ranked name for ${soname}"; return 1; }
+    log "installing ${name} as ${installed}"
+    install -m 0644 "${source_dir}/${name}" "${target_dir}/${installed}" || return 1
+    unversioned="${soname%%.so.*}.so"
+    ln -sfnT "$installed" "${target_dir}/${soname}" || return 1
+    ln -sfnT "$soname" "${target_dir}/${unversioned}" || return 1
+  done
+  command -v ldconfig >/dev/null 2>&1 && { ldconfig || return 1; }
+  return 0
+}
+
+rocm_profiler_hotfix_ranked_applied() {
+  local target_dir="$1" source_dir="$2" hip_lib="$3" tracer_lib="$4"
+  local name soname resolved expected
+  for name in "$hip_lib" "$tracer_lib"; do
+    soname="$(_soname_of "${source_dir}/${name}")" || return 1
+    expected="$(_hotfix_installed_name "$target_dir" "$soname" "${source_dir}/${name}")" || return 1
+    resolved="$(readlink -f "${target_dir}/${soname}" 2>/dev/null || true)"
+    [ "$(basename "$resolved")" = "$expected" ] || return 1
+    cmp -s "${source_dir}/${name}" "$resolved" || return 1
+  done
+}
+
+backup_rocm_profiler_hotfix_links() {
+  local target_dir="$1" backup_dir="$2" path
+  install -d "$backup_dir" || return 1
   for path in \
     "${target_dir}/libamdhip64.so" \
     "${target_dir}/libamdhip64.so.7" \
     "${target_dir}/libroctracer64.so" \
     "${target_dir}/libroctracer64.so.4"; do
     [ -e "$path" ] || [ -L "$path" ] || continue
-    cp -a "$path" "$backup_dir"/
-    real="$(readlink -f "$path" 2>/dev/null || true)"
-    if [ -n "$real" ] && [ -e "$real" ]; then
-      cp -a "$real" "$backup_dir"/
-    fi
+    cp -a "$path" "$backup_dir"/ || return 1
   done
 }
 
-install_rocm_profiler_hotfix_libs() {
-  local source_dir="$1" target_dir="$2" hip_lib="$3" tracer_lib="$4"
-  install -m 0644 "${source_dir}/${hip_lib}" "${target_dir}/${hip_lib}" || return 1
-  install -m 0644 "${source_dir}/${tracer_lib}" "${target_dir}/${tracer_lib}" || return 1
-  ln -sfnT "$hip_lib" "${target_dir}/libamdhip64.so.7" || return 1
-  ln -sfnT libamdhip64.so.7 "${target_dir}/libamdhip64.so" || return 1
-  ln -sfnT "$tracer_lib" "${target_dir}/libroctracer64.so.4" || return 1
-  ln -sfnT libroctracer64.so.4 "${target_dir}/libroctracer64.so" || return 1
-}
-
-rollback_rocm_profiler_hotfix_targets() {
-  local backup_dir="$1" target_dir="$2"
+rollback_rocm_profiler_hotfix_ranked() {
+  local backup_dir="$1" target_dir="$2" path
   [ -d "$backup_dir" ] || return 1
-  if compgen -G "${backup_dir}/libamdhip64.so*" >/dev/null; then
-    cp -a "${backup_dir}"/libamdhip64.so* "$target_dir"/ || return 1
-  fi
-  if compgen -G "${backup_dir}/libroctracer64.so*" >/dev/null; then
-    cp -a "${backup_dir}"/libroctracer64.so* "$target_dir"/ || return 1
-  fi
+  for path in "${target_dir}"/*"${ROCM_PROFILER_HOTFIX_SUFFIX}"*; do
+    [ -e "$path" ] && rm -f "$path"
+  done
+  cp -a "${backup_dir}"/. "$target_dir"/ || return 1
+  command -v ldconfig >/dev/null 2>&1 && { ldconfig || return 1; }
   return 0
 }
 
-verify_rocm_profiler_hotfix() {
-  local target_dir="$1" hip_lib="$2" tracer_lib="$3" py
-  log "verifying ROCm profiler hotfix links"
-  ls -l "${target_dir}/libamdhip64.so" "${target_dir}/libamdhip64.so.7" \
-        "${target_dir}/libroctracer64.so" "${target_dir}/libroctracer64.so.4" || return 1
-  [ "$(basename "$(readlink -f "${target_dir}/libamdhip64.so")")" = "$hip_lib" ] \
-    || { warn "libamdhip64.so does not point to ${hip_lib}"; return 1; }
-  [ "$(basename "$(readlink -f "${target_dir}/libroctracer64.so")")" = "$tracer_lib" ] \
-    || { warn "libroctracer64.so does not point to ${tracer_lib}"; return 1; }
+# Compares content, not paths: /opt/rocm is itself a symlink.
+verify_rocm_profiler_hotfix_links() {
+  local target_dir="$1" source_dir="$2" hip_lib="$3" tracer_lib="$4"
+  local name soname resolved py args=""
+
+  log "verifying ROCm profiler hotfix links in ${target_dir}"
+  for name in "$hip_lib" "$tracer_lib"; do
+    soname="$(_soname_of "${source_dir}/${name}")" || { warn "cannot read SONAME of ${name}"; return 1; }
+    resolved="$(readlink -f "${target_dir}/${soname}" 2>/dev/null || true)"
+    log "${soname} -> ${resolved:-<unresolved>}"
+    cmp -s "${source_dir}/${name}" "$resolved" \
+      || { warn "${soname} does not resolve to the hotfix build"; return 1; }
+    log "ldconfig: $(ldconfig -p 2>/dev/null | awk -v s="$soname" '$1 == s {print $NF; exit}')"
+    args="${args:+${args} }${soname}=${source_dir}/${name}"
+  done
 
   py="$(resolve_python)" || return 1
-  "$py" - "$target_dir" <<'PY'
+  # shellcheck disable=SC2086
+  "$py" - $args <<'PY'
 import ctypes
-import os
+import hashlib
+import pathlib
 import sys
 
-target_dir = sys.argv[1]
-for name in ("libamdhip64.so", "libroctracer64.so"):
-    path = os.path.join(target_dir, name)
-    print(f"{path} -> {os.path.realpath(path)}")
-    ctypes.CDLL(path)
-    print(f"loaded: {path}")
+wanted = dict(arg.split("=", 1) for arg in sys.argv[1:])
+digests = {
+    soname: hashlib.sha256(pathlib.Path(ref).read_bytes()).hexdigest()
+    for soname, ref in wanted.items()
+}
+for soname in wanted:
+    ctypes.CDLL(soname)
+    print(f"loaded by soname: {soname}")
 
-import torch
+stems = {soname.split(".so")[0]: soname for soname in wanted}
+mapped = {}
+with open("/proc/self/maps", encoding="utf-8") as fh:
+    for line in fh:
+        path = line.rstrip("\n").rsplit(" ", 1)[-1]
+        if not path.startswith("/"):
+            continue
+        base = path.rsplit("/", 1)[-1]
+        for stem, soname in stems.items():
+            if base.startswith(stem):
+                mapped.setdefault(soname, path)
 
-hip = getattr(torch.version, "hip", None)
-print(f"torch.version.hip={hip}")
-if not hip:
-    raise SystemExit("torch.version.hip is empty after ROCm profiler hotfix")
+failed = []
+for soname, path in mapped.items():
+    got = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+    ok = got == digests[soname]
+    print(f"{soname}: mapped {path} -> {'hotfix' if ok else 'NOT the hotfix'}")
+    if not ok:
+        failed.append(soname)
+missing = sorted(set(wanted) - set(mapped))
+if missing:
+    print("not mapped: " + ", ".join(missing))
+if failed:
+    raise SystemExit("the loader picked a non-hotfix library: " + ", ".join(failed))
 PY
+}
+
+# Confirms which profiler libs the framework interpreter actually mapped.
+verify_rocm_profiler_hotfix_loaded() {
+  local source_dir="$1" hip_lib="$2" tracer_lib="$3"
+  local default_py pairs py torch_dir rc=0
+
+  default_py="$(resolve_python)" || return 1
+  pairs="$(collect_framework_torch_lib_dirs "$default_py")"
+  [ -n "$pairs" ] || { log "no framework torch/lib to check"; return 0; }
+
+  while IFS="$(printf '\t')" read -r py torch_dir; do
+    log "checking mapped profiler libs for ${py}"
+    "$py" - "${source_dir}/${hip_lib}" "${source_dir}/${tracer_lib}" <<'PY' || rc=1
+import hashlib
+import pathlib
+import sys
+
+refs = [pathlib.Path(p) for p in sys.argv[1:]]
+expected = {}
+for ref in refs:
+    stem = ref.name.split(".so")[0]
+    expected[stem] = hashlib.sha256(ref.read_bytes()).hexdigest()
+
+import torch  # noqa: E402
+
+torch.zeros(1)
+mapped = {}
+with open("/proc/self/maps", encoding="utf-8") as fh:
+    for line in fh:
+        path = line.rstrip("\n").rsplit(" ", 1)[-1]
+        if not path.startswith("/"):
+            continue
+        name = path.rsplit("/", 1)[-1]
+        for stem in expected:
+            if name.startswith(stem):
+                mapped.setdefault(stem, path)
+
+failed = []
+for stem, want in expected.items():
+    path = mapped.get(stem)
+    if path is None:
+        print(f"{stem}: not mapped (framework may load it lazily)")
+        continue
+    got = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+    print(f"{stem}: {path} -> {'hotfix' if got == want else 'NOT the hotfix'}")
+    if got != want:
+        failed.append(stem)
+if failed:
+    raise SystemExit("mapped profiler libs are not the hotfix: " + ", ".join(failed))
+PY
+  done <<< "$pairs"
+  return "$rc"
 }
 
 resolve_torch_lib_dir() {
@@ -1079,6 +1209,7 @@ ROCM_PROFILER_HOTFIX_TORCH_LIBS="libamdhip64.so libroctracer64.so"
 ROCM_PROFILER_HOTFIX_SYNC_FRAMEWORKS="sglang vllm"
 ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR=".profiler_hotfix_backup"
 ROCM_PROFILER_HOTFIX_FINGERPRINT=".fingerprint"
+ROCM_PROFILER_HOTFIX_SONAME_MARKER=".hotfix_soname_links"
 
 _sha256_file() {
   local f="$1"
@@ -1225,52 +1356,123 @@ ensure_torch_lib_backup() {
 restore_torch_libs() {
   local backup_dir="$1" torch_lib_dir="$2" name
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    # What we installed is a symlink, and cp would write through it.
+    rm -f "${torch_lib_dir}/${name}" || return 1
     if [ -e "${backup_dir}/${name}" ]; then
       cp -a "${backup_dir}/${name}" "${torch_lib_dir}/${name}" || return 1
-    else
-      rm -f "${torch_lib_dir}/${name}" || return 1
     fi
   done
+}
+
+# torch/lib is outside every ldconfig search path, so aliases here survive apt.
+link_torch_soname_aliases() {
+  local torch_lib_dir="$1" src_dir="$2"
+  local backup_dir="${torch_lib_dir}/${ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR}"
+  local marker="${backup_dir}/${ROCM_PROFILER_HOTFIX_SONAME_MARKER}"
+  local name src soname target
+
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    src="$(readlink -f "${src_dir}/${name}" 2>/dev/null)" || src=""
+    [ -f "$src" ] || continue
+    soname="$(_soname_of "$src")" || continue
+    [ "$soname" = "$name" ] && continue
+    target="${torch_lib_dir}/${soname}"
+    install -d "$backup_dir" || return 1
+    # A real file here was shipped by torch; keep it before shadowing.
+    if [ -e "$target" ] && [ ! -L "$target" ] && [ ! -e "${backup_dir}/${soname}" ]; then
+      cp -a "$target" "${backup_dir}/${soname}" || return 1
+    fi
+    ln -sfnT "$name" "$target" || return 1
+    grep -qxF "$soname" "$marker" 2>/dev/null || printf '%s\n' "$soname" >> "$marker"
+    log "torch soname alias ${soname} -> ${name} (${torch_lib_dir})"
+  done
+}
+
+_torch_soname_aliases_ok() {
+  local torch_lib_dir="$1" src_dir="$2" name src soname
+  for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    src="$(readlink -f "${src_dir}/${name}" 2>/dev/null)" || src=""
+    [ -f "$src" ] || continue
+    soname="$(_soname_of "$src")" || continue
+    [ "$soname" = "$name" ] && continue
+    [ "$(readlink "${torch_lib_dir}/${soname}" 2>/dev/null || true)" = "$name" ] || return 1
+  done
+}
+
+restore_torch_soname_aliases() {
+  local backup_dir="$1" torch_lib_dir="$2"
+  local marker="${backup_dir}/${ROCM_PROFILER_HOTFIX_SONAME_MARKER}" soname
+  [ -f "$marker" ] || return 0
+  while read -r soname; do
+    [ -n "$soname" ] || continue
+    # The alias we installed is a symlink, and cp would write through it.
+    rm -f "${torch_lib_dir}/${soname}" || return 1
+    if [ -e "${backup_dir}/${soname}" ]; then
+      cp -a "${backup_dir}/${soname}" "${torch_lib_dir}/${soname}" || return 1
+    fi
+  done < "$marker"
+  rm -f "$marker"
 }
 
 sync_one_torch_lib() {
   local rocm_lib_dir="$1" py="$2" torch_lib_dir="$3"
   local backup_dir="${torch_lib_dir}/${ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR}"
-  local name src dst tmp mode pending=""
+  local name src dst pending=""
 
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
     src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
-    [ -f "$src" ] || { warn "${name} unresolved under ${rocm_lib_dir}"; return 1; }
-    cmp -s "$src" "${torch_lib_dir}/${name}" || pending="${pending:+${pending} }${name}"
+    if [ ! -f "$src" ]; then
+      if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+        log "${name} not installed under ${rocm_lib_dir} yet; nothing to sync in this mode"
+        return 0
+      fi
+      warn "${name} unresolved under ${rocm_lib_dir}"
+      return 1
+    fi
+    if [ ! -L "${torch_lib_dir}/${name}" ] \
+        || [ "$(readlink -f "${torch_lib_dir}/${name}" 2>/dev/null)" != "$src" ]; then
+      pending="${pending:+${pending} }${name}"
+    fi
   done
-  [ -n "$pending" ] || { log "torch profiler libs already in sync (${torch_lib_dir})"; return 0; }
+  if [ -z "$pending" ] && _torch_soname_aliases_ok "$torch_lib_dir" "$rocm_lib_dir"; then
+    log "torch profiler libs already in sync (${torch_lib_dir})"
+    return 0
+  fi
 
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    log "would sync ${pending} from ${rocm_lib_dir} into ${torch_lib_dir}"
+    log "would link ${pending:-<no file changes>} from ${rocm_lib_dir} into ${torch_lib_dir}"
+    log "would link versioned soname aliases in ${torch_lib_dir}"
     return 0
   fi
 
   ensure_torch_lib_backup "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir" \
     || { warn "cannot back up ${torch_lib_dir}"; return 1; }
 
-  log "syncing ${pending} into torch lib (${torch_lib_dir})"
+  [ -n "$pending" ] && log "linking ${pending} into torch lib (${torch_lib_dir})"
   for name in $pending; do
     src="$(readlink -f "${rocm_lib_dir}/${name}")"
     dst="${torch_lib_dir}/${name}"
-    tmp="${torch_lib_dir}/.${name}.hotfix-tmp.$$"
-    mode=0644
-    [ -e "$dst" ] && mode="$(stat -c '%a' "$dst")"
-    if ! cp -f "$src" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dst"; then
-      rm -f "$tmp"
-      warn "failed to write ${dst}"
+    # Link rather than copy: a byte-identical copy is a second inode, so glibc
+    # maps both it and the ROCm original and each gets its own HIP runtime.
+    if ! ln -sfnT "$src" "$dst"; then
+      warn "failed to link ${dst} -> ${src}"
       restore_torch_libs "$backup_dir" "$torch_lib_dir" \
         || die "cannot restore ${torch_lib_dir} from ${backup_dir}"
       return 1
     fi
   done
 
+  link_torch_soname_aliases "$torch_lib_dir" "$rocm_lib_dir" || {
+    warn "failed to link soname aliases in ${torch_lib_dir}"
+    restore_torch_soname_aliases "$backup_dir" "$torch_lib_dir" || true
+    restore_torch_libs "$backup_dir" "$torch_lib_dir" \
+      || die "cannot restore ${torch_lib_dir} from ${backup_dir}"
+    return 1
+  }
+
   if ! verify_torch_runtime "$py"; then
     warn "torch did not come up after the sync; restoring ${torch_lib_dir}"
+    restore_torch_soname_aliases "$backup_dir" "$torch_lib_dir" || true
     restore_torch_libs "$backup_dir" "$torch_lib_dir" \
       || die "cannot restore ${torch_lib_dir} from ${backup_dir}"
     for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
@@ -1285,7 +1487,7 @@ sync_one_torch_lib() {
   log "torch profiler libs synced into ${torch_lib_dir}"
 }
 
-# torch loads profiler libs from its bundled torch/lib (DT_RPATH=$ORIGIN).
+# torch searches its bundled torch/lib first, but only for the versioned soname.
 sync_rocm_profiler_libs_to_torch_lib() {
   local rocm_lib_dir="${1:-${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}}"
   local default_py pairs py dir rc=0
@@ -1321,6 +1523,8 @@ verify_rocm_profiler_torch_lib_sync() {
       [ -f "$src" ] || continue
       cmp -s "$src" "${dir}/${name}" || { warn "torch ${name} differs in ${dir}"; rc=1; }
     done
+    _torch_soname_aliases_ok "$dir" "$rocm_lib_dir" \
+      || { warn "versioned soname aliases missing in ${dir}"; rc=1; }
   done <<< "$pairs"
   return "$rc"
 }
@@ -1356,8 +1560,8 @@ apply_rocm_profiler_hotfix() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "would download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
-    log "would back up current ROCm libraries under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
-    log "would install hotfix libraries and update /opt/rocm libamdhip64/libroctracer64 symlinks"
+    log "would back up current ROCm profiler links under ${target_dir}/.profiler_hotfix_backup_<timestamp>"
+    log "would install the hotfix as <current version>${ROCM_PROFILER_HOTFIX_SUFFIX} and run ldconfig"
     sync_torch_profiler_libs "$target_dir" || true
     return 0
   fi
@@ -1366,20 +1570,25 @@ apply_rocm_profiler_hotfix() {
     || { warn "could not obtain ROCm profiler hotfix libraries; skipping"; return 0; }
   hip_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libamdhip64.so.*' | sort | tail -n 1)")"
   tracer_lib="$(basename "$(find "$extract_dir" -maxdepth 1 -type f -name 'libroctracer64.so.*' | sort | tail -n 1)")"
-  if rocm_profiler_hotfix_applied "$target_dir" "$hip_lib" "$tracer_lib"; then
+  if rocm_profiler_hotfix_ranked_applied "$target_dir" "$extract_dir" "$hip_lib" "$tracer_lib"; then
     log "ROCm profiler hotfix already applied (${hip_lib}, ${tracer_lib})"
-    verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib" || warn "existing ROCm profiler hotfix verification reported issues"
+    verify_rocm_profiler_hotfix_links "$target_dir" "$extract_dir" "$hip_lib" "$tracer_lib" \
+      || warn "existing ROCm profiler hotfix verification reported issues"
     sync_torch_profiler_libs "$target_dir" 1 || true
+    verify_rocm_profiler_hotfix_loaded "$extract_dir" "$hip_lib" "$tracer_lib" \
+      || warn "mapped profiler libs are not the hotfix"
     rm -rf "$extract_dir"
     return 0
   fi
+
   backup_dir="${target_dir}/.profiler_hotfix_backup_$(date -u +%Y%m%dT%H%M%SZ)"
-  backup_rocm_profiler_hotfix_targets "$target_dir" "$backup_dir"
-  log "backed up current ROCm profiler libraries to ${backup_dir}"
-  if ! install_rocm_profiler_hotfix_libs "$extract_dir" "$target_dir" "$hip_lib" "$tracer_lib" \
-     || ! verify_rocm_profiler_hotfix "$target_dir" "$hip_lib" "$tracer_lib"; then
+  backup_rocm_profiler_hotfix_links "$target_dir" "$backup_dir" \
+    || { rm -rf "$extract_dir"; die "cannot back up ${target_dir} profiler links"; }
+  log "backed up current ROCm profiler links to ${backup_dir}"
+  if ! install_rocm_profiler_hotfix_ranked "$extract_dir" "$target_dir" "$hip_lib" "$tracer_lib" \
+     || ! verify_rocm_profiler_hotfix_links "$target_dir" "$extract_dir" "$hip_lib" "$tracer_lib"; then
     warn "ROCm profiler hotfix failed; attempting rollback from ${backup_dir}"
-    if rollback_rocm_profiler_hotfix_targets "$backup_dir" "$target_dir"; then
+    if rollback_rocm_profiler_hotfix_ranked "$backup_dir" "$target_dir"; then
       warn "rollback succeeded; continuing without ROCm profiler hotfix"
       rm -rf "$extract_dir"
       return 0
@@ -1387,12 +1596,38 @@ apply_rocm_profiler_hotfix() {
     rm -rf "$extract_dir"
     die "ROCm profiler hotfix failed and rollback did not complete"
   fi
-  rm -rf "$extract_dir"
   if sync_torch_profiler_libs "$target_dir"; then
     log "ROCm profiler hotfix applied"
   else
-    warn "ROCm profiler hotfix partially applied (/opt/rocm overlay only; torch/lib sync failed)"
+    warn "ROCm profiler hotfix partially applied (ROCm links only; torch/lib sync failed)"
   fi
+  verify_rocm_profiler_hotfix_loaded "$extract_dir" "$hip_lib" "$tracer_lib" \
+    || warn "mapped profiler libs are not the hotfix; profiling runs on the vendor libraries"
+  rm -rf "$extract_dir"
+}
+
+verify_rocm_profiler_hotfix_only() {
+  local target_dir="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR}" hip_lib tracer_lib rc=0
+
+  log "verifying ROCm profiler hotfix state"
+  hip_lib="$(basename "$(find "$target_dir" -maxdepth 1 -type f \
+    -name "libamdhip64.so.*${ROCM_PROFILER_HOTFIX_SUFFIX}*" 2>/dev/null | sort -V | tail -n 1)")"
+  tracer_lib="$(basename "$(find "$target_dir" -maxdepth 1 -type f \
+    -name "libroctracer64.so.*${ROCM_PROFILER_HOTFIX_SUFFIX}*" 2>/dev/null | sort -V | tail -n 1)")"
+  if [ -z "$hip_lib" ] || [ -z "$tracer_lib" ]; then
+    warn "no ${ROCM_PROFILER_HOTFIX_SUFFIX} libraries under ${target_dir}; run setup without --verify-hotfix first"
+    return 1
+  fi
+
+  verify_rocm_profiler_hotfix_links "$target_dir" "$target_dir" "$hip_lib" "$tracer_lib" || rc=1
+  verify_rocm_profiler_torch_lib_sync "$target_dir" || rc=1
+  verify_rocm_profiler_hotfix_loaded "$target_dir" "$hip_lib" "$tracer_lib" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    log "ROCm profiler hotfix verified"
+  else
+    warn "ROCm profiler hotfix verification failed; re-run setup to repair it"
+  fi
+  return "$rc"
 }
 
 # Re-read framework env persisted by a prior setup run so Phase 3 targets the
@@ -1842,6 +2077,11 @@ _default_workspace_root() {
   local py_for_env
   if py_for_env="$(resolve_python 2>/dev/null)"; then
     export_virtualenv_for_python "$py_for_env"
+  fi
+
+  if [ "$VERIFY_HOTFIX_ONLY" -eq 1 ]; then
+    verify_rocm_profiler_hotfix_only
+    return $?
   fi
 
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then
