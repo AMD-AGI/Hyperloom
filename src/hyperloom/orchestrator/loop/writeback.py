@@ -811,11 +811,7 @@ class WritebackCollaborator:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
             state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
-            try:
-                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
-            except ImportError:
-                _max_stall = 5
-            if state.enablement.stall_streak >= _max_stall and not state.stop_reason:
+            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
             else:
                 state.enablement.inflight_task_id = ""
@@ -2994,14 +2990,8 @@ class WritebackCollaborator:
                         self.shared_state.enablement.stall_streak = (
                             int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
                         )
-                        _max_stall = getattr(self, "_ENABLEMENT_MAX_STALL", None)
-                        if _max_stall is None:
-                            try:
-                                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
-                            except ImportError:
-                                _max_stall = 5
                         if (
-                            self.shared_state.enablement.stall_streak >= _max_stall
+                            self.shared_state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL
                             and not self.shared_state.stop_reason
                         ):
                             self.shared_state.set_stop_reason("enablement_stalled")

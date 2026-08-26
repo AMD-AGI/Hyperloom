@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALO
 from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.framework import (
+from hyperloom.orchestrator.enablement.build import (
     _derive_gpu_arch,
     _repo_matches_targeted_build_component,
 )

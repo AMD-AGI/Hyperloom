@@ -567,6 +567,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "phase_kernel": ("phases.kernel", "KernelPhase"),
         "phase_explore": ("phases.explore", "ExplorePhase"),
         "phase_framework": ("phases.framework", "FrameworkPhase"),
+        "enablement_params": ("enablement.params", "EnablementParams"),
+        "enablement_lane": ("enablement.lane", "EnablementLane"),
+        "enablement_build": ("enablement.build", "EnablementBuild"),
+        "enablement_revalidation": ("enablement.revalidation", "EnablementRevalidation"),
         "router": ("loop.intent_router", "IntentRouter"),
         "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
         "build_lifecycle": ("loop.build_lifecycle", "BuildLifecycleCollaborator"),
@@ -1053,23 +1057,23 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_coerce_needs_gpu": "phase_framework",
         "_framework_gpu_params": "phase_framework",
         "_framework_authoring_lanes_ttl": "phase_framework",
-        "_build_enablement_specialist_params": "phase_framework",
-        "_read_enablement_source_context": "phase_framework",
-        "_derive_checkpoint_weight_facts": "phase_framework",
-        "_discover_enablement_candidate_refs": "phase_framework",
-        "_maybe_enqueue_enablement_specialist": "phase_framework",
-        "_maybe_record_enablement_human_review": "phase_framework",
-        "_enablement_in_flight": "phase_framework",
-        "_maybe_rearm_enablement": "phase_framework",
-        "_maybe_escalate_to_targeted_build": "phase_framework",
-        "_maybe_enqueue_specialist_requested_build": "phase_framework",
-        "_maybe_route_build_outcomes": "phase_framework",
-        "_route_succeeded_build": "phase_framework",
-        "_route_failed_build": "phase_framework",
-        "_build_routing_record": "phase_framework",
-        "_note_build_routed": "phase_framework",
-        "_build_probe_was_cancelled": "phase_framework",
-        "_enqueue_build_launch_probe": "phase_framework",
+        "_build_enablement_specialist_params": "enablement_params",
+        "_read_enablement_source_context": "enablement_params",
+        "_derive_checkpoint_weight_facts": "enablement_params",
+        "_discover_enablement_candidate_refs": "enablement_params",
+        "_maybe_enqueue_enablement_specialist": "enablement_lane",
+        "_maybe_record_enablement_human_review": "enablement_lane",
+        "_enablement_in_flight": "enablement_lane",
+        "_maybe_rearm_enablement": "enablement_lane",
+        "_maybe_escalate_to_targeted_build": "enablement_build",
+        "_maybe_enqueue_specialist_requested_build": "enablement_build",
+        "_maybe_route_build_outcomes": "enablement_build",
+        "_route_succeeded_build": "enablement_build",
+        "_route_failed_build": "enablement_build",
+        "_build_routing_record": "enablement_build",
+        "_note_build_routed": "enablement_build",
+        "_build_probe_was_cancelled": "enablement_build",
+        "_enqueue_build_launch_probe": "enablement_build",
         "_maybe_rearm_authored_lane": "phase_framework",
         "_enqueue_author_specialist": "phase_framework",
         "_drain_apply_fail_retry_pending": "phase_framework",
@@ -1097,10 +1101,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_framework_agent_critic_denied": "phase_framework",
         "_maybe_reauthor_from_critic_feedback": "phase_framework",
         "_pump_framework_agent_phase_safely": "phase_framework",
-        "_pump_enablement_safely": "phase_framework",
-        "_maybe_enqueue_enablement_baseline_revalidation": "phase_framework",
-        "_open_revalidation_row": "phase_framework",
-        "_open_row_past_spent_generations": "phase_framework",
+        "_pump_enablement_safely": "enablement_lane",
+        "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
+        "_open_revalidation_row": "enablement_revalidation",
+        "_open_row_past_spent_generations": "enablement_revalidation",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
@@ -1311,6 +1315,34 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from ..phases.framework import FrameworkPhase
 
         return self._collaborator("_phase_framework", FrameworkPhase)
+
+    @property
+    def enablement_params(self):
+        """Enablement authoring-specialist request construction."""
+        from ..enablement.params import EnablementParams
+
+        return self._collaborator("_enablement_params", EnablementParams)
+
+    @property
+    def enablement_lane(self):
+        """Enablement round admission / in-flight / re-arm."""
+        from ..enablement.lane import EnablementLane
+
+        return self._collaborator("_enablement_lane", EnablementLane)
+
+    @property
+    def enablement_build(self):
+        """Off-loop compiled-build escalation and outcome routing."""
+        from ..enablement.build import EnablementBuild
+
+        return self._collaborator("_enablement_build", EnablementBuild)
+
+    @property
+    def enablement_revalidation(self):
+        """Genuine-baseline revalidation of a kept enablement round."""
+        from ..enablement.revalidation import EnablementRevalidation
+
+        return self._collaborator("_enablement_revalidation", EnablementRevalidation)
 
     @property
     def conversation(self):
