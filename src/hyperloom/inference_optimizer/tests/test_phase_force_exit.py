@@ -3,8 +3,8 @@
 
 """IR-6 — EXPLORE HARD force-exit gate tests.
 
-Covers ``phase_state.should_force_exit_explore`` and its integration via
-``exit_normal_explore`` / ``compute_next_phase``. The gate fires when the
+Covers ``phase_state.should_force_exit_optimize`` and its integration via
+``exit_normal_optimize`` / ``compute_next_phase``. The gate fires when the
 unspent fraction of EXPLORE's own charge-back budget drops to
 ``force_exit_budget_pct`` or below; there is no session-wall-clock arm, which
 ``test_force_exit_is_blind_to_session_length`` guards.
@@ -41,7 +41,7 @@ def _make_explore_state(
         isl=1024,
         osl=1024,
         baseline_tput=1500.0,
-        phase=phase_state.PHASE_EXPLORE,
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_ts=(now - timedelta(hours=phase_started_hours_ago)).isoformat(),
         phase_started_unix=phase_started_unix,
         start_ts=start_ts,
@@ -68,7 +68,7 @@ def test_force_exit_phase_pct_below_threshold():
         started_hours_ago=6.0,
         phase_started_hours_ago=5.7,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state, budget_pct_threshold=0.20)
+    fired, evidence = phase_state.should_force_exit_optimize(state, budget_pct_threshold=0.20)
     assert fired is True
     assert evidence["phase_remaining_pct"] <= 0.20
 
@@ -80,7 +80,7 @@ def test_force_exit_late_in_session_still_covered_by_pct_arm():
         started_hours_ago=7.5,
         phase_started_hours_ago=4.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state)
+    fired, evidence = phase_state.should_force_exit_optimize(state)
     assert fired is True
     assert evidence["phase_remaining_pct"] == 0.0
 
@@ -92,7 +92,7 @@ def test_force_exit_neither_trigger_fires():
         started_hours_ago=1.0,
         phase_started_hours_ago=0.5,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state, budget_pct_threshold=0.20)
+    fired, evidence = phase_state.should_force_exit_optimize(state, budget_pct_threshold=0.20)
     assert fired is False
     assert evidence["phase_remaining_pct"] > 0.20
 
@@ -105,10 +105,10 @@ def test_force_exit_is_blind_to_session_length(max_minutes):
         started_hours_ago=0.1,
         phase_started_hours_ago=0.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state)
+    fired, evidence = phase_state.should_force_exit_optimize(state)
     assert fired is False
     assert evidence["phase_remaining_pct"] == pytest.approx(1.0)
-    assert phase_state.exit_normal_explore(state) is None
+    assert phase_state.exit_normal_optimize(state) is None
 
 
 def test_force_exit_unlimited_run_never_fires():
@@ -118,7 +118,7 @@ def test_force_exit_unlimited_run_never_fires():
         started_hours_ago=100.0,
         phase_started_hours_ago=100.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state)
+    fired, evidence = phase_state.should_force_exit_optimize(state)
     assert fired is False
     assert "session_remaining_seconds" not in evidence
 
@@ -136,7 +136,7 @@ def test_force_exit_leaves_a_short_session_its_explore_phase(started_hours_ago):
         started_hours_ago=started_hours_ago,
         phase_started_hours_ago=0.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state)
+    fired, evidence = phase_state.should_force_exit_optimize(state)
     assert fired is False
     assert evidence["fired_reasons"] == []
     assert evidence["phase_remaining_pct"] == pytest.approx(1.0)
@@ -149,12 +149,12 @@ def test_force_exit_fires_once_the_phase_has_spent_its_own_budget():
         started_hours_ago=7.6,
         phase_started_hours_ago=4.0,
     )
-    fired, evidence = phase_state.should_force_exit_explore(state)
+    fired, evidence = phase_state.should_force_exit_optimize(state)
     assert fired is True
     assert evidence["fired_reasons"] == ["phase_remaining_pct"]
 
 
-def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
+def test_exit_normal_optimize_force_exit_takes_priority_over_plateau():
     """Force-exit must win even if plateau also has a verdict."""
     state = _make_explore_state(
         max_minutes=600,
@@ -163,7 +163,7 @@ def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
     )
     # Seed plateau-shaped data that would otherwise fire.
     state.specialist_rounds = [{"round_id": i, "empty_streak": i + 1, "proposal_count": 0} for i in range(3)]
-    result = phase_state.exit_normal_explore(state)
+    result = phase_state.exit_normal_optimize(state)
     assert result is not None
     reason, evidence = result
     assert reason == "explore_force_exit_low_budget"
@@ -244,5 +244,5 @@ def test_force_exit_phase_remaining_pct_uses_chargeback_denominator():
     assert total != pytest.approx(legacy)
     assert remaining == pytest.approx(total)
 
-    _, evidence = phase_state.should_force_exit_explore(state, now_unix=now)
+    _, evidence = phase_state.should_force_exit_optimize(state, now_unix=now)
     assert evidence["phase_remaining_pct"] == pytest.approx(1.0)

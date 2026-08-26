@@ -20,7 +20,7 @@ from hyperloom.orchestrator.framework import client as fa_client_mod
 from hyperloom.orchestrator.framework import paths as fp_mod
 from hyperloom.orchestrator.knowledge import kb_writeback as kb_mod
 from hyperloom.orchestrator.phases import machine_state as ps_mod
-from hyperloom.orchestrator.actions.executors import framework_agent as fpr_mod
+from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -378,7 +378,7 @@ def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------
-# _select_best_framework_agent_candidate / _rank_framework_agent_candidates_llm
+# _select_next_framework_agent_candidate / _rank_framework_agent_candidates_llm
 # --------------------------------------------------------------------------
 class _FakeDelta:
     def __init__(self, content: str | None) -> None:
@@ -441,10 +441,10 @@ def _install_ranker(coord: Coordinator, monkeypatch, client) -> None:
 @pytest.mark.asyncio
 async def test_select_best_empty_and_single(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: [])
-    assert await coord._select_best_framework_agent_candidate() is None
+    assert await coord._select_next_framework_agent_candidate() is None
     only = {"candidate_id": "solo"}
     monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: [only])
-    assert await coord._select_best_framework_agent_candidate() is only
+    assert await coord._select_next_framework_agent_candidate() is only
 
 
 @pytest.mark.asyncio
@@ -452,7 +452,7 @@ async def test_select_best_ranker_picks(coord: Coordinator, monkeypatch) -> None
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
     monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(coord, monkeypatch, _FakeClient('{"candidate_id": "c2", "reason": "moe"}'))
-    chosen = await coord._select_best_framework_agent_candidate()
+    chosen = await coord._select_next_framework_agent_candidate()
     assert chosen["candidate_id"] == "c2"
 
 
@@ -465,7 +465,7 @@ async def test_select_best_ranker_failure_falls_back(coord: Coordinator, monkeyp
         raise RuntimeError("rank boom")
 
     monkeypatch.setattr(coord.phase_framework, "_rank_framework_agent_candidates_llm", _raise)
-    chosen = await coord._select_best_framework_agent_candidate()
+    chosen = await coord._select_next_framework_agent_candidate()
     assert chosen["candidate_id"] == "c1"  # deterministic fallback (discovery order)
 
 
@@ -849,5 +849,5 @@ async def test_ranker_applicable_false_falls_back_to_discovery_order(coord: Coor
         monkeypatch,
         _FakeClient('{"applicable": false, "reason": "all off-arch"}'),
     )
-    result = await coord._select_best_framework_agent_candidate()
+    result = await coord._select_next_framework_agent_candidate()
     assert result is cands[0]

@@ -14,7 +14,7 @@ from hyperloom.orchestrator.actions.executors._proposal_identity import (
 )
 from hyperloom.orchestrator.phases.machine_state import (
     PHASE_CLOSE,
-    PHASE_EXPLORE,
+    PHASE_FRAMEWORK_AGENT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     PHASE_PRELUDE,
@@ -210,7 +210,7 @@ def test_overflow_is_truncated_and_counted():
     [
         (PHASE_PRELUDE, False),
         (PHASE_FRAMEWORK_AGENT, False),
-        (PHASE_EXPLORE, True),
+        (PHASE_FRAMEWORK_AGENT, True),
         (PHASE_KERNEL_AGENT, False),
         (PHASE_SWEEP, False),
         (PHASE_CLOSE, False),
@@ -227,7 +227,7 @@ async def test_the_block_is_injected_only_in_explore(coord, phase, expected):
 
 @pytest.mark.asyncio
 async def test_the_block_survives_a_delta_turn(coord, monkeypatch):
-    coord.shared_state.phase = PHASE_EXPLORE
+    coord.shared_state.phase = PHASE_FRAMEWORK_AGENT
     coord.shared_state.macro_cycle = 0
     coord.shared_state.specialist_rounds = [_round([{"name": "queued", "extra_args": "--a 1"}])]
     seed = await coord._compose_prompt("orchestration")

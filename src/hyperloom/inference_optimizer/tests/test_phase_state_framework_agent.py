@@ -100,24 +100,24 @@ def test_long_run_and_gain_helpers_handle_edge_values():
     assert phase_state._cumulative_gain_validated(invalid_gain) == 0.0  # noqa: SLF001
 
 
-def test_exit_normal_framework_agent_returns_none_when_nothing_to_do():
+def test_exit_normal_optimize_returns_none_when_nothing_to_do():
     state = _State()
-    assert phase_state.exit_normal_framework_agent(state) is None
+    assert phase_state.exit_normal_optimize(state) is None
 
 
-def test_exit_normal_framework_agent_ignores_session_remaining():
+def test_exit_normal_optimize_ignores_session_remaining():
     """Low session-remaining alone must not evict a phase that has done nothing.
 
     FRAMEWORK now leaves only on its own charge-back cap, a plateau, or an
     exhausted candidate list — never on the session clock.
     """
-    assert phase_state.exit_normal_framework_agent(_State(remaining_minutes_value=30.0)) is None
+    assert phase_state.exit_normal_optimize(_State(remaining_minutes_value=30.0)) is None
     below_streak = [{"candidate_id": f"c{i}", "status": "reverted", "kept": False} for i in range(3)]
     state = _State(framework_agent_phase_progress=below_streak, remaining_minutes_value=10.0)
-    assert phase_state.exit_normal_framework_agent(state) is None
+    assert phase_state.exit_normal_optimize(state) is None
 
 
-def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
+def test_exit_normal_optimize_exits_on_consecutive_reject_plateau():
     """A full streak of resolved-no-keep candidates (here 'reject') trips the
     plateau exit."""
     batches = [
@@ -145,7 +145,7 @@ def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
         framework_agent_batches=batches,
         framework_agent_phase_progress=progress,
     )
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
@@ -218,7 +218,7 @@ def test_framework_batch_plateau_counts_current_cycle_audit_skips():
     assert triggered is True
 
 
-def test_exit_normal_framework_agent_exit_evidence_carries_pending_count():
+def test_exit_normal_optimize_exit_evidence_carries_pending_count():
     """Regression: an early exit surfaces how many candidates it left behind."""
     n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
     batches = [
@@ -233,28 +233,28 @@ def test_exit_normal_framework_agent_exit_evidence_carries_pending_count():
         framework_agent_batches=batches,
         framework_agent_phase_progress=progress,
     )
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     reason, ev = out
     assert reason == "framework_agent_plateau"
     assert ev["pending_candidate_count"] == 2
 
 
-def test_exit_normal_framework_agent_phase_done_when_signalled():
+def test_exit_normal_optimize_phase_done_when_signalled():
     state = _State(framework_agent_phase_done=True)
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     reason, ev = out
     assert reason == "framework_agent_phase_done"
     assert ev["evidence"] == "no_more_candidates"
 
 
-def test_exit_normal_framework_agent_plateau_at_threshold_consecutive_no_keep():
+def test_exit_normal_optimize_plateau_at_threshold_consecutive_no_keep():
     """N consecutive benchmarked tests with no KEEP → framework_agent_plateau."""
     n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
     progress = [{"candidate_id": f"c{i}", "status": "reverted", "kept": False} for i in range(n)]
     state = _State(framework_agent_phase_progress=progress)
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     reason, ev = out
     assert reason == "framework_agent_plateau"
@@ -262,22 +262,22 @@ def test_exit_normal_framework_agent_plateau_at_threshold_consecutive_no_keep():
     assert ev["threshold"] == n
 
 
-def test_exit_normal_framework_agent_no_plateau_below_threshold():
+def test_exit_normal_optimize_no_plateau_below_threshold():
     """Two reverts is below the streak threshold → no exit."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
-    assert phase_state.exit_normal_framework_agent(state) is None
+    assert phase_state.exit_normal_optimize(state) is None
 
 
 def test_local_explore_author_empty_uses_official_plateau_threshold():
     n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
     progress = [{"candidate_id": f"local_explore:{i}", "status": "author_empty", "kept": False} for i in range(n - 1)]
-    assert phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress)) is None
+    assert phase_state.exit_normal_optimize(_State(framework_agent_phase_progress=progress)) is None
     progress.append({"candidate_id": f"local_explore:{n - 1}", "status": "author_empty", "kept": False})
-    out = phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress))
+    out = phase_state.exit_normal_optimize(_State(framework_agent_phase_progress=progress))
     assert out is not None
     assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == n
@@ -288,10 +288,10 @@ def test_cycle_boundary_resets_local_explore_plateau_streak():
     progress = [{"candidate_id": f"local_explore:{i}", "status": "author_empty", "kept": False} for i in range(n)]
     progress.append({"candidate_id": "", "status": "cycle_boundary", "kept": False})
     progress.append({"candidate_id": "local_explore:new", "status": "author_empty", "kept": False})
-    assert phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress)) is None
+    assert phase_state.exit_normal_optimize(_State(framework_agent_phase_progress=progress)) is None
 
 
-def test_exit_normal_framework_agent_keep_resets_no_keep_streak():
+def test_exit_normal_optimize_keep_resets_no_keep_streak():
     """A KEEP breaks the streak; only reverts after it count."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
@@ -301,10 +301,10 @@ def test_exit_normal_framework_agent_keep_resets_no_keep_streak():
     ]
     state = _State(framework_agent_phase_progress=progress)
     # Trailing run after the KEEP is only 2 reverts → no plateau.
-    assert phase_state.exit_normal_framework_agent(state) is None
+    assert phase_state.exit_normal_optimize(state) is None
 
 
-def test_framework_agent_consecutive_no_keep_handles_malformed_progress():
+def testframework_agent_consecutive_no_keep_handles_malformed_progress():
     state = _State(
         framework_agent_phase_progress=[
             {"candidate_id": "c0", "status": "kept", "kept": True},
@@ -315,10 +315,10 @@ def test_framework_agent_consecutive_no_keep_handles_malformed_progress():
         ],
     )
 
-    assert phase_state._framework_agent_consecutive_no_keep(state) == 2  # noqa: SLF001
+    assert phase_state.framework_agent_consecutive_no_keep(state) == 2  # noqa: SLF001
 
 
-def test_exit_normal_framework_agent_plateau_counts_non_benchmarked_no_keep_rows():
+def test_exit_normal_optimize_plateau_counts_non_benchmarked_no_keep_rows():
     """not_applicable / apply_failed / authored_empty rows count toward the
     no-keep streak (they are resolved candidates that did not KEEP), so a
     batch of dead candidates still trips the plateau gate.
@@ -331,13 +331,13 @@ def test_exit_normal_framework_agent_plateau_counts_non_benchmarked_no_keep_rows
         {"candidate_id": "c5", "status": "already_present", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
-def test_exit_normal_framework_agent_plateau_mixed_terminal_no_keep_rows():
+def test_exit_normal_optimize_plateau_mixed_terminal_no_keep_rows():
     """A mix of reverted + non-benchmarked terminal rows all count; a KEEP
     still breaks the streak so only the trailing run is counted."""
     progress = [
@@ -349,13 +349,13 @@ def test_exit_normal_framework_agent_plateau_mixed_terminal_no_keep_rows():
         {"candidate_id": "c5", "status": "reverted", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
     assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
-def test_exit_normal_framework_agent_plateau_beats_phase_done():
+def test_exit_normal_optimize_plateau_beats_phase_done():
     """Priority order: plateau > phase_done."""
     progress = [
         {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
@@ -365,12 +365,12 @@ def test_exit_normal_framework_agent_plateau_beats_phase_done():
         framework_agent_phase_progress=progress,
         framework_agent_phase_done=True,
     )
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
 
 
-def test_exit_normal_framework_agent_plateau_routes_to_explore():
+def test_exit_normal_optimize_plateau_routes_to_explore():
     """A plateau exit routes FRAMEWORK_AGENT → EXPLORE via compute_next_phase."""
     progress = [
         {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
@@ -380,18 +380,18 @@ def test_exit_normal_framework_agent_plateau_routes_to_explore():
     out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
     assert out is not None
     next_phase, reason, _ev = out
-    assert next_phase == phase_state.PHASE_EXPLORE
+    assert next_phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert reason == "framework_agent_plateau"
 
 
-def test_exit_normal_framework_agent_plateau_uses_default_threshold():
+def test_exit_normal_optimize_plateau_uses_default_threshold():
     """The framework plateau threshold is fixed at the default."""
     progress = [
         {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
         for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK)
     ]
     state = _State(framework_agent_phase_progress=progress)
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
     assert out[1]["threshold"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
@@ -404,7 +404,7 @@ def test_framework_agent_plateau_streak_threshold_is_default():
     )
 
 
-def test_exit_normal_framework_agent_phase_done_wins_when_low_on_session_time():
+def test_exit_normal_optimize_phase_done_wins_when_low_on_session_time():
     """A nearly spent session no longer masks the honest ``phase_done`` reason."""
     batches = [
         {"max_gain_pct_observed_in_batch": 0.1},
@@ -416,7 +416,7 @@ def test_exit_normal_framework_agent_phase_done_wins_when_low_on_session_time():
         framework_agent_phase_done=True,
         remaining_minutes_value=10.0,
     )
-    out = phase_state.exit_normal_framework_agent(state)
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "framework_agent_phase_done"
 
@@ -449,7 +449,7 @@ def test_compute_next_phase_prelude_to_explore_when_disabled_keeps_prelude_done_
     out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=False)
     assert out is not None
     next_phase, reason, _ev = out
-    assert next_phase == phase_state.PHASE_EXPLORE
+    assert next_phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert reason == "prelude_done"
 
 
@@ -542,5 +542,5 @@ def test_compute_next_phase_explore_enabled_default_routes_to_explore():
     out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=False)
     assert out is not None
     next_phase, _reason, ev = out
-    assert next_phase == phase_state.PHASE_EXPLORE
+    assert next_phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert "explore_skipped" not in ev

@@ -26,7 +26,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_next_phase,
     compute_plateau_explore,
     compute_plateau_kernel,
-    exit_normal_explore,
+    exit_normal_optimize,
     exit_normal_kernel,
     is_valid_escalate_hint,
     is_valid_stop_reason,
@@ -287,7 +287,7 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
 
-def test_exit_normal_explore_exits_on_plateau():
+def test_exit_normal_optimize_exits_on_plateau():
     """A bare EXPLORE plateau signal advances to the next lever."""
     state = SimpleNamespace(
         phase="EXPLORE",
@@ -302,12 +302,12 @@ def test_exit_normal_explore_exits_on_plateau():
         stop_reason="",
         plateau_overrides={},
     )
-    out = exit_normal_explore(state)
+    out = exit_normal_optimize(state)
     assert out is not None
     assert out[0] == "explore_no_more_leverage"
 
 
-def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
+def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
     """``skip_to_kernel`` hint forces ``plateau_explore`` even when the real signals disagree."""
     state = SimpleNamespace(
         phase="EXPLORE",
@@ -319,7 +319,7 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_KERNEL,
         stop_reason="",
     )
-    out = exit_normal_explore(state)
+    out = exit_normal_optimize(state)
     assert out is not None and out[0] == "plateau_explore"
     assert out[1]["evidence"] == "llm_escalation"
 
@@ -405,9 +405,9 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
     )
 
 
-def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
+def test_exit_normal_optimize_skip_to_sweep_is_non_terminal():
     # skip_to_sweep exhausts the explore lever, non-terminal.
-    out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
+    out = exit_normal_optimize(_skip_to_sweep_state("EXPLORE"))
     assert out is not None
     reason, evidence = out
     assert reason == "explore_no_more_leverage"

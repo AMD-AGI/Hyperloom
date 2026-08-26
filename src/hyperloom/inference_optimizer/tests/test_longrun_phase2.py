@@ -32,7 +32,7 @@ def _plateaued_explore_state(
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
         phase_started_unix=(now - timedelta(hours=started_hours_ago)).timestamp(),
         max_minutes=max_minutes,
@@ -52,7 +52,7 @@ def _plateaued_explore_state(
 # plateau → actionable
 def test_explore_plateau_is_actionable():
     st = _plateaued_explore_state()
-    out = ps.exit_normal_explore(st)
+    out = ps.exit_normal_optimize(st)
     assert out is not None
     reason, evidence = out
     assert reason == "explore_no_more_leverage"
@@ -121,7 +121,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
 def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.macro_cycle = 2
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
     # A roofline whose dominant direction is comm.
@@ -144,7 +144,7 @@ def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
 def test_redirect_advisory_renders_for_saturation_without_plateau(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.macro_cycle = 3
     st.saturated_directions = {
         "kernel_switch_specialist": {

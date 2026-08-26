@@ -144,7 +144,7 @@ def test_session_remaining_seconds() -> None:
 
 
 def test_post_prelude_target() -> None:
-    assert ps._post_prelude_target(explore_enabled=True, kernel_enabled=True) == ps.PHASE_EXPLORE
+    assert ps._post_prelude_target(explore_enabled=True, kernel_enabled=True) == ps.PHASE_FRAMEWORK_AGENT
     assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=True) == ps.PHASE_KERNEL_AGENT
     assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=False) == ps.PHASE_SWEEP
 

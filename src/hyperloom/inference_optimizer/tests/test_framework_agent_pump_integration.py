@@ -132,11 +132,10 @@ class _CoordinatorStub:
     _stamp_framework_progress = Coordinator._stamp_framework_progress
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
-    _select_best_framework_agent_candidate = Coordinator._select_best_framework_agent_candidate
+    _select_next_framework_agent_candidate = Coordinator._select_next_framework_agent_candidate
     _record_framework_agent_phase_done = Coordinator._record_framework_agent_phase_done
     _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
-    _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     # Local-exploration arm surface (disabled in this stub's state, so these
     # short-circuit; bound so the shared pump/select paths resolve).

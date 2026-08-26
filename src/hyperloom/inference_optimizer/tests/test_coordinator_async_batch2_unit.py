@@ -1810,7 +1810,7 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = ps.PHASE_EXPLORE
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
         ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
     )
@@ -2093,7 +2093,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 @pytest.mark.asyncio
 async def test_advance_phase_hint_survives_transition_toward_explore(coord: Coordinator, monkeypatch) -> None:
     """A skip_to_kernel hint set during FRAMEWORK_AGENT must survive an unrelated
-    FRAMEWORK_AGENT -> EXPLORE transition, since exit_normal_explore (the hint's
+    FRAMEWORK_AGENT -> EXPLORE transition, since exit_normal_optimize (the hint's
     only consumer) only ever checks it once the phase is EXPLORE.
     """
     import hyperloom.orchestrator.phases.machine_state as ps
@@ -2162,7 +2162,7 @@ async def test_advance_phase_hint_discarded_toward_framework_agent_when_explore_
 @pytest.mark.asyncio
 async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Coordinator, monkeypatch) -> None:
     """A pending hint is genuinely stale once the transition target isn't
-    EXPLORE -- it can never reach exit_normal_explore's check again -- so this
+    EXPLORE -- it can never reach exit_normal_optimize's check again -- so this
     is the one case the unrelated-transition cleanup should still clear it.
 
     A discard is not a consumption: it must land in last_discarded_escalate_hint,
@@ -2644,7 +2644,7 @@ async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinato
     async def _select():
         return {"candidate_id": "c1", "pr_url": "https://example.com/pr/1", "batch_id": "b1"}
 
-    monkeypatch.setattr(coord.phase_framework, "_select_best_framework_agent_candidate", _select)
+    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", _select)
 
     async def _audit(cand):
         return {"recommended_next_step": "direct_framework"}
@@ -2671,7 +2671,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
     async def _select():
         return {"candidate_id": "c1", "batch_id": "b1"}
 
-    monkeypatch.setattr(coord.phase_framework, "_select_best_framework_agent_candidate", _select)
+    monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", _select)
 
     async def _audit(cand):
         return {"recommended_next_step": "direct_framework"}
