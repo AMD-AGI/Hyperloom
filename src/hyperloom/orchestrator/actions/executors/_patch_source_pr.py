@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -290,3 +291,139 @@ def _materialize_pr_diff_via_worktree(
             ["-C", root, "worktree", "remove", "--force", str(wt_dir)],
             timeout=60.0,
         )
+
+
+@dataclass
+class PrMaterialization:
+    """What an upstream-PR candidate resolved to on disk."""
+
+    #: The patch files to apply; empty when :attr:`failure` is set.
+    patches: list[Path] = field(default_factory=list)
+    #: Which source produced them: ``explicit`` / ``checkout_head`` /
+    #: ``diff_url_fallback`` / ``diff_url``.
+    mode: str = ""
+    #: A terminal result dict when nothing applyable could be produced. The
+    #: caller returns it as-is rather than benching an unpatched tree.
+    failure: dict[str, Any] | None = None
+
+
+def materialize_candidate_patches(
+    *,
+    candidate: dict[str, Any],
+    params: dict[str, Any],
+    framework_root: Path,
+    output_root: Path,
+    slug: str,
+    diff_fetch_timeout_sec: float,
+) -> PrMaterialization:
+    """Resolve an upstream-PR candidate into local patch files.
+
+    Sources in priority order: explicit ``params.patches``, a net diff from a
+    worktree checked out at the PR head, then the served ``diff_url``. The
+    checkout-head route is disabled for a cross-repo candidate, whose head ref
+    does not exist on the live origin.
+
+    Every failure path returns a terminal result rather than an empty patch
+    list: benching a tree no patch reached measures the baseline and reports it
+    as the candidate's verdict.
+
+    Args:
+        candidate: The candidate row (``diff_url`` / ``head_sha`` / ``ref`` /
+            ``pr_number`` / ``apply_mode``).
+        params: Task params, read for ``patches`` / ``apply_mode`` /
+            ``prefer_checkout`` overrides.
+        framework_root: The live framework checkout the diff will apply to.
+        output_root: Per-task workspace the fetched diff is written into.
+        slug: Candidate slug used to name the written patch file.
+        diff_fetch_timeout_sec: Timeout for a served-diff fetch; the
+            worktree route is given four times this.
+
+    Returns:
+        A :class:`PrMaterialization`.
+    """
+    explicit_patches = params.get("patches") or None
+    if isinstance(explicit_patches, list) and explicit_patches:
+        found: list[Path] = []
+        for entry in explicit_patches:
+            path = Path(str(entry))
+            if path.exists():
+                found.append(path.resolve())
+            else:
+                log.warning("upstream_pr: explicit patch %r not found", entry)
+        if not found:
+            return PrMaterialization(
+                mode="explicit",
+                failure={
+                    "status": "no_patch",
+                    "error_class": "explicit_patches_missing",
+                    "reason": "all explicit patches were missing from disk; refusing to benchmark unpatched tree",
+                    "missing_patches": [str(p) for p in explicit_patches],
+                },
+            )
+        return PrMaterialization(patches=found, mode="explicit")
+
+    diff_url = str(candidate.get("diff_url") or "").strip()
+    apply_mode = str(params.get("apply_mode") or candidate.get("apply_mode") or "").strip().lower()
+    prefer_checkout = bool(params.get("prefer_checkout") or candidate.get("prefer_checkout"))
+    has_checkout_ref = bool(
+        str(candidate.get("head_sha") or "").strip()
+        or str(candidate.get("ref") or "").strip()
+        or candidate.get("pr_number") not in (None, "", 0)
+    )
+    explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
+    use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
+    # Same-repo guard: checkout-head fetches from the live origin, so a
+    # cross-repo candidate would fetch the wrong ref.
+    if use_checkout_head and not _candidate_is_same_repo(candidate, framework_root):
+        log.info(
+            "upstream_pr: candidate repo %r differs from live framework_root origin; using diff_url",
+            candidate.get("repo") or candidate.get("discovered_repo_url"),
+        )
+        use_checkout_head = False
+
+    if not diff_url and not use_checkout_head:
+        return PrMaterialization(
+            failure={
+                "status": "no_patch",
+                "reason": "candidate carries no diff_url, no explicit patches, and no head ref to check out",
+            },
+        )
+
+    dest = output_root / f"{slug}.patch"
+    if use_checkout_head:
+        mode = "checkout_head"
+        ok, err = _materialize_pr_diff_via_worktree(
+            framework_root,
+            candidate,
+            dest,
+            timeout_sec=diff_fetch_timeout_sec * 4.0,
+        )
+        if not ok and diff_url:
+            # A worktree/fetch hiccup must not strand an applyable candidate.
+            log.warning("upstream_pr: checkout-head failed (%s); falling back to diff_url", err)
+            mode = "diff_url_fallback"
+            ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
+        if not ok:
+            return PrMaterialization(
+                mode=mode,
+                failure={
+                    "status": "fetch_failed",
+                    "error_class": "checkout_head_failed",
+                    "error": err,
+                    "reason": f"checkout-head diff extraction failed: {err}",
+                },
+            )
+        return PrMaterialization(patches=[dest.resolve()], mode=mode)
+
+    ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)
+    if not ok:
+        return PrMaterialization(
+            mode="diff_url",
+            failure={
+                "status": "fetch_failed",
+                "error_class": "diff_fetch_failed",
+                "error": err,
+                "reason": f"failed to fetch {diff_url!r}: {err}",
+            },
+        )
+    return PrMaterialization(patches=[dest.resolve()], mode="diff_url")
