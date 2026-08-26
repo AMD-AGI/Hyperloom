@@ -83,9 +83,14 @@ from ._grid_runner import (
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
 
-# DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
-# params['stack_stable_threshold_pct'].
-from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
+# DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor request; the shared
+# resolver clamps it to half the KEEP gate. Override via
+# params['rebench_stable_threshold_pct'].
+from ._stack_rebench import (
+    DEFAULT_STACK_STABLE_PCT,
+    measure_stack_rebench,
+    resolve_stable_threshold_pct,
+)
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -660,7 +665,6 @@ class ExploreExecutor:
         session_dir: Path | str | None = None,
         variant_timeout_sec: int = 2400,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
-        stack_stable_threshold_pct: float = DEFAULT_STACK_STABLE_PCT,
         enable_stack_rebench: bool = True,
     ):
         """Initialize the explore executor and its gating thresholds.
@@ -674,8 +678,6 @@ class ExploreExecutor:
                 floor. Defaults to ``2400``.
             keep_threshold_pct (float): Minimum gain to KEEP a variant.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
-            stack_stable_threshold_pct (float): Stability band for the
-                stack rebench. Defaults to :data:`DEFAULT_STACK_STABLE_PCT`.
             enable_stack_rebench (bool): Whether to run the inlined
                 per-KEEP stack rebench. Defaults to ``True``.
         """
@@ -683,7 +685,6 @@ class ExploreExecutor:
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
-        self.stack_stable_threshold_pct = float(stack_stable_threshold_pct)
         self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
@@ -794,11 +795,8 @@ class ExploreExecutor:
                 self.keep_threshold_pct,
             )
         )
-        stack_stable_threshold_pct = float(
-            params.get(
-                "stack_stable_threshold_pct",
-                self.stack_stable_threshold_pct,
-            )
+        rebench_stable_threshold_pct = resolve_stable_threshold_pct(
+            float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)), keep_threshold_pct
         )
         enable_stack_rebench = bool(
             params.get(
@@ -1713,7 +1711,7 @@ class ExploreExecutor:
                                 # Floor sits on the anchor round 1 graded against,
                                 # which advances with each in-batch KEEP.
                                 base_tput=running_base_tput,
-                                stable_threshold_pct=stack_stable_threshold_pct,
+                                stable_threshold_pct=rebench_stable_threshold_pct,
                                 output_slot=slot / "stack_rebench",
                                 variant_timeout_sec=timeout_sec,
                                 model_path=resolved_model,
@@ -1755,7 +1753,7 @@ class ExploreExecutor:
                                     stack_rebench_tput,
                                     stable_floor,
                                     running_base_tput,
-                                    stack_stable_threshold_pct,
+                                    rebench_stable_threshold_pct,
                                 )
                                 round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
                                 round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput

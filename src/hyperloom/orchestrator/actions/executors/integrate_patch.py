@@ -73,6 +73,7 @@ from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import compose_server_args
 from ._stack_rebench import (
     DEFAULT_STACK_STABLE_PCT,
+    resolve_stable_threshold_pct,
     StackRebenchResult,
     measure_stack_rebench,
 )
@@ -4491,9 +4492,10 @@ class IntegratePatchExecutor:
         Returns:
             float: The stability floor as a percentage over the base throughput.
         """
-        keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
-        requested_stable_threshold_pct = float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT))
-        return min(requested_stable_threshold_pct, max(0.0, keep_threshold_pct / 2.0))
+        return resolve_stable_threshold_pct(
+            float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)),
+            float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
+        )
 
     def _graded_rebench(
         self,

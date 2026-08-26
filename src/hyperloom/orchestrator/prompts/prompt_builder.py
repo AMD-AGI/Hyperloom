@@ -456,7 +456,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: <session-cycle default>, stack_stable_threshold_pct?: <keep/2>}}`. "
+            "keep_threshold_pct?: <session-cycle default>, rebench_stable_threshold_pct?: <clamped to keep/2>}}`. "
             "Variants run serially; each KEEP triggers an inlined stack "
             "rebench. Variant identity is content-based (args+envs+"
             "remove_args+unset_envs+args_mode); only exact duplicates within "
