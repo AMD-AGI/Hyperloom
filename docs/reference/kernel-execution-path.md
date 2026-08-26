@@ -56,7 +56,7 @@ orchestration-issued REQUEST for either
 `inference_optimizer/protocol/action_surfaces.py`, raised as
 `rule="phase_incompatible"`) — a direct request would skip the lane's entry
 gate, its SharedState accounting and its integrate step. The kinds
-orchestration may request are therefore `trace_analyze`, `run_gemm_tuning`,
+orchestration can request are therefore `trace_analyze`, `run_gemm_tuning`,
 `run_optimization`, `integrate` and `apply_patch`; the LLM sees the two lanes
 only as `run_fusion_done` / `run_collective_done` inbox responses. PolicyGate
 validates the REQUEST payload from orchestration (path-sandbox, phase-action
@@ -172,7 +172,7 @@ Collective kernels do *not* ride the per-kernel backend. A trace row whose
 `kernel_contract.kind == "collective"` is routed as follows:
 
 - **Per-kernel path** (`run_optimization` → GEAK / Forge): The row is dropped up
-  front by `_batch_kernel_candidates` via `is_collective_candidate`, and is also
+  front by `_batch_kernel_candidates` using `is_collective_candidate`, and is also
   withheld from `reusable_native_kernel_ids` so orchestration is never offered
   an id whose dispatch would be an empty batch. The FlyDSL rewrite route refuses
   such candidates independently (`collective_unsupported`).
@@ -186,7 +186,7 @@ Collective kernels do *not* ride the per-kernel backend. A trace row whose
 
 The lane is reached on the native/Forge KERNEL entry path; when GEAK owns the
 phase `_on_enter_kernel` returns before it. Under the default
-`KERNEL_OPT_BACKEND_ORDER=geak` it therefore runs only via
+`KERNEL_OPT_BACKEND_ORDER=geak` it therefore runs only through
 `HYPERLOOM_COLLECTIVE_ONLY`, which turns the GEAK branch off. Its own gate keys
 on `TP > 1` and exposed-communication share, not on the backend order value.
 
@@ -204,7 +204,7 @@ Shell paths in this section follow the recommended `pip install --target .` layo
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
 
 The kernel tool scripts live under `hyperloom/agents/kernel/tools/` and are
-resolved at runtime via the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
+resolved at runtime through the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
 `<repo>/hyperloom/agents/kernel` by the CLI bootstrap). Install everything using:
 
 ```bash
@@ -225,7 +225,7 @@ Required env vars:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK and TraceLens both run Claude Code |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
-| `TRACELENS_ROOT` | `install.sh` (operator may override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
+| `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
 | `FORGE_PATH` | operator | KernelForge checkout root; required whenever forge is enabled. `forge_submit.py` resolves the `kernel_agents` package from it and locates the vendor-playbook task bundles under it |
 
@@ -304,7 +304,7 @@ transparently.
 When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
 
 - **Applying patches**: `apply_kernel_patch.py` detects multi-node and fans the
-  patch to every pod via `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`.
+  patch to every pod using `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`.
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
 - **Compiling/benchmarking**: Forge/GEAK backends use
   `python3 -m hyperloom.inference_optimizer.multi_node kernel-bench` instead of

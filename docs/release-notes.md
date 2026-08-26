@@ -22,22 +22,26 @@ availability and adds a correctness pass over the optimization loop: the
 fingerprint that decides whether a configuration has already been benchmarked,
 the kernel evidence a hard-killed campaign leaves behind, the ledger a warm
 replay writes, and the filters standing between an agent's proposal and the
-benchmark subprocess. One change invalidates persisted session state; review the
-list below before upgrading.
+benchmark subprocess. It contains breaking changes — one of which invalidates
+persisted session state. Review the full list below before upgrading.
 
 ### 1.0.0 highlights
 
-- **Configuration fingerprints are flag-aware**: `canonical_fingerprint` sorted
-  arg tokens as a flat list, so `--max-num-seqs 128 --max-model-len 4096` and
+- **Configuration fingerprints are flag-aware** *(breaking change — existing sessions)*:
+  `canonical_fingerprint` sorted arg tokens as a flat list, so
+  `--max-num-seqs 128 --max-model-len 4096` and
   `--max-num-seqs 4096 --max-model-len 128` hashed identically and the second
   was skipped as a duplicate by the `explore_search` dedup ledger. Args are now
   parsed into sorted `(flag, value)` pairs with last-wins semantics for repeated
-  flags. **Operator note**: every fingerprint already persisted in
-  `explore_search.tested`, `accepted`, `rejected`, and `name_index` inside
-  `state.json` is invalidated, so a resumed session re-benches its full explored
-  history. **(Breaking)**
+  flags.
 
-- **Kernel fusion runs again**: the fusion wrapper passed `--llm-model` to
+  **If you resume an existing session after upgrading**: all fingerprints stored
+  in `explore_search.tested`, `accepted`, `rejected`, and `name_index` inside
+  `state.json` are invalidated. Hyperloom treats every previously-tested
+  configuration as unseen and re-benchmarks from scratch, repeating work already
+  done before the upgrade.
+
+- **Kernel fusion runs again**: The fusion wrapper passed `--llm-model` to
   `forge-fuse` after KernelForge renamed the option to `--model`. Because
   `forge-fuse` rejects an unknown option outright rather than ignoring it, every
   fusion run was exiting 2 before it started and surfacing only as a missing
@@ -48,11 +52,11 @@ list below before upgrading.
   gated on `schema_version == 1` while KernelForge has stamped `2` into that
   file since 2026-08-13, so every published best was rejected and the kernel
   backend fell through to the caller checkpoint or the stdout sentinel — losing
-  the one record that survives a hard kill, which is the case it exists for. The
+  the one record that exists specifically to survive a hard kill. The
   version gate is removed rather than corrected: the commit, the timings, and
   the score are each still checked on their own.
 
-- **A reproduced warm replay is recorded as an adopted optimization**: the
+- **A reproduced warm replay is recorded as an adopted optimization**: The
   replay was mirrored into the canonical recorder streams before the keep
   decision was reached, and because a replay's executor settles on `succeeded`
   either way, every replay was recorded as `discarded`. A session that had
@@ -60,11 +64,11 @@ list below before upgrading.
   and the whole gain surfaced as a `reconciliation_gap_pct`. The ledger and
   `cumulative_gain_validated` are now a single number, and drift or failed
   replays carry the measured gain, the threshold, and the reason on their
-  attempt row. This is a forward fix; breakdowns already exported without the
-  adoption are not retroactively repaired.
+  attempt row. Sessions completed before this fix are not retroactively updated —
+  existing breakdowns that show a `reconciliation_gap_pct` remain as-is.
 
-- **Agent-proposed environment overrides are filtered where they enter the
-  loop**: the `extra_envs` argument to `materialize_config_with_envs` was
+- **Agent-proposed environment overrides are filtered where they enter the loop**:
+  The `extra_envs` argument to `materialize_config_with_envs` was
   checked only for key shape, which let `LD_PRELOAD`, `PYTHONPATH` and `PATH`
   through into the rendered YAML and from there into the benchmark subprocess. A
   specialist's `config_changes` / `extra_envs` proposal is now filtered once at
@@ -75,27 +79,26 @@ list below before upgrading.
   `GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PERL5OPT`, `PYTHONSTARTUP`,
   `PYTHONINSPECT`, `PYTHONUSERBASE` and `SHELLOPTS`.
 
-- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
-  `--max-iters` this repository put on every `forge-loop` and
-  `forge-rewrite-by-flydsl` argv. KernelForge deleted the option because its
+- **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone** *(breaking change — remove these variables from your environment)*:
+  This also removes the `--max-iters` flag that was added to every `forge-loop` and
+  `forge-rewrite-by-flydsl` invocation. KernelForge deleted the option because its
   campaigns are bounded by `--max-hours`, so the cap those variables fed was a
   no-op that logged a limit it never applied. `--max-hours` and the hard-kill
-  timeout remain the only budget controls. **(Breaking)**
+  timeout are the only budget controls.
 
 - **A hung `ray stop` no longer blocks recovery**: `force_restart_local_cluster`
   inlined its own `ray stop --force` with neither a timeout nor an `OSError`
   guard. It now routes through `_stop_ray_force`, so
-  `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable via
+  `DEFAULT_RAY_STOP_TIMEOUT_SEC` (30 s, overridable through
   `HYPERLOOM_RAY_STOP_TIMEOUT_SEC`) covers all three stop sites instead of only
   one. Log output is unchanged.
 
-- **Two no-op internals are removed**: `stop_ray_if_owned`, whose only caller
-  went away with `parallel_e2e_runner.py` and whose ownership flag
-  `ensure_ray_cluster` returned for it alone (that signature is now `-> None`),
-  and the `reference_envs` filter inside `materialize_config_with_envs`, whose
-  only writer already applied a strictly stronger filter. Neither dropped
-  anything in production. **(Breaking)** for an external importer of
-  `stop_ray_if_owned`.
+- **Two no-op internals are removed** *(breaking change — affects external importers of `stop_ray_if_owned`)*:
+  `stop_ray_if_owned` (whose only caller went away with `parallel_e2e_runner.py`)
+  and the `reference_envs` filter inside `materialize_config_with_envs` (whose
+  only writer already applied a strictly stronger filter). Neither dropped
+  anything in production. If your code imports `stop_ray_if_owned` directly,
+  remove that import.
 
 ## Hyperloom 1.0.0b2 release
 
@@ -120,51 +123,55 @@ upgrading.
   pinned to the immutable v0.2.0 release commit, so installs remain
   reproducible.
 
-- **One current remote Recipe KB Store contract**: Remote mode reads a single
-  identity-addressed inference Recipe carrying replay config, the ordered patch
-  timeline, and nested kernel columns, then publishes one final CLOSE session
-  with verified artifacts under the same throughput champion. Degraded
-  configuration donors now require exact precision, and a permanently missing
-  owner patch is dead-lettered instead of blocking publication of the remaining
-  Recipe sections. Local Recipe storage and non-Recipe GBrain integrations are
-  unchanged.
+- **Remote Recipe KB reads and writes follow a single unified contract**: Remote
+  mode now reads a single Recipe per session (selected by canonical ID), replays
+  its combined config and patch timeline, and writes one final record at CLOSE.
+  Previously, a missing or imprecise configuration donor could block the entire
+  CLOSE write; it is now skipped individually so the remaining sections still
+  publish. Local Recipe storage and non-Recipe GBrain integrations are unchanged.
+  No user action is required unless you operate a custom remote KB integration.
 
-- **`KERNEL_OPT_BACKEND_ORDER` is the single kernel-backend switch**: The GEAK
-  gate no longer falls back to the persisted `shared_state.kernel_optimizer`
-  field, so the backend choice is identical on a resume. The
-  `KERNEL_OPT_BACKENDS` environment variable is removed; no production code read
-  it. **(Breaking)**
+- **`KERNEL_OPT_BACKEND_ORDER` is the single kernel-backend switch** *(breaking change — remove `KERNEL_OPT_BACKENDS` from your environment)*:
+  The GEAK gate no longer falls back to the persisted `shared_state.kernel_optimizer`
+  field, so the backend choice is now identical on a resume. The
+  `KERNEL_OPT_BACKENDS` environment variable is removed; remove it from any
+  launcher scripts or `.env` files.
 
-- **Action metadata consolidated into code**: `actions/_meta/*.yaml` and
-  `orchestrator/actions/registry.py` are replaced by `ACTION_CATALOGUE` in
-  `inference_optimizer/protocol/action_surfaces.py`. The `preferred_backend`,
-  `preferred_model`, `max_turns`, and `params_schema` fields are dropped because
-  no runtime code read them; the operational `verdict_class` is kept.
-  **(Breaking)**
+- **Action metadata consolidated into code** *(breaking change — affects tools that read action YAML files directly)*:
+  `actions/_meta/*.yaml` and `orchestrator/actions/registry.py` are replaced by
+  `ACTION_CATALOGUE` in `inference_optimizer/protocol/action_surfaces.py`. The
+  `preferred_backend`, `preferred_model`, `max_turns`, and `params_schema` fields
+  are dropped because no runtime code read them; the operational `verdict_class`
+  is kept. If your tooling reads the action YAML files directly, migrate to
+  `ACTION_CATALOGUE`.
 
-- **Three unexecutable kernel actions removed**: `vendor_kernel_config`,
-  `operator_tuning`, and `deep_kernel_analysis` never had an executor, so every
-  request for them was answered with `unknown_kernel_kind`. Sessions recorded
-  under the old build that carry these names in `state.json` / `coordinator.db`
-  are no longer resumable, and no migration is provided. **(Breaking)**
+- **Three unexecutable kernel actions removed** *(breaking change — sessions containing these actions cannot be resumed)*:
+  `vendor_kernel_config`, `operator_tuning`, and `deep_kernel_analysis` never had
+  an executor, so every request for them was answered with `unknown_kernel_kind`.
+  Sessions recorded under the old build that carry these names in `state.json` or
+  `coordinator.db` cannot be resumed after upgrading, and no migration is
+  provided. Start a fresh session for any affected workloads.
 
-- **Write-only artifacts no longer produced**: `agent_transcript.jsonl`,
-  `orchestration_turns.jsonl`, `mn_input_params_*.json`, and the work_dir copy
-  of `semantic_audit.json` had no reader, and the first three persisted secrets
-  or raw LLM transcripts past a redactor that inspected values but not keys.
-  **(Breaking)**
+- **Write-only artifacts no longer produced** *(breaking change — pipelines that consume these files will stop receiving them)*:
+  `agent_transcript.jsonl`, `orchestration_turns.jsonl`, `mn_input_params_*.json`,
+  and the work_dir copy of `semantic_audit.json` are no longer written. The first
+  three persisted secrets or raw LLM transcripts past a redactor that inspected
+  values but not keys. If any downstream pipeline reads these files, remove that
+  dependency.
 
-- **Magpie leak salvage is now opt-in**: Salvage no longer defaults to
-  `/workspace/` and runs only when `$INFERENCE_OPTIMIZER_RESCUE_PATHS` is set.
-  The generic `{framework}_{gpu_type}.sh` scripts respect `$RESULT_DIR` and never
-  needed salvage, but a script pinned through `params.benchmark_script` that
-  hardcodes `/workspace/` now fails the task with `no_report` unless the
-  environment variable is set explicitly. **(Breaking)**
+- **Magpie leak salvage is now opt-in** *(breaking change — scripts that hardcode `/workspace/` as the result directory will now fail)*:
+  Salvage no longer defaults to `/workspace/` and runs only when
+  `$INFERENCE_OPTIMIZER_RESCUE_PATHS` is set. The generic
+  `{framework}_{gpu_type}.sh` scripts respect `$RESULT_DIR` and are unaffected,
+  but a script pinned through `params.benchmark_script` that hardcodes
+  `/workspace/` will now fail the task with `no_report`. Fix: set
+  `INFERENCE_OPTIMIZER_RESCUE_PATHS=/workspace/` in your launcher, or update the
+  script to write to `$RESULT_DIR`.
 
-- **`kernel_optimization.py` drops `--test-command` and `--test-harness-path`**:
-  The unittest-harness contract they fed had no reachable caller. An external
-  invoker still passing either flag now fails in argparse rather than being
-  silently ignored. **(Breaking)**
+- **`kernel_optimization.py` drops `--test-command` and `--test-harness-path`** *(breaking change — callers that pass these flags will now fail at startup)*:
+  The unittest-harness contract they fed had no reachable caller. Remove both
+  flags from any script or tool that invokes `kernel_optimization.py` directly;
+  argparse will exit with an error if either is still present.
 
 ## Hyperloom 1.0.0b1 release
 
@@ -208,17 +215,20 @@ Cortex KB path, and a recipe-oriented naming cleanup across orchestration state.
 ### 1.0.0a3 highlights
 
 - **Recipe-KB write traceability**: Writes to the cross-session recipe KB are now
-  mirrored as Langfuse spans, so T0 identity anchors and Coordinator KEEP/REVERT,
-  framework-PR, and CLOSE amends can be audited without diffing local history.
+  mirrored as Langfuse spans. KEEP/REVERT decisions, framework-PR results, and
+  CLOSE writes are now auditable in Langfuse without having to diff local history.
 
-- **Remote Cortex KB removal**: The obsolete remote Cortex KB integration is
+- **Remote Cortex KB removed**: The obsolete remote Cortex KB integration is
   removed end to end, including CLI wiring, critic assessment calls, prompt
   injection, bundle fields, env vars, and the specialist Cortex KB MCP server.
+  If you were using `CORTEX_KB_*` variables or the Cortex MCP server, remove them —
+  they are no longer read.
 
-- **Recipe-KB naming realignment**: Local recipe knowledge-base paths now use
-  `recipe_*` names across Python APIs, CLI flags, emitted state, breakdown data,
-  stop reasons, warm-recipe source tags, sweep grid sources, and session runtime
-  directories.
+- **Recipe-KB naming realignment**: Internal recipe knowledge-base paths are
+  renamed to use `recipe_*` prefixes consistently across Python APIs, CLI flags,
+  emitted state, breakdown data, stop reasons, warm-recipe source tags, sweep grid
+  sources, and session runtime directories. If your tooling or scripts reference
+  the old KB path names, update them to the `recipe_*` equivalents.
 
 ## Hyperloom 1.0.0a2 release
 
@@ -245,7 +255,7 @@ integrity fixes.
 
 - **Enablement subsystem for non-runnable combos**: A new path lets a non-runnable
   (model, backend) combination repair itself and earn KEEP by actually launching
-  the model, via attempt-scoped runtimes in isolated venvs, source localization of
+  the model, using attempt-scoped runtimes in isolated venvs, source localization of
   merged-PR/vendored closures behind a compiled-closure gate, and off-loop compiled
   builds (AITER, sgl-kernel, vLLM-from-source) on a dedicated `build_lane`.
 
@@ -272,7 +282,7 @@ integrity fixes.
   shape and install-time judgment is aligned with the runtime entry point using a
   shared concurrency-unblocked helper, ending false-positive install aborts
   (exit 5). Persistent baseline servers use per-session unique ports, and the
-  installer downloads the release wheel and hotfix via public `curl`.
+  installer downloads the release wheel and hotfix using public `curl`.
 
 ## Hyperloom 1.0.0a1 public release
 
