@@ -12,6 +12,7 @@ Any phase → CLOSE on terminal/abort; ``recover`` is phase-orthogonal.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any
@@ -21,6 +22,9 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 # Phase identifiers + ordering (monotonic chain)
@@ -776,12 +780,23 @@ def normalize_budget_pct(
     for phase, val in budget.items():
         canon = (phase or "").strip().upper()
         if canon not in PHASE_NAMES:
+            # Loud: a key naming a phase that no longer exists (a renamed
+            # phase, a resumed session, a typo in a manifest) silently reverts
+            # that share to its default, which reads downstream as an operator
+            # choice nobody made.
+            log.warning(
+                "phase budget: dropping override for unknown phase %r (known: %s)",
+                phase,
+                ", ".join(PHASE_NAMES),
+            )
             continue
         try:
             f = float(val)
         except (TypeError, ValueError):
+            log.warning("phase budget: dropping non-numeric override %r=%r", canon, val)
             continue
         if not (0.0 <= f <= 1.0):
+            log.warning("phase budget: dropping out-of-range override %s=%r (want 0.0-1.0)", canon, f)
             continue
         out[canon] = f
     return out

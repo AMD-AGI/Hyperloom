@@ -14,6 +14,9 @@ from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_UPSTREAM_PR,
+    patch_lever_kind,
     patch_owner_phase,
 )
 from ..kernel._recorder_trace import trace_recording_skipped
@@ -89,6 +92,38 @@ log = _logging.getLogger(__name__)
 # ``phase_breakdown`` and the action-family table publish. Anything that
 # reconciles a ``framework_agent`` task against the stack has to translate.
 _FRAMEWORK_STACK_ACTION = "framework"
+
+#: Task kind -> the lever it moves, for winners whose params carried no stamp.
+#: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
+#: evidence and a missing one is a real gap rather than something to guess at.
+_LEVER_BY_TASK_KIND = {
+    "explore": LEVER_CONFIG,
+    "sweep": LEVER_CONFIG,
+    "conc_sweep": LEVER_CONFIG,
+    "framework_agent": LEVER_UPSTREAM_PR,
+    _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
+}
+
+
+def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
+    """Resolve the lever a winner moved.
+
+    Args:
+        task_kind: The action kind that produced the winner.
+        bv: The winning variant dict, read for a ``lever_kind`` stamp.
+
+    Returns:
+        One of :data:`LEVER_KINDS`, or ``""`` when nothing named a lever --
+        which the caller logs rather than papering over.
+    """
+    # The kind wins where it can only move one lever: an ``explore`` round
+    # changes configuration and nothing else, whatever incidental keys its
+    # winner dict carries. ``integrate_patch`` lands every lever, so there the
+    # producer's stamp is the only evidence.
+    by_kind = _LEVER_BY_TASK_KIND.get(str(task_kind or "").strip(), "")
+    if by_kind:
+        return by_kind
+    return patch_lever_kind(bv if isinstance(bv, dict) else None)
 
 
 @dataclass
@@ -1353,6 +1388,7 @@ class WritebackCollaborator:
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
+                lever_kind=_lever_kind_for_lift(kind, result_dict if isinstance(result_dict, dict) else None),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -1509,6 +1545,7 @@ class WritebackCollaborator:
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
+                lever_kind=_lever_kind_for_lift(kind, variant_outcome if isinstance(variant_outcome, dict) else None),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -2637,6 +2674,21 @@ class WritebackCollaborator:
                     or (getattr(self.shared_state, "phase", "") if task_kind != "integrate_patch" else "")
                     or ""
                 ).strip()
+                # The lever is what the report is about; the phase only says
+                # when the work ran, and for every kind but ``integrate_patch``
+                # the fallback above inherits whatever phase is live at
+                # writeback time -- which is not the phase that authored it.
+                lever_kind = _lever_kind_for_lift(task_kind, bv)
+                if not lever_kind:
+                    # Loud, not fatal: a bookkeeping gap must not cost a real
+                    # KEEP, but it must not pass unnoticed either -- an
+                    # unattributed stack entry is how gain lands on the wrong
+                    # lever's total with nothing failing.
+                    log.warning(
+                        "lift: no lever_kind for a %s winner (variant=%s); the stack entry will report as unattributed",
+                        task_kind,
+                        variant_name,
+                    )
                 stack_entry: dict[str, Any] = {
                     "action": task_kind,
                     "variant_name": variant_name,
@@ -2656,6 +2708,8 @@ class WritebackCollaborator:
                 }
                 if source_phase:
                     stack_entry["source_phase"] = source_phase
+                if lever_kind:
+                    stack_entry["lever_kind"] = lever_kind
                 if gap_canonical_id:
                     stack_entry["gap_canonical_id"] = gap_canonical_id
                 # Stamp the variant's stable join key (and source) so breakdown

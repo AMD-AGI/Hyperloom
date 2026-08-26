@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_SOURCE_PATCH,
+    patch_lever_kind,
     patch_owner_phase,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -90,7 +92,18 @@ class IntentRouter:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
-        """Freeze patch ownership when a specialist task is created."""
+        """Freeze patch ownership when a specialist task is created.
+
+        Stamps both the lever the work moves and the phase that owns it. The
+        lever is the durable half: it says what was changed, which stays true
+        after the phase machine is rearranged, while the phase only says when.
+        """
+        lever = patch_lever_kind(params)
+        if not lever:
+            # A specialist that neither names a PR nor carries an enablement
+            # flag is authoring against the source tree.
+            lever = LEVER_SOURCE_PATCH
+        params["lever_kind"] = lever
         owner = patch_owner_phase(params)
         if not owner:
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
@@ -115,6 +128,8 @@ class IntentRouter:
         owner = patch_owner_phase(params)
         if owner:
             params["source_phase"] = owner
+            if not params.get("lever_kind"):
+                params["lever_kind"] = patch_lever_kind(params) or LEVER_SOURCE_PATCH
             return owner
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -135,11 +150,16 @@ class IntentRouter:
             "gap_layer",
             "framework_agent_authoring",
             "framework_agent_candidate_id",
+            # The lever the specialist was dispatched against; the patch that
+            # lands is the same lever, so it is copied rather than re-derived.
+            "lever_kind",
         ):
             value = specialist_params.get(key)
             if value not in (None, "", [], {}):
                 params.setdefault(key, value)
         params["source_phase"] = owner
+        if not params.get("lever_kind"):
+            params["lever_kind"] = patch_lever_kind(params) or LEVER_SOURCE_PATCH
         return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:

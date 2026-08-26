@@ -27,6 +27,11 @@ from ..loop.coordinator import (
     _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC,
     _framework_config_levers_from_done,
 )
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_SOURCE_PATCH,
+    LEVER_UPSTREAM_PR,
+)
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -721,6 +726,7 @@ class FrameworkPhase(PhaseHandler):
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             "task_kind": "framework_authoring",
             "pr_lead": {"title": title, "url": pr_url, "diff_url": diff_url},
+            "lever_kind": LEVER_UPSTREAM_PR,
             # Provenance markers for the dispatcher-side authored-patch bridge.
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand_id,
@@ -1127,6 +1133,7 @@ class FrameworkPhase(PhaseHandler):
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "source_phase": "EXPLORE",
+            "lever_kind": LEVER_SOURCE_PATCH,
             "gap_canonical_id": gap_cid,
             "gap_symptom": gap_symptom or f"Retry apply-failed patch for {gap_cid}",
             "gap_layer": "perf_explore",
@@ -1578,6 +1585,7 @@ class FrameworkPhase(PhaseHandler):
             "domain": domain,
             "source_phase": "FRAMEWORK_AGENT",
             "gap_canonical_id": gap_cid,
+            "lever_kind": LEVER_SOURCE_PATCH,
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
             "framework": framework,
@@ -2442,6 +2450,8 @@ class FrameworkPhase(PhaseHandler):
         params = {
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
+            # This lane fetches and applies an upstream diff directly.
+            "lever_kind": LEVER_UPSTREAM_PR,
             "base_tput": resolve_grading_anchor_tput(state),
             # Same decaying bar the explore and integrate_patch dispatch paths inject.
             "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
@@ -3712,6 +3722,7 @@ class FrameworkPhase(PhaseHandler):
             "domain": domain,
             "source_phase": "FRAMEWORK_AGENT",
             "gap_canonical_id": gap_cid,
+            "lever_kind": LEVER_CONFIG,
             "gap_symptom": ("Propose runtime config variants (server args / env) for a throughput grid"),
             "gap_layer": "framework",
             "framework": framework,

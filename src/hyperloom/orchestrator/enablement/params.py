@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+
 from ..collaborator import CoordinatorCollaborator
 
 import logging as _logging
@@ -272,6 +274,7 @@ class EnablementParams(CoordinatorCollaborator):
             # Enablement tag routes the integrate gate to runnable_decision.
             "framework_agent_authoring": True,
             "enablement": True,
+            "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
             "enablement_search_repos": list(plan.repos),

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
+
 from ..collaborator import CoordinatorCollaborator
 from .params import _enablement_carrier_params
 
@@ -611,6 +613,7 @@ class EnablementBuild(CoordinatorCollaborator):
         params: dict[str, Any] = {
             "enablement": True,
             "enablement_launch_only": True,
+            "lever_kind": LEVER_ENABLEMENT,
             "runtime_override": runtime_override,
             "framework": str(getattr(state, "framework", "") or ""),
             "enablement_before_signature": before_sig,

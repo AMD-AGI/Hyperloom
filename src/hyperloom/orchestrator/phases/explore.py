@@ -82,7 +82,10 @@ def _forward_integrate_source(
     # ``framework`` is intentionally not forwarded: integrate_patch consumes
     # that parameter when selecting accuracy parsing/gating behavior, whereas
     # proposal ownership only needs the gap metadata below.
-    for key in ("gap_canonical_id", "gap_layer"):
+    # ``lever_kind`` travels with the proposal: the patch that lands moved the
+    # same lever the specialist was dispatched against, and re-deriving it at
+    # writeback time is how attribution drifts.
+    for key in ("gap_canonical_id", "gap_layer", "lever_kind"):
         value = src.get(key)
         if value not in (None, "", [], {}):
             dst[key] = value
