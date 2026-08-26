@@ -30,6 +30,7 @@ from typing import Any, Mapping
 import yaml
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.fs_utils import NETWORK_FS_TYPES, is_network_fs, path_fstype
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -751,85 +752,10 @@ def _is_double_run_accuracy_handoff(
     return _WARMUP_ROUND_DIR in Path(source).parts
 
 
-# Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
-# mount flap), where a process whose cwd lives on such a mount sees relative-path
-# writes ENOENT. Such FS types trigger local mirroring of the InferenceX
-# checkout (the server's cwd for its cuda-graph pickle dump).
-_NETWORK_FS_TYPES = frozenset(
-    {
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "lustre",
-        "glusterfs",
-        "ceph",
-        "fuse.weka",
-        "wekafs",
-        "wekafsgw",
-        "fuse.juicefs",
-        "fuse.s3fs",
-        "fuse.sshfs",
-        "9p",
-    }
-)
-
-
-def _path_fstype(path: str) -> str:
-    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
-
-    Picks the longest mountpoint that is a prefix of the resolved path.
-    Returns ``""`` when it cannot be determined (non-Linux, unreadable
-    ``/proc/mounts``, ...), which callers treat as "assume local".
-
-    Args:
-        path: Filesystem path whose backing mount type is resolved.
-
-    Returns:
-        The filesystem type backing ``path``, or ``""`` when it cannot be
-        determined.
-    """
-    try:
-        rp = os.path.realpath(path)
-    except OSError:
-        return ""
-    best_mp = ""
-    best_type = ""
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # /proc/mounts octal-escapes spaces in the mountpoint.
-                try:
-                    mp = parts[1].encode("latin-1").decode("unicode_escape")
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    mp = parts[1]
-                fstype = parts[2]
-                norm = mp.rstrip("/") or "/"
-                if norm == "/":
-                    is_under = True  # root matches everything (lowest priority)
-                else:
-                    is_under = rp == norm or rp.startswith(norm + "/")
-                if is_under and len(norm) >= len(best_mp):
-                    best_mp = norm
-                    best_type = fstype
-    except OSError:
-        return ""
-    return best_type
-
-
-def _is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem.
-
-    Args:
-        path: Filesystem path to classify.
-
-    Returns:
-        ``True`` when ``path`` lives on a known network filesystem type.
-    """
-    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
+# Private aliases kept for backward compatibility with call sites in this module.
+_NETWORK_FS_TYPES = NETWORK_FS_TYPES
+_path_fstype = path_fstype
+_is_network_fs = is_network_fs
 
 
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:

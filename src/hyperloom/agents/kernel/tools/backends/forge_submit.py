@@ -714,6 +714,79 @@ def _pkg_sys_path_root(source_file: str) -> str:
     return str(top.parent)
 
 
+def _is_on_network_fs(path: Path) -> bool:
+    """True when ``path`` or its nearest existing ancestor is on a network FS.
+
+    Imported inside the call rather than at module scope: this file also runs as
+    a standalone script on nodes with no ``hyperloom`` on the path, which is the
+    invariant ``test_forge_submit_stays_import_light`` pins. A module-level
+    ``try/except ImportError`` still reads as a module-level import to it.
+    """
+    try:
+        from hyperloom.common.fs_utils import is_network_fs  # noqa: PLC0415
+    except ImportError:
+        return False
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return is_network_fs(str(probe))
+
+
+def _local_scratch_dir(output_dir: Path) -> Path:
+    """Return the scratch worktree directory, relocated to local disk when needed.
+
+    When ``output_dir`` is on a network filesystem (NFS, wekafs, …), place the
+    throwaway scratch worktree under a local-disk root so git hashing and copytree
+    run at local-disk speed.  Only the scratch worktree is relocated; the durable
+    experiment archive under ``output_dir`` stays on the shared mount.
+
+    The local root is ``$FORGE_LOCAL_SCRATCH_ROOT`` (default
+    ``~/.cache/hyperloom/forge_scratch``).  An orphan-sweep runs at construction
+    time to reclaim space from attempts that crashed before cleanup.
+    """
+    candidate = output_dir / "worktree"
+    if not _is_on_network_fs(output_dir):
+        return candidate
+    root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
+    local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
+    try:
+        local_root.mkdir(parents=True, exist_ok=True)
+        _sweep_orphaned_scratch(local_root, output_dir)
+    except OSError:
+        log.warning("forge: could not create local scratch root %s; falling back to %s", local_root, candidate)
+        return candidate
+    # Use the same basename as the durable output dir so the path is recognisable.
+    return local_root / output_dir.name / "worktree"
+
+
+def _sweep_orphaned_scratch(local_root: Path, current_output_dir: Path) -> None:
+    """Remove scratch worktrees under *local_root* whose parent session is gone.
+
+    A crash or SIGKILL can leave a worktree on local disk after its durable
+    output directory has been removed.  Without a sweep, each failed attempt
+    accumulates several GB under the local root.  Only removes trees whose
+    sibling ``worktree`` marker is present but whose parent directory no longer
+    exists on the shared mount — never removes the current attempt.
+    """
+    try:
+        for child in local_root.iterdir():
+            if not child.is_dir() or child == current_output_dir.parent:
+                continue
+            wt = child / "worktree"
+            if not wt.is_dir():
+                continue
+            shared_peer = current_output_dir.parent.parent / child.name
+            if not shared_peer.exists():
+                try:
+                    import shutil as _shutil
+                    _shutil.rmtree(child, ignore_errors=True)
+                    log.info("forge: swept orphaned scratch worktree %s", child)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _prepare_worktree_nogit(
     source_file: str,
     kernel_repo: str,
@@ -792,7 +865,7 @@ def _prepare_worktree_nogit(
         rel = Path(src_abs.name)
         copy_subtrees = None
 
-    scratch_dir = output_dir / "worktree"
+    scratch_dir = _local_scratch_dir(output_dir)
     if scratch_dir.exists() or scratch_dir.is_symlink():
         raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {scratch_dir}")
     if not branch or branch in {"main", "master"}:
