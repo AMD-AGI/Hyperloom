@@ -52,15 +52,21 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "vllm": ("VLLM_VERSION",),
 }
 
-# Where a component lives when it was installed into a venv of its own instead
-# of the interpreter running this code. ``--framework-env isolated`` is the
-# default for vLLM, whose ROCm wheel pins its own torch and so must not share
-# the orchestrator's environment -- which also means ``importlib.metadata``
-# here cannot see it, and the version silently degraded to "unknown" on the
-# default bare-metal vLLM path. Setup records the root it installed into.
-_STACK_VENV_ROOT_ENVS: dict[str, tuple[str, ...]] = {
-    "vllm": ("VLLM_VENV_ROOT",),
-}
+# The interpreter preflight resolved for the serving framework. ``--framework-env
+# isolated`` is the default for vLLM, whose ROCm wheel pins its own torch and so
+# must not share the orchestrator's environment -- which also means
+# ``importlib.metadata`` here cannot see it, and the version silently degraded to
+# "unknown" on the default bare-metal vLLM path.
+#
+# Preflight already walks the candidate interpreters and imports the framework to
+# find this one, so it describes the runtime this session resolved. The installer's
+# ``$VLLM_VENV_ROOT`` is deliberately not consulted: it is host state that is only
+# ever written, never cleared, so it survives an isolated -> shared move and would
+# name an environment the run no longer serves with.
+_FRAMEWORK_PYTHON_ENV: str = "HYPERLOOM_FRAMEWORK_PYTHON"
+
+# Components served by that interpreter. Others live in this process.
+_FRAMEWORK_COMPONENTS: frozenset[str] = frozenset({"vllm", "sglang"})
 
 #: Runtime-arch overrides only. ``PYTORCH_ROCM_ARCH`` is deliberately absent:
 #: it names the archs a wheel is *compiled* for, not the installed device, and
@@ -192,23 +198,31 @@ def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> d
                     val = v
                     break
         if not val and probe:
-            val = _probe_pkg_version(component, _venv_site_packages(env, component))
+            val = _probe_pkg_version(component, _framework_site_packages(env, component))
         out[component] = val or "unknown"
     return out
 
 
-def _venv_site_packages(env: Mapping[str, str], component: str) -> list[str]:
-    """``site-packages`` dirs of the venv a component was installed into.
+def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str] | None:
+    """``site-packages`` dirs of the interpreter preflight resolved, if any.
 
-    Empty when the component has no isolated-venv convention or the run did not
-    use one, which is the shared-environment case the interpreter already
-    covers.
+    ``None`` when this component is not served by a resolved interpreter, or
+    when preflight published none -- both are the shared-environment case that
+    the running interpreter already answers.
+
+    A resolved interpreter that has no importable tree yields an empty list.
+    That is distinct from ``None``: the interpreter was chosen for this run, so
+    the version has to come from it or not at all.
     """
-    root = _env_first(env, *_STACK_VENV_ROOT_ENVS.get(component, ()))
-    if not root:
-        return []
+    if component not in _FRAMEWORK_COMPONENTS:
+        return None
+    python_exe = _env_first(env, _FRAMEWORK_PYTHON_ENV)
+    if not python_exe:
+        return None
+    # ``<venv>/bin/python`` -> ``<venv>/lib/python*/site-packages``.
+    venv_root = Path(python_exe).resolve().parent.parent
     try:
-        return [str(p) for p in sorted(Path(root).glob("lib/python*/site-packages"))]
+        return [str(p) for p in sorted(venv_root.glob("lib/python*/site-packages"))]
     except OSError:
         return []
 
@@ -222,28 +236,29 @@ def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> st
     runs on the session-manifest build path. Env vars (e.g. ``VLLM_VERSION``,
     ``AITER_COMMIT``) still take priority in ``detect_stack_fingerprint``.
 
-    Falls back to ``venv_path`` when the running interpreter has no such
-    distribution: an isolated framework venv is invisible to this process
-    otherwise, and reporting a framework the run actually served with as
-    "unknown" is worse than the extra directory scan.
+    ``venv_path`` (not ``None``) means preflight resolved a separate interpreter
+    for this framework, and it is authoritative: the framework serving the run
+    lives there, not in this process. Any same-named distribution installed here
+    belongs to a different environment, so answering from it would report a
+    version the run never served with -- worse than "unknown", because it looks
+    right. This process is consulted only when no interpreter was resolved.
     """
     dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "aiter"}.get(component)
     if not dist:
         return ""
+    if venv_path is not None:
+        try:
+            for found in _im.distributions(path=list(venv_path)):
+                name = (found.metadata["Name"] or "").strip().lower().replace("_", "-")
+                if name == dist:
+                    return (found.version or "").strip()
+        except Exception:  # noqa: BLE001 — an unreadable venv is not a failure.
+            return ""
+        return ""
     try:
         return (_im.version(dist) or "").strip()
     except Exception:  # noqa: BLE001 — a missing package is normal.
-        pass
-    if not venv_path:
         return ""
-    try:
-        for found in _im.distributions(path=list(venv_path)):
-            name = (found.metadata["Name"] or "").strip().lower().replace("_", "-")
-            if name == dist:
-                return (found.version or "").strip()
-    except Exception:  # noqa: BLE001 — an unreadable venv is not a failure.
-        return ""
-    return ""
 
 
 def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:

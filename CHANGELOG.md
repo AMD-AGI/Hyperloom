@@ -90,6 +90,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The recorded framework version now comes from the interpreter preflight
+  resolved, not from whatever the orchestrator's own process happens to have.**
+  `--framework-env isolated` is the default for vLLM, whose ROCm wheel pins its
+  own torch, so the framework is installed where `importlib.metadata` in this
+  process cannot see it — and `detect_stack_fingerprint` probed this process
+  first, recording `unknown` on the default bare-metal vLLM path, or the version
+  of a shared install the run never served with when one happened to be present.
+  `_resolve_framework_build` already walks the candidate interpreters and imports
+  the framework to find the right one, but `_check_serving_framework` only
+  printed the winner; it is now published as `$HYPERLOOM_FRAMEWORK_PYTHON` and
+  the fingerprint reads its `site-packages`. The installer-written
+  `$VLLM_VENV_ROOT` is deliberately not consulted: it is only ever written, never
+  cleared, so it survives an isolated-to-shared move and would name an
+  environment the run no longer serves with.
+
 - **Shell and loader hijack names are rejected from the `extra_envs` argument to
   `materialize_config_with_envs` before the config is persisted.** The predicate
   was `valid_env_key`, a key-shape check that let `LD_PRELOAD`, `PYTHONPATH` and

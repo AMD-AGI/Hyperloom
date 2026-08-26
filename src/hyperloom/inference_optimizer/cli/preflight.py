@@ -951,6 +951,13 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
+    # Publish the interpreter this scan resolved to. It is the only value that
+    # was proven to import the framework here, so consumers that would otherwise
+    # re-derive it from installer-written host state (``$VLLM_VENV_ROOT``, which
+    # survives an isolated -> shared move) can read the resolved answer instead.
+    # A refuted build is not published: it is provably the wrong one.
+    if found and probe.verdict is not False:
+        os.environ["HYPERLOOM_FRAMEWORK_PYTHON"] = found
     evidence = _rocm_evidence(framework)
     if found and probe.verdict is True:
         print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")

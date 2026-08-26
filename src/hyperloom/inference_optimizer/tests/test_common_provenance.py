@@ -294,38 +294,55 @@ def test_code_revision_falls_back_when_git_absent(monkeypatch):
 # --- isolated framework venv ------------------------------------------------
 
 
-def _installed(venv_root, name: str, version: str):
-    """A distribution installed under ``venv_root`` and nowhere this process looks."""
+def _installed(venv_root, name: str, version: str) -> str:
+    """A distribution installed under ``venv_root`` and nowhere this process looks.
+
+    Returns the interpreter path preflight would publish for that venv.
+    """
     site = venv_root / "lib" / "python3.12" / "site-packages"
     info = site / f"{name}-{version}.dist-info"
     info.mkdir(parents=True)
     (info / "METADATA").write_text(f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n")
-    return venv_root
+    return str(venv_root / "bin" / "python")
 
 
 def test_a_framework_in_its_own_venv_is_still_versioned(tmp_path):
     """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel
     pins its own torch. The orchestrator's interpreter cannot see that venv, so
-    without following ``VLLM_VENV_ROOT`` every bare-metal vLLM report recorded
-    the framework it actually served with as "unknown"."""
-    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=True)
+    without following the interpreter preflight resolved, every bare-metal vLLM
+    report recorded the framework it actually served with as "unknown"."""
+    python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint({"HYPERLOOM_FRAMEWORK_PYTHON": python_exe}, probe=True)
     assert fp["vllm"] == "0.27.1+rocm723"
 
 
-def test_an_operator_pin_still_wins_over_the_venv(tmp_path):
-    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root), "VLLM_VERSION": "0.28.0-rc1"}, probe=True)
+def test_an_operator_pin_still_wins_over_the_resolved_interpreter(tmp_path):
+    python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint(
+        {"HYPERLOOM_FRAMEWORK_PYTHON": python_exe, "VLLM_VERSION": "0.28.0-rc1"}, probe=True
+    )
     assert fp["vllm"] == "0.28.0-rc1"
 
 
-def test_a_venv_root_that_is_not_there_is_not_a_failure(tmp_path):
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(tmp_path / "gone")}, probe=True)
+def test_a_resolved_interpreter_with_no_tree_is_not_a_failure(tmp_path):
+    fp = _prov.detect_stack_fingerprint(
+        {"HYPERLOOM_FRAMEWORK_PYTHON": str(tmp_path / "gone" / "bin" / "python")}, probe=True
+    )
     assert fp["vllm"] == "unknown"
+
+
+def test_an_installer_venv_root_is_not_consulted(tmp_path):
+    """``$VLLM_VENV_ROOT`` is host state the installer only ever writes; it
+    survives an isolated -> shared move and would name an environment the run no
+    longer serves with. Only the resolved interpreter is authoritative."""
+    root = tmp_path / "stale-venv"
+    _installed(root, "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=True)
+    assert fp["vllm"] != "0.27.1+rocm723"
 
 
 def test_the_venv_is_not_scanned_under_probe_false(tmp_path):
     """probe=False is the hermetic contract: env only, no filesystem."""
-    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=False)
+    python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint({"HYPERLOOM_FRAMEWORK_PYTHON": python_exe}, probe=False)
     assert fp["vllm"] == "unknown"
