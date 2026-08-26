@@ -1352,10 +1352,10 @@ ensure_torch_lib_backup() {
 restore_torch_libs() {
   local backup_dir="$1" torch_lib_dir="$2" name
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
+    # What we installed is a symlink, and cp would write through it.
+    rm -f "${torch_lib_dir}/${name}" || return 1
     if [ -e "${backup_dir}/${name}" ]; then
       cp -a "${backup_dir}/${name}" "${torch_lib_dir}/${name}" || return 1
-    else
-      rm -f "${torch_lib_dir}/${name}" || return 1
     fi
   done
 }
@@ -1413,7 +1413,7 @@ restore_torch_soname_aliases() {
 sync_one_torch_lib() {
   local rocm_lib_dir="$1" py="$2" torch_lib_dir="$3"
   local backup_dir="${torch_lib_dir}/${ROCM_PROFILER_HOTFIX_TORCH_BACKUP_DIR}"
-  local name src dst tmp mode pending=""
+  local name src dst pending=""
 
   for name in $ROCM_PROFILER_HOTFIX_TORCH_LIBS; do
     src="$(readlink -f "${rocm_lib_dir}/${name}" 2>/dev/null)" || src=""
@@ -1425,7 +1425,10 @@ sync_one_torch_lib() {
       warn "${name} unresolved under ${rocm_lib_dir}"
       return 1
     fi
-    cmp -s "$src" "${torch_lib_dir}/${name}" || pending="${pending:+${pending} }${name}"
+    if [ ! -L "${torch_lib_dir}/${name}" ] \
+        || [ "$(readlink -f "${torch_lib_dir}/${name}" 2>/dev/null)" != "$src" ]; then
+      pending="${pending:+${pending} }${name}"
+    fi
   done
   if [ -z "$pending" ] && _torch_soname_aliases_ok "$torch_lib_dir" "$rocm_lib_dir"; then
     log "torch profiler libs already in sync (${torch_lib_dir})"
@@ -1433,7 +1436,7 @@ sync_one_torch_lib() {
   fi
 
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    log "would sync ${pending:-<no file changes>} from ${rocm_lib_dir} into ${torch_lib_dir}"
+    log "would link ${pending:-<no file changes>} from ${rocm_lib_dir} into ${torch_lib_dir}"
     log "would link versioned soname aliases in ${torch_lib_dir}"
     return 0
   fi
@@ -1441,16 +1444,14 @@ sync_one_torch_lib() {
   ensure_torch_lib_backup "$backup_dir" "$torch_lib_dir" "$rocm_lib_dir" \
     || { warn "cannot back up ${torch_lib_dir}"; return 1; }
 
-  [ -n "$pending" ] && log "syncing ${pending} into torch lib (${torch_lib_dir})"
+  [ -n "$pending" ] && log "linking ${pending} into torch lib (${torch_lib_dir})"
   for name in $pending; do
     src="$(readlink -f "${rocm_lib_dir}/${name}")"
     dst="${torch_lib_dir}/${name}"
-    tmp="${torch_lib_dir}/.${name}.hotfix-tmp.$$"
-    mode=0644
-    [ -e "$dst" ] && mode="$(stat -c '%a' "$dst")"
-    if ! cp -f "$src" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dst"; then
-      rm -f "$tmp"
-      warn "failed to write ${dst}"
+    # Link rather than copy: a byte-identical copy is a second inode, so glibc
+    # maps both it and the ROCm original and each gets its own HIP runtime.
+    if ! ln -sfnT "$src" "$dst"; then
+      warn "failed to link ${dst} -> ${src}"
       restore_torch_libs "$backup_dir" "$torch_lib_dir" \
         || die "cannot restore ${torch_lib_dir} from ${backup_dir}"
       return 1

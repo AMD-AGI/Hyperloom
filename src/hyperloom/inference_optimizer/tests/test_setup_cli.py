@@ -1486,7 +1486,8 @@ def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_pa
         tmp_path,
         body=(
             f"{_SYNC_BODY}\n"
-            # Stand in for `pip install -U torch`: fresh vendor bytes in place.
+            # Stand in for `pip install -U torch`: remove our symlinks, lay down fresh vendor bytes.
+            f'rm -f "{torch_lib}/libamdhip64.so" "{torch_lib}/libroctracer64.so"\n'
             f'printf vendor-hip-v2 > "{torch_lib}/libamdhip64.so"\n'
             f'printf vendor-tracer-v2 > "{torch_lib}/libroctracer64.so"\n'
             f"{_SYNC_BODY}"
