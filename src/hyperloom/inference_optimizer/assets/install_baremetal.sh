@@ -124,7 +124,7 @@ Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
-SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
+SGLANG_ROCM_EXTRA, SGLANG_BUILD_RUST_EXTS, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
 VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
@@ -552,6 +552,9 @@ install_sglang_from_source() {
   fi
   constraint_file="$(mktemp)"
   write_rocm_torch_constraints "$py" "$constraint_file"
+  # ROCm editable installs only need multimodal Rust crates for VLM serving.
+  export SGLANG_BUILD_RUST_EXTS="${SGLANG_BUILD_RUST_EXTS:-none}"
+  log "SGLANG_BUILD_RUST_EXTS=${SGLANG_BUILD_RUST_EXTS}"
   "$py" -m pip install --constraint "$constraint_file" -e "${sglang_root}/python[srt_hip]"
   rm -f "$constraint_file"
 }
@@ -689,6 +692,7 @@ PY
         log "would build in-tree ROCm kernel via setup_rocm.py after clone (sgl-kernel/ legacy or python/sglang/kernels/aot/ for v0.5.17+)"
       fi
       log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
+      log "would set SGLANG_BUILD_RUST_EXTS=${SGLANG_BUILD_RUST_EXTS:-none} (editable install; override to build multimodal Rust crates)"
     fi
     if [ -n "$AITER_REF" ]; then
       log "would clone/update ${AITER_REPO}@${AITER_REF} at ${aiter_root} and install it with current torch/triton constraints"
