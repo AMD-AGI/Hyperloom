@@ -2414,7 +2414,7 @@ def _candidate_keywords(name: str) -> list[str]:
     seen: set[str] = set()
     raw: list[str] = []
     for tok in tokens:
-        tok = tok.strip("_")
+        tok = tok.rstrip("_")
         if not tok or tok in seen:
             continue
         if tok in _TYPE_BLOCKLIST:
@@ -2591,11 +2591,23 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    patterns = (
-        r"\bdef\s+" + kw + r"\b",  # Python (incl. @triton.jit) def
-        r"\b" + kw + r"\s*=",  # kernel bound to a module-level name
-        r"__global__[^\n;{]*\b" + kw + r"\b",  # CUDA/HIP global kernel
-    )
+    # Also match the leading-underscore spelling: _candidate_keywords strips
+    # trailing underscores from each token (rstrip), so a kernel named
+    # ``_mxfp8_linear_kernel`` yields the keyword ``_mxfp8_linear_kernel``.
+    # The word-boundary anchor \b cannot sit between ``_`` and a letter, so
+    # the bare ``\bdef\s+kw\b`` pattern will miss ``def _kw(...)`` even when
+    # the leading underscore survived into the keyword.  Search the underscore
+    # prefix spelling explicitly so definition-site ranking works.
+    candidates = [kw] if kw.startswith("_") else [kw, "_" + kw]
+    patterns: list[str] = []
+    for sym in candidates:
+        patterns.extend(
+            [
+                r"def\s+" + re.escape(sym) + r"\b",  # Python / @triton.jit
+                r"\b" + re.escape(sym) + r"\s*=",    # module-level assignment
+                r"__global__[^\n;{]*" + re.escape(sym) + r"\b",  # CUDA/HIP
+            ]
+        )
     return any(re.search(p, text) for p in patterns)
 
 
@@ -5102,10 +5114,12 @@ def _finalize_candidates(
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.
         if res is None or res.status == "unresolved":
-            # A trace frame proves only where Python launched the device kernel;
-            # it does not prove that the same file defines the kernel. Keep the
-            # frame as evidence, then require grep to corroborate the file before
-            # promoting its line/function metadata to source attribution.
+            # Resolution tiers for candidates without a source_file:
+            # 1. Tracer Python stack frame (highest confidence — direct runtime
+            #    observation of what called the device kernel).
+            # 2. Name grep (corroborates or provides an independent path).
+            # Corroboration upgrades the confidence signal; disagreement is
+            # annotated but the tracer frame is not vetoed by a grep mismatch.
             frame = None
             trace_source = ""
             if not item.get("source_file"):

@@ -497,8 +497,8 @@ def test_unconfirmed_trace_launcher_leaves_the_source_empty(
     assert got["source_file"] == ""
     assert got["reusable_native_kernel"] is False
     assert got["trace_launcher_file"] == launcher
-    assert got.get("source_resolution_method") != "trace_python_stack"
-    assert "trace launcher unconfirmed by name grep" in got["source_resolution_reason"]
+    assert got.get("source_resolution_method") == "trace_python_stack_uncorroborated"
+    assert "corroboration" in got.get("source_resolution_reason", "")
 
 
 def test_wiring_leaves_a_real_source_untouched(tmp_path):
