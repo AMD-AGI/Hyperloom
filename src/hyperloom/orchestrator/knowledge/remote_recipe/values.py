@@ -447,20 +447,21 @@ def _entry_files(
     return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts)), patch_roots
 
 
+def _section_value(patches: list[str], artifacts: list[str], patch_roots: dict[str, str]) -> dict[str, Any]:
+    """Assemble one owner section, omitting ``patch_roots`` when nothing recorded one."""
+    value: dict[str, Any] = {"patches": patches, "artifacts": artifacts}
+    if patch_roots:
+        value["patch_roots"] = patch_roots
+    return value
+
+
 def build_explore_value(
     state: Any,
     entries: list[dict[str, Any]],
     files: _Files,
 ) -> dict[str, Any]:
     """Build EXPLORE-origin patch and artifact references."""
-    patches, artifacts, patch_roots = _entry_files(entries, files, "explore")
-    result: dict[str, Any] = {
-        "patches": patches,
-        "artifacts": artifacts,
-    }
-    if patch_roots:
-        result["patch_roots"] = patch_roots
-    return result
+    return _section_value(*_entry_files(entries, files, "explore"))
 
 
 def build_framework_value(
@@ -469,14 +470,7 @@ def build_framework_value(
     files: _Files,
 ) -> dict[str, Any]:
     """Build FRAMEWORK-origin patch and artifact references."""
-    patches, artifacts, patch_roots = _entry_files(entries, files, "framework")
-    result: dict[str, Any] = {
-        "patches": patches,
-        "artifacts": artifacts,
-    }
-    if patch_roots:
-        result["patch_roots"] = patch_roots
-    return result
+    return _section_value(*_entry_files(entries, files, "framework"))
 
 
 def _externalize_record(

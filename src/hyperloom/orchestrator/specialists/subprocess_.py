@@ -614,12 +614,10 @@ class SpecialistSubprocessResult:
     directly — do not join them onto a base."""
 
     patch_roots: dict[str, str] = field(default_factory=dict)
-    """Map from absolute patch path to the apply root it was harvested from.
+    """Apply root per patch path, for patches harvested from a worktree.
 
-    Populated for every patch produced by ``git diff HEAD`` in a worktree;
-    absent for patches scanned from disk whose root was not established at
-    collection time. When present, downstream steps use this as the
-    ``explicit_root`` instead of probing the filesystem."""
+    Empty for patches merely found on disk, whose target tree is not knowable at
+    collection time and must therefore still be resolved from their contents."""
 
     usage: dict[str, Any] | None = None
     """Token usage recovered from the agent CLI's ``process.log``. Carries the
@@ -746,90 +744,6 @@ def _setup_worktree(
     if cp.returncode != 0:
         return None, (f"git worktree add rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}")
     return worktree_path, ""
-
-
-def ensure_authoring_checkout(framework: str, session_dir: Path) -> tuple[Path | None, str]:
-    """Return a git checkout of ``framework``'s source tree, creating one if needed.
-
-    The fast path: when the framework already has a git checkout (discovered via
-    ``resolve_framework_tree``), return it directly with no I/O cost.
-
-    The slow path: when the framework is pip-installed (no ``.git``), create a
-    shadow repo at ``<session>/runtime/authoring_repo/<framework>`` by
-    hardlink-copying the full tree, running ``git init``, and making one commit.
-    This gives the specialist an isolated, revisionable workspace whose ``git diff``
-    produces canonical ``-p1`` relative paths against the correct tree root.
-
-    Args:
-        framework: Framework name, e.g. ``"sglang"`` or ``"vllm"``.
-        session_dir: The session directory; shadow repos are created beneath it.
-
-    Returns:
-        ``(checkout_path, "")`` on success, ``(None, error_reason)`` on failure.
-    """
-    from hyperloom.orchestrator.framework.paths import resolve_framework_tree
-
-    tree = resolve_framework_tree(framework)
-    if not tree:
-        return None, f"no_source_tree_for_{framework}"
-
-    tree_path = Path(tree.rstrip("/"))
-    if not tree_path.is_dir():
-        return None, f"source_tree_missing:{tree}"
-
-    if (tree_path / ".git").exists():
-        return tree_path, ""
-
-    shadow_root = session_dir / "runtime" / "authoring_repo" / (framework or "framework")
-    if shadow_root.exists() and (shadow_root / ".git").exists():
-        log.info("reusing existing shadow repo at %s", shadow_root)
-        return shadow_root, ""
-
-    shadow_root.mkdir(parents=True, exist_ok=True)
-
-    try:
-        cp = subprocess.run(
-            ["cp", "-al", f"{tree_path}/.", str(shadow_root)],
-            capture_output=True,
-            text=True,
-            timeout=300.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, f"shadow_repo_copy_failed:{exc!r}"
-    if cp.returncode != 0:
-        return None, f"shadow_repo_copy_rc={cp.returncode}:{cp.stderr.strip()[:200]!r}"
-
-    for cmd, timeout in [
-        (["git", "-C", str(shadow_root), "init", "-q"], 30.0),
-        (["git", "-C", str(shadow_root), "add", "-A"], 120.0),
-        (
-            [
-                "git",
-                "-C",
-                str(shadow_root),
-                "-c",
-                "user.email=hyperloom@local",
-                "-c",
-                "user.name=hyperloom",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "shadow base",
-            ],
-            60.0,
-        ),
-    ]:
-        try:
-            cp2 = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return None, f"shadow_repo_git_failed:{exc!r}"
-        if cp2.returncode != 0:
-            return None, f"shadow_repo_git_rc={cp2.returncode}:{cp2.stderr.strip()[:200]!r}"
-
-    log.info("created shadow repo for %s at %s", framework, shadow_root)
-    return shadow_root, ""
 
 
 # §3.3: how often to poll a PENDING GPU-specialist Ray actor for its pid.
@@ -1691,46 +1605,37 @@ class SpecialistSubprocessDispatcher:
         workspace: Path,
         worktree_base: Path | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Collect specialist patches, preferring ``git diff HEAD`` over hand-authored files.
+        """Harvest the specialist's edits, else collect the patch files it wrote.
 
-        When a worktree exists, run ``git diff HEAD`` against it to produce a
-        single canonical ``-p1`` patch whose apply root is the worktree base.
-        The fallback is the historical disk scan of ``<tree>/patches/*.patch``.
+        Editing the worktree is the primary contract: ``git diff HEAD`` renders
+        those edits as one canonical ``-p1`` patch and names its apply root, so
+        nothing downstream has to infer which tree it belongs to. Scanning
+        ``patches/`` remains for dispatches that never got a worktree.
 
         Args:
             worktree: Per-task worktree, or None.
             workspace: Task workspace.
-            worktree_base: The git checkout the worktree was branched off;
-                used as the apply root for harvested patches.
+            worktree_base: Checkout the worktree was branched off, which is the
+                apply root of anything harvested from it.
 
         Returns:
-            ``(patch_paths, patch_roots)`` where ``patch_roots`` maps each
-            harvested path to its apply root string.
+            ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
-        out: list[str] = []
-        roots: dict[str, str] = {}
-
         if worktree is not None and (worktree / ".git").exists():
-            harvest_root = worktree_base or worktree
-            try:
-                cp = subprocess.run(
-                    ["git", "-C", str(worktree), "diff", "HEAD"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60.0,
-                    check=False,
-                )
-                if cp.returncode == 0 and cp.stdout.strip():
-                    harvested_dir = worktree / "patches"
-                    harvested_dir.mkdir(exist_ok=True)
-                    harvested_path = harvested_dir / "_worktree_diff.patch"
-                    harvested_path.write_text(cp.stdout, encoding="utf-8")
-                    out.append(str(harvested_path))
-                    roots[str(harvested_path)] = str(harvest_root)
-                    return out, roots
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-                log.warning("specialist: git diff harvest failed (%r); falling back to patch scan", exc)
+            diff = subprocess.run(
+                ["git", "-C", str(worktree), "diff", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=120.0,
+                check=False,
+            )
+            if diff.returncode == 0 and diff.stdout.strip():
+                harvested = worktree / "patches" / "_worktree_diff.patch"
+                harvested.parent.mkdir(exist_ok=True)
+                harvested.write_text(diff.stdout, encoding="utf-8")
+                return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
+        out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
                 continue
@@ -1740,7 +1645,7 @@ class SpecialistSubprocessDispatcher:
             for ext in ("*.patch", "*.diff"):
                 for p in sorted(patches_dir.glob(ext)):
                     out.append(str(p))
-        return out, roots
+        return out, {}
 
     @staticmethod
     def _read_done(done_file: Path) -> dict[str, Any] | None:
@@ -1804,7 +1709,6 @@ __all__ = [
     "SpecialistSubprocessResult",
     "_pick_worktree_base",
     "_setup_worktree",
-    "ensure_authoring_checkout",
     "resolve_codex_executable",
     "resolve_specialist_agent_backend",
 ]

@@ -11,16 +11,17 @@ On-disk format::
          import_root, complete, files:[{rel, op}], extra}
     <snapshot_dir>/files/<rel>   # full copy of each upserted file
 
-``import_root`` is a path component relative to ``snapshot_dir/files/`` that
-locates the Python import root for this framework. GEAK prepends
-``snapshot_dir/files/<import_root>`` onto PYTHONPATH so the patched modules
-are importable from the snapshot without the ``files/`` indirection.
-For a sglang repo checkout, ``import_root`` is ``python``; for a dist-packages
-install it is ``""``.
+Full-file capture (not a fuzzy diff) reconstructs byte-for-byte regardless of
+patch strip levels, generated/untracked files, or whether the framework root is
+a git tree at all.
 
-``complete`` is True when every declared file was successfully copied and no
-entry carries ``op: "missing"``. Callers derive ``reproducible`` from this
-flag rather than from path existence alone.
+``files/<import_root>`` is the directory the GEAK handoff puts on PYTHONPATH, so
+``import_root`` must name where modules start within the tree: ``python`` for a
+sglang checkout, ``""`` for a dist-packages install.
+
+``complete`` is False once any declared path could not be accounted for, which
+is what makes the snapshot unusable as an overlay; ``reproducible`` downstream
+is this flag, never the mere existence of the directory.
 """
 
 from __future__ import annotations
@@ -47,27 +48,47 @@ def _safe_rel(rel: str) -> str | None:
 
 
 def snapshot_is_complete(snapshot_dir: str | Path) -> bool:
-    """Return True when the snapshot has a manifest and no ``op: "missing"`` entries.
+    """Return whether the snapshot at ``snapshot_dir`` accounts for every path.
+
+    Reads the manifest rather than trusting the directory's existence. Schema-1
+    manifests predate ``complete`` and are judged on their ops instead.
 
     Args:
-        snapshot_dir: Path to the snapshot directory written by
-            :func:`snapshot_source_layer`.
+        snapshot_dir: A directory written by :func:`snapshot_source_layer`.
 
     Returns:
-        True when the manifest exists, ``complete`` is True (schema ≥ 2), or
-        all entries carry ``"upsert"`` or ``"delete"`` (schema 1 fallback).
+        True when the manifest is readable and records no unaccounted path.
     """
+    manifest_path = Path(snapshot_dir) / MANIFEST_NAME
     try:
-        manifest_path = Path(snapshot_dir) / MANIFEST_NAME
-        if not manifest_path.is_file():
-            return False
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if "complete" in manifest:
-            return bool(manifest["complete"])
-        files = manifest.get("files") or []
-        return all(f.get("op") in ("upsert", "delete") for f in files if isinstance(f, dict))
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, ValueError):
         return False
+    if "complete" in manifest:
+        return bool(manifest["complete"])
+    files = manifest.get("files") or []
+    return all(f.get("op") in ("upsert", "delete") for f in files if isinstance(f, dict))
+
+
+def source_layer_reproducible(entry: dict[str, Any]) -> bool:
+    """Return whether an ``optimization_stack`` source-patch entry is replayable.
+
+    Prefers the flag recorded at KEEP time; entries written before it existed are
+    judged by reading their manifest.
+
+    Args:
+        entry: A ``scope=source_patch`` optimization_stack entry.
+
+    Returns:
+        True when the entry carries a snapshot that accounts for every path.
+    """
+    snapshot_dir = str(entry.get("source_snapshot") or "").strip()
+    if not snapshot_dir:
+        return False
+    recorded = entry.get("source_snapshot_complete")
+    if recorded is not None:
+        return bool(recorded)
+    return snapshot_is_complete(snapshot_dir)
 
 
 def snapshot_source_layer(
@@ -93,14 +114,10 @@ def snapshot_source_layer(
             any later git hygiene on ``framework_root``).
         provenance: Free-form origin tag (e.g. ``integrate_patch``).
         extra: Optional metadata folded into the manifest.
-        declared_ops: Caller-supplied ``{rel: op}`` mapping.  When a path is
-            in this dict with ``op="delete"`` and absent from disk, it is
-            recorded as a genuine deletion. Paths absent from disk and not in
-            ``declared_ops`` are recorded with ``op="missing"`` and cause
-            ``complete=False``.
-        import_root: The Python import root relative to ``files/``; placed on
-            PYTHONPATH by the GEAK baseline server. ``"python"`` for sglang
-            repo checkouts; ``""`` for dist-packages installs.
+        declared_ops: ``{rel: op}`` from the caller, which is the only party
+            that knows a deletion was intended. An absent path it does not
+            declare deleted is recorded ``"missing"``, not ``"delete"``.
+        import_root: Where modules start within the tree, relative to ``files/``.
 
     Returns:
         The manifest dict augmented with ``snapshot_dir``, or ``None`` when

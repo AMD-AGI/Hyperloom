@@ -1263,15 +1263,7 @@ def collect_final(
         reconstructed_report,
         warnings,
     )
-    def _layer_reproducible(e: dict) -> bool:
-        snap = str(e.get("source_snapshot") or "").strip()
-        if not snap:
-            return False
-        complete = e.get("source_snapshot_complete")
-        if complete is not None:
-            return bool(complete)
-        from hyperloom.orchestrator.source_snapshot import snapshot_is_complete as _sic
-        return _sic(snap)
+    from hyperloom.orchestrator.source_snapshot import source_layer_reproducible
 
     source_layers = [
         {
@@ -1279,7 +1271,7 @@ def collect_final(
             "snapshot_dir": str(e.get("source_snapshot") or ""),
             "framework_root": str(e.get("framework_root") or ""),
             "base_sha": str(e.get("base_sha") or ""),
-            "reproducible": _layer_reproducible(e),
+            "reproducible": source_layer_reproducible(e),
         }
         for e in (stack if isinstance(stack, list) else [])
         if isinstance(e, dict) and e.get("scope") == "source_patch"

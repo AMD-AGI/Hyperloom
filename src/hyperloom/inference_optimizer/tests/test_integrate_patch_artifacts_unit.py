@@ -154,7 +154,9 @@ def test_resolve_artifact_specs_missing_source_or_target(tmp_path, monkeypatch):
 
 # ---- _apply_artifacts / _revert_artifacts round-trip ----------------------
 def _spec(source: Path, target: Path, rel: str) -> ip._ArtifactSpec:
-    return ip._ArtifactSpec(source=source.resolve(), target=target.resolve(), rel_target=rel)
+    resolved = target.resolve()
+    root = Path(str(resolved)[: -len(rel)]) if rel and str(resolved).endswith(rel) else resolved.parent
+    return ip._ArtifactSpec(source=source.resolve(), target=resolved, rel_target=rel, root=root)
 
 
 def test_apply_then_revert_restores_clobbered_target(tmp_path):
@@ -230,6 +232,7 @@ def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch
     assert out == (
         (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
         "configs/model_configs/tuned_fmoe.csv",
+        fw.resolve(),
     )
 
 
@@ -250,6 +253,7 @@ def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
     assert out == (
         (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
         "configs/model_configs/tuned_fmoe.csv",
+        fw.resolve(),
     )
 
 

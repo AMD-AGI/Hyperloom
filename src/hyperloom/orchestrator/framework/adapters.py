@@ -264,25 +264,17 @@ class BaseAdapter:
         return None
 
     def source_import_root(self, framework_root: str) -> str:
-        """Return the Python import root relative to ``snapshot/files/``.
+        """Return the import root relative to a source snapshot's ``files/`` dir.
 
-        This is the directory GEAK prepends to PYTHONPATH so the patched modules
-        are importable from the snapshot. For a dist-packages install, the
-        snapshot's ``files/`` directory already contains the package directly,
-        so the import root is ``""``; for a repo checkout with a ``python/``
-        subdirectory, it is ``"python"``.
-
-        The default derives the import root heuristically from the captured
-        paths: the topmost directory component shared by all captured files that
-        itself contains the framework's own package directory.  Subclasses with
-        a known static layout override this.
+        A dist-packages install stores modules at the tree root, so ``""`` is
+        correct; a repo checkout that nests them (e.g. under ``python/``)
+        overrides this.
 
         Args:
             framework_root: Absolute path to the framework checkout or install.
 
         Returns:
-            str: The import-root path component, or ``""`` when files are
-            importable directly from ``files/``.
+            str: The import-root path component, or ``""``.
         """
         return ""
 
@@ -507,17 +499,11 @@ class SglangAdapter(_VenvProvisionMixin):
     framework = "sglang"
 
     def source_import_root(self, framework_root: str) -> str:
-        """Return ``"python"`` when the sglang repo layout is present, else ``""``.
-
-        A sglang git checkout organises importable modules under ``python/``
-        (i.e. ``python/sglang/...``), so the overlay PYTHONPATH entry must be
-        ``snapshot/files/python``. A dist-packages install has no such
-        subdirectory and files are importable from ``snapshot/files/`` directly.
-        """
-        root = Path(framework_root).rstrip("/") if framework_root else Path("")
-        if root and (root / "python").is_dir() and (root / "python" / "sglang").is_dir():
-            return "python"
-        return ""
+        """Return ``"python"`` for a sglang checkout (``python/sglang/...``), else ``""``."""
+        if not framework_root:
+            return ""
+        root = Path(framework_root)
+        return "python" if (root / "python" / "sglang").is_dir() else ""
 
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""

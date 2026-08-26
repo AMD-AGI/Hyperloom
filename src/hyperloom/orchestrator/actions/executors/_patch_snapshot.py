@@ -63,9 +63,7 @@ def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> i
     return best_lvl
 
 
-def _patch_touched_paths_split(
-    framework_root: Path, patches: list[Path]
-) -> tuple[list[str], list[str]]:
+def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tuple[list[str], list[str]]:
     """Classify applied patch targets as upserted or deleted.
 
     Per header pair (``old`` ``---``, ``new`` ``+++``):
@@ -109,18 +107,14 @@ def _patch_touched_paths_split(
 
 
 def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
-    """Repo-relative paths the applied ``patches`` created / modified / deleted.
-
-    Thin wrapper around :func:`_patch_touched_paths_split` that returns a
-    flat list in the order ``[upserted..., deleted...]`` for callers that do
-    not need to distinguish the two.
+    """Repo-relative paths to stage, for callers that need no upsert/delete split.
 
     Args:
         framework_root: The git checkout the patches were applied into.
         patches: The applied patch files to inspect.
 
     Returns:
-        The repo-relative paths to stage, in first-seen order.
+        The repo-relative paths, upserted first.
     """
     upserted, deleted = _patch_touched_paths_split(framework_root, patches)
     return list(dict.fromkeys(upserted + deleted))

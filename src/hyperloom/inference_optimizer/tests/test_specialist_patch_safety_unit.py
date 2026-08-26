@@ -7,6 +7,9 @@ git grounding, missing-target detection, and quantitative-claim guards)."""
 from __future__ import annotations
 
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from hyperloom.orchestrator.specialists import patch_safety as ps
@@ -377,16 +380,15 @@ def test_vet_patches_unreadable(tmp_path):
 
 
 # ---- nested root collapse + GROUND_AMBIGUOUS_ROOT -------------------------
-def _make_git_repo(root: "Path", files: dict) -> "Path":
-    import subprocess as _sp
+def _make_git_repo(root: Path, files: dict[str, str]) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     for rel, content in files.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-    _sp.run(["git", "init", "-q", str(root)], check=True)
-    _sp.run(["git", "-C", str(root), "add", "-A"], check=True)
-    _sp.run(
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
         ["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "base"],
         check=True,
     )
@@ -427,9 +429,7 @@ def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):
     tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
     diff_file = tmp_path / "p.patch"
     diff_file.write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
-    _, dropped, grounding, _ = ps.vet_patches(
-        [str(diff_file)], base_checkout=tree_a, candidate_roots=(tree_b,)
-    )
+    _, dropped, grounding, _ = ps.vet_patches([str(diff_file)], base_checkout=tree_a, candidate_roots=(tree_b,))
     assert len(dropped) == 1
     assert dropped[0]["verdict"] == ps.GROUND_AMBIGUOUS_ROOT
     assert grounding[str(diff_file)] == ps.GROUND_AMBIGUOUS_ROOT

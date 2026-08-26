@@ -82,9 +82,9 @@ _PATCH_PATH_RE: re.Pattern[str] = re.compile(
 
 
 # Candidate ``-p`` strip levels for resolving a diff header path to a real file.
-# Used only on the legacy fallback path (worktree-harvested patches are -p1 by
-# construction and never need probing).
-_P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4)
+# Specialists author patches with heterogeneous path prefixes, so target
+# existence is probed across levels rather than assuming ``-p1``.
+_P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 # Sentinel the post-/pre-image path takes for a created/deleted file.
 _DEV_NULL = "/dev/null"
@@ -284,31 +284,25 @@ def patch_targets_missing(
 
 
 def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
-    """Drop roots that have an ancestor in ``roots``, keeping the outermost.
+    """Keep only the outermost of any nested match, leaving disjoint ones alone.
 
-    When both ``/sgl-workspace/sglang`` and ``/sgl-workspace/sglang/python``
-    match a patch's targets, the inner root is a subtree of the outer one:
-    using the inner root would apply at the wrong ``-p`` level. Keeping the
-    outer root makes the strip level consistent with ``git diff`` output.
-
-    Genuinely disjoint roots are not affected.
+    An editable install puts a package parent inside its own checkout, so
+    ``/sgl-workspace/sglang`` and ``/sgl-workspace/sglang/python`` both hold a
+    ``python/sglang/...`` target at different strip levels. They are one tree,
+    and the outer root is the one whose strip level matches ``git diff`` output.
 
     Args:
         roots: Match candidates from :func:`resolve_patch_apply_root`.
 
     Returns:
-        Roots with nested (child) paths removed.
+        Roots with any descendant of another entry removed.
     """
-    resolved = [r.resolve() for r in roots]
-    kept: list[Path] = []
-    for i, root in enumerate(roots):
-        if not any(
-            resolved[i] != resolved[j] and str(resolved[i]).startswith(str(resolved[j]) + "/")
-            for j in range(len(roots))
-            if i != j
-        ):
-            kept.append(root)
-    return tuple(kept)
+    resolved = {root: root.resolve() for root in roots}
+    return tuple(
+        root
+        for root in roots
+        if not any(other != resolved[root] and other in resolved[root].parents for other in resolved.values())
+    )
 
 
 def resolve_patch_apply_root(

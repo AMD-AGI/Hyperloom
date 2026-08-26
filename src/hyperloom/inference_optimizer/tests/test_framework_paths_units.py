@@ -966,3 +966,34 @@ class TestWarmReplayPatchRootResolution:
         resolution = fp.resolve_warm_replay_kernel_root(patch_paths=[patch])
         assert resolution.root == ""
         assert resolution.reason == "kernel_patch_root_not_in_allowlist"
+
+
+class TestResolveFrameworkTree:
+    def test_prefixed_env_wins(self, monkeypatch, tmp_path):
+        tree = tmp_path / "sglang"
+        tree.mkdir()
+        monkeypatch.setenv("SGLANG_REPO_PATH", str(tree))
+        assert fp.resolve_framework_tree("sglang") == f"{tree}/"
+
+    def test_generic_env_is_used_when_no_prefixed_one(self, monkeypatch, tmp_path):
+        tree = tmp_path / "generic"
+        tree.mkdir()
+        monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+        monkeypatch.delenv("SGLANG_DIR", raising=False)
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(tree))
+        assert fp.resolve_framework_tree("sglang") == f"{tree}/"
+
+    def test_absent_env_falls_to_package_origin(self, monkeypatch, tmp_path):
+        pkg_parent = tmp_path / "site-packages"
+        (pkg_parent / "myfw").mkdir(parents=True)
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_parent if name == "myfw" else None)
+        assert fp.resolve_framework_tree("myfw") == f"{pkg_parent}/"
+
+    def test_unknown_framework_resolves_to_nothing(self, monkeypatch):
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        assert fp.resolve_framework_tree("not-a-framework") == ""
+
+    def test_empty_name_resolves_to_nothing(self):
+        assert fp.resolve_framework_tree("") == ""

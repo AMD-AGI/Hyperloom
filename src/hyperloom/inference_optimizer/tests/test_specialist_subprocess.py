@@ -1255,6 +1255,7 @@ async def test_partial_checkpoint_published_while_alive(
 # ---- _collect_patches: git diff harvest ------------------------------------
 def _make_git_worktree_pair(tmp_path: Path) -> tuple[Path, Path]:
     import subprocess as _sp
+
     base = tmp_path / "base"
     base.mkdir()
     (base / "mod.py").write_text("old = 1\n", encoding="utf-8")
@@ -1284,9 +1285,7 @@ def test_collect_patches_falls_back_to_disk_scan_when_no_changes(tmp_path: Path)
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "patches").mkdir()
-    (ws / "patches" / "manual.patch").write_text(
-        "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8"
-    )
+    (ws / "patches" / "manual.patch").write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
     patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws, worktree_base=base)
     assert any("manual.patch" in p for p in patches)
     assert all(p not in roots for p in patches)

@@ -1185,6 +1185,7 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
             source=tmp_path / "tuned.json",
             target=repo / "tuned.json",
             rel_target="tuned.json",
+            root=repo,
             kind="config_json",
         )
         return [spec], []
@@ -1287,6 +1288,7 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
             source=tmp_path / "tuned.json",
             target=repo / "tuned.json",
             rel_target="tuned.json",
+            root=repo,
             kind="config_json",
         )
         return [spec], []
@@ -1390,39 +1392,3 @@ async def test_no_patches_without_drops_has_no_grounding_key(tmp_path, monkeypat
 
     assert res["status"] == "no_patches"
     assert "patches_dropped_by_grounding" not in res
-
-
-# ---- VettingDropFeedback ---------------------------------------------------
-def test_vetting_drop_feedback_format_missing_target():
-    from hyperloom.orchestrator.actions.executors._apply_feedback import VettingDropFeedback
-    fb = VettingDropFeedback(patch="patches/001.patch", verdict="missing_target", detail="no_matching_root")
-    text = fb.format_for_mandate()
-    assert "001.patch" in text
-    assert "missing_target" in text
-    assert "Glob/Grep" in text
-
-
-def test_vetting_drop_feedback_format_ambiguous_root():
-    from hyperloom.orchestrator.actions.executors._apply_feedback import VettingDropFeedback
-    fb = VettingDropFeedback(patch="patches/p.patch", verdict="ambiguous_root", detail="/a, /b")
-    text = fb.format_for_mandate()
-    assert "ambiguous_root" in text
-    assert "framework_source_root" in text
-
-
-def test_vetting_drop_feedback_round_trip():
-    from hyperloom.orchestrator.actions.executors._apply_feedback import VettingDropFeedback
-    fb = VettingDropFeedback(patch="p.patch", verdict="missing_target", detail="x")
-    assert VettingDropFeedback.from_dict(fb.to_dict()) == fb
-
-
-def test_vetting_drop_feedback_from_dropped_records():
-    from hyperloom.orchestrator.actions.executors._apply_feedback import VettingDropFeedback
-    records = [
-        {"path": "a.patch", "verdict": "missing_target", "detail": "no match"},
-        {"path": "b.patch", "verdict": "ambiguous_root", "detail": "/x, /y"},
-    ]
-    feedbacks = VettingDropFeedback.from_dropped_records(records)
-    assert len(feedbacks) == 2
-    assert feedbacks[0].patch == "a.patch"
-    assert feedbacks[1].verdict == "ambiguous_root"

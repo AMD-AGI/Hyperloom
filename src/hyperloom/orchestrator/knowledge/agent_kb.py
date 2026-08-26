@@ -106,11 +106,7 @@ class _ConfigPatchAgentKB:
         return [str(ref) for ref in patches if isinstance(ref, str) and str(ref).strip()]
 
     def read_patch_roots(self) -> dict[str, str]:
-        """Return the per-patch apply roots recorded alongside ``patches``, if any.
-
-        Returns an empty dict for legacy records written before this field was
-        introduced.
-        """
+        """Return ``{patch_ref: apply_root}``; empty for records predating the field."""
         prior = self.read()
         raw = prior.get("patch_roots")
         if not isinstance(raw, Mapping):

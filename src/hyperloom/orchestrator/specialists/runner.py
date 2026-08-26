@@ -16,7 +16,6 @@ from __future__ import annotations
 import enum
 import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -46,10 +45,10 @@ from .subprocess_ import (
     SpecialistSubprocessResult,
     _pick_worktree_base,
     _setup_worktree,
-    ensure_authoring_checkout,
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
+from ..framework.paths import resolve_framework_tree
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -139,32 +138,6 @@ _TOKEN_VALUE_RES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
 )
-
-
-def _framework_checkout(framework: str) -> str:
-    """Return the checkout of the framework this session optimises, if published.
-
-    A scriptable framework runs out of a repo checkout, and
-    ``_publish_scriptable_repo_root`` puts that path in ``os.environ`` as
-    ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR`` so it reaches PolicyGate. The
-    specialist worktree needs the same answer: it must branch off the tree whose
-    files the patches name, not off whichever allowlisted root happens to be a
-    checkout.
-
-    Args:
-        framework: Session framework name, e.g. ``worldplay``.
-
-    Returns:
-        The resolved path, or ``""`` when the framework publishes none (the
-        pip-installed case, where the allowlist order is the right fallback).
-    """
-    name = str(framework or "").strip().upper()
-    candidates = (f"{name}_REPO_PATH", f"{name}_DIR") if name else ()
-    for var in (*candidates, "FRAMEWORK_REPO_PATH"):
-        value = os.environ.get(var, "").strip()
-        if value:
-            return value
-    return ""
 
 
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
@@ -1378,9 +1351,9 @@ class SpecialistRunner:
                 _proposal.setdefault("scope", prep.profile.scope)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
-        # the rest against the clean base checkout, and scan for smuggled claims.
-        # The worktree base names one framework tree, but a specialist may target
-        # another allowlisted one, so the rest are offered as candidate roots.
+        # the rest, and scan for smuggled claims. A harvested patch already knows
+        # its root, so it is grounded against that one tree; only a hand-authored
+        # patch, whose target tree is unknown, is matched against the candidates.
         collected_roots = dict(patch_roots or {})
         base_checkout = prep.worktree_base or prep.worktree
         candidate_roots = _sibling_checkouts(
@@ -1388,13 +1361,13 @@ class SpecialistRunner:
             base_checkout,
         )
         explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
-        explicit_root: Path | None = Path(explicit_value) if explicit_value else None
-        if explicit_root is None and collected_roots:
-            unique_roots = set(collected_roots.values())
-            if len(unique_roots) == 1:
-                sole_root = Path(next(iter(unique_roots)))
-                if sole_root.is_dir():
-                    explicit_root = sole_root
+        harvested_roots = set(collected_roots.values())
+        if explicit_value:
+            explicit_root: Path | None = Path(explicit_value)
+        elif len(harvested_roots) == 1:
+            explicit_root = Path(harvested_roots.pop())
+        else:
+            explicit_root = None
         kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
@@ -1491,16 +1464,12 @@ class SpecialistRunner:
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        framework = str((ctx.task.params or {}).get("framework") or "")
-        session_dir = self.session_dir if hasattr(self, "session_dir") and self.session_dir else workspace.parent
-        base, shadow_err = ensure_authoring_checkout(framework, session_dir)
+        base = _pick_worktree_base(
+            self.subprocess_config.framework_source_roots,
+            preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
+        )
         if base is None:
-            base = _pick_worktree_base(
-                self.subprocess_config.framework_source_roots,
-                preferred=_framework_checkout(framework),
-            )
-        if base is None:
-            return None, None, shadow_err or "no_git_framework_source_root"
+            return None, None, "no_git_framework_source_root"
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)
