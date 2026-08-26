@@ -2491,7 +2491,11 @@ class FrameworkPhase(CoordinatorCollaborator):
         await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
-            idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}",
+            # The empty-result count is part of the key: the registry hands
+            # back whatever row a key already names, so a fixed key would make
+            # every retry a no-op re-fetch of the finished first attempt, and
+            # the streak this method declines on could never reach its limit.
+            idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}:r{empties}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             side_effects=["writes_results"],
