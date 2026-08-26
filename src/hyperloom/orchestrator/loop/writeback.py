@@ -5224,12 +5224,16 @@ class WritebackCollaborator:
                     self.tasks,
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                 )
+                lanes, ttl = self._registry_lanes_ttl("explore")
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
                     idempotency_key=idempotency_key,
-                    # Without a TTL the row is invisible to ``reclaim_expired_running``.
-                    lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
+                    # Both halves of the catalogue contract: without lanes the row
+                    # launches a server unserialised; without a TTL it is invisible
+                    # to ``reclaim_expired_running``.
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
                 )
                 try:
                     from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -5295,12 +5299,13 @@ class WritebackCollaborator:
             params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
+        lanes, ttl = self._registry_lanes_ttl("explore")
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
             idempotency_key="resume-stack-revalidate",
-            # Without a TTL the row is invisible to ``reclaim_expired_running``.
-            lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 

@@ -1583,12 +1583,13 @@ class PreludePhase(PhaseHandler):
             "workload_compatibility": workload_compatibility,
         }
         try:
+            lanes, ttl = self._registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="replay_warm_recipe",
                 params=params,
                 idempotency_key="warm-replay-prelude",
-                # Without a TTL the row is invisible to ``reclaim_expired_running``.
-                lease_ttl_sec=self._registry_lanes_ttl("replay_warm_recipe")[1],
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
         except Exception as exc:
             rollback = self._revert_warm_kernel_patches(
