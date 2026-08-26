@@ -1243,6 +1243,10 @@ class DispatcherCollaborator:
                             task=task,
                             done_payload=done_payload,
                         )
+                        self._ingest_candidate_discovery(
+                            task=task,
+                            done_payload=done_payload,
+                        )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
                             "framework_config: generation ingest failed for task=%s",

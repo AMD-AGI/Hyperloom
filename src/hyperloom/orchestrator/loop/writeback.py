@@ -2397,7 +2397,7 @@ class WritebackCollaborator:
                     task.task_id,
                 )
 
-        # Aggregate research evidence from any domain (e.g. pr_intel) that
+        # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above). Fail-soft.
@@ -2475,7 +2475,7 @@ class WritebackCollaborator:
         session-wide seen-set, de-duped across the session.
 
         Applies to every domain that self-reports a ``research`` block
-        (``pr_intel`` + ``research_scout``), so FRAMEWORK / explore lanes
+        (candidate discovery + research_scout), so FRAMEWORK / explore lanes
         do not re-fetch the same references. Fail-soft: never raises (the caller
         also guards, but keep this self-contained so partial payloads degrade
         gracefully).

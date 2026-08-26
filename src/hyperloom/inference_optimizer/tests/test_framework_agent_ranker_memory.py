@@ -11,7 +11,6 @@ the "already tried this session" negative-sample block into its prompt.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -45,8 +44,6 @@ class _MemCoord:
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _build_framework_working_memory = Coordinator._build_framework_working_memory
     _render_framework_memory_for_prompt = staticmethod(Coordinator._render_framework_memory_for_prompt)
-    _match_framework_agent_candidate = staticmethod(Coordinator._match_framework_agent_candidate)
-    _rank_framework_agent_candidates_llm = Coordinator._rank_framework_agent_candidates_llm
 
     def __init__(self) -> None:
         self.shared_state = _StateStub()
@@ -153,42 +150,3 @@ class _FakeCompletions:
 class _FakeClient:
     def __init__(self, captured: dict[str, Any], reply: str) -> None:
         self.chat = SimpleNamespace(completions=_FakeCompletions(captured, reply))
-
-
-def test_ranker_prompt_includes_tried_block_and_returns_match():
-    coord = _MemCoord()
-    coord.shared_state.framework_agent_phase_progress = [
-        {"candidate_id": "PR:723", "status": "reverted", "gain_pct": 0.0, "rationale": "no-op on SD3 path"},
-    ]
-    captured: dict[str, Any] = {}
-    coord._framework_agent_ranker_client = lambda: _FakeClient(
-        captured, '{"candidate_id": "PR:2000", "reason": "attacks mem-bw"}'
-    )  # type: ignore[attr-defined]
-    coord._framework_agent_ranker_model = lambda: "m"  # type: ignore[attr-defined]
-
-    candidates = [
-        {"candidate_id": "PR:2000", "title": "moe gemm fastpath", "repo": "sgl-project/sglang"},
-        {"candidate_id": "PR:3000", "title": "kv cache dtype", "repo": "sgl-project/sglang"},
-    ]
-    chosen = asyncio.run(coord._rank_framework_agent_candidates_llm(candidates))
-
-    # The already-tried negative-sample block is present in the ranker prompt.
-    assert "Already tried THIS session" in captured["prompt"]
-    assert "PR:723 [reverted]" in captured["prompt"]
-    # And the ranker resolves the model's pick.
-    assert chosen is not None
-    assert chosen["candidate_id"] == "PR:2000"
-
-
-def test_ranker_prompt_omits_tried_block_when_no_history():
-    coord = _MemCoord()
-    captured: dict[str, Any] = {}
-    coord._framework_agent_ranker_client = lambda: _FakeClient(captured, '{"candidate_id": "PR:2000"}')  # type: ignore[attr-defined]
-    coord._framework_agent_ranker_model = lambda: "m"  # type: ignore[attr-defined]
-
-    candidates = [
-        {"candidate_id": "PR:2000", "title": "x", "repo": "r"},
-        {"candidate_id": "PR:3000", "title": "y", "repo": "r"},
-    ]
-    asyncio.run(coord._rank_framework_agent_candidates_llm(candidates))
-    assert "Already tried THIS session" not in captured["prompt"]
