@@ -102,6 +102,27 @@ def first_positive_tput(d: Any) -> float:
     return 0.0
 
 
+def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, bool]:
+    """Grade against the live anchor when a KEEP landed after this task snapshotted its params.
+
+    A task carries ``base_tput`` from the moment it was created; a KEEP landing
+    while it queued makes that snapshot stale and would grade the candidate
+    against a recipe it no longer sits on top of.
+
+    Args:
+        snapshot_tput: The anchor recorded in the task's params.
+        state: Any object exposing ``current_best`` / ``baseline_tput``.
+
+    Returns:
+        ``(anchor, drifted)`` — the anchor to grade against, and whether the
+        live value displaced a positive snapshot (i.e. worth logging).
+    """
+    live = resolve_grading_anchor_tput(state)
+    if live > snapshot_tput:
+        return live, snapshot_tput > 0
+    return snapshot_tput, False
+
+
 def resolve_grading_anchor_tput(state: Any) -> float:
     """Throughput a new candidate must beat: the recipe it is composed on top of.
 

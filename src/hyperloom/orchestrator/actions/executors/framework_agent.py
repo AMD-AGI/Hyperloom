@@ -65,7 +65,8 @@ from ...knowledge.kb_writeback import (
     OUTCOME_REVERTED_SMOKE_FAIL,
     write_framework_record,
 )
-from ...state.shared_state import resolve_grading_anchor_tput
+from ...state.shared_state import resolve_anchor_with_drift
+from hyperloom.common.gain_math import gain_pct
 
 
 log = logging.getLogger(__name__)
@@ -818,17 +819,17 @@ class FrameworkAgentExecutor:
             raise
 
         # KEEP / REVERT decision.
-        base_tput = float(params.get("base_tput") or 0.0)
-        live_anchor = resolve_grading_anchor_tput(extra.get("shared_state") or extra.get("state"))
-        if live_anchor > base_tput:
-            base_tput = live_anchor
+        base_tput, anchor_drifted = resolve_anchor_with_drift(
+            float(params.get("base_tput") or 0.0),
+            extra.get("shared_state") or extra.get("state"),
+        )
+        if anchor_drifted:
+            log.warning("framework: anchor drift; grading against live anchor %.1f", base_tput)
         keep_threshold_pct = float(
             params.get("keep_threshold_pct", self.keep_threshold_pct),
         )
         new_tput = bench_result.get("output_throughput")
-        delta_pct: float | None = None
-        if isinstance(new_tput, (int, float)) and new_tput > 0 and base_tput > 0:
-            delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+        delta_pct = gain_pct(new_tput, base_tput)
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
         # Source patches require the accuracy gate for a KEEP: a measured

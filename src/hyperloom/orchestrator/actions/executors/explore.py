@@ -47,7 +47,7 @@ from ...state.failure_evidence import (
     make_failure_id,
     tail_excerpt,
 )
-from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
+from ...state.shared_state import first_positive_tput, resolve_anchor_with_drift, stack_base_params
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
@@ -63,6 +63,7 @@ from . import _framework_switch_manifest as _switch_manifest
 from ._canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_runner import (
+    DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
@@ -98,11 +99,6 @@ from ._workload_envs import (
 
 
 log = logging.getLogger(__name__)
-
-
-# Per-variant KEEP threshold (gain-pct + accuracy gate); the inlined stack
-# rebench is the second gate. Override per-task via ``params['keep_threshold_pct']``.
-DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 
 _now_iso = functools.partial(now_iso, "auto")
@@ -766,11 +762,16 @@ class ExploreExecutor:
         # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
         ss = extra.get("shared_state") or extra.get("state")
         snapshot_tput = float(params.get("base_tput") or 0.0)
-        live_anchor = 0.0 if params.get("source") == "resume_stack_revalidate" else resolve_grading_anchor_tput(ss)
-        if live_anchor > snapshot_tput:
-            if snapshot_tput > 0:
-                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, live_anchor)
-            params["base_tput"] = live_anchor
+        # Revalidation reproduces the saved stack, so it never re-anchors.
+        anchor, anchor_drifted = (
+            (snapshot_tput, False)
+            if params.get("source") == "resume_stack_revalidate"
+            else resolve_anchor_with_drift(snapshot_tput, ss)
+        )
+        if anchor > snapshot_tput:
+            if anchor_drifted:
+                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, anchor)
+            params["base_tput"] = anchor
             cb = getattr(ss, "current_best", None)
             # Only current_best carries args; a baseline_tput anchor leaves the
             # params stack (seeded from the baseline record) authoritative.
@@ -2110,7 +2111,6 @@ explore_executor = ExploreExecutor()
 
 
 __all__ = [
-    "DEFAULT_KEEP_THRESHOLD_PCT",
     "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
     "explore_executor",

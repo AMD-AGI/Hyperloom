@@ -33,7 +33,8 @@ from ...specialists.patch_safety import (
     patch_targets_missing,
     resolve_patch_apply_root,
 )
-from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
+from ...state.shared_state import inject_stack_base_params, resolve_anchor_with_drift
+from hyperloom.common.gain_math import gain_pct
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
@@ -57,6 +58,8 @@ from ._nogit_patch import (
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
+    DEFAULT_KEEP_THRESHOLD_PCT,
+    DEFAULT_VARIANT_TIMEOUT_SEC,
     GridVariant,
     VariantResult,
     _num_gpus_for_config,
@@ -83,8 +86,6 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
-DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
-DEFAULT_VARIANT_TIMEOUT_SEC = 7800
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 # Deliberately shares no substring with the auto-stash tag: _find_hyperloom_auto_stash
 # matches by message, and a quarantined merge must never be picked up and popped back.
@@ -3016,17 +3017,16 @@ class IntegratePatchExecutor:
         ctx: Any,
     ) -> dict[str, Any]:
         """Throughput KEEP / REVERT decision, or no verdict when the run stopped it."""
-        base_tput = float(params.get("base_tput") or 0.0)
         # Grade against the current live anchor, not a stale task snapshot.
-        live_anchor = resolve_grading_anchor_tput(shared_state)
-        if live_anchor > base_tput:
-            if base_tput > 0:
-                log.warning(
-                    "integrate_patch: anchor drift, params base_tput=%.1f but live anchor is %.1f; using live",
-                    base_tput,
-                    live_anchor,
-                )
-            base_tput = live_anchor
+        base_tput, anchor_drifted = resolve_anchor_with_drift(
+            float(params.get("base_tput") or 0.0),
+            shared_state,
+        )
+        if anchor_drifted:
+            log.warning(
+                "integrate_patch: anchor drift; grading against live anchor %.1f",
+                base_tput,
+            )
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
 
@@ -3053,9 +3053,7 @@ class IntegratePatchExecutor:
             )
 
         new_tput = bench_result.get("output_throughput")
-        delta_pct = None
-        if isinstance(new_tput, (int, float)) and new_tput > 0 and base_tput > 0:
-            delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+        delta_pct = gain_pct(new_tput, base_tput)
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
@@ -3324,9 +3322,10 @@ class IntegratePatchExecutor:
                         "workspace": str(output_root),
                     },
                 )
-            if isinstance(confirm["tput"], (int, float)) and confirm["tput"] > 0:
+            confirmed_delta = gain_pct(confirm["tput"], base_tput)
+            if confirmed_delta is not None:
                 new_tput = confirm["tput"]
-                delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+                delta_pct = confirmed_delta
             if confirm["accuracy_pass"] is not None:
                 accuracy_pass = confirm["accuracy_pass"]
 
