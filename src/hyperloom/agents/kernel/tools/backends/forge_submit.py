@@ -871,13 +871,16 @@ def _prepare_worktree_nogit(
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
+    _excl_dirs = _forge_scratch_exclude_dirs() | {"build", "dist"}
+    _excl_suffixes = _forge_scratch_exclude_suffixes()
+
     def _ignore(directory: str, names: list[str]) -> list[str]:
         ignored: list[str] = []
         for n in names:
             if (
-                n in (".git", "__pycache__", "jit", "flydsl_cache", "build", "dist")
+                n in (".git", *_excl_dirs)
                 or n.endswith(".egg-info")
-                or n.endswith(".so")
+                or any(n.endswith(s) for s in _excl_suffixes)
             ):
                 ignored.append(n)
         return ignored
@@ -1388,16 +1391,55 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 
 _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
 # Patterns for machine-generated artefacts that must never enter the scratch
-# repository's index: compiling a kernel writes into these directories while
-# the loop runs.  Including them inflates the index by gigabytes, makes
-# git add -A time out on NFS, and causes spurious integrity violations when a
-# compile creates new cache entries during an iteration.
-_SCRATCH_EXCLUDE_GLOBS: tuple[str, ...] = (
+# repository's index.  The authoritative set comes from the forge path-ownership
+# manifest; these are the local fallback for when kernel_agents is unavailable.
+_SCRATCH_EXCLUDE_GLOBS_FALLBACK: tuple[str, ...] = (
     "__pycache__/",
     "flydsl_cache/",
     "jit/",
     "*.so",
 )
+# _SCRATCH_EXCLUDE_GLOB_NAMES lists just the bare directory names (no trailing
+# slash) used by the _ignore copytree filter.
+_SCRATCH_EXCLUDE_DIR_NAMES_FALLBACK: frozenset[str] = frozenset(
+    {"__pycache__", "flydsl_cache", "jit"}
+)
+_SCRATCH_EXCLUDE_SUFFIXES_FALLBACK: tuple[str, ...] = (".so",)
+
+
+def _forge_scratch_exclude_globs() -> tuple[str, ...]:
+    """Return gitignore-style globs covering all runtime artefacts in a scratch repo.
+
+    Reads from the forge path-ownership manifest when kernel_agents is importable
+    via $FORGE_PATH; falls back to a local constant otherwise so the function is
+    usable on remote nodes and before FORGE_PATH is configured.
+    """
+    _ensure_forge_on_path()
+    try:
+        from kernel_agents.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
+        return runtime_gitignore_globs()
+    except ImportError:
+        return _SCRATCH_EXCLUDE_GLOBS_FALLBACK
+
+
+def _forge_scratch_exclude_dirs() -> frozenset[str]:
+    """Return directory basenames that the copytree filter should skip."""
+    _ensure_forge_on_path()
+    try:
+        from kernel_agents.loop.path_ownership import RUNTIME_DIRECTORY_NAMES  # noqa: PLC0415
+        return RUNTIME_DIRECTORY_NAMES
+    except ImportError:
+        return _SCRATCH_EXCLUDE_DIR_NAMES_FALLBACK
+
+
+def _forge_scratch_exclude_suffixes() -> tuple[str, ...]:
+    """Return file suffixes that the copytree filter should skip."""
+    _ensure_forge_on_path()
+    try:
+        from kernel_agents.loop.path_ownership import RUNTIME_FILE_SUFFIXES  # noqa: PLC0415
+        return tuple(RUNTIME_FILE_SUFFIXES)
+    except ImportError:
+        return _SCRATCH_EXCLUDE_SUFFIXES_FALLBACK
 
 
 def _exclude_generated_drivers(workspace: Path) -> None:
@@ -1454,7 +1496,7 @@ def _exclude_bytecode_caches(workspace: Path) -> None:
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
         present = set(existing.split())
-        missing = [g for g in _SCRATCH_EXCLUDE_GLOBS if g not in present]
+        missing = [g for g in _forge_scratch_exclude_globs() if g not in present]
         if not missing:
             return
         exclude.parent.mkdir(parents=True, exist_ok=True)
