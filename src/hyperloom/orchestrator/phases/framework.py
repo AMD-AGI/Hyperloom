@@ -162,7 +162,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             if await self._maybe_dispatch_local_explore(reason="no_new_candidates"):
                 state.save(self.session_dir)
                 return
-            self._record_framework_agent_phase_done(reason="no_candidates_and_discovery_exhausted")
+            self._record_framework_agent_phase_done(
+                reason="no_candidates_and_discovery_exhausted",
+                failure_count=int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
+            )
             state.framework_agent_phase_done = True
             state.save(self.session_dir)
             return
@@ -242,29 +245,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             pass
         return False
 
-    def _framework_audit_verdict_uncertain(audit: dict[str, Any] | None) -> bool:
-        """True when a static audit verdict is too weak to route on confidently.
-
-        The ``auto`` LLM policy re-runs the audit with ``use_llm=True`` only in
-        this case, so the extra chat-completion is spent only where the cheap
-        static pass could not decide (``unknown`` status or ``confidence < 0.5``).
-
-        Args:
-            audit: The static-layer verdict dict.
-
-        Returns:
-            ``True`` when the verdict is ``unknown`` or low-confidence.
-        """
-        if not isinstance(audit, dict) or not audit:
-            return True
-        status = str(audit.get("semantic_status") or "").strip().lower()
-        if status in ("", "unknown"):
-            return True
-        try:
-            return float(audit.get("confidence") or 0.0) < 0.5
-        except (TypeError, ValueError):
-            return True
-
+    @staticmethod
     def _framework_agent_audit_seed_lines(audit: dict[str, Any] | None) -> list[str]:
         """Render audit evidence as authoring-seed lines (empty when no audit)."""
         if not isinstance(audit, dict) or not audit:
@@ -1454,39 +1435,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                 _add(_fa_client.repo_url_for_framework(framework or "sglang"))
         return urls
 
-    def _framework_agent_repo_url_origin_framework(repo_url: str) -> str:
-        """Reverse-lookup: which known serving framework (if any) owns ``repo_url``.
-
-        Design #5-P1/discovery-wiring: ``_framework_agent_discover_repo_urls``
-        already queries the global cross-repo allowlist (e.g. a
-        sglang session's discovery batch already includes ``ROCm/vllm``), but
-        candidates returned by ``fa phase-discover`` never carry a
-        ``framework`` tag reflecting which repo they actually came from — so
-        ``_audit_framework_agent_candidate``'s cross-framework detection had
-        no signal to act on even though cross-repo candidates were already
-        flowing through the pump. Only the four ``repo_map`` frameworks are
-        resolvable (kernel-level repos like aiter/triton/rccl aren't a
-        "framework" in the audit sense and correctly resolve to "").
-
-        Args:
-            repo_url: A repo URL as returned by
-                :meth:`_framework_agent_discover_repo_urls`.
-
-        Returns:
-            The lowercase framework name, or ``""`` when ``repo_url`` doesn't
-            match any known framework's canonical repo.
-        """
-        from ..framework import client as _fa_client
-
-        normalized = (repo_url or "").strip().rstrip("/").lower()
-        if not normalized:
-            return ""
-        for fw in ("sglang", "vllm", "atom", "xdit"):
-            fw_url = (_fa_client.repo_url_for_framework(fw) or "").strip().rstrip("/").lower()
-            if fw_url and fw_url == normalized:
-                return fw
-        return ""
-
     def _record_framework_agent_phase_done(
         self,
         *,
@@ -2497,13 +2445,26 @@ class FrameworkPhase(CoordinatorCollaborator):
         Minimum supply only; Orchestration dispatches the same specialist
         whenever it judges the upstream lane worth pursuing.
 
+        Declines once discovery has come back empty
+        ``DISCOVER_FAILURE_RETRY_LIMIT`` times in a row. Without that the lane
+        would always answer "asked again", the pump would return on every tick,
+        and neither the local-exploration pivot below it nor
+        ``framework_agent_phase_done`` could ever be reached -- the source arm
+        would have no way to report itself plateaued.
+
         Args:
             reason: Why discovery is being requested; carried into the mandate.
 
         Returns:
-            True when a discovery task was created or is already in flight.
+            True when a discovery task was created or is already in flight;
+            False once the empty-result streak says there is nothing left to find.
         """
+        from ..framework import client as _fa_client
+
         state = self.shared_state
+        empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0)
+        if empties >= int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+            return False
         if await self._candidate_discovery_inflight():
             return True
         gap, keywords = self._compose_framework_local_explore_gap()
