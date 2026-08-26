@@ -1,0 +1,848 @@
+{
+ "root": "src/hyperloom",
+ "entry_points": {
+  "optimizer_cli": [
+   "hyperloom.inference_optimizer.cli"
+  ],
+  "bootstrap": [
+   "hyperloom.inference_optimizer.setup"
+  ],
+  "framework_agent": [
+   "hyperloom.agents.framework.runtime.cli"
+  ],
+  "robustness_agent": [
+   "hyperloom.agents.robustness.main"
+  ],
+  "quantization_agent": [
+   "hyperloom.agents.quantization.cli"
+  ],
+  "critic_agent": [
+   "hyperloom.agents.critic.runtime.cli"
+  ],
+  "multi_node": [
+   "hyperloom.inference_optimizer.multi_node.cli"
+  ]
+ },
+ "totals": {
+  "all": {
+   "files": 1104,
+   "stmts": 218595,
+   "physical": 561407,
+   "sloc": 385997,
+   "blank": 83021,
+   "comment": 24522,
+   "docstring": 67867,
+   "lloc": 262393,
+   "radon_sloc": 387359
+  },
+  "prod": {
+   "files": 487,
+   "stmts": 97049,
+   "physical": 278845,
+   "sloc": 176423,
+   "blank": 33260,
+   "comment": 15734,
+   "docstring": 53428,
+   "lloc": 118143,
+   "radon_sloc": 177465
+  },
+  "test": {
+   "files": 617,
+   "stmts": 121546,
+   "physical": 282562,
+   "sloc": 209574,
+   "blank": 49761,
+   "comment": 8788,
+   "docstring": 14439,
+   "lloc": 144250,
+   "radon_sloc": 209894
+  }
+ },
+ "subsystems": {
+  "__init__.py": {
+   "all": {
+    "files": 1,
+    "stmts": 2,
+    "physical": 8,
+    "sloc": 2,
+    "blank": 3,
+    "comment": 2,
+    "docstring": 1,
+    "lloc": 4,
+    "radon_sloc": 2
+   },
+   "prod": {
+    "files": 1,
+    "stmts": 2,
+    "physical": 8,
+    "sloc": 2,
+    "blank": 3,
+    "comment": 2,
+    "docstring": 1,
+    "lloc": 4,
+    "radon_sloc": 2
+   },
+   "test": {
+    "files": 0,
+    "stmts": 0,
+    "physical": 0,
+    "sloc": 0,
+    "blank": 0,
+    "comment": 0,
+    "docstring": 0,
+    "lloc": 0,
+    "radon_sloc": 0
+   }
+  },
+  "agents": {
+   "all": {
+    "files": 307,
+    "stmts": 51499,
+    "physical": 131553,
+    "sloc": 90322,
+    "blank": 19846,
+    "comment": 5442,
+    "docstring": 15943,
+    "lloc": 61212,
+    "radon_sloc": 90636
+   },
+   "prod": {
+    "files": 145,
+    "stmts": 24912,
+    "physical": 68704,
+    "sloc": 43480,
+    "blank": 8897,
+    "comment": 3348,
+    "docstring": 12979,
+    "lloc": 30304,
+    "radon_sloc": 43703
+   },
+   "test": {
+    "files": 162,
+    "stmts": 26587,
+    "physical": 62849,
+    "sloc": 46842,
+    "blank": 10949,
+    "comment": 2094,
+    "docstring": 2964,
+    "lloc": 30908,
+    "radon_sloc": 46933
+   }
+  },
+  "common": {
+   "all": {
+    "files": 29,
+    "stmts": 2440,
+    "physical": 7156,
+    "sloc": 3964,
+    "blank": 1193,
+    "comment": 300,
+    "docstring": 1699,
+    "lloc": 3012,
+    "radon_sloc": 4004
+   },
+   "prod": {
+    "files": 23,
+    "stmts": 2018,
+    "physical": 6120,
+    "sloc": 3315,
+    "blank": 956,
+    "comment": 241,
+    "docstring": 1608,
+    "lloc": 2495,
+    "radon_sloc": 3353
+   },
+   "test": {
+    "files": 6,
+    "stmts": 422,
+    "physical": 1036,
+    "sloc": 649,
+    "blank": 237,
+    "comment": 59,
+    "docstring": 91,
+    "lloc": 517,
+    "radon_sloc": 651
+   }
+  },
+  "inference_optimizer": {
+   "all": {
+    "files": 567,
+    "stmts": 113590,
+    "physical": 275167,
+    "sloc": 196881,
+    "blank": 45553,
+    "comment": 9592,
+    "docstring": 23141,
+    "lloc": 136490,
+    "radon_sloc": 197409
+   },
+   "prod": {
+    "files": 124,
+    "stmts": 19728,
+    "physical": 57765,
+    "sloc": 35658,
+    "blank": 7251,
+    "comment": 3021,
+    "docstring": 11835,
+    "lloc": 24400,
+    "radon_sloc": 35959
+   },
+   "test": {
+    "files": 443,
+    "stmts": 93862,
+    "physical": 217402,
+    "sloc": 161223,
+    "blank": 38302,
+    "comment": 6571,
+    "docstring": 11306,
+    "lloc": 112090,
+    "radon_sloc": 161450
+   }
+  },
+  "orchestrator": {
+   "all": {
+    "files": 200,
+    "stmts": 51064,
+    "physical": 147523,
+    "sloc": 94828,
+    "blank": 16426,
+    "comment": 9186,
+    "docstring": 27083,
+    "lloc": 61675,
+    "radon_sloc": 95308
+   },
+   "prod": {
+    "files": 194,
+    "stmts": 50389,
+    "physical": 146248,
+    "sloc": 93968,
+    "blank": 16153,
+    "comment": 9122,
+    "docstring": 27005,
+    "lloc": 60940,
+    "radon_sloc": 94448
+   },
+   "test": {
+    "files": 6,
+    "stmts": 675,
+    "physical": 1275,
+    "sloc": 860,
+    "blank": 273,
+    "comment": 64,
+    "docstring": 78,
+    "lloc": 735,
+    "radon_sloc": 860
+   }
+  }
+ },
+ "duplicates": {
+  "exact": {
+   "groups": 9,
+   "redundant_files": 13,
+   "redundant_physical": 805,
+   "redundant_sloc": 581,
+   "detail": [
+    {
+     "keep": "src/hyperloom/inference_optimizer/tests/test_framework_gap_composer.py",
+     "drop": [
+      "src/hyperloom/inference_optimizer/tests/test_framework_gap_composer_units.py"
+     ],
+     "sloc_each": 123,
+     "physical_each": 157,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/test_runner_collector.py",
+     "drop": [
+      "src/hyperloom/agents/quantization/tests/test_runner_collector_branches_unit.py"
+     ],
+     "sloc_each": 99,
+     "physical_each": 144,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/critic/runtime/tests/test_coverage_boost_unit.py",
+     "drop": [
+      "src/hyperloom/agents/critic/runtime/tests/test_critic_utils.py"
+     ],
+     "sloc_each": 99,
+     "physical_each": 139,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/critic/runtime/tests/test_kb_request.py",
+     "drop": [
+      "src/hyperloom/agents/critic/runtime/tests/test_kb_request_branches_unit.py"
+     ],
+     "sloc_each": 90,
+     "physical_each": 121,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/test_assessment.py",
+     "drop": [
+      "src/hyperloom/agents/quantization/tests/test_assessment_branches_unit.py"
+     ],
+     "sloc_each": 79,
+     "physical_each": 103,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/test_retry.py",
+     "drop": [
+      "src/hyperloom/agents/quantization/tests/test_retry_branches_unit.py"
+     ],
+     "sloc_each": 60,
+     "physical_each": 85,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/critic/runtime/tests/test_inbox_parser_branches.py",
+     "drop": [
+      "src/hyperloom/agents/critic/runtime/tests/test_inbox_parser_branches_unit.py"
+     ],
+     "sloc_each": 31,
+     "physical_each": 48,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/framework/tests/__init__.py",
+     "drop": [
+      "src/hyperloom/agents/framework/tests/integration/__init__.py",
+      "src/hyperloom/agents/robustness/tests/__init__.py",
+      "src/hyperloom/inference_optimizer/tests/__init__.py",
+      "src/hyperloom/orchestrator/measurement/tests/__init__.py"
+     ],
+     "sloc_each": 0,
+     "physical_each": 2,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/__init__.py",
+     "drop": [
+      "src/hyperloom/inference_optimizer/multi_node/commands/__init__.py",
+      "src/hyperloom/orchestrator/state/_shared_state/__init__.py"
+     ],
+     "sloc_each": 0,
+     "physical_each": 0,
+     "test": true
+    }
+   ]
+  },
+  "normalized": {
+   "groups": 8,
+   "redundant_files": 16,
+   "redundant_physical": 807,
+   "redundant_sloc": 581,
+   "detail": [
+    {
+     "keep": "src/hyperloom/inference_optimizer/tests/test_framework_gap_composer.py",
+     "drop": [
+      "src/hyperloom/inference_optimizer/tests/test_framework_gap_composer_units.py"
+     ],
+     "sloc_each": 123,
+     "physical_each": 157,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/test_runner_collector.py",
+     "drop": [
+      "src/hyperloom/agents/quantization/tests/test_runner_collector_branches_unit.py"
+     ],
+     "sloc_each": 99,
+     "physical_each": 144,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/critic/runtime/tests/test_coverage_boost_unit.py",
+     "drop": [
+      "src/hyperloom/agents/critic/runtime/tests/test_critic_utils.py"
+     ],
+     "sloc_each": 99,
+     "physical_each": 139,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/critic/runtime/tests/test_kb_request.py",
+     "drop": [
+      "src/hyperloom/agents/critic/runtime/tests/test_kb_request_branches_unit.py"
+     ],
+     "sloc_each": 90,
+     "physical_each": 121,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/test_assessment.py",
+     "drop": [
+      "src/hyperloom/agents/quantization/tests/test_assessment_branches_unit.py"
+     ],
+     "sloc_each": 79,
+     "physical_each": 103,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/quantization/tests/test_retry.py",
+     "drop": [
+      "src/hyperloom/agents/quantization/tests/test_retry_branches_unit.py"
+     ],
+     "sloc_each": 60,
+     "physical_each": 85,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/critic/runtime/tests/test_inbox_parser_branches.py",
+     "drop": [
+      "src/hyperloom/agents/critic/runtime/tests/test_inbox_parser_branches_unit.py"
+     ],
+     "sloc_each": 31,
+     "physical_each": 48,
+     "test": true
+    },
+    {
+     "keep": "src/hyperloom/agents/framework/tests/__init__.py",
+     "drop": [
+      "src/hyperloom/agents/framework/tests/integration/__init__.py",
+      "src/hyperloom/agents/quantization/tests/__init__.py",
+      "src/hyperloom/agents/robustness/tests/__init__.py",
+      "src/hyperloom/inference_optimizer/multi_node/commands/__init__.py",
+      "src/hyperloom/inference_optimizer/tests/__init__.py",
+      "src/hyperloom/inference_optimizer/tests/fixtures/sglang_kernel_layouts/legacy/sgl-kernel/setup_rocm.py",
+      "src/hyperloom/inference_optimizer/tests/fixtures/sglang_kernel_layouts/v0517_aot/python/sglang/kernels/aot/setup_rocm.py",
+      "src/hyperloom/orchestrator/measurement/tests/__init__.py",
+      "src/hyperloom/orchestrator/state/_shared_state/__init__.py"
+     ],
+     "sloc_each": 0,
+     "physical_each": 2,
+     "test": true
+    }
+   ]
+  }
+ },
+ "reachability": {
+  "prod_modules": 487,
+  "scenarios": {
+   "optimizer_cli": {
+    "seeds": [
+     "hyperloom.inference_optimizer.cli"
+    ],
+    "modules": 242,
+    "metrics": {
+     "files": 242,
+     "stmts": 58777,
+     "physical": 171582,
+     "sloc": 108202,
+     "blank": 19744,
+     "comment": 10403,
+     "docstring": 33233,
+     "lloc": 71886,
+     "radon_sloc": 108828
+    }
+   },
+   "bootstrap": {
+    "seeds": [
+     "hyperloom.inference_optimizer.setup"
+    ],
+    "modules": 1,
+    "metrics": {
+     "files": 1,
+     "stmts": 56,
+     "physical": 132,
+     "sloc": 89,
+     "blank": 21,
+     "comment": 4,
+     "docstring": 18,
+     "lloc": 61,
+     "radon_sloc": 89
+    }
+   },
+   "framework_agent": {
+    "seeds": [
+     "hyperloom.agents.framework.runtime.cli"
+    ],
+    "modules": 31,
+    "metrics": {
+     "files": 31,
+     "stmts": 3437,
+     "physical": 10002,
+     "sloc": 5673,
+     "blank": 1578,
+     "comment": 262,
+     "docstring": 2489,
+     "lloc": 4251,
+     "radon_sloc": 5689
+    }
+   },
+   "robustness_agent": {
+    "seeds": [
+     "hyperloom.agents.robustness.main"
+    ],
+    "modules": 40,
+    "metrics": {
+     "files": 40,
+     "stmts": 4431,
+     "physical": 14857,
+     "sloc": 8184,
+     "blank": 2219,
+     "comment": 660,
+     "docstring": 3794,
+     "lloc": 5797,
+     "radon_sloc": 8237
+    }
+   },
+   "quantization_agent": {
+    "seeds": [
+     "hyperloom.agents.quantization.cli"
+    ],
+    "modules": 11,
+    "metrics": {
+     "files": 11,
+     "stmts": 1349,
+     "physical": 4448,
+     "sloc": 2305,
+     "blank": 773,
+     "comment": 165,
+     "docstring": 1205,
+     "lloc": 1666,
+     "radon_sloc": 2309
+    }
+   },
+   "critic_agent": {
+    "seeds": [
+     "hyperloom.agents.critic.runtime.cli"
+    ],
+    "modules": 30,
+    "metrics": {
+     "files": 30,
+     "stmts": 2635,
+     "physical": 8597,
+     "sloc": 4462,
+     "blank": 1401,
+     "comment": 350,
+     "docstring": 2384,
+     "lloc": 3390,
+     "radon_sloc": 4489
+    }
+   },
+   "multi_node": {
+    "seeds": [
+     "hyperloom.inference_optimizer.multi_node.cli"
+    ],
+    "modules": 20,
+    "metrics": {
+     "files": 20,
+     "stmts": 2366,
+     "physical": 8163,
+     "sloc": 4501,
+     "blank": 1234,
+     "comment": 369,
+     "docstring": 2059,
+     "lloc": 2831,
+     "radon_sloc": 4537
+    }
+   },
+   "all_entry_points": {
+    "seeds": [
+     "hyperloom",
+     "hyperloom.agents.critic.runtime.cli",
+     "hyperloom.agents.framework.examples.bench_rmsnorm",
+     "hyperloom.agents.framework.examples.check_accuracy_rmsnorm",
+     "hyperloom.agents.framework.runtime.cli",
+     "hyperloom.agents.kernel.tools.apply_kernel_patch",
+     "hyperloom.agents.kernel.tools.backends.geak_runner",
+     "hyperloom.agents.kernel.tools.bypass_trace_analysis",
+     "hyperloom.agents.kernel.tools.diffusion_flops",
+     "hyperloom.agents.kernel.tools.diffusion_roofline",
+     "hyperloom.agents.kernel.tools.forge_collective",
+     "hyperloom.agents.kernel.tools.forge_fusion",
+     "hyperloom.agents.kernel.tools.forge_gemm_tuning",
+     "hyperloom.agents.kernel.tools.gemm_tuning",
+     "hyperloom.agents.kernel.tools.kernel_optimization",
+     "hyperloom.agents.kernel.tools.kernel_source_index",
+     "hyperloom.agents.kernel.tools.source_resolver",
+     "hyperloom.agents.kernel.tools.tracelens_analysis",
+     "hyperloom.agents.quantization.cli",
+     "hyperloom.agents.robustness.main",
+     "hyperloom.agents.robustness.runtime.cli",
+     "hyperloom.inference_optimizer.assets.agentx.map_aiperf",
+     "hyperloom.inference_optimizer.breakdown.recorder",
+     "hyperloom.inference_optimizer.cli",
+     "hyperloom.inference_optimizer.cli.__main__",
+     "hyperloom.inference_optimizer.framework_deps",
+     "hyperloom.inference_optimizer.multi_node",
+     "hyperloom.inference_optimizer.multi_node.__main__",
+     "hyperloom.inference_optimizer.multi_node.cli",
+     "hyperloom.inference_optimizer.multi_node.scripts.apply_tracelens_patch_multinode",
+     "hyperloom.inference_optimizer.multi_node.scripts.kernel_bench_multinode",
+     "hyperloom.inference_optimizer.multi_node.scripts.kernel_node_ops",
+     "hyperloom.inference_optimizer.multi_node.scripts.kernel_patch_multinode",
+     "hyperloom.inference_optimizer.multi_node.scripts.kill_multinode",
+     "hyperloom.inference_optimizer.multi_node.scripts.launch_infera_node",
+     "hyperloom.inference_optimizer.multi_node.scripts.launch_multinode",
+     "hyperloom.inference_optimizer.multi_node.scripts.launch_router",
+     "hyperloom.inference_optimizer.session.paths",
+     "hyperloom.inference_optimizer.setup",
+     "hyperloom.inference_optimizer.tools.backfill_langfuse",
+     "hyperloom.inference_optimizer.tools.dump_session_breakdown",
+     "hyperloom.inference_optimizer.tools.dump_session_report",
+     "hyperloom.inference_optimizer.tools.event_counts",
+     "hyperloom.inference_optimizer.tools.preflight_optimizer",
+     "hyperloom.inference_optimizer.tools.read_optimizer_state",
+     "hyperloom.orchestrator.actions.executors.bypass_runner",
+     "hyperloom.orchestrator.bus.message_bus",
+     "hyperloom.orchestrator.framework.targeted_build",
+     "hyperloom.orchestrator.specialists.rebench"
+    ],
+    "seed_counts": {
+     "console_scripts": 7,
+     "main_guarded": 44,
+     "string_referenced": 17
+    },
+    "modules": 351,
+    "metrics": {
+     "files": 351,
+     "stmts": 77686,
+     "physical": 224883,
+     "sloc": 141545,
+     "blank": 26745,
+     "comment": 12784,
+     "docstring": 43809,
+     "lloc": 94971,
+     "radon_sloc": 142277
+    }
+   },
+   "unreached_from_any_entry": {
+    "seeds": [],
+    "modules": 136,
+    "metrics": {
+     "files": 136,
+     "stmts": 19363,
+     "physical": 53962,
+     "sloc": 34878,
+     "blank": 6515,
+     "comment": 2950,
+     "docstring": 9619,
+     "lloc": 23172,
+     "radon_sloc": 35188
+    },
+    "modules_list": [
+     "hyperloom.agents.critic",
+     "hyperloom.agents.critic.runtime",
+     "hyperloom.agents.framework.runtime",
+     "hyperloom.agents.framework.sources.pr_kb",
+     "hyperloom.agents.kernel",
+     "hyperloom.agents.kernel.tools._analysis_md",
+     "hyperloom.agents.kernel.tools._bypass_benchmark_resolver",
+     "hyperloom.agents.kernel.tools._bypass_classify",
+     "hyperloom.agents.kernel.tools._bypass_fusion",
+     "hyperloom.agents.kernel.tools._bypass_report",
+     "hyperloom.agents.kernel.tools._bypass_roofline",
+     "hyperloom.agents.kernel.tools._bypass_trace_reader",
+     "hyperloom.agents.kernel.tools._collective_names",
+     "hyperloom.agents.kernel.tools._denoise_steps",
+     "hyperloom.agents.kernel.tools._idle_gate",
+     "hyperloom.agents.kernel.tools._invocation_spec",
+     "hyperloom.agents.kernel.tools._io_utils",
+     "hyperloom.agents.kernel.tools._kernel_category",
+     "hyperloom.agents.kernel.tools._llm_source_context",
+     "hyperloom.agents.kernel.tools._llm_source_fallback",
+     "hyperloom.agents.kernel.tools._llm_source_review",
+     "hyperloom.agents.kernel.tools._nccl_summary_candidates",
+     "hyperloom.agents.kernel.tools._paths",
+     "hyperloom.agents.kernel.tools._roofline_source",
+     "hyperloom.agents.kernel.tools._task_group_contract",
+     "hyperloom.agents.kernel.tools._trace_launcher_resolver",
+     "hyperloom.agents.kernel.tools._trace_shape_manifest",
+     "hyperloom.agents.kernel.tools._vendor_operator_playbooks",
+     "hyperloom.agents.kernel.tools.backends",
+     "hyperloom.agents.kernel.tools.backends._flydsl_rewrite",
+     "hyperloom.agents.kernel.tools.backends._llm_stability_env",
+     "hyperloom.agents.kernel.tools.backends.forge_submit",
+     "hyperloom.agents.kernel.tools.collective_driver_generator",
+     "hyperloom.agents.kernel.tools.tracelens_arch_benchmark",
+     "hyperloom.agents.kernel.tools.tracelens_skill_runner",
+     "hyperloom.agents.quantization",
+     "hyperloom.agents.quantization.driver",
+     "hyperloom.agents.robustness.decision",
+     "hyperloom.agents.robustness.role",
+     "hyperloom.agents.robustness.runtime",
+     "hyperloom.agents.robustness.signals.classifier",
+     "hyperloom.agents.robustness.sources",
+     "hyperloom.inference_optimizer.actions",
+     "hyperloom.inference_optimizer.agentx",
+     "hyperloom.inference_optimizer.assets.host_probe.hl_host_probe",
+     "hyperloom.inference_optimizer.assets.host_probe.sitecustomize",
+     "hyperloom.inference_optimizer.baseline_comparison",
+     "hyperloom.inference_optimizer.baseline_comparison.target_analyzer",
+     "hyperloom.inference_optimizer.baseline_comparison.types",
+     "hyperloom.inference_optimizer.breakdown.collectors._common",
+     "hyperloom.inference_optimizer.breakdown.collectors.attribution",
+     "hyperloom.inference_optimizer.breakdown.collectors.decision",
+     "hyperloom.inference_optimizer.breakdown.collectors.explore",
+     "hyperloom.inference_optimizer.breakdown.collectors.geak",
+     "hyperloom.inference_optimizer.breakdown.collectors.kernels",
+     "hyperloom.inference_optimizer.breakdown.collectors.optimizations",
+     "hyperloom.inference_optimizer.breakdown.collectors.roofline",
+     "hyperloom.inference_optimizer.breakdown.collectors.sessions",
+     "hyperloom.inference_optimizer.breakdown.collectors.telemetry",
+     "hyperloom.inference_optimizer.breakdown.collectors.timeline",
+     "hyperloom.inference_optimizer.breakdown.recorder.assembler",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers._invocation",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.attribution",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.baseline",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.capability_summary",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.critic_robustness",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.data_provenance",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.decision_journal",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.final",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_decision_path",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_lifecycle",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_profiling",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.optimizations",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.param_search",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.phase_timeline",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.roofline",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.session",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.source_files",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.sweep",
+     "hyperloom.inference_optimizer.breakdown.reporters._renderers.workload",
+     "hyperloom.inference_optimizer.breakdown.reporters.base",
+     "hyperloom.inference_optimizer.breakdown.reporters.compose",
+     "hyperloom.inference_optimizer.breakdown.reporters.cross_section",
+     "hyperloom.inference_optimizer.breakdown.reporters.llm_prompt",
+     "hyperloom.inference_optimizer.breakdown.session_package",
+     "hyperloom.inference_optimizer.cli.backends",
+     "hyperloom.inference_optimizer.cli.bootstrap",
+     "hyperloom.inference_optimizer.cli.credentials",
+     "hyperloom.inference_optimizer.cli.executors",
+     "hyperloom.inference_optimizer.cli.kb",
+     "hyperloom.inference_optimizer.cli.multi_node",
+     "hyperloom.inference_optimizer.cli.parser",
+     "hyperloom.inference_optimizer.cli.preflight",
+     "hyperloom.inference_optimizer.cli.quantization",
+     "hyperloom.inference_optimizer.cli.recover",
+     "hyperloom.inference_optimizer.multi_node._internal.gpu_probe",
+     "hyperloom.inference_optimizer.multi_node.commands",
+     "hyperloom.inference_optimizer.multi_node.scripts.patch_path_safety",
+     "hyperloom.inference_optimizer.protocol",
+     "hyperloom.inference_optimizer.session.lock",
+     "hyperloom.inference_optimizer.session.manifest",
+     "hyperloom.orchestrator.actions.executors.conc_sweep",
+     "hyperloom.orchestrator.actions.executors.framework_agent",
+     "hyperloom.orchestrator.actions.executors.recover",
+     "hyperloom.orchestrator.actions.executors.session_breakdown",
+     "hyperloom.orchestrator.actions.executors.target_analysis",
+     "hyperloom.orchestrator.actions.executors.targeted_build_executor",
+     "hyperloom.orchestrator.bus.storage",
+     "hyperloom.orchestrator.knowledge.kernel_experience_bridge",
+     "hyperloom.orchestrator.knowledge.knowledge_plane",
+     "hyperloom.orchestrator.knowledge.pr_monitor",
+     "hyperloom.orchestrator.knowledge.recipe_kb.canonical_id",
+     "hyperloom.orchestrator.knowledge.recipe_kb.dispatcher",
+     "hyperloom.orchestrator.knowledge.recipe_kb.local_store",
+     "hyperloom.orchestrator.knowledge.recipe_kb.schema",
+     "hyperloom.orchestrator.knowledge.remote_recipe.client",
+     "hyperloom.orchestrator.loop",
+     "hyperloom.orchestrator.measurement",
+     "hyperloom.orchestrator.phases.quantization_request_handlers",
+     "hyperloom.orchestrator.phases.quantization_schemes",
+     "hyperloom.orchestrator.roles",
+     "hyperloom.orchestrator.roles._runtime_bridge",
+     "hyperloom.orchestrator.roles.claude",
+     "hyperloom.orchestrator.roles.codex",
+     "hyperloom.orchestrator.roles.codex_agent",
+     "hyperloom.orchestrator.roles.critic_agent",
+     "hyperloom.orchestrator.roles.mcp_emit_intent",
+     "hyperloom.orchestrator.roles.mock_backend",
+     "hyperloom.orchestrator.roles.robustness_agent",
+     "hyperloom.orchestrator.roles.robustness_mock",
+     "hyperloom.orchestrator.scoring",
+     "hyperloom.orchestrator.scoring.proposal_scorer",
+     "hyperloom.orchestrator.specialists.mcp_config",
+     "hyperloom.orchestrator.state._shared_state"
+    ]
+   }
+  },
+  "orphan_modules": 66,
+  "orphans": {
+   "files": 66,
+   "stmts": 15492,
+   "physical": 39507,
+   "sloc": 26702,
+   "blank": 4470,
+   "comment": 2067,
+   "docstring": 6268,
+   "lloc": 18313,
+   "radon_sloc": 26860
+  },
+  "orphan_list": [
+   "hyperloom.agents.critic",
+   "hyperloom.agents.critic.runtime",
+   "hyperloom.agents.framework.examples.bench_rmsnorm",
+   "hyperloom.agents.framework.examples.check_accuracy_rmsnorm",
+   "hyperloom.agents.kernel",
+   "hyperloom.agents.kernel.tools._analysis_md",
+   "hyperloom.agents.kernel.tools._bypass_benchmark_resolver",
+   "hyperloom.agents.kernel.tools._bypass_classify",
+   "hyperloom.agents.kernel.tools._bypass_fusion",
+   "hyperloom.agents.kernel.tools._bypass_report",
+   "hyperloom.agents.kernel.tools._bypass_roofline",
+   "hyperloom.agents.kernel.tools._bypass_trace_reader",
+   "hyperloom.agents.kernel.tools._collective_names",
+   "hyperloom.agents.kernel.tools._denoise_steps",
+   "hyperloom.agents.kernel.tools._idle_gate",
+   "hyperloom.agents.kernel.tools._invocation_spec",
+   "hyperloom.agents.kernel.tools._io_utils",
+   "hyperloom.agents.kernel.tools._kernel_category",
+   "hyperloom.agents.kernel.tools._llm_source_context",
+   "hyperloom.agents.kernel.tools._llm_source_fallback",
+   "hyperloom.agents.kernel.tools._llm_source_review",
+   "hyperloom.agents.kernel.tools._nccl_summary_candidates",
+   "hyperloom.agents.kernel.tools._roofline_source",
+   "hyperloom.agents.kernel.tools._task_group_contract",
+   "hyperloom.agents.kernel.tools._trace_launcher_resolver",
+   "hyperloom.agents.kernel.tools._trace_shape_manifest",
+   "hyperloom.agents.kernel.tools._vendor_operator_playbooks",
+   "hyperloom.agents.kernel.tools.apply_kernel_patch",
+   "hyperloom.agents.kernel.tools.backends._flydsl_rewrite",
+   "hyperloom.agents.kernel.tools.backends._llm_stability_env",
+   "hyperloom.agents.kernel.tools.backends.geak_runner",
+   "hyperloom.agents.kernel.tools.bypass_trace_analysis",
+   "hyperloom.agents.kernel.tools.collective_driver_generator",
+   "hyperloom.agents.kernel.tools.diffusion_flops",
+   "hyperloom.agents.kernel.tools.diffusion_roofline",
+   "hyperloom.agents.kernel.tools.forge_collective",
+   "hyperloom.agents.kernel.tools.forge_gemm_tuning",
+   "hyperloom.agents.kernel.tools.gemm_tuning",
+   "hyperloom.agents.kernel.tools.kernel_optimization",
+   "hyperloom.agents.kernel.tools.tracelens_analysis",
+   "hyperloom.agents.kernel.tools.tracelens_arch_benchmark",
+   "hyperloom.agents.robustness.role",
+   "hyperloom.inference_optimizer.actions",
+   "hyperloom.inference_optimizer.assets.agentx.map_aiperf",
+   "hyperloom.inference_optimizer.assets.host_probe.hl_host_probe",
+   "hyperloom.inference_optimizer.assets.host_probe.sitecustomize",
+   "hyperloom.inference_optimizer.breakdown.collectors.explore",
+   "hyperloom.inference_optimizer.breakdown.collectors.optimizations",
+   "hyperloom.inference_optimizer.breakdown.collectors.timeline",
+   "hyperloom.inference_optimizer.multi_node.scripts.apply_tracelens_patch_multinode",
+   "hyperloom.inference_optimizer.multi_node.scripts.kernel_bench_multinode",
+   "hyperloom.inference_optimizer.multi_node.scripts.kernel_node_ops",
+   "hyperloom.inference_optimizer.multi_node.scripts.kernel_patch_multinode",
+   "hyperloom.inference_optimizer.multi_node.scripts.kill_multinode",
+   "hyperloom.inference_optimizer.multi_node.scripts.launch_infera_node",
+   "hyperloom.inference_optimizer.multi_node.scripts.launch_multinode",
+   "hyperloom.inference_optimizer.multi_node.scripts.launch_router",
+   "hyperloom.inference_optimizer.multi_node.scripts.patch_path_safety",
+   "hyperloom.inference_optimizer.protocol",
+   "hyperloom.inference_optimizer.tools.dump_session_breakdown",
+   "hyperloom.inference_optimizer.tools.dump_session_report",
+   "hyperloom.inference_optimizer.tools.event_counts",
+   "hyperloom.inference_optimizer.tools.preflight_optimizer",
+   "hyperloom.inference_optimizer.tools.read_optimizer_state",
+   "hyperloom.orchestrator.roles.robustness_mock",
+   "hyperloom.orchestrator.state._shared_state"
+  ]
+ }
+}

@@ -166,7 +166,7 @@ def test_exit_normal_optimize_force_exit_takes_priority_over_plateau():
     result = phase_state.exit_normal_optimize(state)
     assert result is not None
     reason, evidence = result
-    assert reason == "explore_force_exit_low_budget"
+    assert reason == "optimize_force_exit_low_budget"
     assert evidence["evidence"] == "force_exit"
 
 
@@ -181,7 +181,7 @@ def test_compute_next_phase_routes_to_kernel_with_kernel_enabled():
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == phase_state.PHASE_KERNEL_AGENT
-    assert reason == "explore_force_exit_low_budget"
+    assert reason == "optimize_force_exit_low_budget"
 
 
 def test_compute_next_phase_routes_to_sweep_when_kernel_disabled():
@@ -198,12 +198,12 @@ def test_compute_next_phase_routes_to_sweep_when_kernel_disabled():
     # Kernel disabled: route through ``no_kernel_skipped``, original reason
     # passed through evidence.
     assert reason == "no_kernel_skipped"
-    assert evidence.get("passed_through_reason") == "explore_force_exit_low_budget"
+    assert evidence.get("passed_through_reason") == "optimize_force_exit_low_budget"
 
 
 def test_explore_force_exit_low_budget_is_in_vocabularies():
-    assert "explore_force_exit_low_budget" in phase_state.PHASE_EXIT_REASONS
-    assert "explore_force_exit_low_budget" in phase_state.STOP_REASON_VOCAB
+    assert "optimize_force_exit_low_budget" in phase_state.PHASE_EXIT_REASONS
+    assert "optimize_force_exit_low_budget" in phase_state.STOP_REASON_VOCAB
 
 
 def test_force_exit_thresholds_routed_through_overrides():
@@ -219,7 +219,7 @@ def test_force_exit_thresholds_routed_through_overrides():
     assert nxt is not None
     target, reason, _ = nxt
     assert target == phase_state.PHASE_KERNEL_AGENT
-    assert reason == "explore_force_exit_low_budget"
+    assert reason == "optimize_force_exit_low_budget"
 
 
 def test_force_exit_phase_remaining_pct_uses_chargeback_denominator():
@@ -240,7 +240,7 @@ def test_force_exit_phase_remaining_pct_uses_chargeback_denominator():
     remaining = phase_state.phase_budget_remaining_seconds(state, now_unix=now)
     assert total is not None and total > 0
     # Charge-back engaged (not the legacy whole-session*pct allotment).
-    legacy = 600 * 60.0 * phase_state.DEFAULT_PHASE_BUDGET_PCT["EXPLORE"]
+    legacy = 600 * 60.0 * phase_state.DEFAULT_PHASE_BUDGET_PCT["FRAMEWORK_AGENT"]
     assert total != pytest.approx(legacy)
     assert remaining == pytest.approx(total)
 

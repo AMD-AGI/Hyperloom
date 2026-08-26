@@ -271,7 +271,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "sweep_done",
         "conc_sweep_done",
         "conc_sweep_failed",
-        "explore_force_exit_low_budget",
+        "optimize_force_exit_low_budget",
         "framework_agent_phase_done",
         "framework_agent_plateau",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
@@ -788,23 +788,21 @@ def redistribute_budget_pct(
     *,
     optimize_enabled: bool = True,
     kernel_enabled: bool = True,
-    framework_enabled: bool = False,
 ) -> dict[str, float]:
     """Reallocate disabled phases' budget shares to the enabled work phases.
 
-    When a work phase is turned off (``--no-explore`` → EXPLORE, ``--no-kernel``
-    → KERNEL_AGENT, framework phase off → FRAMEWORK_AGENT), its ``pct`` is zeroed
-    and its freed share is spread across the still-enabled work phases
-    (FRAMEWORK/EXPLORE/KERNEL/SWEEP), weighted by their base ``pct``. PRELUDE and
-    CLOSE are fixed overhead and never absorb. Idempotent: once a phase is 0 its
-    freed share is 0, so re-running per tick is a no-op.
+    When a work phase is turned off (``--no-framework-agent`` →
+    FRAMEWORK_AGENT, ``--no-kernel`` → KERNEL_AGENT), its ``pct`` is zeroed and
+    its freed share is spread across the still-enabled work phases, weighted by
+    their base ``pct``. PRELUDE and CLOSE are fixed overhead and never absorb.
+    Idempotent: once a phase is 0 its freed share is 0, so re-running per tick
+    is a no-op.
 
     Args:
         base (dict[str, float]): A ``phase -> pct`` map, already sanitized by
             :func:`normalize_budget_pct`.
-        optimize_enabled (bool): Whether the OPTIMIZE (FRAMEWORK_AGENT) phase runs.
+        optimize_enabled (bool): Whether the merged optimisation phase runs.
         kernel_enabled (bool): Whether the KERNEL_AGENT phase runs.
-        framework_enabled (bool): Whether the FRAMEWORK_AGENT phase runs.
 
     Returns:
         dict[str, float]: A new map with disabled phases at 0 and their share
@@ -816,8 +814,6 @@ def redistribute_budget_pct(
         disabled.append(PHASE_FRAMEWORK_AGENT)
     if not kernel_enabled:
         disabled.append(PHASE_KERNEL_AGENT)
-    if not framework_enabled:
-        disabled.append(PHASE_FRAMEWORK_AGENT)
     freed = sum(float(out.get(p, 0.0)) for p in disabled)
     for p in disabled:
         out[p] = 0.0

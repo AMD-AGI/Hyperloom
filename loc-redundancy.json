@@ -1,0 +1,445 @@
+{
+ "unreachable": {
+  "referenced_by_prod": {
+   "modules": 136,
+   "physical": 53962,
+   "sloc": 35188,
+   "lloc": 23172,
+   "top": [
+    {
+     "module": "hyperloom.agents.kernel.tools.backends.forge_submit",
+     "path": "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
+     "physical": 4882,
+     "sloc": 3629,
+     "lloc": 2428,
+     "prod_refs": 10,
+     "test_refs": 12,
+     "other_refs": 5
+    },
+    {
+     "module": "hyperloom.inference_optimizer.cli.preflight",
+     "path": "src/hyperloom/inference_optimizer/cli/preflight.py",
+     "physical": 2332,
+     "sloc": 1376,
+     "lloc": 976,
+     "prod_refs": 45,
+     "test_refs": 42,
+     "other_refs": 25
+    },
+    {
+     "module": "hyperloom.inference_optimizer.breakdown.collectors.kernels",
+     "path": "src/hyperloom/inference_optimizer/breakdown/collectors/kernels.py",
+     "physical": 1557,
+     "sloc": 1062,
+     "lloc": 754,
+     "prod_refs": 71,
+     "test_refs": 61,
+     "other_refs": 18
+    },
+    {
+     "module": "hyperloom.inference_optimizer.breakdown.collectors.sessions",
+     "path": "src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py",
+     "physical": 1719,
+     "sloc": 1065,
+     "lloc": 740,
+     "prod_refs": 47,
+     "test_refs": 42,
+     "other_refs": 21
+    },
+    {
+     "module": "hyperloom.agents.kernel.tools.tracelens_skill_runner",
+     "path": "src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py",
+     "physical": 1800,
+     "sloc": 1110,
+     "lloc": 731,
+     "prod_refs": 2,
+     "test_refs": 6,
+     "other_refs": 0
+    },
+    {
+     "module": "hyperloom.agents.kernel.tools._bypass_trace_reader",
+     "path": "src/hyperloom/agents/kernel/tools/_bypass_trace_reader.py",
+     "physical": 1126,
+     "sloc": 769,
+     "lloc": 707,
+     "prod_refs": 4,
+     "test_refs": 2,
+     "other_refs": 0
+    },
+    {
+     "module": "hyperloom.agents.kernel.tools._invocation_spec",
+     "path": "src/hyperloom/agents/kernel/tools/_invocation_spec.py",
+     "physical": 954,
+     "sloc": 836,
+     "lloc": 598,
+     "prod_refs": 3,
+     "test_refs": 1,
+     "other_refs": 0
+    },
+    {
+     "module": "hyperloom.agents.kernel.tools._bypass_report",
+     "path": "src/hyperloom/agents/kernel/tools/_bypass_report.py",
+     "physical": 1487,
+     "sloc": 1087,
+     "lloc": 591,
+     "prod_refs": 6,
+     "test_refs": 4,
+     "other_refs": 0
+    },
+    {
+     "module": "hyperloom.orchestrator.roles.claude",
+     "path": "src/hyperloom/orchestrator/roles/claude.py",
+     "physical": 1086,
+     "sloc": 716,
+     "lloc": 529,
+     "prod_refs": 36,
+     "test_refs": 58,
+     "other_refs": 28
+    },
+    {
+     "module": "hyperloom.orchestrator.roles.critic_agent",
+     "path": "src/hyperloom/orchestrator/roles/critic_agent.py",
+     "physical": 1537,
+     "sloc": 928,
+     "lloc": 513,
+     "prod_refs": 2,
+     "test_refs": 7,
+     "other_refs": 0
+    },
+    {
+     "module": "hyperloom.inference_optimizer.breakdown.collectors.geak",
+     "path": "src/hyperloom/inference_optimizer/breakdown/collectors/geak.py",
+     "physical": 1047,
+     "sloc": 661,
+     "lloc": 501,
+     "prod_refs": 38,
+     "test_refs": 36,
+     "other_refs": 21
+    },
+    {
+     "module": "hyperloom.inference_optimizer.breakdown.collectors.optimizations",
+     "path": "src/hyperloom/inference_optimizer/breakdown/collectors/optimizations.py",
+     "physical": 1199,
+     "sloc": 915,
+     "lloc": 499,
+     "prod_refs": 18,
+     "test_refs": 8,
+     "other_refs": 11
+    },
+    {
+     "module": "hyperloom.inference_optimizer.assets.host_probe.hl_host_probe",
+     "path": "src/hyperloom/inference_optimizer/assets/host_probe/hl_host_probe.py",
+     "physical": 1059,
+     "sloc": 533,
+     "lloc": 475,
+     "prod_refs": 2,
+     "test_refs": 1,
+     "other_refs": 2
+    },
+    {
+     "module": "hyperloom.orchestrator.actions.executors.framework_agent",
+     "path": "src/hyperloom/orchestrator/actions/executors/framework_agent.py",
+     "physical": 1249,
+     "sloc": 915,
+     "lloc": 455,
+     "prod_refs": 25,
+     "test_refs": 29,
+     "other_refs": 8
+    },
+    {
+     "module": "hyperloom.orchestrator.knowledge.recipe_kb.local_store",
+     "path": "src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py",
+     "physical": 1116,
+     "sloc": 581,
+     "lloc": 432,
+     "prod_refs": 2,
+     "test_refs": 3,
+     "other_refs": 0
+    }
+   ]
+  }
+ },
+ "duplicate_functions": {
+  "prod": {
+   "functions_scanned": 5744,
+   "duplicate_groups": 14,
+   "redundant_copies": 16,
+   "redundant_physical": 126,
+   "redundant_stmts": 101,
+   "top": [
+    {
+     "name": "_denied_extra_args",
+     "copies": 2,
+     "physical_each": 30,
+     "locations": [
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py:_denied_extra_args",
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_multinode.py:_denied_extra_args"
+     ]
+    },
+    {
+     "name": "_fail",
+     "copies": 3,
+     "physical_each": 9,
+     "locations": [
+      "src/hyperloom/orchestrator/framework/targeted_build.py:_fail",
+      "src/hyperloom/orchestrator/framework/targeted_build.py:_fail",
+      "src/hyperloom/orchestrator/framework/targeted_build.py:_fail"
+     ]
+    },
+    {
+     "name": "_flag_value_pairs",
+     "copies": 2,
+     "physical_each": 13,
+     "locations": [
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py:_flag_value_pairs",
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_multinode.py:_flag_value_pairs"
+     ]
+    },
+    {
+     "name": "_is_denied_server_flag",
+     "copies": 2,
+     "physical_each": 10,
+     "locations": [
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py:_is_denied_server_flag",
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_multinode.py:_is_denied_server_flag"
+     ]
+    },
+    {
+     "name": "_unsafe_path_value_reason",
+     "copies": 2,
+     "physical_each": 10,
+     "locations": [
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py:_unsafe_path_value_reason",
+      "src/hyperloom/inference_optimizer/multi_node/scripts/launch_multinode.py:_unsafe_path_value_reason"
+     ]
+    },
+    {
+     "name": "_add_opt",
+     "copies": 2,
+     "physical_each": 7,
+     "locations": [
+      "src/hyperloom/agents/kernel/tools/forge_fusion.py:_add_opt",
+      "src/hyperloom/agents/kernel/tools/forge_gemm_tuning.py:_add_opt"
+     ]
+    },
+    {
+     "name": "geak_spec_kind",
+     "copies": 2,
+     "physical_each": 7,
+     "locations": [
+      "src/hyperloom/inference_optimizer/breakdown/collectors/geak.py:geak_spec_kind",
+      "src/hyperloom/inference_optimizer/breakdown/collectors/geak.py:geak_spec_kind"
+     ]
+    },
+    {
+     "name": "_trace_file_size",
+     "copies": 2,
+     "physical_each": 6,
+     "locations": [
+      "src/hyperloom/agents/kernel/tools/tracelens_analysis.py:_trace_file_size",
+      "src/hyperloom/orchestrator/actions/executors/profile.py:_trace_size_bytes"
+     ]
+    },
+    {
+     "name": "_geak_spec_name",
+     "copies": 2,
+     "physical_each": 6,
+     "locations": [
+      "src/hyperloom/inference_optimizer/breakdown/collectors/attribution.py:_geak_spec_name",
+      "src/hyperloom/inference_optimizer/breakdown/collectors/geak.py:_geak_spec_name"
+     ]
+    },
+    {
+     "name": "_tuple",
+     "copies": 3,
+     "physical_each": 3,
+     "locations": [
+      "src/hyperloom/orchestrator/framework/build_actions.py:_tuple",
+      "src/hyperloom/orchestrator/framework/stack_actions.py:_str_tuple",
+      "src/hyperloom/orchestrator/framework/stack_actions.py:_tuple"
+     ]
+    },
+    {
+     "name": "supports",
+     "copies": 2,
+     "physical_each": 5,
+     "locations": [
+      "src/hyperloom/orchestrator/framework/adapters.py:supports",
+      "src/hyperloom/orchestrator/framework/adapters.py:supports"
+     ]
+    },
+    {
+     "name": "_default_probe",
+     "copies": 2,
+     "physical_each": 3,
+     "locations": [
+      "src/hyperloom/orchestrator/actions/executors/bypass_engine.py:_default_probe",
+      "src/hyperloom/orchestrator/actions/executors/bypass_engine.py:_default_probe"
+     ]
+    },
+    {
+     "name": "__getattr__",
+     "copies": 2,
+     "physical_each": 3,
+     "locations": [
+      "src/hyperloom/orchestrator/loop/intent_router.py:__getattr__",
+      "src/hyperloom/orchestrator/phases/base.py:__getattr__"
+     ]
+    },
+    {
+     "name": "_qualifies",
+     "copies": 2,
+     "physical_each": 2,
+     "locations": [
+      "src/hyperloom/common/jsonio.py:_qualifies",
+      "src/hyperloom/common/jsonio.py:_qualifies"
+     ]
+    }
+   ]
+  },
+  "test": {
+   "functions_scanned": 15365,
+   "duplicate_groups": 431,
+   "redundant_copies": 530,
+   "redundant_physical": 5450,
+   "redundant_stmts": 3220,
+   "top": [
+    {
+     "name": "test_infera_node_ops_apply_revert_and_bench",
+     "copies": 2,
+     "physical_each": 121,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_infera_node_ops_apply_revert_and_bench",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_infera_node_ops_apply_revert_and_bench"
+     ]
+    },
+    {
+     "name": "test_framework_static_audit_classification",
+     "copies": 2,
+     "physical_each": 89,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_framework_static_audit_classification",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_framework_static_audit_classification"
+     ]
+    },
+    {
+     "name": "_rich_inputs",
+     "copies": 2,
+     "physical_each": 87,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_specialist_prompt_builder_coverage_unit.py:_rich_inputs",
+      "src/hyperloom/inference_optimizer/tests/test_specialist_prompt_builder_extra.py:_rich_inputs"
+     ]
+    },
+    {
+     "name": "test_infera_restart_config_and_alive",
+     "copies": 2,
+     "physical_each": 77,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_infera_restart_config_and_alive",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_infera_restart_config_and_alive"
+     ]
+    },
+    {
+     "name": "test_infera_restart_and_kill_paths",
+     "copies": 2,
+     "physical_each": 73,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_infera_restart_and_kill_paths",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_infera_restart_and_kill_paths"
+     ]
+    },
+    {
+     "name": "test_seed_shared_state_populates_geak_and_cli_overrides",
+     "copies": 2,
+     "physical_each": 66,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_cli_bootstrap.py:test_seed_shared_state_populates_geak_and_cli_overrides",
+      "src/hyperloom/inference_optimizer/tests/test_cli_bootstrap_coverage_unit.py:test_seed_shared_state_populates_geak_and_cli_overrides"
+     ]
+    },
+    {
+     "name": "test_framework_isolation_helpers",
+     "copies": 2,
+     "physical_each": 61,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_framework_isolation_helpers",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_framework_isolation_helpers"
+     ]
+    },
+    {
+     "name": "test_framework_audit_llm_refine_fallbacks",
+     "copies": 2,
+     "physical_each": 55,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_framework_audit_llm_refine_fallbacks",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_framework_audit_llm_refine_fallbacks"
+     ]
+    },
+    {
+     "name": "test_multi_node_patch_replay_skip_and_failure_paths",
+     "copies": 2,
+     "physical_each": 52,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_multi_node_patch_replay_skip_and_failure_paths",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_multi_node_patch_replay_skip_and_failure_paths"
+     ]
+    },
+    {
+     "name": "test_infera_forward_env_and_fanout",
+     "copies": 2,
+     "physical_each": 51,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_infera_forward_env_and_fanout",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_infera_forward_env_and_fanout"
+     ]
+    },
+    {
+     "name": "test_recover_session_status_and_run_paths",
+     "copies": 2,
+     "physical_each": 50,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_recover_session_status_and_run_paths",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_recover_session_status_and_run_paths"
+     ]
+    },
+    {
+     "name": "_args",
+     "copies": 2,
+     "physical_each": 47,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_cli_bootstrap.py:_args",
+      "src/hyperloom/inference_optimizer/tests/test_cli_bootstrap_coverage_unit.py:_args"
+     ]
+    },
+    {
+     "name": "test_infera_tracelens_and_geak_install",
+     "copies": 2,
+     "physical_each": 47,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_infera_tracelens_and_geak_install",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_infera_tracelens_and_geak_install"
+     ]
+    },
+    {
+     "name": "test_read_failure_summary_and_final_summary_output",
+     "copies": 2,
+     "physical_each": 44,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_cli_bootstrap.py:test_read_failure_summary_and_final_summary_output",
+      "src/hyperloom/inference_optimizer/tests/test_cli_bootstrap_coverage_unit.py:test_read_failure_summary_and_final_summary_output"
+     ]
+    },
+    {
+     "name": "test_framework_audit_common_patch_sources",
+     "copies": 2,
+     "physical_each": 44,
+     "locations": [
+      "src/hyperloom/inference_optimizer/tests/test_common_utils.py:test_framework_audit_common_patch_sources",
+      "src/hyperloom/inference_optimizer/tests/test_coverage_gap_units.py:test_framework_audit_common_patch_sources"
+     ]
+    }
+   ]
+  }
+ }
+}
