@@ -1207,16 +1207,38 @@ def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
     return patch_texts
 
 
-def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the framework root whose tree holds the warm-replay patch targets."""
+def _resolve_recipe_patch_target(params: dict[str, Any], warm_replay_outcome: dict[str, Any] | None = None) -> str:
+    """Return the framework root whose tree holds the warm-replay patch targets.
+
+    Prefers a root recorded alongside the Recipe patch entries. Falls back to
+    filesystem probing for legacy records that pre-date root recording, and
+    annotates the outcome dict so callers can count the remaining legacy stock.
+    """
     if not params.get("patches"):
         return ""
-    from .integrate_patch import _resolve_framework_root
+    patches = list(params["patches"])
+    recorded_roots: list[str] = []
+    for entry in patches:
+        if isinstance(entry, dict):
+            r = str(entry.get("framework_root") or "").strip()
+            if r:
+                recorded_roots.append(r)
+    unique_recorded = list(dict.fromkeys(recorded_roots))
+    if len(unique_recorded) == 1:
+        cand = unique_recorded[0]
+        from ...framework.paths import resolve_source_file_allowlist
+        from .integrate_patch import trusted_explicit_root
+        trusted = trusted_explicit_root(cand, allowlist=resolve_source_file_allowlist())
+        if trusted is not None:
+            return str(trusted)
 
+    from .integrate_patch import _resolve_framework_root
     root = _resolve_framework_root(
         resolve_session_framework_root() or None,
         patch_texts=_patch_texts_from_warm_params(params),
     )
+    if warm_replay_outcome is not None:
+        warm_replay_outcome["root_source"] = "inferred"
     return str(root or "")
 
 
@@ -2892,7 +2914,10 @@ class BaselineExecutor:
         # Explore/Framework Recipe patches target the framework checkout, not
         # the InferenceX benchmark harness. The Session's explicitly selected
         # root is the sole authority, matching Kernel Recipe replay.
-        patch_target = _resolve_recipe_patch_target(params)
+        _wro: dict[str, Any] = {}
+        patch_target = _resolve_recipe_patch_target(params, warm_replay_outcome=_wro)
+        if _wro.get("root_source") == "inferred":
+            log.info("warm replay: apply root inferred by probe; recipe pre-dates root recording")
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""

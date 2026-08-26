@@ -385,9 +385,12 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
     }
 
 
-def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) -> tuple[list[str], list[str]]:
+def _entry_files(
+    entries: list[dict[str, Any]], files: _Files, category: str
+) -> tuple[list[str], list[str], dict[str, str]]:
     patches: list[str] = []
     artifacts: list[str] = []
+    patch_roots: dict[str, str] = {}
     for entry in entries:
         try:
             stack_index = int(entry.get("__stack_index", -1))
@@ -395,6 +398,7 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
             stack_index = -1
         patch_member = 0
         seen_patch_sources: set[str] = set()
+        entry_framework_root = str(entry.get("framework_root") or "").strip()
 
         def add_value(raw: Any, *, kind: str) -> str:
             nonlocal patch_member
@@ -425,6 +429,8 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
             ref = add_value(raw, kind=kind)
             if ref:
                 (patches if kind == "patches" else artifacts).append(ref)
+                if kind == "patches" and entry_framework_root:
+                    patch_roots[ref] = entry_framework_root
         for key in _PATH_LIST_KEYS:
             raw_values = entry.get(key) or []
             if isinstance(raw_values, (str, Path)):
@@ -436,7 +442,9 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
                 ref = add_value(raw, kind=kind)
                 if ref:
                     (patches if kind == "patches" else artifacts).append(ref)
-    return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts))
+                    if kind == "patches" and entry_framework_root:
+                        patch_roots[ref] = entry_framework_root
+    return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts)), patch_roots
 
 
 def build_explore_value(
@@ -445,11 +453,14 @@ def build_explore_value(
     files: _Files,
 ) -> dict[str, Any]:
     """Build EXPLORE-origin patch and artifact references."""
-    patches, artifacts = _entry_files(entries, files, "explore")
-    return {
+    patches, artifacts, patch_roots = _entry_files(entries, files, "explore")
+    result: dict[str, Any] = {
         "patches": patches,
         "artifacts": artifacts,
     }
+    if patch_roots:
+        result["patch_roots"] = patch_roots
+    return result
 
 
 def build_framework_value(
@@ -458,11 +469,14 @@ def build_framework_value(
     files: _Files,
 ) -> dict[str, Any]:
     """Build FRAMEWORK-origin patch and artifact references."""
-    patches, artifacts = _entry_files(entries, files, "framework")
-    return {
+    patches, artifacts, patch_roots = _entry_files(entries, files, "framework")
+    result: dict[str, Any] = {
         "patches": patches,
         "artifacts": artifacts,
     }
+    if patch_roots:
+        result["patch_roots"] = patch_roots
+    return result
 
 
 def _externalize_record(

@@ -801,7 +801,7 @@ def resolve_warm_replay_framework_root(
     return _resolve_warm_replay_patch_root(
         patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
         allowlist=_warm_replay_framework_patch_roots(),
-        missing_patch_reason="active_framework_root_missing",
+        missing_patch_reason="warm_replay_patch_content_missing",
         missing_allowlist_reason="framework_patch_root_not_in_allowlist",
         explicit_root=resolve_session_framework_root() or None,
     )
