@@ -4680,14 +4680,17 @@ class FrameworkPhase(PhaseHandler):
             generations -- the window stays open and the next tick tries again.
         """
         state = self.shared_state
+        _baseline_lanes, _baseline_ttl = self._registry_lanes_ttl("baseline")
         task, generation = await self._open_row_past_spent_generations(
             kind="baseline",
             params=params,
             key_for=lambda gen: f"enablement_revalidation:gen{gen}",
             generation=int(state.enablement.revalidation_generation or 0),
             label="revalidation",
-            # Without a TTL the row is invisible to ``reclaim_expired_running``.
-            lease_ttl_sec=self._registry_lanes_ttl("baseline")[1],
+            # Both halves of the catalogue contract: a baseline re-launches the
+            # server, so it must hold the same lanes any other baseline does.
+            requires_lanes=_baseline_lanes,
+            lease_ttl_sec=_baseline_ttl,
         )
         state.enablement.revalidation_generation = generation
         return task
@@ -5304,12 +5307,13 @@ class FrameworkPhase(PhaseHandler):
             return ""
         params = self._framework_config_explore_params(grid, reason=reason)
         try:
+            lanes, ttl = self._registry_lanes_ttl("explore")
             etask, was_existing = await self.tasks.create_or_return_existing(
                 kind="explore",
                 params=params,
                 idempotency_key=f"framework-config-explore-round{int(round_no)}{self._cycle_idem_suffix()}",
-                # Without a TTL the row is invisible to ``reclaim_expired_running``.
-                lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
         except Exception:  # noqa: BLE001 -- defensive; never wedge the pump
             log.exception("framework_config: failed to enqueue explore round")
