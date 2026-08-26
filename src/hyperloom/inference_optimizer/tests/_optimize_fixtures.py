@@ -85,3 +85,46 @@ def optimize_state(
     for key, value in overrides.items():
         setattr(state, key, value)
     return state
+
+
+class FakeCoordinator:
+    """Answers the Coordinator's state surface; resolves the rest for real.
+
+    Replaces the hand-written stub classes that bound one Coordinator method
+    per line. Those are a transitive closure of an implementation detail: a
+    method that starts calling one more sibling kills every test that built
+    such a stub, naming a helper the test never heard of.
+
+    Here anything not set as state is looked up in ``Coordinator._DELEGATED``
+    and served by the real collaborator, so moving a method between
+    collaborators costs one table edit and no test edits. An attribute in
+    neither place raises with an explanation, rather than an ``AttributeError``
+    from three frames down.
+    """
+
+    def __init__(self, session_dir: Any, **state: Any) -> None:
+        from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+
+        self.session_dir = session_dir
+        # The real catalogue: a stubbed one can only ever agree with the test.
+        self.action_registry = ACTION_CATALOGUE
+        for key, value in state.items():
+            setattr(self, key, value)
+
+    def __getattr__(self, name: str) -> Any:
+        from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+        owner = Coordinator._DELEGATED.get(name)
+        if owner is None:
+            raise AttributeError(
+                f"{name!r} is neither state this fake was given nor a name in "
+                f"Coordinator._DELEGATED -- the test is reaching into an "
+                f"implementation detail, or the delegation table is stale."
+            )
+        collaborator = getattr(type(self), f"_collab_{owner}", None)
+        if collaborator is None:
+            module_path, cls_name = Coordinator._COLLAB_MODULES[owner]
+            module = __import__(f"hyperloom.orchestrator.{module_path}", fromlist=[cls_name])
+            collaborator = getattr(module, cls_name)(self)
+            setattr(type(self), f"_collab_{owner}", collaborator)
+        return getattr(collaborator, name)
