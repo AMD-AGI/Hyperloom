@@ -37,13 +37,6 @@ MAINTENANCE_EVERY_TICKS: int = 50
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
-
-# Window granted to the CLOSE sequencer when a terminal fires on the success
-# path. The post-deadline ``grace_sec`` cannot be reused as-is: it is 0 on an
-# unbounded run and whenever an operator disables the rescue window, which would
-# leave a met target with no time to produce its report at all. Matches the
-# ceiling ``effective_closing_grace_sec`` uses for bounded runs.
-_TERMINAL_CLOSE_WINDOW_SEC: float = 120.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Enablement stall cap: consecutive enablement rounds that neither made the combo
@@ -874,6 +867,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: float | None = None
+        # Set while a success terminal (a met objective) is being routed into
+        # CLOSE. Distinct from ``closing_phase``, which means the wall clock ran
+        # out and the sequencer should shed expensive work; a met target has to
+        # produce the full set of artifacts. ``True`` lifts the session bound for
+        # that routing without claiming a rescue is under way.
+        self._terminal_closing: bool = False
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -1629,9 +1628,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
         During CLOSE the session deadline has already passed, so the bound
         switches to ``_closing_deadline`` and CLOSE work is not skipped.
 
+        A success terminal is unbounded here: the sequencer's own per-step
+        timeouts (``CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC`` is 600s on its own)
+        are the budget. An outer bound short enough to matter would cancel the
+        step mid-flight and drop the run onto the safety net -- the very outcome
+        routing into CLOSE exists to avoid.
+
         Returns:
             Remaining seconds, or ``None`` when no bound is armed.
         """
+        if self._terminal_closing:
+            return None
         if bool(getattr(self.shared_state, "closing_phase", False)):
             bound = self._closing_deadline
         else:
@@ -1846,22 +1853,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             log.exception(
                                 "Coordinator: persisting target_reached failed; closing anyway",
                             )
-                        # Arm the closing bound before advancing: that swaps
-                        # ``_seconds_until_session_bound`` onto
-                        # ``_closing_deadline``, which is what keeps CLOSE work
-                        # from being skipped on an elapsed session bound, and
-                        # keeps the sequencer itself bounded.
-                        #
-                        # ``grace_sec`` is the post-deadline rescue window: 0 on
-                        # an unbounded run, and ``max_minutes * 60 * 0.02``
-                        # otherwise, so it shrinks with the budget. A met target
-                        # is not a rescue -- it is the success path -- and the
-                        # sequencer needs a workable window to render its report
-                        # whatever the budget was, hence a floor rather than a
-                        # zero-check.
-                        close_window = max(grace_sec, _TERMINAL_CLOSE_WINDOW_SEC)
-                        self.shared_state.closing_phase = True
-                        self._closing_deadline = time.monotonic() + close_window
+                        # Lift the session bound for this one advance so the
+                        # elapsed run deadline cannot skip it. ``closing_phase``
+                        # is deliberately NOT set: that flag means the wall clock
+                        # ran out, and CLOSE reads it to shed expensive work --
+                        # ``_maybe_run_close_post_opt_roofline`` returns early on
+                        # it, which would drop the very artifact this routing
+                        # exists to produce. The sequencer's own per-step
+                        # timeouts bound the work.
+                        self._terminal_closing = True
                         try:
                             await self._await_within_session_bound(
                                 self._advance_phase_if_needed,
@@ -1871,6 +1871,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             log.exception(
                                 "Coordinator: close transition on target_reached failed",
                             )
+                        finally:
+                            self._terminal_closing = False
                     stop_reason = self.shared_state.stop_reason or "target_reached"
                     break
                 if deadline is not None and time.monotonic() >= deadline and not in_closing:

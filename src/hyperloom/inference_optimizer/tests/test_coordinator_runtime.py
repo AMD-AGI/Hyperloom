@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -2589,4 +2592,87 @@ async def test_target_reached_closes_despite_a_failed_state_save(session_dir):
         assert c.shared_state.close_sequence_done is True
     finally:
         c.shared_state.save = real_save  # type: ignore[method-assign]
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir):
+    """A met target must not be treated as a wall-clock rescue.
+
+    ``_maybe_run_close_post_opt_roofline`` returns early on ``closing_phase``,
+    which means "the wall clock ran out, shed expensive work". Routing a success
+    terminal through that flag would drop the post-opt snapshot the
+    optimization-progress chart reads -- one of the artifacts skipping CLOSE
+    loses in the first place.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.cumulative_gain_validated = 50.0
+    # A kernel-level optimization landed, so the roofline step applies.
+    c.shared_state.optimization_stack = [{"action": "integrate", "tput": 150.0}]
+    c.shared_state.save(session_dir)
+
+    ran: list[str] = []
+
+    async def _record_roofline() -> None:
+        ran.append(str(c.shared_state.closing_phase))
+
+    c.phase_close._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_minutes=0.0001,
+            max_ticks=6,
+        )
+        assert reason == "target_reached"
+        assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_target_reached_close_is_not_cancelled_by_an_outer_bound(session_dir):
+    """The sequencer's own per-step timeouts are the budget, not an outer one.
+
+    ``CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC`` alone allows 600s, so any outer
+    bound short enough to matter would cancel the step mid-flight and drop the
+    run onto the safety net -- the outcome this routing exists to avoid. With
+    the session bound already elapsed, an awaited step would be skipped outright
+    unless the terminal close lifts it.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.save(session_dir)
+
+    # The bound is armed and elapsed; the terminal close must ignore it.
+    c._run_deadline = time.monotonic() - 1.0
+    assert c._seconds_until_session_bound() is not None
+    c._terminal_closing = True
+    assert c._seconds_until_session_bound() is None, "terminal close must be unbounded"
+    c._terminal_closing = False
+
+    real_advance = c.phase_machine._advance_phase_if_needed
+    completed: list[bool] = []
+
+    async def _slow_advance() -> None:
+        # Any await at all is cancelled or skipped by an elapsed outer bound.
+        await asyncio.sleep(0.3)
+        await real_advance()
+        completed.append(True)
+
+    try:
+        with mock.patch.object(c.phase_machine, "_advance_phase_if_needed", _slow_advance):
+            reason = await c.run(
+                objective=TargetGainObjective(target_gain_pct=10.0),
+                max_minutes=0.0001,
+                max_ticks=2,
+            )
+        assert reason == "target_reached"
+        assert completed, "the close step was skipped or cancelled by an outer bound"
+    finally:
         await c.stop()
