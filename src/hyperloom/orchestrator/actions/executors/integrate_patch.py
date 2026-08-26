@@ -3489,7 +3489,12 @@ class IntegratePatchExecutor:
         # stack would claim a win the tree no longer carries. Non-git roots have
         # no checkout revert to survive, so the commit is skipped there.
         commit_failure: str = ""
-        if framework_root is not None and _is_git_tree(framework_root):
+        if framework_root is None or not _is_git_tree(framework_root):
+            log.info(
+                "integrate_patch: non-git framework root %s; skipping commit-on-KEEP",
+                framework_root,
+            )
+        else:
             try:
                 touched = _patch_touched_paths(framework_root, applied)
                 ok, note = _git_commit_kept(
@@ -3529,12 +3534,6 @@ class IntegratePatchExecutor:
                     "reason": f"KEEP could not be committed: {commit_failure}",
                     "workspace": str(output_root),
                 },
-            )
-        else:
-            log.info(
-                "integrate_patch: non-git framework root %s; skipping commit-on-KEEP "
-                "(backup-based revert + source snapshot provide durability)",
-                framework_root,
             )
 
         source_snapshot_dir = ""
