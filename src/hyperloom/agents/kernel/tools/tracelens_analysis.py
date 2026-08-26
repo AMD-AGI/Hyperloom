@@ -978,6 +978,251 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
+#: How many times the median step a leading step must exceed before it counts as
+#: a profiler-start transient rather than real work. Observed transients run
+#: two-to-three orders of magnitude over the median (479x on the reference
+#: capture) while healthy decode steps hold inside 2% of it, so anything in this
+#: range separates them with a wide margin either way.
+_PRETRIM_OUTLIER_FACTOR = 10.0
+
+#: Fewest step annotations a trace must carry before the median is worth
+#: trusting. Below this a single slow step skews the median enough that the
+#: comparison stops meaning anything, so the trim is skipped rather than guessed.
+_PRETRIM_MIN_STEPS = 8
+
+#: Ceiling on how many leading steps may be dropped. A transient is one step in
+#: every capture examined; needing more than a handful means the run never
+#: reached steady state, which the splitter and the health gates should see
+#: rather than have quietly trimmed away.
+_PRETRIM_MAX_DROPPED_STEPS = 4
+
+
+#: Categories that live on the device timeline. Everything else in a torch
+#: trace -- ``cpu_op``, ``python_function``, ``user_annotation``,
+#: ``cuda_runtime`` -- is host-side.
+_GPU_TIMELINE_CATS = frozenset({"kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"})
+
+
+def _step_annotation_spans(events: list[Any]) -> list[tuple[float, float, str]]:
+    """``(ts, dur, name)`` for every GPU-side step annotation, ordered by start.
+
+    Args:
+        events (list[Any]): ``traceEvents`` from a torch-profiler trace.
+
+    Returns:
+        list[tuple[float, float, str]]: One entry per ``step[...]`` annotation on
+            the GPU timeline. Empty when the trace carries no step annotations.
+    """
+    spans: list[tuple[float, float, str]] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("cat") != "gpu_user_annotation":
+            continue
+        name = ev.get("name")
+        if not isinstance(name, str) or not name.startswith("step["):
+            continue
+        ts = ev.get("ts")
+        dur = ev.get("dur")
+        if isinstance(ts, (int, float)) and isinstance(dur, (int, float)):
+            spans.append((float(ts), float(dur), name))
+    spans.sort()
+    return spans
+
+
+def _host_step_starts(events: list[Any]) -> dict[str, float]:
+    """Earliest host-side start for each ``step[...]`` annotation, keyed by name.
+
+    The host runs ahead of the device -- a step's launches are issued while the
+    previous step is still executing -- so a step's host span begins before its
+    device span. Step names embed the cumulative sequence length, so they pair
+    the two timelines exactly.
+
+    Args:
+        events (list[Any]): ``traceEvents`` from a torch-profiler trace.
+
+    Returns:
+        dict[str, float]: Step annotation name to its host-timeline start.
+    """
+    starts: dict[str, float] = {}
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("cat") != "user_annotation":
+            continue
+        name = ev.get("name")
+        ts = ev.get("ts")
+        if not isinstance(name, str) or not name.startswith("step["):
+            continue
+        if not isinstance(ts, (int, float)):
+            continue
+        prev = starts.get(name)
+        if prev is None or ts < prev:
+            starts[name] = float(ts)
+    return starts
+
+
+def pretrim_startup_transient(
+    src: Path,
+    dst: Path,
+    *,
+    outlier_factor: float = _PRETRIM_OUTLIER_FACTOR,
+    min_steps: int = _PRETRIM_MIN_STEPS,
+    max_dropped_steps: int = _PRETRIM_MAX_DROPPED_STEPS,
+) -> tuple[bool, dict[str, Any]]:
+    """Drop the profiler-start transient from the head of a torch trace.
+
+    ``torch.profiler.start()`` is a local, unfenced call whose cost varies by
+    seconds across ranks, and SGLang does not barrier after it. The ranks whose
+    profiler comes up first therefore reach the first collective of the step and
+    spin there until the slowest peer arrives. A spin-waiting collective is
+    charged as GPU-busy time, so that wait lands in the trace as one enormous
+    kernel at the head of the window: on the reference capture a single
+    ``cross_device_reduce_2stage`` held 15747 ms of a 16805 ms window, leaving
+    Compute% at 5.75% and tripping the low-compute gate that suppresses the
+    entire hot-kernel candidate list.
+
+    The collective is self-healing -- releasing it re-synchronises every rank --
+    so the contamination is confined to the first step and everything after it is
+    already steady (32.94 ms +/- 0.3 across the following 127 steps on the same
+    capture). Cutting the leading outlier steps therefore recovers an honest
+    window without touching instrumentation, and keeps ``shape_discovery`` and
+    the ``with_stack`` frames its shapes ride on fully intact.
+
+    Detection is on step duration, not on any kernel name, so the same guard
+    catches other head-of-window transients (first-replay JIT, KV-pool growth)
+    without knowing what they are. Only a *leading* run of outliers is cut: a
+    slow step in the middle is real behaviour the splitter and the health gates
+    should still see.
+
+    The cut is applied per timeline rather than as one timestamp, because the
+    host runs a step ahead of the device and the two spans interleave across the
+    boundary. See the comment at the cut for what each single-point alternative
+    loses.
+
+    Step count is unaffected downstream: the splitter is invoked with
+    ``--num-steps`` and caps its window there, so it still hands TraceLens
+    exactly that many steps -- only which ones changes. The caller refuses the
+    trim outright when fewer than ``--num-steps`` would remain.
+
+    Args:
+        src (Path): Raw per-rank trace, JSON or ``.gz``.
+        dst (Path): Where the trimmed trace is written. Untouched when no trim
+            is performed.
+        outlier_factor (float): Multiple of the median step duration above
+            which a leading step is treated as a transient.
+        min_steps (int): Fewest step annotations required before trimming.
+        max_dropped_steps (int): Refuse to trim when more than this many leading
+            steps look like transients.
+
+    Returns:
+        tuple[bool, dict[str, Any]]: ``(trimmed, report)``. ``report`` always
+            carries a ``reason``; when ``trimmed`` is True it also carries the
+            step counts and durations for the run log and status file.
+    """
+    factor = outlier_factor
+    try:
+        payload = open_json(src)
+    except Exception as exc:  # noqa: BLE001 - unreadable trace is the splitter's problem, not ours
+        return False, {"reason": "unreadable_trace", "error": str(exc)[:200]}
+    if not isinstance(payload, dict):
+        return False, {"reason": "unexpected_payload"}
+    events = payload.get("traceEvents")
+    if not isinstance(events, list):
+        return False, {"reason": "no_trace_events"}
+
+    spans = _step_annotation_spans(events)
+    if len(spans) < min_steps:
+        return False, {"reason": "too_few_steps", "steps": len(spans), "min_steps": min_steps}
+
+    durations = sorted(dur for _, dur, _ in spans)
+    median_us = durations[len(durations) // 2]
+    if median_us <= 0:
+        return False, {"reason": "degenerate_median", "steps": len(spans)}
+
+    dropped = 0
+    while dropped < len(spans) and spans[dropped][1] > factor * median_us:
+        dropped += 1
+    if dropped == 0:
+        return False, {
+            "reason": "clean",
+            "steps": len(spans),
+            "median_step_ms": round(median_us / 1000.0, 3),
+            "first_step_ratio": round(spans[0][1] / median_us, 2),
+        }
+    if dropped > max_dropped_steps:
+        # Not a start-up blip. Leave it visible so the health gates can act.
+        return False, {
+            "reason": "too_many_leading_outliers",
+            "steps": len(spans),
+            "leading_outliers": dropped,
+            "max_dropped_steps": max_dropped_steps,
+            "median_step_ms": round(median_us / 1000.0, 3),
+        }
+
+    remaining = len(spans) - dropped
+    # One cut per timeline, not one for the trace. The host runs a step ahead of
+    # the device, so the first kept step's launches are issued *while the dropped
+    # step is still executing on the GPU* -- on the reference capture the kept
+    # step's host span starts 839 ms inside the dropped step's 15.78 s device
+    # span. A single timestamp therefore cannot both drop the transient whole and
+    # keep the first surviving step whole: cutting on the device boundary strips
+    # that step's host ops, taking the `kernel_shape_profiler` frames its shape
+    # attribution rides on with them, and cutting on the host boundary leaves the
+    # dropped step's post-barrier kernels behind as orphans.
+    gpu_cut = spans[dropped][0]
+    host_starts = _host_step_starts(events)
+    cpu_cut = min(host_starts.get(spans[dropped][2], gpu_cut), gpu_cut)
+
+    def _survives(ev: Any) -> bool:
+        if not isinstance(ev, dict):
+            return True
+        # ph:"M" is metadata (process_name / process_labels / thread_name /
+        # sort indices), not timeline work. torch stamps it with the
+        # profiler-open ts, which is always before either cut, so a plain ts
+        # filter would strip every one of them and leave the chunk with
+        # unnamed processes and threads for TraceLens to attribute against.
+        if ev.get("ph") == "M":
+            return True
+        ts = ev.get("ts")
+        if not isinstance(ts, (int, float)):
+            return True
+        ph = ev.get("ph")
+        if ph == "s":  # flow start: sits on the host timeline
+            return ts >= cpu_cut
+        if ph == "f":  # flow finish: sits on the device timeline
+            return ts >= gpu_cut
+        return ts >= (gpu_cut if ev.get("cat") in _GPU_TIMELINE_CATS else cpu_cut)
+
+    kept = [ev for ev in events if _survives(ev)]
+
+    report = {
+        "reason": "trimmed",
+        "dropped_steps": dropped,
+        "dropped_ms": round(sum(dur for _, dur, _ in spans[:dropped]) / 1000.0, 3),
+        "median_step_ms": round(median_us / 1000.0, 3),
+        "outlier_ratio": round(spans[0][1] / median_us, 2),
+        "outlier_factor": factor,
+        "remaining_steps": remaining,
+        "events_before": len(events),
+        "events_after": len(kept),
+        "gpu_cut_ts": gpu_cut,
+        "cpu_cut_ts": cpu_cut,
+        "source": str(src),
+        "output": str(dst),
+    }
+
+    payload["traceEvents"] = kept
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        opener = gzip.open if dst.suffix == ".gz" else open
+        with opener(dst, "wt", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+    except Exception as exc:  # noqa: BLE001 - fall back to the raw trace rather than fail the run
+        return False, {"reason": "write_failed", "error": str(exc)[:200], **report}
+    return True, report
+
+
 #: Directory name the splitter writes its per-phase output into. Everything
 #: below it is derived from a raw capture, never a capture itself.
 _SPLIT_DIR_NAME = "trace_split"
@@ -7593,6 +7838,51 @@ def main() -> int:
                 )
                 split_dir = tracelens_dir / "trace_split"
                 split_dir.mkdir(parents=True, exist_ok=True)
+                # Cut the profiler-start transient before the splitter sees the
+                # trace. --find-steady-state selects on load composition, not on
+                # timing, so it will happily hand back a window whose first step
+                # is a multi-second rank-arrival barrier -- and every downstream
+                # percentage is then computed against that inflated denominator.
+                # Trimming here keeps the splitter and TraceLens untouched.
+                trimmed_trace = split_dir / (analysis_trace_path.name.replace(".trace.json", ".pretrimmed.trace.json"))
+                min_remaining = max(8, int(args.split_num_steps or 32))
+                did_trim, pretrim_report = pretrim_startup_transient(
+                    analysis_trace_path,
+                    trimmed_trace,
+                )
+                pretrim_summary = dict(pretrim_report)
+                pretrim_summary["applied"] = False
+                if did_trim and pretrim_report["remaining_steps"] < min_remaining:
+                    # Trimming would leave the splitter fewer steps than it
+                    # was asked for. A silently short window reads as a clean
+                    # measurement; the untrimmed one at least shows the damage.
+                    append_log(
+                        log_path,
+                        f"pretrim: only {pretrim_report['remaining_steps']} step(s) would "
+                        f"remain < --split-num-steps {min_remaining}; keeping untrimmed trace",
+                    )
+                    pretrim_summary["reason"] = "insufficient_remaining_steps"
+                    pretrim_summary["min_remaining_steps"] = min_remaining
+                elif did_trim:
+                    append_log(
+                        log_path,
+                        f"pretrim: dropped {pretrim_report['dropped_steps']} leading step(s), "
+                        f"{pretrim_report['dropped_ms']:.1f} ms, "
+                        f"{pretrim_report['outlier_ratio']:.0f}x median "
+                        f"{pretrim_report['median_step_ms']:.1f} ms; "
+                        f"{pretrim_report['remaining_steps']} step(s) remain",
+                    )
+                    pretrim_summary["applied"] = True
+                    analysis_trace_path = trimmed_trace
+                    artifacts["tracelens_pretrimmed_trace"] = str(trimmed_trace)
+                elif pretrim_report.get("reason") != "clean":
+                    append_log(log_path, f"pretrim: not applied ({pretrim_report.get('reason')})")
+                # Persist as an artifact, not just a log line: the status
+                # file is rewritten by every later step, so a diagnostic
+                # parked there is gone by the time anyone reads the report.
+                pretrim_path = tracelens_dir / "pretrim.json"
+                atomic_write_json(pretrim_path, pretrim_summary)
+                artifacts["tracelens_pretrim"] = str(pretrim_path)
                 # --find-steady-state writes the three *_steady_state_* chunks; --R feeds PD-ratio selection.
                 split_cmd = [
                     sys.executable,

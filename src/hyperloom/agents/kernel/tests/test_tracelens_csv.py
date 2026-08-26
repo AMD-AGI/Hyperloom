@@ -5438,3 +5438,235 @@ def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
     assert tla._graph_coverage_from_raw_trace(None) == {}
     assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
+
+
+# --- pretrim_startup_transient (#profiler-start transient) -------------------
+
+
+def _write_trace(path: Path, step_durs, *, step_us_gap=0.0, host_lead_us=30_000.0, extra_events=None):
+    """Build a minimal torch-profiler trace with GPU step annotations.
+
+    ``step_durs`` are microsecond durations laid end to end; each becomes one
+    ``step[DECODE bs=64]`` gpu_user_annotation plus a kernel inside it, so the
+    trimmer has both something to measure and something to drop.
+    """
+    # torch stamps metadata with the profiler-open ts, i.e. always before any
+    # cut point -- reproduce that, it is what made a naive ts filter drop it.
+    events = [
+        {"ph": "M", "name": "process_name", "ts": 999_999.0, "pid": 1, "args": {"name": "python"}},
+        {"ph": "M", "name": "thread_name", "ts": 999_999.0, "pid": 1, "tid": 7, "args": {"name": "t"}},
+    ]
+    ts = 1_000_000.0
+    for i, dur in enumerate(step_durs):
+        name = f"step[DECODE bs=64 g_sk={i}]"
+        # The host runs a step ahead: step N's launches are issued while step
+        # N-1 still owns the GPU. Reproduce that offset -- it is what makes a
+        # single-timestamp cut unable to separate the two.
+        host_ts = ts - min(host_lead_us, dur) if i else ts - 1.0
+        events.append(
+            {"ph": "X", "cat": "user_annotation", "name": name, "pid": 1, "tid": 1, "ts": host_ts, "dur": 3.0}
+        )
+        events.append(
+            {"ph": "X", "cat": "cpu_op", "name": f"launch_{i}", "pid": 1, "tid": 1, "ts": host_ts + 0.1, "dur": 1.0}
+        )
+        events.append(
+            {
+                "ph": "X",
+                "cat": "gpu_user_annotation",
+                "name": name,
+                "pid": 5,
+                "tid": 7,
+                "ts": ts,
+                "dur": dur,
+            }
+        )
+        events.append(
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": f"some_kernel_{i}",
+                "pid": 5,
+                "tid": 7,
+                "ts": ts + 1.0,
+                "dur": max(1.0, dur / 2),
+            }
+        )
+        ts += dur + step_us_gap
+    events.extend(extra_events or [])
+    payload = {"schemaVersion": 1, "baseTimeNanoseconds": 12345, "traceEvents": events}
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    return path
+
+
+def test_pretrim_drops_leading_barrier_step(tmp_path):
+    """A 479x leading step is cut; the steady tail and metadata survive."""
+    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is True
+    assert report["reason"] == "trimmed"
+    assert report["dropped_steps"] == 1
+    assert report["remaining_steps"] == 127
+    assert report["outlier_ratio"] > 400
+
+    out = tla.open_json(dst)
+    spans = tla._step_annotation_spans(out["traceEvents"])
+    assert len(spans) == 127
+    assert max(dur for _, dur, _ in spans) < 40_000.0  # the barrier step is gone
+    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its
+    # process/thread names and TraceLens can't attribute anything.
+    assert sum(1 for ev in out["traceEvents"] if ev.get("ph") == "M") == 2
+    assert out["baseTimeNanoseconds"] == 12345
+
+
+def test_pretrim_noop_on_clean_trace(tmp_path):
+    """Uniform steps are left alone and no output file is written."""
+    src = _write_trace(tmp_path / "r.trace.json.gz", [32_900.0, 33_100.0] * 32)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "clean"
+    assert not dst.exists()
+
+
+def test_pretrim_keeps_midstream_outlier(tmp_path):
+    """Only a *leading* run is cut; a slow step in the middle is real behaviour."""
+    durs = [32_944.0] * 10 + [5_000_000.0] + [32_944.0] * 10
+    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "clean"
+
+
+def test_pretrim_refuses_when_too_many_leading_outliers(tmp_path):
+    """A run that never reaches steady state is surfaced, not trimmed away."""
+    durs = [5_000_000.0] * 6 + [32_944.0] * 20
+    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "too_many_leading_outliers"
+    assert report["leading_outliers"] == 6
+    assert not dst.exists()
+
+
+def test_pretrim_skips_short_traces(tmp_path):
+    """Below the step floor the median is not worth trusting."""
+    src = _write_trace(tmp_path / "r.trace.json.gz", [9_000_000.0] + [32_944.0] * 3)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "too_few_steps"
+
+
+def test_pretrim_degrades_on_unreadable_trace(tmp_path):
+    """An unreadable trace must fall through to the raw path, not raise."""
+    bad = tmp_path / "bad.trace.json.gz"
+    bad.write_bytes(b"not a gzip")
+
+    trimmed, report = tla.pretrim_startup_transient(bad, tmp_path / "out.trace.json.gz")
+
+    assert trimmed is False
+    assert report["reason"] == "unreadable_trace"
+
+
+def test_pretrim_ignores_traces_without_step_annotations(tmp_path):
+    """No step annotations -> nothing to measure against."""
+    payload = {"traceEvents": [{"ph": "X", "cat": "kernel", "name": "k", "ts": 1.0, "dur": 5.0} for _ in range(50)]}
+    src = tmp_path / "r.trace.json.gz"
+    with gzip.open(src, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+    trimmed, report = tla.pretrim_startup_transient(src, tmp_path / "out.trace.json.gz")
+
+    assert trimmed is False
+    assert report["reason"] == "too_few_steps"
+    assert report["steps"] == 0
+
+
+def test_pretrim_threshold_is_the_module_default(tmp_path):
+    """A step under the default multiple is left alone; over it is cut."""
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+    # ~6x the median -- real jitter can reach this, so it must survive.
+    under = _write_trace(tmp_path / "under.trace.json.gz", [200_000.0] + [32_944.0] * 20)
+    assert tla.pretrim_startup_transient(under, dst)[0] is False
+    # ~15x -- past the default, and nowhere near the 479x the real barrier hits.
+    over = _write_trace(tmp_path / "over.trace.json.gz", [500_000.0] + [32_944.0] * 20)
+    trimmed, report = tla.pretrim_startup_transient(over, dst)
+    assert trimmed is True
+    assert report["dropped_steps"] == 1
+    assert report["outlier_factor"] == tla._PRETRIM_OUTLIER_FACTOR
+
+
+def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
+    """The kept step's host ops survive even though they start inside the
+    dropped step's device span.
+
+    Host launches run a step ahead of the device, so a single-timestamp cut on
+    the device boundary would strip them -- and with them the shape-carrying
+    frames TraceLens attributes MoE kernels through.
+    """
+    src = _write_trace(
+        tmp_path / "r.trace.json.gz",
+        [15_781_320.0] + [32_944.0] * 40,
+        host_lead_us=839_000.0,
+    )
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+    assert trimmed is True
+    assert report["cpu_cut_ts"] < report["gpu_cut_ts"]  # two cuts, host earlier
+
+    ev = tla.open_json(dst)["traceEvents"]
+    kept_host = {e["name"] for e in ev if e.get("cat") == "user_annotation"}
+    kept_dev = {n for _, _, n in tla._step_annotation_spans(ev)}
+    # Same set on both timelines: no step is half-present.
+    assert kept_host == kept_dev
+    assert "step[DECODE bs=64 g_sk=0]" not in kept_host  # dropped step, both sides
+    assert "step[DECODE bs=64 g_sk=1]" in kept_host  # kept step, host side survived
+    assert len(kept_host) == 40
+
+
+def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
+    """Kernels belonging to the dropped step do not leak past the host cut.
+
+    The dropped step's device span extends beyond the kept step's host start, so
+    a host-boundary cut alone would leave its trailing kernels behind as orphans.
+    """
+    src = _write_trace(
+        tmp_path / "r.trace.json.gz",
+        [15_781_320.0] + [32_944.0] * 40,
+        host_lead_us=839_000.0,
+    )
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+    tla.pretrim_startup_transient(src, dst)
+
+    ev = tla.open_json(dst)["traceEvents"]
+    kernels = {e["name"] for e in ev if e.get("cat") == "kernel"}
+    assert "some_kernel_0" not in kernels
+    assert "some_kernel_1" in kernels
+    assert len(kernels) == 40
+
+
+def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
+    """Step count downstream is set by --num-steps, and the trim keeps well
+    clear of it: the splitter still gets its full window, only shifted."""
+    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    _, report = tla.pretrim_startup_transient(src, dst)
+
+    assert report["remaining_steps"] == 127
+    assert report["remaining_steps"] >= 32  # the default --split-num-steps
