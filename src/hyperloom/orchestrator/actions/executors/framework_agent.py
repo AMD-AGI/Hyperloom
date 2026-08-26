@@ -1205,23 +1205,39 @@ class FrameworkAgentExecutor:
                 "name": r.name,
                 "status": r.status,
                 "output_throughput": getattr(r, "output_throughput", None),
-                "ttft_ms": getattr(r, "ttft_ms", None),
-                "itl_ms": getattr(r, "itl_ms", None),
-                "result_dir": str(getattr(r, "result_dir", "")),
+                # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
+                # the emitted keys stay ``ttft_ms`` / ``itl_ms`` because that is
+                # what the breakdown collectors read.
+                "ttft_ms": r.ttft_mean_ms,
+                "itl_ms": r.tpot_mean_ms,
+                # Benchmark dir; the accuracy grade below locates eval artifacts
+                # from its parent (the grid slot).
+                "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
+                "error_class": getattr(r, "error_class", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
             }
 
         accuracy_pass: bool | None = None
+        measured_accuracy: float | None = None
         baseline_accuracy = params.get("accuracy_baseline")
+        # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
+        # the ``benchmark_*`` workspace, so grade from the slot while honoring an
+        # explicit ``result_dir`` override the same way the grid subprocess does.
+        # An empty root would resolve to ``Path(".")`` and silently search the
+        # process CWD, which reads back as "no eval result" and blocks every KEEP.
+        eval_search_root = override_result_dir or (
+            str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
+        )
         if (
             bench.get("status") == "succeeded"
+            and eval_search_root
             and isinstance(baseline_accuracy, (int, float))
             and float(baseline_accuracy) > 0
         ):
             try:
                 eval_results = parse_eval_results(
-                    bench["result_dir"],
+                    eval_search_root,
                     framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
                 )
                 # Read ``accuracy`` and pass (baseline, new) in the order
@@ -1229,14 +1245,17 @@ class FrameworkAgentExecutor:
                 # (xDiT) quality-gate reports resolve onto the accuracy contract.
                 new_accuracy = eval_results.get("accuracy")
                 if new_accuracy is not None:
+                    measured_accuracy = float(new_accuracy)
                     accuracy_pass = accuracy_passed(
                         float(baseline_accuracy),
-                        float(new_accuracy),
+                        measured_accuracy,
                     )
             except Exception:  # noqa: BLE001
                 log.exception("framework: accuracy gate parse failed; treating as None (gate skipped)")
 
-        return bench, {"accuracy_pass": accuracy_pass}
+        # ``accuracy`` carries the raw measurement for the KB record; the caller
+        # reads it for ``accuracy_delta_pct`` and would otherwise always see None.
+        return bench, {"accuracy_pass": accuracy_pass, "accuracy": measured_accuracy}
 
 
 framework_agent_executor = FrameworkAgentExecutor
