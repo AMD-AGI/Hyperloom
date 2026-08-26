@@ -2606,6 +2606,86 @@ def _compound_subwindow_keywords(name: str) -> list[str]:
     return out[:6]
 
 
+def _composed_name_prefix_keywords(name: str) -> list[str]:
+    """Leading snake_case prefixes of a name assembled at runtime.
+
+    The mirror image of ``_compound_subwindow_keywords``. That one handles a
+    profiler prefix glued onto a real symbol, so it drops leading segments. A
+    name built by an f-string has the opposite shape: the head is literal in
+    source and the tail is interpolated, as in aiter's
+    ``f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"``, which no search for
+    the launched name ``mfma_moe1_silu_mul_afp8_wfp8_bf16_...`` can ever match.
+    So this drops trailing segments instead, longest (most specific) first.
+
+    Args:
+        name: The runtime kernel name.
+
+    Returns:
+        Progressively shorter leading snake_case prefixes (longest first),
+        capped at eight.
+    """
+    cleaned = _strip_template_args(_normalize_profiler_op_name(name))
+    if "::" in cleaned:
+        cleaned = cleaned.split("::")[-1]
+    segs = [s for s in cleaned.split("_") if s]
+    if len(segs) < 3:
+        return []
+    out: list[str] = []
+    # Anchored at the start, dropping trailing segments one at a time. The full
+    # name is skipped: the primary pass already searched it.
+    for end in range(len(segs) - 1, 1, -1):
+        window = "_".join(segs[:end])
+        if len(window) >= 6 and not window.isdigit():
+            out.append(window)
+    # The SHORTEST prefixes are the ones that can match, because everything the
+    # f-string interpolated sits at the tail -- the reverse of the sub-window
+    # pass, where the longest window is the likely hit. So the budget is spent
+    # on the head of the name, still tried longest-first so the most specific
+    # match wins.
+    return out[-8:]
+
+
+def _longest_literal_prefix_len(path: Path, name: str) -> int:
+    """How much of ``name``'s head appears verbatim in ``path``.
+
+    Two kernels built by neighbouring f-strings share a short prefix, so the
+    keyword that found them cannot tell them apart -- aiter's
+    ``mfma_moe2_a{a_dtype}...`` and ``mfma_moe2_{in_dtype}...`` both answer to
+    ``mfma_moe2``. The file that spells out more of the launched name is the one
+    that built it, and it is measured in characters rather than segments
+    because the interpolation cuts mid-segment.
+
+    Args:
+        path: Candidate source file.
+        name: The runtime kernel name.
+
+    Returns:
+        Length of the longest prefix of ``name`` found in the file, or 0.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    low = text.lower()
+    target = _strip_template_args(_normalize_profiler_op_name(name)).lower()
+    if "::" in target:
+        target = target.split("::")[-1]
+    # Longest first: the answer is the first prefix that is present.
+    for size in range(len(target), 5, -1):
+        if target[:size] in low:
+            return size
+    return 0
+
+
+def _prefer_composing_file(name: str, hits: list[Path]) -> list[Path]:
+    """Rank the file that spells out most of a runtime-assembled name first."""
+    scored = sorted(
+        _rank_paths(hits),
+        key=lambda h: -_longest_literal_prefix_len(h, name),
+    )
+    return scored
+
+
 def _file_defines_symbol(path: Path, keyword: str) -> bool:
     """True when ``path`` *defines* ``keyword`` (vs merely mentioning it).
 
@@ -2730,6 +2810,19 @@ def locate_source_via_grep(name: str) -> str:
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
             return str(_prefer_symbol_definition(keyword, hits)[0])
+    # Last pass: the name was assembled by an f-string, so only its head is
+    # literal in source and both passes above searched text that is never
+    # written down. Ranked by how much of the name a file spells out, because
+    # the shortest prefixes are shared by sibling kernels in sibling files.
+    for keyword in _composed_name_prefix_keywords(name):
+        if not keyword or keyword in tried:
+            continue
+        tried.add(keyword)
+        hits = []
+        for root in kernel_search_roots():
+            hits.extend(_grep_for_keyword(keyword, Path(root)))
+        if hits:
+            return str(_prefer_composing_file(name, hits)[0])
     return ""
 
 
