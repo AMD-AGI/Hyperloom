@@ -63,7 +63,11 @@ def variant_fingerprint(
     )
 
 
-_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
+# 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC. Sized for the synthetic
+# ISL/OSL shape: an AgentX round does not fit it, and is not meant to -- see
+# ``agentx_variant_timeout_sec`` in ``_grid_runner``, which raises whatever cap
+# reaches it rather than expecting this default to cover both workloads.
+_VARIANT_TIMEOUT_SEC_DEFAULT = 7800
 
 
 @dataclass

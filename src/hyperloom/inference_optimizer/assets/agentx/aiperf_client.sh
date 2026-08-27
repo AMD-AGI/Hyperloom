@@ -236,7 +236,10 @@ AIPERF="${AIPERF_BIN:-aiperf}"
 # map_aiperf.py carries no error counters. This is the safety net that turns a
 # server/client context mismatch into an honest failure instead of a fabricated
 # win on the surviving short sessions. Matches upstream's 0.10.
-FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-0.10}"
+# Declared as one value, like CANON_WARMUP_*/WARMLANE below, so the canonical
+# ratio and the default cannot drift apart.
+CANON_FRT=0.10
+FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-$CANON_FRT}"
 
 # ── Non-canonical workloads may run, but may never be submittable ────────────
 # The scenario enforces a 900s duration floor, so a shortened AGENTX_DURATION is
@@ -295,6 +298,17 @@ NONCANON=()
   NONCANON+=("warmup_per_lane=${WARMLANE}(canonical ${CANON_WARMUP_PER_LANE})")
 [ "$WARMGRACE" -lt "$CANON_WARMUP_GRACE" ] && \
   NONCANON+=("warmup_grace=${WARMGRACE}s(canonical ${CANON_WARMUP_GRACE}s)")
+# The abort threshold is measurement-defining for the same reason warmup is:
+# raising it keeps a run alive that upstream's 0.10 would have aborted, and the
+# surviving requests are then mapped as a normal measurement. aiperf stamps no
+# scenario marker for it -- the threshold is the client's own safety net, not
+# something the scenario knows about -- so a loosened round comes back
+# submission_valid=true. Only a *larger* ratio deviates; tightening it below
+# canonical measures a strictly cleaner run. Compared with awk because the
+# ratio is a decimal, which `-lt` cannot handle.
+if awk "BEGIN{exit !(($FRT) > ($CANON_FRT))}" 2>/dev/null; then
+  NONCANON+=("failed_request_threshold=${FRT}(canonical ${CANON_FRT})")
+fi
 
 SMOKE_ARGS=()
 if [ "$DURATION" -lt "$CANON_DURATION" ] || [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ]; then

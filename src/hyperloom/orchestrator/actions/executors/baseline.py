@@ -622,6 +622,19 @@ BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
 AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
 
+# The warmup share of that overhead is not a constant either, and it is the
+# share that actually varies by model: aiperf_client.sh bounds the warmup drain
+# with AGENTX_WARMUP_GRACE_PERIOD, so a model whose warmup runs long is a model
+# whose operator has already had to raise that knob for the round to complete at
+# all. Splitting the flat 7200 at its canonical grace lets the cap follow that
+# same knob instead of asking for a second, independent number that means the
+# same thing -- which is how the constant came to be wrong for Kimi-K3 (a raw
+# aiperf run measured warmup alone at ~12075s, past this entire cap). At
+# canonical settings the sum is unchanged, so the measured GLM-5.2/Qwen3.8
+# calibration this number carries is preserved exactly.
+AGENTX_CANON_WARMUP_GRACE_SEC = 1800  # aiperf_client.sh's CANON_WARMUP_GRACE
+_AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+
 
 def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """Resolve the AgentX baseline cap: explicit, else duration + overhead.
@@ -653,29 +666,55 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     if explicit:
         return explicit
 
-    overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
     # Same validity bar as `_int` itself (parses to a positive int) rather than
     # "non-empty string" -- otherwise an invalid override (e.g. "abc" or "-1")
     # both silently falls back to the default AND suppresses the warning meant
     # to flag exactly that case.
-    if not _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
-        # AGENTX_BASELINE_OVERHEAD_SEC's default is calibrated on GLM-5.2/Qwen3.8
-        # (measured 4774s/6676s warmup+compile). A raw aiperf run against
-        # Kimi-K3 (conc=64, ISL ~115k avg) measured warmup alone draining in
-        # ~12075s -- already past this whole cap before profiling even starts.
-        # Nothing here can tell long-context/slow-prefill models apart from the
-        # ones this constant was measured on, so surface it instead of letting
-        # the round run untimed-out until the flat cap kills it mid-warmup.
-        log.warning(
-            "agentx_baseline_timeout_sec: using default AGENTX_BASELINE_OVERHEAD_SEC=%ds "
-            "(no explicit override set). This default is calibrated on GLM-5.2/Qwen3.8 "
-            "and may be far too small for long-context or slow-prefill models -- a raw "
-            "aiperf run against Kimi-K3 at concurrency=64 measured warmup alone taking "
-            "~12075s. If this round is for such a model, set AGENTX_BASELINE_OVERHEAD_SEC "
-            "explicitly.",
-            overhead,
-        )
-    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + overhead
+    if _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
+        overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
+        grace = None
+    else:
+        # Derive the warmup share from the same knob that bounds it in the
+        # client, so the cap tracks the round the operator actually configured
+        # rather than the one this constant was measured on.
+        grace = _int("AGENTX_WARMUP_GRACE_PERIOD", AGENTX_CANON_WARMUP_GRACE_SEC)
+        overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
+        if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
+            # Nothing has been tuned for this model at all. The derivation
+            # above is only as good as its warmup bound, and at the canonical
+            # grace that bound is the GLM-5.2/Qwen3.8 measurement (4774s/6676s
+            # warmup+compile). A raw aiperf run against Kimi-K3 (conc=64, ISL
+            # ~115k avg) measured warmup alone draining in ~12075s -- past this
+            # whole cap before profiling starts. Nothing here can tell such a
+            # model apart, so say so rather than let the round be killed
+            # mid-warmup by a cap nobody chose.
+            log.warning(
+                "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
+                "AGENTX_WARMUP_GRACE_PERIOD is set, so the overhead falls back to the "
+                "canonical %ds (= %ds non-warmup + %ds canonical warmup grace). That "
+                "grace is calibrated on GLM-5.2/Qwen3.8 and may be far too small for a "
+                "long-context or slow-prefill model -- a raw aiperf run against Kimi-K3 "
+                "at concurrency=64 measured warmup alone taking ~12075s. Raise "
+                "AGENTX_WARMUP_GRACE_PERIOD (the client honours it too, so the warmup "
+                "and this cap stay consistent) or pin AGENTX_BASELINE_OVERHEAD_SEC.",
+                overhead,
+                _AGENTX_NON_WARMUP_OVERHEAD_SEC,
+                AGENTX_CANON_WARMUP_GRACE_SEC,
+            )
+    duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
+    total = duration + overhead
+    # Log every input, so a timeout in the field can be read back to the value
+    # that produced it instead of guessing which knob was in play.
+    log.info(
+        "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
+        total,
+        duration,
+        overhead,
+        "explicit AGENTX_BASELINE_OVERHEAD_SEC"
+        if grace is None
+        else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
+    )
+    return total
 
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported

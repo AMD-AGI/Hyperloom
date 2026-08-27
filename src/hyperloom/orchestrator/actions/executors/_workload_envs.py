@@ -1147,6 +1147,24 @@ def materialize_config_with_envs(
                 delay_iters = 8
             if delay_iters < 0:
                 delay_iters = 0
+            # The AgentX clamp above is a HOST RAM bound, and this override
+            # silently undoes it. Neither check below stands in for saying so:
+            # ``cap`` defaults to _DEFAULT_PROFILE_MAX_STEPS, so the obvious
+            # HYPERLOOM_PROFILE_MAX_ITERS=128 lands exactly on it, trips
+            # neither branch, and restores the very bound that kept the
+            # profiler from being OOM-killed -- without printing anything.
+            if agentx_enabled() and max_iters > _AGENTX_PROFILE_MAX_ITERS:
+                log.warning(
+                    "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
+                    "bound of %d. That bound is a host-RAM limit, not a "
+                    "serialization one: an agentic step carries orders of "
+                    "magnitude more events than the synthetic shape ``cap`` is "
+                    "sized against, and at the stock cap a DeepSeek-V4 profile "
+                    "round was OOM-killed mid-capture three times in a row. "
+                    "Unset it to restore the bound.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
             if max_iters < steady_floor:
                 log.warning(
                     "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "

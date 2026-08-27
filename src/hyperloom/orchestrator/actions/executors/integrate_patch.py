@@ -84,6 +84,10 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
+# Synthetic-sized, mirroring _grid_base._VARIANT_TIMEOUT_SEC_DEFAULT. AgentX
+# rounds are raised past it by ``agentx_variant_timeout_sec`` where the cap is
+# consumed, so this stays the synthetic default rather than growing to cover a
+# workload it was never measured against.
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 # Deliberately shares no substring with the auto-stash tag: _find_hyperloom_auto_stash

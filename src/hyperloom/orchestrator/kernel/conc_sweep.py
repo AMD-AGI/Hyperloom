@@ -55,6 +55,9 @@ DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 # Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
+# Synthetic-sized, like every other variant-timeout default here; under AgentX
+# ``agentx_variant_timeout_sec`` raises it at the point of use, so this number
+# is a floor for the synthetic sweep rather than a bound on an agentic round.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.

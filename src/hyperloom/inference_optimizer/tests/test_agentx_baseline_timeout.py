@@ -26,6 +26,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.baseline import (
     AGENTX_BASELINE_OVERHEAD_SEC,
+    AGENTX_CANON_WARMUP_GRACE_SEC,
     AGENTX_DEFAULT_DURATION_SEC,
     BASELINE_DEFAULT_TIMEOUT_SEC,
     BaselineExecutor,
@@ -43,6 +44,7 @@ def _clear(monkeypatch):
         "AGENTX_DURATION",
         "AGENTX_BASELINE_TIMEOUT_SEC",
         "AGENTX_BASELINE_OVERHEAD_SEC",
+        "AGENTX_WARMUP_GRACE_PERIOD",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -102,6 +104,58 @@ def test_explicit_overhead_override_suppresses_the_warning(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         agentx_baseline_timeout_sec()
     assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
+def test_overhead_tracks_the_warmup_grace_the_operator_set(monkeypatch):
+    """The knob that bounds the warmup must also size the cap that has to cover it.
+
+    A model whose warmup runs long is a model whose operator has already had to
+    raise AGENTX_WARMUP_GRACE_PERIOD for the round to finish -- the Kimi-K3
+    case, where the flat overhead was smaller than the warmup itself. Deriving
+    from that same knob is what stops the two numbers disagreeing.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    grown = 14400 - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert agentx_baseline_timeout_sec() == (
+        AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown
+    )
+
+
+def test_canonical_grace_reproduces_the_measured_constant(monkeypatch):
+    """Splitting the constant must not move it: same inputs, same number."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
+    assert agentx_baseline_timeout_sec() == (
+        AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
+    )
+
+
+def test_explicit_overhead_outranks_the_derivation(monkeypatch):
+    """A pinned overhead is an answer, not an input: the grace must not add to it."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
+    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
+
+
+def test_a_tuned_grace_suppresses_the_uncalibrated_warning(monkeypatch, caplog):
+    """The warning is about nobody having sized this model, not about the default."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
+def test_unparseable_grace_falls_back_to_canonical(monkeypatch, bad):
+    """A typo in the grace must not shrink the cap below the measured default."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
+    assert agentx_baseline_timeout_sec() == (
+        AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
+    )
 
 
 def test_explicit_cap_wins_outright(monkeypatch):

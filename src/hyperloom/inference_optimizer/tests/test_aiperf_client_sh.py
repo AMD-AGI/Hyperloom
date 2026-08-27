@@ -708,3 +708,45 @@ def test_raised_warmup_per_lane_is_not_flagged_non_canonical(tmp_path):
     out = _result(res)
     assert not out["submission_invalid_reasons"]
     assert out["submission_valid"] is not False
+
+
+def test_raised_failed_request_threshold_is_flagged_non_canonical(tmp_path):
+    """Loosening the abort threshold is measurement-defining and carries no marker.
+
+    Raising it keeps alive a run that upstream's 0.10 would have aborted, and
+    the requests that did survive are then mapped as an ordinary measurement.
+    aiperf stamps nothing for this -- the threshold is the client's own safety
+    net, not part of the scenario -- so without the client objecting the round
+    comes back submission_valid=true.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD="0.5")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any(
+        "failed_request_threshold=0.5" in x for x in out["submission_invalid_reasons"]
+    ), out["submission_invalid_reasons"]
+
+
+def test_tightened_failed_request_threshold_is_not_flagged(tmp_path):
+    """A stricter threshold measures a cleaner run, so it is not a deviation."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD="0.01")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_canonical_failed_request_threshold_is_not_flagged(tmp_path):
+    """Restating the canonical ratio must not trip the check, in either spelling."""
+    for spelling in ("0.10", "0.1"):
+        base = tmp_path / spelling.replace(".", "_")
+        base.mkdir()
+        bench, bind, res = _sandbox(base)
+        r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD=spelling)
+        assert r.returncode == 0, r.stderr
+        out = _result(res)
+        assert not out["submission_invalid_reasons"], spelling
+        assert out["submission_valid"] is not False, spelling

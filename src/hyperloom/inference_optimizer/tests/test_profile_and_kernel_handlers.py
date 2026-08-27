@@ -888,6 +888,54 @@ def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
     assert any("explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=64" in r.message for r in caplog.records)
 
 
+def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Overriding the AgentX capture bound must say so -- 128 warns about nothing else.
+
+    HYPERLOOM_PROFILE_MAX_ITERS is applied after the AgentX clamp and wins, so
+    it restores exactly the host-RAM exposure the clamp exists to remove. The
+    two pre-existing warnings cannot cover this: ``cap`` defaults to
+    _DEFAULT_PROFILE_MAX_STEPS (128), so an override of 128 is neither below
+    steady_floor's band nor above the cap, and the bound would be lifted in
+    silence.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    # The override is still honored verbatim; this is a visibility fix only.
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert any(
+        "HYPERLOOM_PROFILE_MAX_ITERS=128 overrides the AgentX capture bound of 8" in r.message
+        for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """The new warning is AgentX-only; the synthetic path has no host-RAM bound."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        _materialize_config_with_envs(src, tmp_path)
+    assert not any("AgentX capture bound" in r.message for r in caplog.records)
+
+
 def test_materialize_persists_inferencex_path_for_magpie(
     tmp_path,
     monkeypatch,

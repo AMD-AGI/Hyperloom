@@ -5,6 +5,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **The AgentX baseline overhead is derived from the warmup bound instead of a
+  flat constant.** `AGENTX_BASELINE_OVERHEAD_SEC` was a single measured number
+  (7200s, calibrated on GLM-5.2/Qwen3.8) covering setup, corpus load, warmup and
+  first-compile. Warmup is the share that actually varies by model, and it
+  already has an operator-visible bound in the client:
+  `AGENTX_WARMUP_GRACE_PERIOD`. A model whose warmup runs long is therefore a
+  model whose operator has already raised that knob — a raw aiperf run against
+  Kimi-K3 at concurrency 64 measured warmup alone at ~12075s, past the entire
+  flat cap. The overhead is now `5400s non-warmup + AGENTX_WARMUP_GRACE_PERIOD`,
+  and every input is logged at INFO so a field timeout can be read back to the
+  values that produced it.<br/>
+  **Operator note**: at canonical settings the cap is unchanged
+  (5400 + 1800 = 7200), so nothing moves for existing synthetic or GLM-5.2-class
+  runs. Raising `AGENTX_WARMUP_GRACE_PERIOD` now also raises the baseline
+  timeout by the same amount — which is the point, but it means the round's
+  worst-case wall clock grows with that knob. `AGENTX_BASELINE_OVERHEAD_SEC`
+  still overrides the derivation outright, and the "nothing has been tuned for
+  this model" warning now fires only when *neither* knob is set.
+
+- **Overriding `HYPERLOOM_PROFILE_MAX_ITERS` under AgentX no longer lifts the
+  host-RAM capture bound silently.** The AgentX branch clamps captured profile
+  steps to 8 because an agentic step carries orders of magnitude more profiler
+  events than the synthetic shape the normal cap is sized against — at the stock
+  cap a DeepSeek-V4 round was OOM-killed mid-capture three times in a row. The
+  operator override is applied afterwards and wins, which is intended, but the
+  two existing warnings could not report it: `cap` defaults to 128, so the
+  obvious `HYPERLOOM_PROFILE_MAX_ITERS=128` was neither below the steady-state
+  floor nor above the cap and restored the full exposure without printing
+  anything. The override is still honoured verbatim; it now warns.
+
+- **A loosened `AGENTX_FAILED_REQUEST_THRESHOLD` is flagged as a non-canonical
+  workload.** Raising the abort ratio keeps alive a run that upstream's 0.10
+  would have aborted, and the surviving requests are then mapped as an ordinary
+  measurement. aiperf stamps no scenario marker for it — the threshold is the
+  client's own safety net, not part of the scenario — so the round came back
+  `submission_valid=true`. Only a *larger* ratio is flagged; tightening it
+  measures a strictly cleaner run.<br/>
+  **Operator note**: a run that raises this knob is now stamped
+  `submission_valid=false` with `failed_request_threshold=<v>(canonical 0.10)`
+  in `submission_invalid_reasons`, and `benchmark_result.py` will refuse the
+  measurement. Rounds that previously passed on a raised threshold will now be
+  rejected — which is the intended correction, not a regression.
+
 ## [v1.0.0] - 2026-08-26
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
