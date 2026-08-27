@@ -169,12 +169,15 @@ create_workload() {
   code="$(printf '%s' "$resp" | tail -n1)"
   json="$(printf '%s' "$resp" | sed '$d')"
   if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-    summary "❌ create '$name' failed (HTTP $code): $(printf '%s' "$json" | head -c 400)"
+    # Report to stderr: this runs inside wid="$(create_workload ...)" command
+    # substitution, so a stdout message would be captured into $wid and never
+    # reach the CI log. stderr surfaces the real HTTP status + API body.
+    echo "❌ create '$name' failed (HTTP $code): $(printf '%s' "$json" | head -c 400)" >&2
     return 1
   fi
   wid="$(printf '%s' "$json" | jq -r '.workloadId // empty')"
   if [ -z "$wid" ]; then
-    summary "❌ create '$name' returned no workloadId: $(printf '%s' "$json" | head -c 400)"
+    echo "❌ create '$name' returned no workloadId: $(printf '%s' "$json" | head -c 400)" >&2
     return 1
   fi
   printf '%s' "$wid"

@@ -168,6 +168,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Ensure the CI NFS root is writable by the runner user
+        # The bare-metal runner runs as `ubuntu`, which is not in the group that owns
+        # /shared_nfs, so it cannot mkdir the CI root there. Self-heal idempotently
+        # (survives runner reinstall / NFS remount) instead of relying on a one-off
+        # manual chown. Needs passwordless sudo on the runner host.
+        run: |
+          set -euo pipefail
+          : "${NFS_ROOT:?PRE_E2E_NFS_ROOT is required}"
+          if [ ! -w "$NFS_ROOT" ]; then
+            sudo -n mkdir -p "$NFS_ROOT"
+            sudo -n chown "$(id -un):$(id -gn)" "$NFS_ROOT"
+          fi
+          test -w "$NFS_ROOT" && echo "NFS root writable: $NFS_ROOT"
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
