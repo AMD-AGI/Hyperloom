@@ -44,7 +44,7 @@
 #   LEG_CPU  / LEG_MEM              baremetal leg resource request
 #                     (default 32 / 128Gi)
 #   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
-#                     (default 14400 = 3+1h / 46800 = 12+1h). The docker host
+#                     (default 16200 = 3h+1h+30m / 48600 = 12h+1h+30m). The docker host
 #                     pod uses the MAX over its legs. SaFE kills the pod at the
 #                     deadline; poll then judges that leg FAIL. Timing starts when
 #                     the workload is DISPATCHED, not when it is queued.
@@ -71,12 +71,16 @@ LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-128Gi}"
 PRIORITY="${PRIORITY:-2}"
 DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
 
-# Pod hard-timeout (design: 3h leg -> 3+1h, 12h leg -> 12+1h). SaFE terminates the
-# workload at the deadline; the poll then sees a non-Succeeded terminal / missing
-# report and judges that leg FAIL. The deadline is counted from DISPATCH (not queue)
-# time, so the +1h buffer absorbs bootstrap/setup/agent overhead. Given per duration:
-DEADLINE_3H_S="${DEADLINE_3H_S:-14400}"    # 3h + 1h buffer  = 4h
-DEADLINE_12H_S="${DEADLINE_12H_S:-46800}"  # 12h + 1h buffer = 13h
+# Pod hard-timeout. SaFE terminates the workload at the deadline; the poll then sees a
+# non-Succeeded terminal / missing report and judges that leg FAIL. Counted from DISPATCH
+# (not queue) time. This MUST exceed the bootstrap's own in-pod wait deadline
+# (hours*3600+3600, i.e. 3h/12h demo + 1h agent/setup buffer) so SaFE never pre-empts the
+# pod mid-wait -- which would lose bootstrap's clean `return 1` + logging and reintroduce
+# the premature-teardown race. We add a further +30m pod margin on top of the bootstrap
+# deadline. Ordering per leg: bootstrap deadline < SaFE pod timeout < poll GLOBAL_TIMEOUT_S
+# (default 50400s=14h, still > 48600s). Given per duration:
+DEADLINE_3H_S="${DEADLINE_3H_S:-16200}"    # 3h demo + 1h bootstrap buffer + 30m pod margin = 4.5h
+DEADLINE_12H_S="${DEADLINE_12H_S:-48600}"  # 12h demo + 1h bootstrap buffer + 30m pod margin = 13.5h
 # The SaFE API field that carries the pod deadline. Confirmed against the Primus-SaFE
 # codebase: the create-workload body embeds WorkloadSpec inline, whose `timeout`
 # (integer seconds, top-level, from dispatch time) is enforced by WorkloadTTLController

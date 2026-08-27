@@ -151,7 +151,72 @@ run_leg() {
   claude --print --dangerously-skip-permissions < "$setup_prompt"
   log "claude --print (demo ${hours}h)"
   claude --print --dangerously-skip-permissions < "$demo_prompt"
-  log "leg $leg agent turns complete; poll will judge $session/reports/final.json"
+  log "leg $leg demo turn returned; waiting for the background optimize to finish"
+
+  # ---- wait for the backgrounded `optimize` to reach a terminal state --------
+  # `claude --print` is ONE non-interactive turn: it returns right after the demo
+  # skill backgrounds `optimize` (setsid nohup). If we returned now, run.sh would
+  # exit 0 and SaFE would mark a FALSE "Succeeded" while the benchmark is still
+  # running. Block here until the run writes reports/final.json (or a deadline).
+  #
+  # The real artifacts do NOT live under $session directly: make_session_dir()
+  # creates a NESTED per-run dir  $session/<sanitized_model>/<UTC_ts>-<rand8>/
+  # and re-pins INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR to it -- but that re-pin
+  # happens in the CLI's own process and never reaches us. So we discover the real
+  # dir by globbing the newest one under $session that contains a state.json, and
+  # re-point the poll's pin (.session_dir) at it.
+  local wait_interval="${LEG_WAIT_INTERVAL_S:-45}"
+  local startup_grace="${LEG_STARTUP_GRACE_S:-900}"   # 15m for optimize to appear
+  local final_grace="${LEG_FINAL_GRACE_S:-120}"       # state stop_reason -> final.json
+  local deadline_s=$(( hours * 3600 + 3600 ))         # demo budget + 1h margin
+  local start_ts; start_ts="$(date +%s)"
+  local real_sdir="" final_json="" state_json=""
+
+  while :; do
+    local now elapsed; now="$(date +%s)"; elapsed=$(( now - start_ts ))
+
+    if [ -z "$real_sdir" ]; then
+      # newest dir under $session that actually contains a state.json
+      real_sdir="$(find "$session" -mindepth 2 -type f -name state.json -printf '%T@ %h\n' 2>/dev/null \
+                   | sort -rn | head -n1 | cut -d' ' -f2- || true)"
+      if [ -n "$real_sdir" ]; then
+        final_json="${real_sdir}/reports/final.json"
+        state_json="${real_sdir}/state.json"
+        log "leg $leg real session dir: $real_sdir"
+        # Re-pin so the poll (leg_session_dir -> head -n1 .session_dir) finds the report.
+        echo "$real_sdir" > "${session}/.session_dir"
+      elif [ "$elapsed" -ge "$startup_grace" ]; then
+        log "ERROR: leg $leg -- no session dir with state.json under $session after ${elapsed}s (optimize never launched?)"
+        return 1
+      fi
+    fi
+
+    if [ -n "$real_sdir" ]; then
+      if [ -f "$final_json" ]; then
+        log "leg $leg final.json present after ${elapsed}s; demo ran to completion"
+        return 0
+      fi
+      local stop=""
+      [ -f "$state_json" ] && stop="$(jq -r '.stop_reason // ""' "$state_json" 2>/dev/null || echo "")"
+      if [ -n "$stop" ]; then
+        log "leg $leg state.json stop_reason='$stop'; waiting up to ${final_grace}s for final.json"
+        local g0; g0="$(date +%s)"
+        while [ ! -f "$final_json" ] && [ $(( $(date +%s) - g0 )) -lt "$final_grace" ]; do sleep 5; done
+        if [ -f "$final_json" ]; then
+          log "leg $leg final.json present (stop_reason='$stop'); demo complete"
+          return 0
+        fi
+        log "ERROR: leg $leg state stop_reason='$stop' but final.json never appeared within ${final_grace}s"
+        return 1
+      fi
+    fi
+
+    if [ "$elapsed" -ge "$deadline_s" ]; then
+      log "ERROR: leg $leg deadline ${deadline_s}s reached without reports/final.json (real_sdir='${real_sdir:-<none>}')"
+      return 1
+    fi
+    sleep "$wait_interval"
+  done
 }
 
 # Install docker + start a pod-local dockerd. VERIFIED on a real privileged MI355X pod
