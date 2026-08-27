@@ -50,8 +50,10 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  statuses: write
+  contents: write        # commit-comment fallback when no PR is associated
+  statuses: write        # per-leg commit statuses (pre-release-e2e/<leg>)
+  pull-requests: write   # sticky PR report comment
+  issues: write          # PR comments go through the issues API
 
 jobs:
   # 1. resolve: gate on a real version bump (push) or manual input; compute CI_VERSION.

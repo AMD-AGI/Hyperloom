@@ -41,6 +41,12 @@
 #                     (default 128 / 512Gi / 256Gi)
 #   LEG_CPU  / LEG_MEM              baremetal leg resource request
 #                     (default 32 / 128Gi)
+#   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
+#                     (default 14400 = 3+1h / 46800 = 12+1h). The docker host
+#                     pod uses the MAX over its legs. SaFE kills the pod at the
+#                     deadline; poll then judges that leg FAIL.
+#   DEADLINE_FIELD    SaFE payload field for the deadline (default
+#                     activeDeadlineSeconds; set "" to omit). TODO(owner): confirm.
 #   SAFE_CACERT / SAFE_INSECURE    TLS to the API (CA bundle / skip-verify)
 set -euo pipefail
 
@@ -49,6 +55,17 @@ TARGET_GAIN="${TARGET_GAIN:-100}"
 HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-512Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-128Gi}"
 DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
+
+# Pod hard-timeout (design: 3h leg -> 3+1h, 12h leg -> 12+1h). SaFE terminates the
+# workload at the deadline; the poll then sees a non-Succeeded terminal / missing
+# report and judges that leg FAIL. Given per duration:
+DEADLINE_3H_S="${DEADLINE_3H_S:-14400}"    # 3h + 1h buffer  = 4h
+DEADLINE_12H_S="${DEADLINE_12H_S:-46800}"  # 12h + 1h buffer = 13h
+# The SaFE API field that carries the pod deadline. TODO(owner): confirm the real
+# field name/placement against the SaFE Authoring API; k8s convention is
+# activeDeadlineSeconds (integer seconds). Set DEADLINE_FIELD="" to omit entirely.
+DEADLINE_FIELD="${DEADLINE_FIELD:-activeDeadlineSeconds}"
+leg_deadline_s() { case "$1" in *-3h) echo "$DEADLINE_3H_S" ;; *-12h) echo "$DEADLINE_12H_S" ;; esac; }
 
 : "${SAFE_API_BASE:?SAFE_API_BASE is required}"
 : "${SAFE_API_KEY:?SAFE_API_KEY is required}"
@@ -118,14 +135,19 @@ common_env_json() {
     } + (if $baseurl == "" then {} else {ANTHROPIC_BASE_URL: $baseurl} end)'
 }
 
-# POST one workload; echo the workloadId. Args: displayName resourcesJson envJson privileged(true|false)
+# POST one workload; echo the workloadId.
+# Args: displayName resourcesJson envJson privileged(true|false) entry_b64 deadline_s
 create_workload() {
-  local name="$1" resources="$2" env="$3" privileged="$4" entry_b64="$5"
-  local body resp code json wid
+  local name="$1" resources="$2" env="$3" privileged="$4" entry_b64="$5" deadline_s="${6:-}"
+  local body resp code json wid dl_json="{}"
+  # Attach the pod hard-deadline when both a field name and a value are set.
+  if [ -n "$DEADLINE_FIELD" ] && [ -n "$deadline_s" ]; then
+    dl_json="$(jq -n --arg k "$DEADLINE_FIELD" --argjson v "$deadline_s" '{($k): $v}')"
+  fi
   body="$(jq -n \
     --arg name "$name" --arg ws "$SAFE_WORKSPACE_ID" --arg img "$AUTHORING_IMAGE" \
     --arg entry "$entry_b64" --argjson res "$resources" --argjson env "$env" \
-    --argjson priv "$privileged" \
+    --argjson priv "$privileged" --argjson dl "$dl_json" \
     '{
       displayName: $name,
       workspaceId: $ws,
@@ -135,7 +157,7 @@ create_workload() {
       entryPoints: [$entry],
       env: $env,
       useWorkspaceStorage: true
-    } + (if $priv then {privileged:true} else {} end)')"
+    } + (if $priv then {privileged:true} else {} end) + $dl')"
   resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
     "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
   code="$(printf '%s' "$resp" | tail -n1)"
@@ -176,9 +198,10 @@ for leg in $REQ_TASKS; do
       env_json="$(common_env_json "$(leg_model_path "$leg")" "$(leg_hours "$leg")" "$(leg_backend "$leg")" \
         | jq --arg leg "$leg" '. + {LEG_ID:$leg, HYPERLOOM_RUN_MODE:"baremetal"}')"
       entry="$(bootstrap_entry_b64 "")"
-      wid="$(create_workload "e2e-${CI_VERSION}-${leg}" "$leg_resources_1gpu" "$env_json" false "$entry")"
+      dl="$(leg_deadline_s "$leg")"
+      wid="$(create_workload "e2e-${CI_VERSION}-${leg}" "$leg_resources_1gpu" "$env_json" false "$entry" "$dl")"
       DISPATCH["$leg"]="$wid"
-      summary "• \`$leg\` → workloadId \`$wid\` (baremetal, 1 GPU)"
+      summary "• \`$leg\` → workloadId \`$wid\` (baremetal, 1 GPU, deadline $((dl/3600))h)"
       ;;
     docker-*)
       want_docker_host=1
@@ -223,12 +246,18 @@ if [ "$want_docker_host" = 1 ]; then
       DOCKER_LEGS:$legs, DOCKER_GPU_MAP:($gpumap|tostring)
     } + (if $baseurl == "" then {} else {ANTHROPIC_BASE_URL:$baseurl} end)')"
   entry="$(bootstrap_entry_b64 "E2E_DOCKER_HOST=1;")"
-  wid="$(create_workload "e2e-${CI_VERSION}-docker-host" "$host_resources" "$host_env" true "$entry")"
+  # The one host pod runs a mix of 3h and 12h nested legs, so its deadline must be
+  # the MAX over the legs it hosts (a 3h deadline would kill a still-running 12h leg).
+  host_dl="$DEADLINE_3H_S"
+  for leg in $docker_legs; do
+    case "$leg" in *-12h) host_dl="$DEADLINE_12H_S" ;; esac
+  done
+  wid="$(create_workload "e2e-${CI_VERSION}-docker-host" "$host_resources" "$host_env" true "$entry" "$host_dl")"
   # Every docker leg shares the one host workloadId; the poll distinguishes them by
   # reading each leg's own session dir on NFS.
   for leg in $docker_legs; do
     DISPATCH["$leg"]="$wid"
-    summary "• \`$leg\` → workloadId \`$wid\` (docker host, GPU $(docker_gpu_index "$leg"))"
+    summary "• \`$leg\` → workloadId \`$wid\` (docker host, GPU $(docker_gpu_index "$leg"), deadline $((host_dl/3600))h)"
   done
 fi
 

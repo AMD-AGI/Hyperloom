@@ -74,6 +74,103 @@ post_status() { # leg state(pending|success|failure|error) description
     >/dev/null 2>&1 || true
 }
 
+# ---- sticky PR/commit report comment ---------------------------------------
+# This CI runs on push to main, which carries no PR number. Resolve the PR that
+# the triggering commit was merged from (GET /commits/{sha}/pulls); if none is
+# found, fall back to a commit comment. Then upsert ONE sticky comment (matched
+# by an HTML marker) and PATCH it in place as legs finish -- so a single comment
+# updates incrementally (design §10, point C). Mirrors ci-e2e-dispatch.sh.
+REPORT_MARKER="<!-- pre-release-e2e-report:${CI_VERSION} -->"
+PR_NUMBER=""; COMMENT_TARGET=""   # COMMENT_TARGET: "pr" | "commit" | "" (disabled)
+
+gh_report_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [ -n "${GH_STATUS_SHA:-}" ]; }
+
+resolve_comment_target() {
+  gh_report_on || { COMMENT_TARGET=""; return 0; }
+  # A merged commit usually belongs to exactly one PR; take the first.
+  PR_NUMBER="$(curl -sS \
+    -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "${GH_API}/repos/${GH_STATUS_REPO}/commits/${GH_STATUS_SHA}/pulls" 2>/dev/null \
+    | jq -r '[.[]|.number][0] // empty' 2>/dev/null || true)"
+  if [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+    COMMENT_TARGET="pr"
+    echo "[report] commenting on PR #$PR_NUMBER (from commit $GH_STATUS_SHA)"
+  else
+    COMMENT_TARGET="commit"
+    echo "[report] no PR for commit $GH_STATUS_SHA; commenting on the commit"
+  fi
+}
+
+# GET/PATCH/POST helpers keyed by the marker. The PR path uses the issues API
+# (a PR is an issue for comments); the commit path uses the commits API.
+_comment_list_url() {
+  case "$COMMENT_TARGET" in
+    pr)     echo "${GH_API}/repos/${GH_STATUS_REPO}/issues/${PR_NUMBER}/comments?per_page=100" ;;
+    commit) echo "${GH_API}/repos/${GH_STATUS_REPO}/commits/${GH_STATUS_SHA}/comments?per_page=100" ;;
+  esac
+}
+_comment_create_url() {
+  case "$COMMENT_TARGET" in
+    pr)     echo "${GH_API}/repos/${GH_STATUS_REPO}/issues/${PR_NUMBER}/comments" ;;
+    commit) echo "${GH_API}/repos/${GH_STATUS_REPO}/commits/${GH_STATUS_SHA}/comments" ;;
+  esac
+}
+_comment_patch_url() { # comment id
+  case "$COMMENT_TARGET" in
+    pr)     echo "${GH_API}/repos/${GH_STATUS_REPO}/issues/comments/$1" ;;
+    commit) echo "${GH_API}/repos/${GH_STATUS_REPO}/comments/$1" ;;
+  esac
+}
+
+report_upsert() { # body(markdown, already includes the marker on line 1)
+  [ -n "$COMMENT_TARGET" ] || return 0
+  local body="$1" cid
+  cid="$(curl -sS -H "Authorization: Bearer ${GH_STATUS_TOKEN}" -H "Accept: application/vnd.github+json" \
+    "$(_comment_list_url)" 2>/dev/null \
+    | jq -r --arg m "$REPORT_MARKER" '[.[]|select(.body|contains($m))|.id][0] // empty' 2>/dev/null || true)"
+  if [ -n "$cid" ]; then
+    curl -sS -X PATCH -H "Authorization: Bearer ${GH_STATUS_TOKEN}" -H "Accept: application/vnd.github+json" \
+      "$(_comment_patch_url "$cid")" \
+      -d "$(jq -n --arg b "$body" '{body:$b}')" >/dev/null 2>&1 || true
+  else
+    curl -sS -X POST -H "Authorization: Bearer ${GH_STATUS_TOKEN}" -H "Accept: application/vnd.github+json" \
+      "$(_comment_create_url)" \
+      -d "$(jq -n --arg b "$body" '{body:$b}')" >/dev/null 2>&1 || true
+  fi
+}
+
+# Build the sticky report body from the current VERDICT map. `phase` is a short
+# status word (Running|Complete) shown in the heading. Legs with no verdict yet
+# render as "⏳ pending".
+report_body() { # phase  done_count  total_count
+  local phase="$1" done="$2" total="$3" leg v vv vd icon rows=""
+  for leg in "${LEGS[@]}"; do
+    v="${VERDICT[$leg]:-}"
+    if [ -z "$v" ]; then
+      rows="${rows}| \`${leg}\` | ⏳ pending | running |
+"
+      continue
+    fi
+    vv="${v%%|*}"; vd="${v#*|}"
+    icon="✅"; [ "$vv" = "PASS" ] || icon="❌"
+    rows="${rows}| \`${leg}\` | ${icon} ${vv} | ${vd} |
+"
+  done
+  local detail_link=""
+  [ -n "${GH_STATUS_DETAILS_URL:-}" ] && detail_link="[run details](${GH_STATUS_DETAILS_URL})"
+  printf '%s\n## Pre-release E2E — %s (%d/%d legs done)\n\nCI_VERSION `%s` · target_gain %s%% · commit `%s`\n\n| leg | verdict | detail |\n|-----|---------|--------|\n%s\n%s\n' \
+    "$REPORT_MARKER" "$phase" "$done" "$total" "$CI_VERSION" "$TARGET_GAIN" "$GH_STATUS_SHA" "$rows" "$detail_link"
+}
+
+# Count legs that have a terminal verdict.
+done_count() {
+  local n=0 leg
+  for leg in "${LEGS[@]}"; do [ -n "${VERDICT[$leg]:-}" ] && n=$((n+1)); done
+  echo "$n"
+}
+
 workload_phase() { # workloadId -> phase string
   local wid="$1" detail
   detail="$(curl -sS "${tls[@]}" "$API/$wid" "${auth[@]}" 2>/dev/null || true)"
@@ -137,9 +234,15 @@ summary ""
 summary "Polling ${#LEGS[@]} legs (global timeout $((GLOBAL_TIMEOUT_S/3600))h). Each leg reports on its own terminal (point C)."
 summary ""
 
+# Resolve the PR (from the triggering commit) or fall back to a commit comment,
+# then post the initial "all pending" sticky report.
+resolve_comment_target
+report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
+
 start_s="$(date +%s)"
 while :; do
   pending=0
+  changed=0   # did any leg reach a verdict this tick? -> refresh the sticky comment
   for leg in "${LEGS[@]}"; do
     [ -n "${VERDICT[$leg]}" ] && continue
     wid="${WID[$leg]}"
@@ -149,6 +252,7 @@ while :; do
       VERDICT["$leg"]="FAIL|workload phase=$wphase"
       summary "❌ **$leg** — FAIL (workload $wphase, wid=\`$wid\`)"
       post_status "$leg" failure "workload $wphase; wid=$wid"
+      changed=1
       continue
     fi
     # Otherwise judge from the on-disk report (present once the leg finishes).
@@ -158,15 +262,20 @@ while :; do
       VERDICT["$leg"]="PASS|$detail"
       summary "✅ **$leg** — PASS ($detail)"
       post_status "$leg" success "PASS — $detail"
+      changed=1
     elif [ "$wphase" = "Succeeded" ]; then
       # Workload ended but the report did not clear the gate -> terminal FAIL.
       VERDICT["$leg"]="FAIL|$detail"
       summary "❌ **$leg** — FAIL ($detail)"
       post_status "$leg" failure "FAIL — $detail"
+      changed=1
     else
       pending=$((pending + 1))   # still running; check again next tick
     fi
   done
+
+  # A leg finished this tick -> refresh the single sticky report comment (point C).
+  [ "$changed" -eq 1 ] && report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
 
   [ "$pending" -eq 0 ] && break
 
@@ -199,8 +308,14 @@ for leg in "${LEGS[@]}"; do
 done
 summary ""
 if [ "$fail" -eq 0 ]; then
-  summary "**GATE: PASS** — all ${#LEGS[@]} legs reached target_gain=${TARGET_GAIN}."
-  exit 0
+  gate_line="**GATE: PASS** — all ${#LEGS[@]} legs reached target_gain=${TARGET_GAIN}."
+else
+  gate_line="**GATE: FAIL** — one or more legs did not pass. Release blocked."
 fi
-summary "**GATE: FAIL** — one or more legs did not pass. Release blocked."
+summary "$gate_line"
+
+# Final sticky report: the completed table plus the gate verdict.
+report_upsert "$(printf '%s\n\n%s\n' "$(report_body Complete "$(done_count)" "${#LEGS[@]}")" "$gate_line")"
+
+[ "$fail" -eq 0 ] && exit 0
 exit 1
